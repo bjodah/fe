@@ -16,6 +16,12 @@ void FexInstallProcess(FeContext* ctx) {
   FexInstallNativeFn(ctx, "execute", FexExecute);
 }
 
+static void FreeArguments(char** arguments, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    free(arguments[i]);
+  }
+}
+
 FeObject* FexExecute(FeContext* ctx, FeObject* arg) {
   enum { MaxArgumentCount = 31 };
   char* arguments[MaxArgumentCount + 1] = {NULL};
@@ -27,11 +33,16 @@ FeObject* FexExecute(FeContext* ctx, FeObject* arg) {
     FeObject* a = FeGetNextArgument(ctx, &arg);
     const FeType type = FeGetType(a);
     if (type != FeTString) {
+      FreeArguments(arguments, i);
       FeHandleError(ctx, "not a string");
     }
     char string[1024];
     FeToString(ctx, a, string, sizeof(string));
     arguments[i] = strdup(string);
+    if (arguments[i] == NULL) {
+      FreeArguments(arguments, i);
+      FeHandleError(ctx, "out of memory");
+    }
   }
 
   if (i == 0) {
@@ -42,18 +53,18 @@ FeObject* FexExecute(FeContext* ctx, FeObject* arg) {
   const pid_t child = fork();
   if (child == 0) {
     execvp(arguments[0], arguments);
+    perror("execvp");
+    _exit(127);
   } else if (child == -1) {
     perror("fork");
   } else {
     if (waitpid(child, &status, 0) == -1) {
       perror("waitpid");
     } else {
-      status = WEXITSTATUS(status);
+      status = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
     }
   }
 
-  for (i = 0; i < MaxArgumentCount && arguments[i] != NULL; i++) {
-    free(arguments[i]);
-  }
+  FreeArguments(arguments, i);
   return FeMakeDouble(ctx, (double)status);
 }

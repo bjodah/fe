@@ -6,9 +6,8 @@
 #define FE_H
 
 #include <assert.h>
-#include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include <stdnoreturn.h>
 
 extern const char* FeVersion;
 
@@ -70,14 +69,14 @@ extern FeObject nil;
 FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);
 FeHandlers* FeGetHandlers(FeContext* ctx);
-void FeHandleError(FeContext* ctx, const char* msg);
+noreturn void FeHandleError(FeContext* ctx, const char* msg);
 
 FeType FeGetType(FeObject* obj);
-bool FeIsNil(FeObject* obj);
+bool FeIsNil(const FeObject* obj);
 
 void FePushGC(FeContext* ctx, FeObject* obj);
 void FeRestoreGC(FeContext* ctx, size_t idx);
-size_t FeSaveGC(FeContext* ctx);
+size_t FeSaveGC(const FeContext* ctx);
 void FeMark(FeContext* ctx, FeObject* obj);
 
 FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr);

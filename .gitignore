@@ -2,3 +2,7 @@ fe
 *.o
 *.dSYM
 .vscode
+compile_commands.json
+coverage/
+*.gcda
+*.gcno

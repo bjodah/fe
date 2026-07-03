@@ -30,6 +30,7 @@ static FeObject* FexGC(FeContext* ctx, FeObject* o) {
     case FeTSentinel:
       abort();
   }
+  abort();
 }
 
 void FexInit(FeContext* ctx) {

@@ -8,10 +8,8 @@
 
 extern const char* FexVersion;
 
-enum {
-  FexTFile = FeTFex0,
-  FexTRE = FeTFex1,
-};
+#define FexTFile FeTFex0
+#define FexTRE FeTFex1
 
 void FexInit(FeContext* ctx);
 FeObject* BuildErrnoError(FeContext* ctx, int error);

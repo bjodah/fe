@@ -20,7 +20,8 @@ run_clang_check() {
 	cd "$(dirname "${file}")"
 	out=$(mktemp)
 	trap 'rm -f "${out}"' RETURN
-	clang-check -analyze -p "${COMPILE_DB}" "$(basename "${file}")" 2>&1 | tee "${out}"
+	clang-check -analyze --analyzer-output-path=/dev/null -p "${COMPILE_DB}" \
+		"$(basename "${file}")" 2>&1 | tee "${out}"
 	if rg -q "warning:" "${out}"; then
 		exit 1
 	fi
@@ -48,6 +49,9 @@ make iwyu
 
 compile_db_files | "${PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_check
 
-cppcheck --quiet --error-exitcode=1 --suppress=normalCheckLevelMaxBranches -j "${JOBS}" src/*.c
+cppcheck --quiet --error-exitcode=1 --std=c23 \
+	--enable=warning,style,performance,portability --check-level=exhaustive \
+	--inline-suppr --suppress=preprocessorErrorDirective:auto.h \
+	-j "${JOBS}" ./*.c
 
 compile_db_files | "${PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_tidy

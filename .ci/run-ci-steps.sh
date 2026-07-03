@@ -3,7 +3,10 @@ set -euxo pipefail
 
 cd "$(dirname "$0")/.."
 
-source $(compgen -G "/opt-?/cpython-v3.*-apt-deb/bin/activate")
+python_activate=$(compgen -G "/opt-?/cpython-v3.*-apt-deb/bin/activate" | head -n 1 || true)
+if [[ -n ${python_activate} ]]; then
+	source "${python_activate}"
+fi
 source .ci/ci-env.sh
 
 export JOBS PARALLEL VALGRIND

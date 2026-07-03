@@ -8,7 +8,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
-#include <stdbool.h>
+#include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
 
@@ -147,11 +147,10 @@ FeHandlers* FeGetHandlers(FeContext* ctx) {
   return &ctx->handlers;
 }
 
-static void Format(char* result, size_t size, const char* format, ...)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wgcc-compat"
-    __attribute((format(printf, 3, 4))) {
-#pragma clang diagnostic pop
+static void __attribute((format(printf, 3, 4))) Format(char* result,
+                                                       size_t size,
+                                                       const char* format,
+                                                       ...) {
   assert(size < INT_MAX);
   assert(size > 0);
   assert(result != NULL);
@@ -159,16 +158,20 @@ static void Format(char* result, size_t size, const char* format, ...)
 
   va_list arguments;
   va_start(arguments, format);
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
   const int count = vsnprintf(result, size, format, arguments);
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
   va_end(arguments);
   assert(count > 0);
   assert(count < INT_MAX);
 }
 
-void noreturn FeHandleError(FeContext* ctx, const char* msg) {
+noreturn void FeHandleError(FeContext* ctx, const char* msg) {
   FeObject* cl = ctx->call_list;
   // reset context state:
   ctx->call_list = &nil;
@@ -215,7 +218,7 @@ FeType FeGetType(FeObject* obj) {
   return (FeType)(TAG(obj) & OtherCell ? TAG(obj) >> GcMarkBit : FeTPair);
 }
 
-bool FeIsNil(FeObject* obj) {
+bool FeIsNil(const FeObject* obj) {
   return obj == &nil;
 }
 
@@ -230,7 +233,7 @@ void FeRestoreGC(FeContext* ctx, size_t index) {
   ctx->gc_stack_index = index;
 }
 
-size_t FeSaveGC(FeContext* ctx) {
+size_t FeSaveGC(const FeContext* ctx) {
   return ctx->gc_stack_index;
 }
 
@@ -313,13 +316,17 @@ static bool IsNearlyEqual(double a, double b, double epsilon) {
   const double diff = fabs(a - b);
 // It's OK to turn this warning off for this limited section of code, because
 // it's in the context of handling tiny errors.
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wfloat-equal"
+#endif
   if (a == b) {
     // Special case; handles infinities.
     return true;
   } else if (a == 0 || b == 0 || (absA + absB < DBL_MIN)) {
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
     // Either a or b is zero, or both are extremely close to it. Relative error
     // is less meaningful here.
     return diff < (epsilon * DBL_MIN);
@@ -551,10 +558,6 @@ void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt) {
 
     case FeTPrimitive:
     case FeTNativeFn:
-      Format(buf, sizeof(buf), "[%s]", GetTypeName(FeGetType(obj)));
-      WriteString(ctx, fn, udata, buf);
-      break;
-
     case FeTPtr:
     case FeTFex0:
     case FeTFex1:
@@ -815,11 +818,11 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
                                    FeObject* obj,
                                    FeObject* env,
                                    FeObject** newenv,
-                                   FeObject* fn) {
+                                   const FeObject* fn) {
   FeObject* res = &nil;
   FeObject* arg = CDR(obj);
   FeObject* va;
-  FeObject* vb;
+  const FeObject* vb;
   switch (GetPrimitive(fn)) {
     case PAssert:
       va = EVAL_ARG();
@@ -950,6 +953,8 @@ static FeObject* Evaluate(FeContext* ctx,
   FeObject cl;
   CAR(&cl) = obj;
   CDR(&cl) = ctx->call_list;
+  // This stack link is restored below or reset by FeHandleError before longjmp.
+  // cppcheck-suppress autoVariables
   ctx->call_list = &cl;
 
   const size_t gc = FeSaveGC(ctx);

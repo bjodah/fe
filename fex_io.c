@@ -1,14 +1,13 @@
 // Copyright 2024 Chris Palmer, https://noncombatant.org/
 // SPDX-License-Identifier: MIT
 
-#define _POSIX_C_SOURCE 200809L
+#include <sys/types.h>
+
 #include <errno.h>
 #include <limits.h>
-#include <math.h>
-#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
-#include "auto.h"
 #include "fex.h"
 #include "fex_io.h"
 
@@ -55,12 +54,14 @@ FeObject* FexReadFile(FeContext* ctx, FeObject* arg) {
   (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), delimiter,
                    sizeof(delimiter));
 
-  AUTO(char*, record, NULL, FreeChar);
+  char* record = NULL;
   size_t capacity = 0;
   const ssize_t r =
       getdelim(&record, &capacity, delimiter[0], FeToPtr(ctx, file));
+  const int error = errno;
   FeObject* result =
-      r >= 0 ? FeMakeString(ctx, record) : BuildErrnoError(ctx, errno);
+      r >= 0 ? FeMakeString(ctx, record) : BuildErrnoError(ctx, error);
+  free(record);
   return result;
 }
 
@@ -74,11 +75,17 @@ FeObject* FexRemoveFile(FeContext* ctx, FeObject* arg) {
 FeObject* FexWriteFile(FeContext* ctx, FeObject* arg) {
   FeObject* file = GetFile(ctx, &arg);
   const size_t arbitrary_limit = 4 * 1024 * 1024;  // TODO
-  AUTO(char*, buffer, malloc(arbitrary_limit), FreeChar);
+  char* buffer = malloc(arbitrary_limit);
+  if (buffer == NULL) {
+    FeHandleError(ctx, "out of memory");
+  }
   const size_t size =
       FeToString(ctx, FeGetNextArgument(ctx, &arg), buffer, arbitrary_limit);
+  // cppcheck-suppress nullPointerOutOfMemory
   const size_t written = fwrite(buffer, 1, size, FeToPtr(ctx, file));
+  const int error = errno;
   FeObject* result = written == size ? FeMakeDouble(ctx, (double)written)
-                                     : BuildErrnoError(ctx, errno);
+                                     : BuildErrnoError(ctx, error);
+  free(buffer);
   return result;
 }

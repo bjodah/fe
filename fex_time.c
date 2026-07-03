@@ -1,7 +1,6 @@
 // Copyright 2024 Chris Palmer, https://noncombatant.org/
 // SPDX-License-Identifier: MIT
 
-#define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <time.h>
 

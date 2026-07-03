@@ -2,12 +2,12 @@ variables:
   - &ci_image 'cont-reg.bjodah.se:443/bjodah/triceratops-5:39'
 
 when:
-  - event: [push]
+  - event: [push, pull_request]
 
 steps:
   - name: build-and-test
     image: *ci_image
     environment:
     commands:
-      - apt-get install pmccabe
+      - apt-get install -y pmccabe
       - bash -l .ci/run-ci-steps.sh

@@ -2,10 +2,7 @@
 // Copyright 2024 Chris Palmer, https://noncombatant.org/
 // SPDX-License-Identifier: MIT
 
-#define _POSIX_C_SOURCE 200809L
-#include <getopt.h>
 #include <setjmp.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
@@ -25,7 +22,7 @@ static const char* InterpreterVersion = "1.0";
 
 static jmp_buf top_level;
 
-static void noreturn HandleError(FeContext* ctx,
+noreturn static void HandleError(FeContext* ctx,
                                  const char* message,
                                  FeObject* stack) {
   fprintf(stderr, "error: %s\n", message);
@@ -53,7 +50,7 @@ static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
   return Handle(ctx, args, "gc");
 }
 
-static void noreturn PrintHelp(int status) {
+noreturn static void PrintHelp(int status) {
   FILE* out = status == 0 ? stdout : stderr;
   fprintf(out,
           "fe — Fe language interpreter\n\n"

@@ -20,10 +20,16 @@ run_test() {
   for s in scripts/*; do
     local b
     b=$(basename "$s")
-    ./fe scripts/assert.fe "$s" > out 2> err
+    case " ${FE_SKIP_SCRIPTS:-} " in
+      *" $b "*)
+        echo "SKIP: $s"
+        continue
+        ;;
+    esac
+    ${FE_RUNNER:-} ./fe scripts/assert.fe "$s" > out 2> err
     check_results "tests/$b.out" "tests/$b.err" "$s"
   done
-  ./fe -e '(print "hello, world!")' > out 2> err
+  ${FE_RUNNER:-} ./fe -e '(print "hello, world!")' > out 2> err
   check_results "tests/one-liner.out" "tests/one-liner.err" "one-liner"
   rm out err
 }

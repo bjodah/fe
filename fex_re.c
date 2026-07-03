@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "auto.h"
 #include "fex.h"
 #include "fex_re.h"
 
@@ -36,13 +35,21 @@ FeObject* FexCompileRE(FeContext* ctx, FeObject* arg) {
   (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), pattern, sizeof(pattern));
 
   regex_t* re = calloc(1, sizeof(regex_t));
+  if (re == NULL) {
+    FeHandleError(ctx, "out of memory");
+  }
   const int error = regcomp(re, pattern, REG_EXTENDED);
-  return error == 0 ? FeMakePtr(ctx, FexTRE, re) : BuildError(ctx, error, re);
+  if (error == 0) {
+    return FeMakePtr(ctx, FexTRE, re);
+  }
+  FeObject* result = BuildError(ctx, error, re);
+  free(re);
+  return result;
 }
 
 static FeObject* BuildMatchResult(FeContext* ctx,
                                   char* buffer,
-                                  regmatch_t* matches) {
+                                  const regmatch_t* matches) {
   FeObject* substrings[ArbitraryMatchCount] = {NULL};
   size_t count;
   for (count = 0; count < ArbitraryMatchCount; count++) {
@@ -50,9 +57,12 @@ static FeObject* BuildMatchResult(FeContext* ctx,
     if (m.rm_so == -1 || m.rm_eo == -1) {
       break;
     }
-    AUTO(char*, s, strndup(buffer + m.rm_so, (size_t)(m.rm_eo - m.rm_so)),
-         FreeChar);
+    char* s = strndup(buffer + m.rm_so, (size_t)(m.rm_eo - m.rm_so));
+    if (s == NULL) {
+      FeHandleError(ctx, "out of memory");
+    }
     substrings[count] = FeMakeString(ctx, s);
+    free(s);
   }
   return FeMakeList(ctx, substrings, count);
 }
@@ -64,7 +74,10 @@ FeObject* FexMatchRE(FeContext* ctx, FeObject* arg) {
   }
   regex_t* re = FeToPtr(ctx, o);
 
-  AUTO(char*, buffer, calloc(1, ArbitraryDataLengthLimit), FreeChar);
+  char* buffer = calloc(1, ArbitraryDataLengthLimit);
+  if (buffer == NULL) {
+    FeHandleError(ctx, "out of memory");
+  }
   (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), buffer,
                    ArbitraryDataLengthLimit);
 
@@ -72,6 +85,7 @@ FeObject* FexMatchRE(FeContext* ctx, FeObject* arg) {
   const int error = regexec(re, buffer, ArbitraryMatchCount, matches, 0);
   FeObject* result = error == 0 ? BuildMatchResult(ctx, buffer, matches)
                                 : BuildError(ctx, error, re);
+  free(buffer);
   return result;
 }
 
