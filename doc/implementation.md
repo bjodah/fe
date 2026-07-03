@@ -90,6 +90,13 @@ reachable from an existing interpreter root. Accessors return existing objects
 without pushing them; their lifetime therefore depends on an existing root
 until the caller explicitly calls `FePushGC()`.
 
+Persistent `FeRoot` handles are pair objects linked through the context's
+`root_list`. Each pair's `car` is the retained value and its `cdr` is the next
+root. Marking the list therefore marks both the bookkeeping and every retained
+object without allocating outside the arena. Releasing a root unlinks its pair;
+a later collection can reclaim it. Release checks that the handle names an
+active node in the same context.
+
 Multi-form string and file evaluation uses one additional context root for its
 final result. Each helper restores its entry GC-stack index between forms and
 before returning, then keeps the returned value alive through this root. The
@@ -97,6 +104,15 @@ next multi-form evaluation replaces the root. Length-aware input is fed through
 the existing callback reader; its adapter treats the supplied length as the
 only end-of-input marker and raises an error when a NUL byte occurs inside that
 range.
+
+`FeCall()` temporarily protects the callable and all host-supplied arguments,
+then builds an ordinary internal call form whose arguments are individually
+quoted. The normal evaluator therefore receives the supplied values without
+re-evaluating list values as forms, while retaining its function/native
+dispatch, call trace, error behavior, and ambient step accounting. The context
+has a separate `call_result` GC root. A successful call assigns its result to
+that root before restoring the entry GC-stack index, keeping normal returns
+stack-balanced. The next call replaces this root.
 
 ## Error Handling
 

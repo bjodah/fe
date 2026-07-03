@@ -47,5 +47,5 @@ FeObject* BuildErrnoError(FeContext* ctx, int error) {
 }
 
 void FexInstallNativeFn(FeContext* ctx, const char* name, FeNativeFn fn) {
-  FeSet(ctx, FeMakeSymbol(ctx, name), FeMakeNativeFn(ctx, fn));
+  FeDefineNative(ctx, name, fn);
 }

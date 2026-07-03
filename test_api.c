@@ -28,6 +28,7 @@ typedef struct ErrorState {
   FeContext* context;
   const char* expected_message;
   InterruptState* nested_interrupt;
+  FeRoot* root;
   bool nested_with_options;
   bool called;
   bool stack_was_nil;
@@ -171,6 +172,21 @@ static FeObject* ReenterEvaluation(FeContext* context, FeObject* arguments) {
                                      sizeof(source) - 1, &options);
 }
 
+static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
+  const double x = FeToDouble(context, FeGetNextArgument(context, &arguments));
+  const double y = FeToDouble(context, FeGetNextArgument(context, &arguments));
+  FeRequireNoArguments(context, arguments);
+  return FeMakeDouble(context, x + y);
+}
+
+static FeObject* CallRoot(FeContext* context,
+                          // cppcheck-suppress constParameterCallback
+                          FeObject* arguments) {
+  FeRequireNoArguments(context, arguments);
+  const ErrorState* state = FeGetUserData(context);
+  return FeCall(context, FeGetRoot(state->root), nullptr, 0);
+}
+
 static bool ExpectReadError(FeContext* context,
                             ErrorState* state,
                             const char* source,
@@ -198,6 +214,54 @@ static bool ExpectFileError(FeContext* context,
   state->expected_message = expected;
   if (setjmp(state->jump) == 0) {
     (void)FeEvaluateFile(context, "nul-file.fe", file);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  return true;
+}
+
+static bool ExpectStringError(FeContext* context,
+                              ErrorState* state,
+                              const FeObject* object,
+                              const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    (void)FeStringByteLength(context, object);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  return true;
+}
+
+static bool ExpectCallError(FeContext* context,
+                            ErrorState* state,
+                            FeObject* callable,
+                            const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    (void)FeCall(context, callable, nullptr, 0);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  return true;
+}
+
+static bool ExpectReleaseError(FeContext* context,
+                               ErrorState* state,
+                               FeRoot* root,
+                               const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    FeReleaseRoot(context, root);
     CHECK(false);
   }
   FeRestoreGC(context, gc);
@@ -438,9 +502,132 @@ static bool TestEvaluationControl(void) {
   return true;
 }
 
+static bool TestExtensionAPI(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  CHECK(FeNil(context) ==
+        FeEvaluateString(context, "nil.fe", "()", sizeof("()") - 1));
+  FeDefineNative(context, "add-exactly", AddExactly);
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "native.fe", "(add-exactly 2 3)",
+                                    sizeof("(add-exactly 2 3)") - 1),
+                   "5"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "native.fe", "(add-exactly 2 3 4)",
+      sizeof("(add-exactly 2 3 4)") - 1, "native.fe: too many arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "native.fe", "(add-exactly 2)",
+                              sizeof("(add-exactly 2)") - 1,
+                              "native.fe: too few arguments"));
+
+  enum { TextLength = 128 };
+  char text[TextLength];
+  char source[TextLength + 2];
+  source[0] = '"';
+  for (size_t i = 0; i < sizeof(text); i++) {
+    text[i] = (char)('a' + i % 26);
+    source[i + 1] = text[i];
+  }
+  source[sizeof(source) - 1] = '"';
+  const FeObject* string =
+      FeEvaluateString(context, "string.fe", source, sizeof(source));
+  CHECK(FeStringByteLength(context, string) == sizeof(text));
+  char copied[TextLength];
+  CHECK(FeCopyStringBytes(context, string, copied, sizeof(copied)));
+  CHECK(memcmp(copied, text, sizeof(text)) == 0);
+  CHECK(!FeCopyStringBytes(context, string, copied, sizeof(copied) - 1));
+
+  const FeObject* symbol = FeMakeSymbol(context, "dispatch-name");
+  static const char symbol_name[] = "dispatch-name";
+  char symbol_bytes[sizeof(symbol_name) - 1];
+  CHECK(FeStringByteLength(context, symbol) == sizeof(symbol_bytes));
+  CHECK(FeCopyStringBytes(context, symbol, symbol_bytes, sizeof(symbol_bytes)));
+  CHECK(memcmp(symbol_bytes, symbol_name, sizeof(symbol_bytes)) == 0);
+  CHECK(ExpectStringError(context, &state, FeMakeDouble(context, 1),
+                          "expected string or symbol, got double"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+static bool TestRootsAndCalls(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char pair_function[] = "(fn (x y) (list x y))";
+  FeRoot* pair_root =
+      FeCreateRoot(context, FeEvaluateString(context, "root.fe", pair_function,
+                                             sizeof(pair_function) - 1));
+  static const char constant_function[] = "(fn () 17)";
+  FeRoot* constant_root = FeCreateRoot(
+      context, FeEvaluateString(context, "root.fe", constant_function,
+                                sizeof(constant_function) - 1));
+  CHECK(FeGetRoot(pair_root) != FeGetRoot(constant_root));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "replace-root.fe", "0", 1), "0"));
+
+  char temporary[160];
+  memset(temporary, 'x', sizeof(temporary) - 1);
+  temporary[sizeof(temporary) - 1] = '\0';
+  const size_t allocation_gc = FeSaveGC(context);
+  for (size_t i = 0; i < 1000; i++) {
+    FeRestoreGC(context, allocation_gc);
+    (void)FeMakeString(context, temporary);
+  }
+  FeRestoreGC(context, allocation_gc);
+
+  FeObject* list =
+      FeEvaluateString(context, "argument.fe", "'(1 2)", sizeof("'(1 2)") - 1);
+  FeObject* arguments[] = {list, FeMakeDouble(context, 3)};
+  const size_t call_gc = FeSaveGC(context);
+  for (size_t i = 0; i < 16; i++) {
+    CHECK(IsRendered(context,
+                     FeCall(context, FeGetRoot(pair_root), arguments,
+                            sizeof(arguments) / sizeof(arguments[0])),
+                     "((1 2) 3)"));
+    CHECK(FeSaveGC(context) == call_gc);
+  }
+  CHECK(IsRendered(
+      context, FeCall(context, FeGetRoot(constant_root), nullptr, 0), "17"));
+  CHECK(FeSaveGC(context) == call_gc);
+
+  FeReleaseRoot(context, pair_root);
+  CHECK(IsRendered(
+      context, FeCall(context, FeGetRoot(constant_root), nullptr, 0), "17"));
+  CHECK(ExpectReleaseError(context, &state, pair_root, "root is not active"));
+  FeReleaseRoot(context, constant_root);
+
+  CHECK(ExpectCallError(context, &state, FeMakeDouble(context, 1),
+                        "tried to call non-callable value"));
+
+  static const char looping_function[] = "(fn () (while t 1))";
+  state.root = FeCreateRoot(
+      context, FeEvaluateString(context, "root.fe", looping_function,
+                                sizeof(looping_function) - 1));
+  FeDefineNative(context, "call-root", CallRoot);
+  const FeEvalOptions options = {.step_limit = 32};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "call.fe", "(call-root)", sizeof("(call-root)") - 1,
+      &options, "call.fe: evaluation step limit exceeded"));
+  FeReleaseRoot(context, state.root);
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
-                 TestStringInput() && TestFileInput() && TestEvaluationControl()
+                 TestStringInput() && TestFileInput() &&
+                 TestEvaluationControl() && TestExtensionAPI() &&
+                 TestRootsAndCalls()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

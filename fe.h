@@ -13,6 +13,7 @@ extern const char* FeVersion;
 typedef double FeDouble;
 typedef struct FeObject FeObject;
 typedef struct FeContext FeContext;
+typedef struct FeRoot FeRoot;
 typedef FeObject* FeNativeFn(FeContext* ctx, FeObject* args);
 typedef bool FeInterruptFn(FeContext* ctx, void* userdata);
 typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
@@ -76,8 +77,9 @@ void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
 
-[[nodiscard]] FeType FeGetType(FeObject* obj);
+[[nodiscard]] FeType FeGetType(const FeObject* obj);
 [[nodiscard]] bool FeIsNil(const FeObject* obj);
+[[nodiscard]] FeObject* FeNil(FeContext* ctx);
 
 void FePushGC(FeContext* ctx, FeObject* obj);
 void FeRestoreGC(FeContext* ctx, size_t idx);
@@ -110,11 +112,25 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
                                 FeObject* obj,
                                 char* dst,
                                 size_t size);
+[[nodiscard]] size_t FeStringByteLength(FeContext* ctx, const FeObject* obj);
+[[nodiscard]] bool FeCopyStringBytes(FeContext* ctx,
+                                     const FeObject* obj,
+                                     char* dst,
+                                     size_t size);
 [[nodiscard]] FeDouble FeToDouble(FeContext* ctx, FeObject* obj);
 [[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
+void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn);
 
 [[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);
+void FeRequireNoArguments(FeContext* ctx, const FeObject* args);
+[[nodiscard]] FeRoot* FeCreateRoot(FeContext* ctx, FeObject* object);
+[[nodiscard]] FeObject* FeGetRoot(const FeRoot* root);
+void FeReleaseRoot(FeContext* ctx, FeRoot* root);
+[[nodiscard]] FeObject* FeCall(FeContext* ctx,
+                               FeObject* callable,
+                               FeObject* const* arguments,
+                               size_t count);
 [[nodiscard]] FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeEvaluateWithOptions(FeContext* ctx,
                                               FeObject* obj,

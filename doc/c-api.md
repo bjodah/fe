@@ -84,6 +84,19 @@ while reachable from a protected object or another interpreter root. Call
 lost. Never retain an `FeObject*` after removing its last protection or root;
 any object creation can trigger collection.
 
+For values that must outlive a temporary GC frame, `FeCreateRoot()` creates an
+opaque persistent root in the context's arena. `FeGetRoot()` retrieves its
+value, and `FeReleaseRoot()` releases it. Roots are independent and survive
+collections until released or until `FeCloseContext()`. Root bookkeeping is
+bounded by the caller-provided arena; creating a root can therefore raise the
+normal `out of memory` error. A released root handle is invalid. Passing a
+handle that is not active in that context to `FeReleaseRoot()` raises `root is
+not active`; this includes immediate double release and handles from another
+context.
+
+`FeNil()` returns Fe's nil object without requiring an embedder to reference
+the legacy public `nil` global.
+
 ## Reading And Running Source
 
 `FeReadString()` reads one form from an explicitly sized byte sequence. The
@@ -208,23 +221,34 @@ for example, a controlled string call labelled `init.fe` reports
 
 ## Calling A Function
 
-You can call a function by creating a list and evaulating it; for example, we
-could add two numbers using the `+` function:
+`FeCall()` invokes an `FeTFn` or `FeTNativeFn` with already-evaluated argument
+values. It protects the callable and every argument while constructing its
+internal call form, so a list argument is passed as the list itself and is not
+evaluated as code. Macros and primitives are not supported by this API; passing
+one, or any other non-callable value, raises `tried to call non-callable value`.
 
 ```c
 size_t gc = FeSaveGC(ctx);
-
-FeObject* objs[] = {
-  FeMakeSymbol(ctx, "+"),
-  FeMakeDouble(ctx, 10),
-  FeMakeDouble(ctx, 20),
+FeObject* function = FeEvaluateString(
+    ctx, "host", "(fn (x y) (+ x y))", sizeof("(fn (x y) (+ x y))") - 1);
+FeRoot* root = FeCreateRoot(ctx, function);
+FeObject* arguments[] = {
+    FeMakeDouble(ctx, 10),
+    FeMakeDouble(ctx, 20),
 };
-FeObject* result = FeEvaluate(ctx, FeMakeList(ctx, objs, 3));
-printf("result: %g\n", FeToNumber(ctx, result));
-
-// Discard all temporary objects pushed to the GC stack.
+FeObject* result = FeCall(ctx, FeGetRoot(root), arguments, 2);
+printf("result: %g\n", FeToDouble(ctx, result));
+FeReleaseRoot(ctx, root);
 FeRestoreGC(ctx, gc);
 ```
+
+On normal return `FeCall()` restores its internal GC-stack frame, so repeated
+calls do not grow the stack. Its result is held by a context-owned root until
+the next `FeCall()` or context close. Create a persistent root before the next
+call if the result must live longer. When called during an ambient controlled
+evaluation, the internal invocation consumes the existing step budget and
+uses its interrupt settings. Normal Fe errors and nonlocal recovery rules are
+unchanged.
 
 ## Extending The Core
 
@@ -233,11 +257,15 @@ For examples of using the extension API in full detail, refer to `fex.[ch]` and
 
 ### Exposing A C Function
 
-You can install a `FeNativeFn` into a `FeContext` by using `FeMakeNativeFn`. The
-`FeNativeFn` can be bound to a global variable by using the `FeSet` function.
-`FeNativeFn`s take a context and an argument list as arguments, and return an
-`FeObject`. The result must never be `nullptr`; if you want to return `nil`, use
-the value returned by `FeMakeBool(ctx, false)`.
+`FeDefineNative()` creates a `FeNativeFn` and binds it to a global symbol while
+balancing all temporary GC protection. Native callbacks take a context and a
+list of already-evaluated arguments and return an `FeObject*`. The result must
+never be `nullptr`; use `FeNil(ctx)` to return nil.
+
+Consume required arguments with `FeGetNextArgument()`, which raises `too few
+arguments` for a missing value. After consuming the supported arguments, call
+`FeRequireNoArguments()`; it raises `too many arguments` if anything remains.
+Together these helpers enforce exact arity.
 
 You could expose the `pow` function from `math.h` like so:
 
@@ -245,10 +273,11 @@ You could expose the `pow` function from `math.h` like so:
 static FeObject* Power(FeContext* ctx, FeObject* arg) {
   double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   double y = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
   return FeMakeDouble(ctx, pow(x, y));
 }
 
-FeSet(ctx, FeMakeSymbol(ctx, "pow"), FeMakeNativeFn(ctx, Power));
+FeDefineNative(ctx, "pow", Power);
 ```
 
 You can then call the `FeNativeFn` from Fe like any other function:
@@ -256,6 +285,23 @@ You can then call the `FeNativeFn` from Fe like any other function:
 ```clojure
 (print (pow 2 10))
 ```
+
+### Extracting String And Symbol Bytes
+
+`FeStringByteLength()` accepts a string or symbol and returns the exact number
+of stored text bytes. `FeCopyStringBytes()` accepts the same types and copies
+those bytes without quoting, escaping, serialization, or a trailing NUL. A
+buffer whose size is exactly the reported length succeeds. If the buffer is
+short, or is null for a non-empty value, the function returns `false` without
+writing anything. Other object types raise an `expected string or symbol`
+type error.
+
+The extraction APIs are byte-counted and walk every chained string cell; they
+do not have `FeToString()`'s fixed-buffer serialization semantics. Fe source
+still rejects embedded NUL bytes, and `FeMakeString()` accepts a NUL-terminated
+C string, so the current public construction paths cannot create a string
+containing an embedded NUL. Extraction nevertheless reports and copies the
+exact stored payload rather than treating its destination as a C string.
 
 ### Creating An `FePtr`
 

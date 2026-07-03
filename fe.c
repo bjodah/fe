@@ -123,10 +123,6 @@ static FeNativeFn* GetNativeFn(const FeObject* o) {
   return o->cdr.f;
 }
 
-static char GetPrimitive(const FeObject* o) {
-  return o->cdr.c;
-}
-
 static void SetType(FeObject* o, FeType type) {
   o->car.c = (char)((type) << GcMarkBit | OtherCell);
 }
@@ -144,6 +140,8 @@ struct FeContext {
   FeObject* free_list;
   FeObject* symbol_list;
   FeObject* evaluation_result;
+  FeObject* call_result;
+  FeObject* root_list;
   FeObject* t;
   FeInterruptFn* evaluation_interrupt;
   void* evaluation_userdata;
@@ -320,12 +318,22 @@ static FeObject* CheckType(FeContext* ctx, FeObject* obj, FeType type) {
   return obj;
 }
 
-FeType FeGetType(FeObject* obj) {
+void FeRequireNoArguments(FeContext* ctx, const FeObject* args) {
+  if (!FeIsNil(args)) {
+    FeHandleError(ctx, "too many arguments");
+  }
+}
+
+FeType FeGetType(const FeObject* obj) {
   return (FeType)(TAG(obj) & OtherCell ? TAG(obj) >> GcMarkBit : FeTPair);
 }
 
 bool FeIsNil(const FeObject* obj) {
   return obj == &nil;
+}
+
+FeObject* FeNil(FeContext*) {
+  return &nil;
 }
 
 void FePushGC(FeContext* ctx, FeObject* obj) {
@@ -392,6 +400,8 @@ static void CollectGarbage(FeContext* ctx) {
   }
   FeMark(ctx, ctx->symbol_list);
   FeMark(ctx, ctx->evaluation_result);
+  FeMark(ctx, ctx->call_result);
+  FeMark(ctx, ctx->root_list);
 
   // Sweep and unmark:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -556,6 +566,14 @@ FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn) {
   return obj;
 }
 
+void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* symbol = FeMakeSymbol(ctx, name);
+  FeObject* native = FeMakeNativeFn(ctx, fn);
+  FeSet(ctx, symbol, native);
+  FeRestoreGC(ctx, gc);
+}
+
 FeObject* FeMakePtr(FeContext* ctx, FeType type, void* ptr) {
   FeObject* obj = MakeObject(ctx);
   SetType(obj, type);
@@ -571,18 +589,30 @@ FeObject* FeMakeList(FeContext* ctx, FeObject** objs, size_t n) {
   return res;
 }
 
-FeObject* FeCar(FeContext* ctx, FeObject* obj) {
+static FeObject* GetCar(const FeObject* pair) {
+  return CAR(pair);
+}
+
+static FeObject* GetCdr(const FeObject* pair) {
+  return CDR(pair);
+}
+
+static FeObject* GetPairMember(FeContext* ctx,
+                               FeObject* obj,
+                               FeObject* (*member)(const FeObject*)) {
   if (FeIsNil(obj)) {
     return obj;
   }
-  return CAR(CheckType(ctx, obj, FeTPair));
+  const FeObject* pair = CheckType(ctx, obj, FeTPair);
+  return member(pair);
+}
+
+FeObject* FeCar(FeContext* ctx, FeObject* obj) {
+  return GetPairMember(ctx, obj, GetCar);
 }
 
 FeObject* FeCdr(FeContext* ctx, FeObject* obj) {
-  if (FeIsNil(obj)) {
-    return obj;
-  }
-  return CDR(CheckType(ctx, obj, FeTPair));
+  return GetPairMember(ctx, obj, GetCdr);
 }
 
 static void WriteString(FeContext* ctx,
@@ -708,6 +738,54 @@ size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size) {
   FeWrite(ctx, obj, WriteBuffer, &s, 0);
   *s.string = '\0';
   return size - s.size - 1;
+}
+
+static const FeObject* GetStringObject(FeContext* ctx, const FeObject* obj) {
+  const FeType type = FeGetType(obj);
+  if (type == FeTSymbol) {
+    return CAR(CDR(obj));
+  }
+  if (type != FeTString) {
+    char message[64];
+    Format(message, sizeof(message), "expected string or symbol, got %s",
+           GetTypeName(type));
+    FeHandleError(ctx, message);
+  }
+  return obj;
+}
+
+static size_t CopyStoredStringBytes(const FeObject* string, char* dst) {
+  size_t length = 0;
+  while (!FeIsNil(string)) {
+    const char* buffer = STRING_BUFFER(string);
+    const char* end = memchr(buffer, '\0', StringBufferSize);
+    const size_t count =
+        end == nullptr ? StringBufferSize : (size_t)(end - buffer);
+    if (dst != nullptr) {
+      memcpy(dst, buffer, count);
+      dst += count;
+    }
+    length += count;
+    string = CDR(string);
+  }
+  return length;
+}
+
+size_t FeStringByteLength(FeContext* ctx, const FeObject* obj) {
+  return CopyStoredStringBytes(GetStringObject(ctx, obj), nullptr);
+}
+
+bool FeCopyStringBytes(FeContext* ctx,
+                       const FeObject* obj,
+                       char* dst,
+                       size_t size) {
+  const FeObject* string = GetStringObject(ctx, obj);
+  const size_t length = CopyStoredStringBytes(string, nullptr);
+  if (size < length || (dst == nullptr && length != 0)) {
+    return false;
+  }
+  (void)CopyStoredStringBytes(string, dst);
+  return true;
 }
 
 FeDouble FeToDouble(FeContext* ctx, FeObject* obj) {
@@ -989,7 +1067,7 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
   FeObject* arg = CDR(obj);
   FeObject* va;
   const FeObject* vb;
-  switch (GetPrimitive(fn)) {
+  switch (PRIM(fn)) {
     case PAssert:
       va = EVAL_ARG();
       if (FeIsNil(va)) {
@@ -1026,7 +1104,7 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
       va = FeCons(ctx, env, arg);
       (void)FeGetNextArgument(ctx, &arg);
       res = MakeObject(ctx);
-      SetType(res, GetPrimitive(fn) == PFn ? FeTFn : FeTMacro);
+      SetType(res, PRIM(fn) == PFn ? FeTFn : FeTMacro);
       CDR(res) = va;
       return res;
     case PWhile: {
@@ -1183,6 +1261,56 @@ FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {
   return Evaluate(ctx, obj, &nil, NULL);
 }
 
+FeRoot* FeCreateRoot(FeContext* ctx, FeObject* object) {
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, object);
+  FeObject* root = FeCons(ctx, object, ctx->root_list);
+  ctx->root_list = root;
+  FeRestoreGC(ctx, gc);
+  return (FeRoot*)root;
+}
+
+FeObject* FeGetRoot(const FeRoot* root) {
+  return CAR((const FeObject*)root);
+}
+
+void FeReleaseRoot(FeContext* ctx, FeRoot* root) {
+  FeObject* object = (FeObject*)root;
+  FeObject** link = &ctx->root_list;
+  while (!FeIsNil(*link) && *link != object) {
+    link = &CDR(*link);
+  }
+  if (FeIsNil(*link)) {
+    FeHandleError(ctx, "root is not active");
+  }
+  *link = CDR(object);
+}
+
+FeObject* FeCall(FeContext* ctx,
+                 FeObject* callable,
+                 FeObject* const* arguments,
+                 size_t count) {
+  if (FeGetType(callable) != FeTFn && FeGetType(callable) != FeTNativeFn) {
+    FeHandleError(ctx, "tried to call non-callable value");
+  }
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, callable);
+  for (size_t i = 0; i < count; i++) {
+    FePushGC(ctx, arguments[i]);
+  }
+
+  FeObject* quote = FeMakeSymbol(ctx, "quote");
+  FeObject* forms = &nil;
+  for (size_t i = count; i > 0; i--) {
+    FeObject* value = FeCons(ctx, arguments[i - 1], &nil);
+    value = FeCons(ctx, quote, value);
+    forms = FeCons(ctx, value, forms);
+  }
+  ctx->call_result = Evaluate(ctx, FeCons(ctx, callable, forms), &nil, nullptr);
+  FeRestoreGC(ctx, gc);
+  return ctx->call_result;
+}
+
 FeObject* FeEvaluateWithOptions(FeContext* ctx,
                                 FeObject* obj,
                                 const FeEvalOptions* options) {
@@ -1330,6 +1458,8 @@ FeContext* FeOpenContext(void* arena, size_t size) {
   ctx->free_list = &nil;
   ctx->symbol_list = &nil;
   ctx->evaluation_result = &nil;
+  ctx->call_result = &nil;
+  ctx->root_list = &nil;
 
   // Populate the free_list:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -1360,5 +1490,7 @@ void FeCloseContext(FeContext* ctx) {
   ctx->gc_stack_index = 0;
   ctx->symbol_list = &nil;
   ctx->evaluation_result = &nil;
+  ctx->call_result = &nil;
+  ctx->root_list = &nil;
   CollectGarbage(ctx);
 }
