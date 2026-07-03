@@ -1,0 +1,13 @@
+variables:
+  - &ci_image 'cont-reg.bjodah.se:443/bjodah/triceratops-5:39'
+
+when:
+  - event: [push]
+
+steps:
+  - name: build-and-test
+    image: *ci_image
+    environment:
+    commands:
+      - apt-get install pmccabe
+      - bash -l .ci/run-ci-steps.sh
