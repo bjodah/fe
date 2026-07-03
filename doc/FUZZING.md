@@ -37,8 +37,9 @@ The grammar deliberately excludes:
 Those exclusions are steering constraints, not claims that the excluded
 features are safe. They ensure every generated program should terminate
 quickly and perform no external side effects. This target exercises the core
-evaluator deeply; it does not replace raw reader fuzzing or end-to-end script
-tests.
+evaluator deeply through `FeEvaluateWithOptions()` with a finite step budget as
+a final termination backstop; it does not replace raw reader fuzzing or
+end-to-end script tests.
 
 ## Smoke tests
 

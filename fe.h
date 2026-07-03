@@ -8,6 +8,8 @@
 #include <stddef.h>  // IWYU pragma: keep
 #include <stdio.h>
 
+#define FE_API_VERSION 1
+
 extern const char* FeVersion;
 
 typedef double FeDouble;

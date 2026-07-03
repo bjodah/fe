@@ -11,6 +11,7 @@
 enum {
   MaxDepth = 4,
   MaxInputSize = 4096,
+  MaxEvaluationSteps = 10000,
 };
 
 static FeObject* BuildExpression(FeContext* ctx,
@@ -252,7 +253,8 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         FeWriteFile(ctx, expression, stderr);
         fputc('\n', stderr);
       }
-      FeObject* result = FeEvaluate(ctx, expression);
+      const FeEvalOptions options = {.step_limit = MaxEvaluationSteps};
+      FeObject* result = FeEvaluateWithOptions(ctx, expression, &options);
       char rendered[256];
       (void)FeToString(ctx, result, rendered, sizeof(rendered));
       FeRestoreGC(ctx, gc);

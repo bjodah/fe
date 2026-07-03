@@ -6,7 +6,9 @@ The implementation uses a fixed-size region of memory supplied by the caller
 when creating the `FeContext`. The implementation stores the context at the
 start of this memory region and uses the rest of the region to store
 `FeObject`s. The arena must satisfy `alignof(FeContext)`; static assertions
-ensure that the object region is then also aligned.
+ensure that the object region is then also aligned. Fe neither reallocates nor
+frees this storage; its address, size, and exclusive lifetime are controlled by
+the caller through `FeCloseContext()`.
 
 `FeMinimumArenaSize()` derives its result from the private context and object
 layouts and from the objects required to intern and bind every core primitive.
@@ -90,20 +92,25 @@ reachable from an existing interpreter root. Accessors return existing objects
 without pushing them; their lifetime therefore depends on an existing root
 until the caller explicitly calls `FePushGC()`.
 
-Persistent `FeRoot` handles are pair objects linked through the context's
-`root_list`. Each pair's `car` is the retained value and its `cdr` is the next
-root. Marking the list therefore marks both the bookkeeping and every retained
-object without allocating outside the arena. Releasing a root unlinks its pair;
-a later collection can reclaim it. Release checks that the handle names an
-active node in the same context.
+The context's three result/retention roots have separate lifetimes.
+`evaluation_result` holds the latest string or file evaluation result,
+`call_result` holds the latest `FeCall()` result, and `root_list` links explicit
+persistent roots. The collector marks all three. Each persistent `FeRoot` is a
+pair whose `car` is the retained value and whose `cdr` is the next root, so the
+bookkeeping and retained values stay inside the arena. Releasing a root unlinks
+its pair; a later collection can reclaim it. Release checks that the handle
+names an active node in the same context, so foreign and already-released
+handles raise `root is not active`.
 
-Multi-form string and file evaluation uses one additional context root for its
-final result. Each helper restores its entry GC-stack index between forms and
-before returning, then keeps the returned value alive through this root. The
-next multi-form evaluation replaces the root. Length-aware input is fed through
-the existing callback reader; its adapter treats the supplied length as the
-only end-of-input marker and raises an error when a NUL byte occurs inside that
-range.
+Multi-form string and file evaluation uses `evaluation_result` for its final
+value. Each helper restores its entry GC-stack index between forms and before
+returning, then keeps the returned value alive through this root. The next
+multi-form evaluation replaces it. Length-aware input is fed through the
+existing callback reader; its adapter treats the supplied length as the only
+end-of-input marker and raises an error when a NUL byte occurs inside that
+range. The adapter updates a zero-based byte offset before each read, allowing
+reader errors to carry `<label>:<offset>` while evaluator errors carry the
+source label without a reader offset.
 
 `FeCall()` temporarily protects the callable and all host-supplied arguments,
 then builds an ordinary internal call form whose arguments are individually
@@ -133,6 +140,12 @@ The host must save and restore its GC stack checkpoint around a recoverable
 operation. Error handling resets the evaluator's call-trace link, but cannot
 unwind host resources, the GC stack, or input callback state. Once the host has
 restored those invariants, the context remains usable.
+
+The default error policy is a silent `abort()`: it is used when no error
+callback is installed and when an installed callback returns. The core never
+prints or exits on runtime failure. A recovering host callback must copy any
+needed diagnostic and perform a nonlocal transfer; the message and trace are
+borrowed only for the callback invocation.
 
 Native callbacks may synchronously re-enter evaluation on the same context.
 The evaluator's call trace and GC stack support nesting, but a context has no

@@ -26,6 +26,15 @@ OBJS = $(SRCS:.c=.o)
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
 TEST_SRCS = test_api.c test_header.c
+EXAMPLE_HOST = example_host
+EXAMPLE_SRCS = example_host.c
+EXAMPLE_RUNNER ?=
+
+# Standalone core checks use flags supported by both kg's C23 compilers.
+CORE_GCC ?= gcc
+CORE_CLANG ?= clang
+CORE_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x
+CORE_OBJS = fe-core-gcc.o fe-core-clang.o
 
 # Fuzzing
 FUZZ_DIR ?= fuzz
@@ -61,7 +70,8 @@ COVERAGE_LCOV_ARGS ?= --quiet --branch-coverage --ignore-errors inconsistent,gco
 COVERAGE_GENHTML_ARGS ?= --quiet
 COVERAGE_MIN_LINES ?= 80
 CLANG_FORMAT ?= clang-format
-FORMAT_FILES = $(SOURCES) $(TEST_SRCS) $(FUZZ_SRCS) $(FUZZ_DIR)/fuzz_support.h
+FORMAT_FILES = $(SOURCES) $(TEST_SRCS) $(EXAMPLE_SRCS) $(FUZZ_SRCS) \
+	$(FUZZ_DIR)/fuzz_support.h
 BEAR ?= bear
 CLANG_CC ?= clang
 COMPILE_DB_FILE ?= compile_commands.json
@@ -74,9 +84,12 @@ all: $(TARGET)
 
 check: test
 
-test: test-header $(TEST_API) $(TARGET)
+test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET)
 	./$(TEST_API)
+	$(EXAMPLE_RUNNER) ./$(EXAMPLE_HOST)
 	./test.sh
+
+core: $(CORE_OBJS)
 
 run: fe
 	./fe
@@ -115,8 +128,18 @@ $(TARGET): $(OBJS)
 $(TEST_API): test_api.o fe.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+$(EXAMPLE_HOST): example_host.o fe.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 test-header: test_header.c fe.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -fsyntax-only test_header.c
+	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
+	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
+
+fe-core-gcc.o: fe.c fe.h
+	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -c fe.c -o $@
+
+fe-core-clang.o: fe.c fe.h
+	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe.c -o $@
 
 %.o: %.c $(HDRS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -137,7 +160,7 @@ sizes:
 	wc scripts/*.fe
 
 clean:
-	-rm -rf fe $(TEST_API) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN)
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN)
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -195,6 +218,6 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-smoke fuzz-clean \
+.PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke complexity complexity-check pmccabe \
 	pmccabe-check coverage coverage-clean format format-check compile-db iwyu

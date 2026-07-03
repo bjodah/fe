@@ -1,6 +1,21 @@
 # C API
 
-For the full details of the core Fe API, refer to `fe.h`. Here is an overview.
+For the full details of the core Fe API, refer to `fe.h`. The runnable
+[`example_host.c`](../example_host.c) demonstrates the complete lifecycle
+described below.
+
+## API Compatibility
+
+`FE_API_VERSION` identifies the public embedding interface. A host that vendors
+or pins Fe should assert the version it was written against at compile time:
+
+```c
+static_assert(FE_API_VERSION == 1);
+```
+
+The macro is bumped for every breaking public API change. Compatible additions
+do not require a bump, so downstreams should still pin an exact released commit
+or tag rather than using the macro as a substitute for source control.
 
 ## Initializing A Context
 
@@ -40,9 +55,9 @@ free(arena);
 
 Each context is single-threaded: do not call into one context concurrently or
 move an active call chain between threads. Callbacks run synchronously on the
-calling thread. Distinct contexts have distinct interpreter state, although a
-host must still synchronize any globals it modifies, such as the current
-extension type-name table.
+calling thread. Distinct contexts have distinct core interpreter state. The
+legacy Fex custom-type names are process-global and are not suitable for
+independent kg-style contexts; see "Legacy Fex Custom Types" below.
 
 ## Context Userdata And Callbacks
 
@@ -67,8 +82,10 @@ the way to the host's recovery point.
 Object-producing functions return an object that is either on the context's GC
 protection stack or reachable from an interpreter root. Newly allocated
 objects are pushed automatically; reader and evaluator results retain the
-protection or rooted reachability established while producing them. Save an
-index before temporary work and restore it afterward:
+protection or rooted reachability established while producing them. The
+context has separate internal roots for the latest multi-form evaluation
+result, the latest `FeCall()` result, and the persistent-root list. Save an index
+before temporary work and restore it afterward:
 
 ```c
 size_t gc = FeSaveGC(ctx);
@@ -255,6 +272,12 @@ unchanged.
 For examples of using the extension API in full detail, refer to `fex.[ch]` and
 `fex_*.[ch]`. Here is an overview.
 
+kg-style embedders should use the context-based lifecycle, userdata, error,
+evaluation-control, native-binding, extraction, root, and call APIs described
+above. In particular, use `FeNil()` rather than `nil`, `FeDefineNative()` rather
+than assembling a binding manually, and `FeStringByteLength()` plus
+`FeCopyStringBytes()` rather than treating serialized output as host data.
+
 ### Exposing A C Function
 
 `FeDefineNative()` creates a `FeNativeFn` and binds it to a global symbol while
@@ -297,40 +320,29 @@ writing anything. Other object types raise an `expected string or symbol`
 type error.
 
 The extraction APIs are byte-counted and walk every chained string cell; they
-do not have `FeToString()`'s fixed-buffer serialization semantics. Fe source
-still rejects embedded NUL bytes, and `FeMakeString()` accepts a NUL-terminated
-C string, so the current public construction paths cannot create a string
-containing an embedded NUL. Extraction nevertheless reports and copies the
-exact stored payload rather than treating its destination as a C string.
+do not have `FeToString()`'s fixed-buffer serialization semantics.
+`FeToString()` renders any object as Fe syntax, including string quoting and
+escaping, and its destination may truncate; it is for display, not extracting
+host data. Fe source still rejects embedded NUL bytes, and `FeMakeString()`
+accepts a NUL-terminated C string, so the current public construction paths
+cannot create a string containing an embedded NUL. Extraction nevertheless
+reports and copies the exact stored payload rather than treating its
+destination as a C string.
 
-### Creating An `FePtr`
+### Legacy Fex Custom Types
 
-Fe provides the `FePtr` object type to allow for custom objects. For type
-safety, you must tag your types by using the `FeTFex*` elements of the `FeType`
-`enum` type. You can give them your own `enum` names:
+The public `FeTFex0` through `FeTFex2` tags, mutable `type_names` array, and
+`nil` object remain only for compatibility with the in-tree Fex extensions.
+They are process-global legacy interfaces, are not safe as per-context type
+registrations, and are slated for removal when Phase 8 introduces per-context
+custom types. New kg-style embedders must not use them.
 
-```c
-enum {
-  MyTypeFoo = FeTFex0,
-  MyTypeBar = FeTFex1,
-  // ...
-};
-```
-
-And you should give them string names, too, using the global `type_names` array:
-
-```c
-type_names[MyTypeFoo] = "foo";
-type_names[MyTypeBar] = "bar";
-```
-
-You can create an `FePtr` object by using the `FeMakePtr` function.
-
-Fe provides mark and GC callbacks to customize garbage collection for `FePtr`
-types. Whenever the GC marks an `FePtr`, it calls the function installed by
-`FeSetMarkFn()`; this callback can mark referenced Fe objects with `FeMark()`.
-When a pointer-backed object becomes unreachable, Fe calls the function
-installed by `FeSetGCFn()` so it can release external resources.
+`FeMakePtr()`, `FeSetMarkFn()`, `FeSetGCFn()`, and `FeMark()` support that legacy
+Fex model: the mark callback marks Fe objects reachable through an external
+pointer, and the GC callback releases external resources. Until the deferred
+Phase 8 work provides a replacement, embedders that require their own custom
+pointer-backed types must account for the global tag/name limitation rather
+than treating this interface as context-local.
 
 ### Error Handling
 
