@@ -15,10 +15,20 @@
     }                                                    \
   } while (false)
 
+typedef struct InterruptState {
+  FeContext* context;
+  void* expected_userdata;
+  size_t polls;
+  size_t cancel_after;
+  bool userdata_seen;
+} InterruptState;
+
 typedef struct ErrorState {
   jmp_buf jump;
   FeContext* context;
   const char* expected_message;
+  InterruptState* nested_interrupt;
+  bool nested_with_options;
   bool called;
   bool stack_was_nil;
 } ErrorState;
@@ -115,6 +125,50 @@ static bool ExpectEvaluationError(FeContext* context,
   FeRestoreGC(context, gc);
   CHECK(state->called);
   return true;
+}
+
+static bool ExpectEvaluationOptionsError(FeContext* context,
+                                         ErrorState* state,
+                                         const char* label,
+                                         const char* source,
+                                         size_t length,
+                                         const FeEvalOptions* options,
+                                         const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    (void)FeEvaluateStringWithOptions(context, label, source, length, options);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  return true;
+}
+
+static bool Interrupt(
+    // cppcheck-suppress constParameterCallback
+    FeContext* context,
+    void* userdata) {
+  InterruptState* state = userdata;
+  state->userdata_seen =
+      state->context == context && state->expected_userdata == userdata;
+  state->polls++;
+  return state->polls == state->cancel_after;
+}
+
+static FeObject* ReenterEvaluation(FeContext* context, FeObject* arguments) {
+  (void)arguments;
+  const ErrorState* state = FeGetUserData(context);
+  const FeEvalOptions options = {.poll_interval = 1,
+                                 .interrupt = Interrupt,
+                                 .userdata = state->nested_interrupt};
+  static const char source[] = "(while t 1)";
+  if (!state->nested_with_options) {
+    return FeEvaluateString(context, "inner.fe", source, sizeof(source) - 1);
+  }
+  return FeEvaluateStringWithOptions(context, "inner.fe", source,
+                                     sizeof(source) - 1, &options);
 }
 
 static bool ExpectReadError(FeContext* context,
@@ -254,6 +308,12 @@ static bool TestFileInput(void) {
   CHECK(IsRendered(context, FeEvaluateFile(context, "memory.fe", file), "7"));
   CHECK(FeSaveGC(context) == gc);
   rewind(file);
+  const FeEvalOptions options = {.step_limit = 16};
+  CHECK(IsRendered(
+      context, FeEvaluateFileWithOptions(context, "memory.fe", file, &options),
+      "7"));
+  CHECK(FeSaveGC(context) == gc);
+  rewind(file);
   CHECK(fgetc(file) == '1');
   CHECK(fclose(file) == 0);
 
@@ -267,9 +327,120 @@ static bool TestFileInput(void) {
   return true;
 }
 
+static bool TestEvaluationControl(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char loop[] = "(while t 1)";
+  const FeEvalOptions loop_options = {.step_limit = 32};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "loop.fe", loop, sizeof(loop) - 1, &loop_options,
+      "loop.fe: evaluation step limit exceeded"));
+  CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "5", 1),
+                   "5"));
+
+  static const char recursion[] =
+      "(= recurse (fn (x) (recurse x))) (recurse 1)";
+  const FeEvalOptions recursion_options = {.step_limit = 64};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "recursion.fe", recursion, sizeof(recursion) - 1,
+      &recursion_options, "recursion.fe: evaluation step limit exceeded"));
+
+  static const char macros[] =
+      "(= expand (macro (x) x)) (expand (expand (expand (expand (expand "
+      "(expand (expand (expand 1))))))))";
+  const FeEvalOptions macro_options = {.step_limit = 20};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "macros.fe", macros, sizeof(macros) - 1, &macro_options,
+      "macros.fe: evaluation step limit exceeded"));
+
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectEvaluationOptionsError(context, &state, "interrupt.fe", loop,
+                                     sizeof(loop) - 1, &interrupt_options,
+                                     "interrupt.fe: evaluation cancelled"));
+  CHECK(interrupt.polls == interrupt.cancel_after);
+  CHECK(interrupt.userdata_seen);
+  CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "6", 1),
+                   "6"));
+
+  InterruptState default_poll = {.context = context,
+                                 .expected_userdata = &default_poll,
+                                 .polls = 0,
+                                 .cancel_after = 1};
+  const FeEvalOptions default_poll_options = {.interrupt = Interrupt,
+                                              .userdata = &default_poll};
+  CHECK(ExpectEvaluationOptionsError(context, &state, "default-poll.fe", loop,
+                                     sizeof(loop) - 1, &default_poll_options,
+                                     "default-poll.fe: evaluation cancelled"));
+  CHECK(default_poll.polls == 1);
+  CHECK(default_poll.userdata_seen);
+
+  static const char addition[] = "(+ 1 2)";
+  const FeEvalOptions exact_options = {.step_limit = 3};
+  for (size_t i = 0; i < 2; i++) {
+    CHECK(ExpectEvaluationOptionsError(
+        context, &state, "exact.fe", addition, sizeof(addition) - 1,
+        &exact_options, "exact.fe: evaluation step limit exceeded"));
+  }
+  const FeEvalOptions sufficient_options = {.step_limit = 4};
+  CHECK(IsRendered(
+      context,
+      FeEvaluateStringWithOptions(context, "exact.fe", addition,
+                                  sizeof(addition) - 1, &sufficient_options),
+      "3"));
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "plain.fe", addition, sizeof(addition) - 1),
+      "3"));
+
+  size_t offset = 0;
+  FeObject* addition_object =
+      FeReadString(context, addition, sizeof(addition) - 1, &offset);
+  CHECK(IsRendered(
+      context,
+      FeEvaluateWithOptions(context, addition_object, &sufficient_options),
+      "3"));
+
+  InterruptState nested_interrupt = {.context = context,
+                                     .expected_userdata = &nested_interrupt,
+                                     .polls = 0,
+                                     .cancel_after = 1};
+  state.nested_interrupt = &nested_interrupt;
+  const size_t gc = FeSaveGC(context);
+  FeSet(context, FeMakeSymbol(context, "reenter"),
+        FeMakeNativeFn(context, ReenterEvaluation));
+  FeRestoreGC(context, gc);
+  static const char nested[] = "(reenter)";
+  const FeEvalOptions outer_options = {.step_limit = 24};
+  state.nested_with_options = false;
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "outer.fe", nested, sizeof(nested) - 1, &outer_options,
+      "inner.fe: evaluation step limit exceeded"));
+  CHECK(nested_interrupt.polls == 0);
+  state.nested_with_options = true;
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "outer.fe", nested, sizeof(nested) - 1, &outer_options,
+      "inner.fe: evaluation step limit exceeded"));
+  CHECK(nested_interrupt.polls == 0);
+  CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "7", 1),
+                   "7"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
-                 TestStringInput() && TestFileInput()
+                 TestStringInput() && TestFileInput() && TestEvaluationControl()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

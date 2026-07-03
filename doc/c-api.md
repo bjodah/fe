@@ -146,6 +146,66 @@ while (true) {
 fclose(file);
 ```
 
+## Bounding And Cancelling Evaluation
+
+`FeEvaluateWithOptions()`, `FeEvaluateStringWithOptions()`, and
+`FeEvaluateFileWithOptions()` are the controlled counterparts of the plain
+evaluation functions. The string and file variants retain the same input,
+label, ownership, final-result rooting, and multi-form behavior described
+above.
+
+```c
+FeEvalOptions options = {
+  .step_limit = 100000,
+  .poll_interval = 256,
+  .interrupt = ShouldCancel,
+  .userdata = host,
+};
+FeObject* result = FeEvaluateStringWithOptions(
+    ctx, "init.fe", source, source_length, &options);
+```
+
+`step_limit` is the maximum number of evaluation steps; zero means unlimited.
+The first `step_limit` steps are allowed, and attempting another raises
+`evaluation step limit exceeded`. Fe counts every internal evaluator entry,
+including atoms and callable forms, every element processed by evaluator list
+loops, every lexical environment and parameter-binding entry traversed, and
+every successful `while` iteration. Function calls therefore count their
+call-form entry, evaluated arguments, parameter binding, and body forms. Macro
+expansion counts the macro call, body forms, and the generated form's re-entry
+into the evaluator. This accounting is deterministic for identical input and
+Fe version, but hosts should treat limits as work bounds rather than portable
+instruction counts because the granularity may change in a later version.
+
+When `interrupt` is non-null, Fe calls it after each `poll_interval` evaluation
+steps. A zero interval selects the default of 1024 steps. Returning `true`
+raises the distinct `evaluation cancelled` error. Polling uses a decrementing
+counter and performs no clock calls. Fe borrows the callback and its `userdata`
+for the controlled call; both must remain valid until it returns or transfers
+control through the error callback. Cancellation is cooperative at evaluator
+step boundaries: a native callback that does not return cannot be preempted by
+Fe.
+
+The control state is ambient for the complete outermost `*WithOptions()` call.
+Evaluation re-entered from a native callback through either a plain evaluator
+or another controlled evaluator consumes the same outer step budget and uses
+the outer interrupt settings. Options supplied to a nested controlled call are
+ignored; nested code cannot reset or extend the active budget. This includes
+all forms in nested string and file evaluation. Passing `nullptr` as the
+outermost options pointer is equivalent to zero-initialized options and still
+establishes an unlimited ambient control scope whose nested options are
+ignored.
+
+The plain `FeEvaluate()`, `FeEvaluateString()`, and `FeEvaluateFile()` functions
+remain unlimited when no ambient control is active. When called during a
+controlled evaluation, they inherit and consume its controls. Successful
+return from the outermost controlled call clears the control state.
+`FeHandleError()` also clears it before calling the host error callback, so a
+context recovered with `longjmp` starts its next top-level evaluation fresh.
+The exhaustion and cancellation messages pass through normal label handling;
+for example, a controlled string call labelled `init.fe` reports
+`init.fe: evaluation cancelled`.
+
 ## Calling A Function
 
 You can call a function by creating a list and evaulating it; for example, we

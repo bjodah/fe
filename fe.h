@@ -14,9 +14,17 @@ typedef double FeDouble;
 typedef struct FeObject FeObject;
 typedef struct FeContext FeContext;
 typedef FeObject* FeNativeFn(FeContext* ctx, FeObject* args);
+typedef bool FeInterruptFn(FeContext* ctx, void* userdata);
 typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
+
+typedef struct FeEvalOptions {
+  size_t step_limit;
+  size_t poll_interval;
+  FeInterruptFn* interrupt;
+  void* userdata;
+} FeEvalOptions;
 
 typedef enum FeType {
   FeTPair,
@@ -108,12 +116,25 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 
 [[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);
 [[nodiscard]] FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
+[[nodiscard]] FeObject* FeEvaluateWithOptions(FeContext* ctx,
+                                              FeObject* obj,
+                                              const FeEvalOptions* options);
 [[nodiscard]] FeObject* FeEvaluateString(FeContext* ctx,
                                          const char* label,
                                          const char* source,
                                          size_t length);
+[[nodiscard]] FeObject* FeEvaluateStringWithOptions(
+    FeContext* ctx,
+    const char* label,
+    const char* source,
+    size_t length,
+    const FeEvalOptions* options);
 [[nodiscard]] FeObject* FeEvaluateFile(FeContext* ctx,
                                        const char* label,
                                        FILE* file);
+[[nodiscard]] FeObject* FeEvaluateFileWithOptions(FeContext* ctx,
+                                                  const char* label,
+                                                  FILE* file,
+                                                  const FeEvalOptions* options);
 
 #endif

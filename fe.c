@@ -97,6 +97,7 @@ enum {
   // TODO: This should scale with arena size?
   GcStackSize = 512,
   StringBufferSize = (sizeof(FeObject*) - 1),
+  DefaultEvalPollInterval = 1024,
 };
 
 struct FeObject {
@@ -144,8 +145,15 @@ struct FeContext {
   FeObject* symbol_list;
   FeObject* evaluation_result;
   FeObject* t;
+  FeInterruptFn* evaluation_interrupt;
+  void* evaluation_userdata;
+  size_t evaluation_steps;
+  size_t evaluation_poll_interval;
+  size_t evaluation_poll_countdown;
   const char* error_label;
   size_t error_offset;
+  bool evaluation_active;
+  bool evaluation_limited;
   bool error_has_offset;
   char nextchr;
 };
@@ -204,6 +212,22 @@ static void __attribute((format(printf, 3, 4))) Format(char* result,
   assert(count < INT_MAX);
 }
 
+static void ClearEvaluationControl(FeContext* ctx) {
+  ctx->evaluation_interrupt = nullptr;
+  ctx->evaluation_userdata = nullptr;
+  ctx->evaluation_steps = 0;
+  ctx->evaluation_poll_interval = 0;
+  ctx->evaluation_poll_countdown = 0;
+  ctx->evaluation_active = false;
+  ctx->evaluation_limited = false;
+}
+
+static void EndEvaluationControl(FeContext* ctx, bool owns_control) {
+  if (owns_control) {
+    ClearEvaluationControl(ctx);
+  }
+}
+
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
   FeObject* cl = ctx->call_list;
   const char* label = ctx->error_label;
@@ -215,6 +239,7 @@ static void __attribute((format(printf, 3, 4))) Format(char* result,
   ctx->error_label = nullptr;
   ctx->error_has_offset = false;
   ctx->nextchr = '\0';
+  ClearEvaluationControl(ctx);
 
   if (label != nullptr && has_offset) {
     Format(message, sizeof(message), "%s:%zu: %s", label, offset, msg);
@@ -231,6 +256,42 @@ static void __attribute((format(printf, 3, 4))) Format(char* result,
     ctx->error_fn(ctx, msg, cl);
   }
   abort();
+}
+
+static bool BeginEvaluationControl(FeContext* ctx,
+                                   const FeEvalOptions* options) {
+  if (ctx->evaluation_active) {
+    return false;
+  }
+  ctx->evaluation_active = true;
+  if (options == nullptr) {
+    return true;
+  }
+  ctx->evaluation_limited = options->step_limit != 0;
+  ctx->evaluation_steps = options->step_limit;
+  ctx->evaluation_interrupt = options->interrupt;
+  ctx->evaluation_userdata = options->userdata;
+  ctx->evaluation_poll_interval = options->poll_interval != 0
+                                      ? options->poll_interval
+                                      : DefaultEvalPollInterval;
+  ctx->evaluation_poll_countdown = ctx->evaluation_poll_interval;
+  return true;
+}
+
+static void EvaluationStep(FeContext* ctx) {
+  if (ctx->evaluation_limited) {
+    if (ctx->evaluation_steps == 0) {
+      FeHandleError(ctx, "evaluation step limit exceeded");
+    }
+    ctx->evaluation_steps--;
+  }
+  if (ctx->evaluation_interrupt != nullptr &&
+      --ctx->evaluation_poll_countdown == 0) {
+    ctx->evaluation_poll_countdown = ctx->evaluation_poll_interval;
+    if (ctx->evaluation_interrupt(ctx, ctx->evaluation_userdata)) {
+      FeHandleError(ctx, "evaluation cancelled");
+    }
+  }
 }
 
 FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg) {
@@ -661,9 +722,10 @@ void* FeToPtr(FeContext*, FeObject* obj) {
   return CDR(obj);
 }
 
-static FeObject* GetBound(FeObject* sym, FeObject* env) {
+static FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env) {
   // Try to find the symbol in the environment:
   for (; !FeIsNil(env); env = CDR(env)) {
+    EvaluationStep(ctx);
     FeObject* x = CAR(env);
     if (CAR(x) == sym) {
       return x;
@@ -673,8 +735,8 @@ static FeObject* GetBound(FeObject* sym, FeObject* env) {
   return CDR(sym);
 }
 
-void FeSet(FeContext*, FeObject* sym, FeObject* v) {
-  CDR(GetBound(sym, &nil)) = v;
+void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
+  CDR(GetBound(ctx, sym, &nil)) = v;
 }
 
 static FeObject rparen;
@@ -862,6 +924,7 @@ static FeObject* EvaluateList(FeContext* ctx, FeObject* lst, FeObject* env) {
   FeObject* res = &nil;
   FeObject** tail = &res;
   while (!FeIsNil(lst)) {
+    EvaluationStep(ctx);
     *tail = FeCons(ctx, Evaluate(ctx, FeGetNextArgument(ctx, &lst), env, NULL),
                    &nil);
     tail = &CDR(*tail);
@@ -873,6 +936,7 @@ static FeObject* DoList(FeContext* ctx, FeObject* lst, FeObject* env) {
   FeObject* res = &nil;
   const size_t save = FeSaveGC(ctx);
   while (!FeIsNil(lst)) {
+    EvaluationStep(ctx);
     FeRestoreGC(ctx, save);
     FePushGC(ctx, lst);
     FePushGC(ctx, env);
@@ -886,6 +950,7 @@ static FeObject* ArgsToEnv(FeContext* ctx,
                            FeObject* arg,
                            FeObject* env) {
   while (!FeIsNil(prm)) {
+    EvaluationStep(ctx);
     if (FeGetType(prm) != FeTPair) {
       env = FeCons(ctx, FeCons(ctx, prm, arg), env);
       break;
@@ -941,7 +1006,7 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
       return res;
     case PSet:
       va = CheckType(ctx, FeGetNextArgument(ctx, &arg), FeTSymbol);
-      CDR(GetBound(va, env)) = EVAL_ARG();
+      CDR(GetBound(ctx, va, env)) = EVAL_ARG();
       return res;
     case PIf:
       while (!FeIsNil(arg)) {
@@ -968,6 +1033,7 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
       va = FeGetNextArgument(ctx, &arg);
       const size_t n = FeSaveGC(ctx);
       while (!FeIsNil(Evaluate(ctx, va, env, NULL))) {
+        EvaluationStep(ctx);
         DoList(ctx, arg, env);
         FeRestoreGC(ctx, n);
       }
@@ -1044,8 +1110,9 @@ static FeObject* Evaluate(FeContext* ctx,
                           FeObject* obj,
                           FeObject* env,
                           FeObject** newenv) {
+  EvaluationStep(ctx);
   if (FeGetType(obj) == FeTSymbol) {
-    return CDR(GetBound(obj, env));
+    return CDR(GetBound(ctx, obj, env));
   }
   if (FeGetType(obj) != FeTPair) {
     return obj;
@@ -1116,6 +1183,15 @@ FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {
   return Evaluate(ctx, obj, &nil, NULL);
 }
 
+FeObject* FeEvaluateWithOptions(FeContext* ctx,
+                                FeObject* obj,
+                                const FeEvalOptions* options) {
+  const bool owns_control = BeginEvaluationControl(ctx, options);
+  FeObject* result = FeEvaluate(ctx, obj);
+  EndEvaluationControl(ctx, owns_control);
+  return result;
+}
+
 static FeObject* EvaluateInput(FeContext* ctx,
                                const char* label,
                                FeReadFn* read,
@@ -1156,6 +1232,17 @@ FeObject* FeEvaluateString(FeContext* ctx,
   return EvaluateInput(ctx, label, ReadString, &input);
 }
 
+FeObject* FeEvaluateStringWithOptions(FeContext* ctx,
+                                      const char* label,
+                                      const char* source,
+                                      size_t length,
+                                      const FeEvalOptions* options) {
+  const bool owns_control = BeginEvaluationControl(ctx, options);
+  FeObject* result = FeEvaluateString(ctx, label, source, length);
+  EndEvaluationControl(ctx, owns_control);
+  return result;
+}
+
 typedef struct FileInput {
   FILE* file;
   size_t offset;
@@ -1184,6 +1271,16 @@ static char ReadEvaluatedFile(FeContext* ctx, void* udata) {
 FeObject* FeEvaluateFile(FeContext* ctx, const char* label, FILE* file) {
   FileInput input = {.file = file, .offset = 0};
   return EvaluateInput(ctx, label, ReadEvaluatedFile, &input);
+}
+
+FeObject* FeEvaluateFileWithOptions(FeContext* ctx,
+                                    const char* label,
+                                    FILE* file,
+                                    const FeEvalOptions* options) {
+  const bool owns_control = BeginEvaluationControl(ctx, options);
+  FeObject* result = FeEvaluateFile(ctx, label, file);
+  EndEvaluationControl(ctx, owns_control);
+  return result;
 }
 
 static size_t GetSymbolObjectCount(const char* name) {

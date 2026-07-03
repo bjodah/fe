@@ -122,6 +122,30 @@ Native callbacks may synchronously re-enter evaluation on the same context.
 The evaluator's call trace and GC stack support nesting, but a context has no
 internal synchronization and must be used by only one thread at a time.
 
+## Evaluation Control
+
+The context stores one ambient evaluation-control record. Only the outermost
+controlled API call initializes and owns that record. Plain evaluator calls
+and nested controlled calls see it already active, so all re-entry consumes
+the outer record and nested options cannot replace its limit, interrupt
+callback, polling interval, or userdata. The owning call clears the record on
+normal return.
+
+An evaluator step is charged on every `Evaluate()` entry, on each element of
+the evaluator's argument and body list loops, on lexical environment and
+parameter-binding traversal, and on each successful `while` iteration.
+Macro-generated code re-enters `Evaluate()` and is charged there. Finite
+budgets store a remaining-step count. Interrupt polling stores a countdown that
+is reset before invoking the callback, making the common path a counter
+decrement with no clock access and allowing callback re-entry to keep using the
+same polling state.
+
+Budget exhaustion and interrupt cancellation both enter `FeHandleError()`.
+Along with clearing the call trace and temporary source label, that function
+clears the complete control record before invoking the host error callback.
+Consequently a nonlocal transfer cannot leave a stale budget active in a
+recovered context.
+
 ## Known Issues
 
 The implementation has some known issues. These exist as a side effect of trying
