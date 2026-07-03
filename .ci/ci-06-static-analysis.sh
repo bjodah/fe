@@ -52,6 +52,6 @@ compile_db_files | "${PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buff
 cppcheck --quiet --error-exitcode=1 --std=c23 \
 	--enable=warning,style,performance,portability --check-level=exhaustive \
 	--inline-suppr --suppress=preprocessorErrorDirective:auto.h \
-	-j "${JOBS}" ./*.c
+	-j "${JOBS}" ./*.c ./fuzz/*.c
 
 compile_db_files | "${PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_tidy

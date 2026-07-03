@@ -496,7 +496,8 @@ void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt) {
 
     case FeTDouble: {
       const double d = GetDouble(obj);
-      if (floor(d) == d) {
+      // cppcheck-suppress incorrectLogicOperator
+      if (d >= -0x1p63 && d < 0x1p63 && floor(d) == d) {
         Format(buf, sizeof(buf), "%" PRId64, (int64_t)d);
       } else {
         Format(buf, sizeof(buf), "%.7g", GetDouble(obj));

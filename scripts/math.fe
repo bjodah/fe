@@ -24,3 +24,5 @@
 
 (print pi)
 (print e)
+(print (/ 1 0))
+(print 1e100)

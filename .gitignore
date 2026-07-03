@@ -6,3 +6,7 @@ compile_commands.json
 coverage/
 *.gcda
 *.gcno
+fuzz/fuzz_reader
+fuzz/fuzz_eval
+fuzz/corpus/
+fuzz/artifacts/

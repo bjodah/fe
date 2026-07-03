@@ -25,12 +25,31 @@ HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o)
 SOURCES = $(SRCS) $(HDRS)
 
+# Fuzzing
+FUZZ_DIR ?= fuzz
+FUZZ_CC ?= clang
+FUZZ_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x -O1 -g \
+	-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+	-fno-omit-frame-pointer
+FUZZ_RUNS ?= 1000
+FUZZ_MAX_LEN ?= 4096
+FUZZ_TIMEOUT ?= 2
+FUZZ_RSS_LIMIT_MB ?= 512
+FUZZ_VERBOSITY ?= 0
+FUZZ_CORPUS_DIR ?= $(FUZZ_DIR)/corpus
+FUZZ_ARTIFACT_DIR ?= $(FUZZ_DIR)/artifacts
+FUZZ_SUPPORT = $(FUZZ_DIR)/fuzz_support.c
+FUZZ_READER_BIN = $(FUZZ_DIR)/fuzz_reader
+FUZZ_EVAL_BIN = $(FUZZ_DIR)/fuzz_eval
+FUZZ_SRCS = $(FUZZ_SUPPORT) $(FUZZ_DIR)/fuzz_reader.c \
+	$(FUZZ_DIR)/fuzz_eval.c
+
 # Project metrics
 SCC ?= scc
-SCC_PATHS ?= $(SOURCES)
+SCC_PATHS ?= $(SOURCES) $(FUZZ_SRCS)
 SCC_COMPLEXITY_PATHS ?= $(SOURCES)
-SCC_COMPLEXITY_MAX ?= 147
-SCC_FILE_COMPLEXITY_MAX ?= 75
+SCC_COMPLEXITY_MAX ?= 149
+SCC_FILE_COMPLEXITY_MAX ?= 77
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
@@ -40,7 +59,7 @@ COVERAGE_LCOV_ARGS ?= --quiet --branch-coverage --ignore-errors inconsistent,gco
 COVERAGE_GENHTML_ARGS ?= --quiet
 COVERAGE_MIN_LINES ?= 80
 CLANG_FORMAT ?= clang-format
-FORMAT_FILES = $(SOURCES)
+FORMAT_FILES = $(SOURCES) $(FUZZ_SRCS) $(FUZZ_DIR)/fuzz_support.h
 BEAR ?= bear
 CLANG_CC ?= clang
 COMPILE_DB_FILE ?= compile_commands.json
@@ -62,11 +81,46 @@ run: fe
 bench: clean
 	./bench.sh
 
+fuzz: fuzz-reader fuzz-eval
+
+fuzz-reader: $(FUZZ_READER_BIN)
+
+fuzz-eval: $(FUZZ_EVAL_BIN)
+
+fuzz-smoke: fuzz-reader-smoke fuzz-eval-smoke
+
+fuzz-reader-smoke: $(FUZZ_READER_BIN)
+	mkdir -p $(FUZZ_CORPUS_DIR)/reader $(FUZZ_ARTIFACT_DIR)/reader
+	./$(FUZZ_READER_BIN) -runs=$(FUZZ_RUNS) -max_len=$(FUZZ_MAX_LEN) \
+		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
+		-verbosity=$(FUZZ_VERBOSITY) \
+		-dict=$(FUZZ_DIR)/fe.dict \
+		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/reader/ \
+		$(FUZZ_CORPUS_DIR)/reader scripts
+
+fuzz-eval-smoke: $(FUZZ_EVAL_BIN)
+	mkdir -p $(FUZZ_CORPUS_DIR)/eval $(FUZZ_ARTIFACT_DIR)/eval
+	./$(FUZZ_EVAL_BIN) -runs=$(FUZZ_RUNS) -max_len=$(FUZZ_MAX_LEN) \
+		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
+		-verbosity=$(FUZZ_VERBOSITY) \
+		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/eval/ \
+		$(FUZZ_CORPUS_DIR)/eval scripts
+
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 %.o: %.c $(HDRS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
+	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
+		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
+
+$(FUZZ_EVAL_BIN): $(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
+	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
+		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
 
 sizes:
 	wc *.[ch]
@@ -74,8 +128,11 @@ sizes:
 	wc scripts/*.fe
 
 clean:
-	-rm -rf fe *.o *.dSYM
+	-rm -rf fe *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN)
 	-rm -f scripts/*.csv scripts/*.times
+
+fuzz-clean:
+	rm -rf $(FUZZ_CORPUS_DIR) $(FUZZ_ARTIFACT_DIR)
 
 
 complexity:
@@ -129,5 +186,6 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test sizes clean complexity complexity-check pmccabe pmccabe-check \
-	coverage coverage-clean format format-check compile-db iwyu
+.PHONY: all check test sizes clean fuzz fuzz-reader fuzz-eval fuzz-smoke fuzz-clean \
+	fuzz-reader-smoke fuzz-eval-smoke complexity complexity-check pmccabe \
+	pmccabe-check coverage coverage-clean format format-check compile-db iwyu

@@ -31,6 +31,7 @@ The implementation aims to fulfill the following goals:
 * [C API overview](doc/c-api.md)
 * [Language overview](doc/language.md)
 * [Implementation overview](doc/implementation.md)
+* [Fuzzing and crash triage](doc/FUZZING.md)
 
 ## Contributing
 
