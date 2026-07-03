@@ -84,12 +84,47 @@ while reachable from a protected object or another interpreter root. Call
 lost. Never retain an `FeObject*` after removing its last protection or root;
 any object creation can trigger collection.
 
-## Running A Script
+## Reading And Running Source
 
-To run a script, Fe must first read and then evaluate it. Do this in a loop if
-there are several root-level expressions contained in the script. Fe provides
-`FeReadFile` as a convenience to read from a file pointer, and you can also use
-`FeRead` with a custom `FeReadFn` callback function to read from other sources.
+`FeReadString()` reads one form from an explicitly sized byte sequence. The
+input need not be NUL-terminated and Fe never reads at or beyond `length`.
+When `offset` is non-null, it supplies the zero-based starting position and is
+updated to the first byte not belonging to the returned form; pass the same
+value back to read subsequent forms. A null `offset` starts at byte zero.
+The function returns `nullptr` when no form remains. `source` may be `nullptr`
+only when `length` is zero.
+
+Fe source is textual rather than binary. An embedded NUL within the supplied
+length is an error, including a NUL between otherwise valid forms; it is never
+treated as end-of-input. Reader diagnostics from `FeReadString()` use the form
+`byte <offset>: <message>` with zero-based byte offsets.
+
+`FeEvaluateString()` evaluates every top-level form and returns the last
+value, or nil when the input contains no forms. It accepts the same explicitly
+sized, non-NUL-terminated input and rejects embedded NUL bytes.
+`FeEvaluateFile()` does the same from the `FILE` object's current position
+through end-of-file. It neither closes nor rewinds the stream, so ownership
+remains with the caller. File read errors and embedded NUL bytes are reported
+through the normal Fe error callback.
+
+Both evaluation helpers restore the GC stack to its entry index between forms
+and before returning. Their returned value is held by a context-owned root,
+which is replaced by the next call to either helper. The result therefore
+survives allocations without growing the GC stack until another string or file
+evaluation begins, or until the context is closed.
+
+During either evaluation helper, reader errors are reported as
+`<label>:<offset>: <message>` and evaluator errors as
+`<label>: <message>`. File offsets start at zero at the stream position passed
+to `FeEvaluateFile()`. Passing `nullptr` as the label disables the label prefix.
+Fe borrows the label only for the duration of the call and does not retain its
+pointer. Before invoking the error callback, Fe copies the composed diagnostic
+into its temporary error-message buffer; as with other error messages, that
+borrowed message is valid only during the callback.
+
+The lower-level `FeRead()` and `FeReadFile()` APIs remain available for
+streaming embedders and fuzzing. To evaluate such a stream manually, read and
+evaluate one form at a time:
 
 ```c
 FILE* file = fopen("test.fe", "rb");

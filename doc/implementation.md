@@ -90,6 +90,14 @@ reachable from an existing interpreter root. Accessors return existing objects
 without pushing them; their lifetime therefore depends on an existing root
 until the caller explicitly calls `FePushGC()`.
 
+Multi-form string and file evaluation uses one additional context root for its
+final result. Each helper restores its entry GC-stack index between forms and
+before returning, then keeps the returned value alive through this root. The
+next multi-form evaluation replaces the root. Length-aware input is fed through
+the existing callback reader; its adapter treats the supplied length as the
+only end-of-input marker and raises an error when a NUL byte occurs inside that
+range.
+
 ## Error Handling
 
 If an error occurs, `FeHandleError()` detaches the active call trace and invokes
@@ -98,6 +106,12 @@ only for that invocation. A recovering callback must `longjmp` or perform an
 equivalent nonlocal transfer; it must not allocate Fe objects. If the callback
 is absent or returns, Fe silently calls `abort()`. Error reporting and process
 exit policy belong to the host.
+
+String and file evaluation temporarily install a borrowed source label and
+reader byte offset in the context. `FeHandleError()` copies those values into a
+labelled diagnostic and clears the temporary input state before invoking the
+callback. Successful nested evaluation restores the enclosing label state;
+an escaping error clears it because the active evaluation chain is abandoned.
 
 The host must save and restore its GC stack checkpoint around a recoverable
 operation. Error handling resets the evaluator's call-trace link, but cannot

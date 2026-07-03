@@ -142,7 +142,11 @@ struct FeContext {
   FeObject* call_list;
   FeObject* free_list;
   FeObject* symbol_list;
+  FeObject* evaluation_result;
   FeObject* t;
+  const char* error_label;
+  size_t error_offset;
+  bool error_has_offset;
   char nextchr;
 };
 
@@ -202,8 +206,26 @@ static void __attribute((format(printf, 3, 4))) Format(char* result,
 
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
   FeObject* cl = ctx->call_list;
+  const char* label = ctx->error_label;
+  const size_t offset = ctx->error_offset;
+  const bool has_offset = ctx->error_has_offset;
+  char message[1024];
   // reset context state:
   ctx->call_list = &nil;
+  ctx->error_label = nullptr;
+  ctx->error_has_offset = false;
+  ctx->nextchr = '\0';
+
+  if (label != nullptr && has_offset) {
+    Format(message, sizeof(message), "%s:%zu: %s", label, offset, msg);
+    msg = message;
+  } else if (label != nullptr) {
+    Format(message, sizeof(message), "%s: %s", label, msg);
+    msg = message;
+  } else if (has_offset) {
+    Format(message, sizeof(message), "byte %zu: %s", offset, msg);
+    msg = message;
+  }
 
   if (ctx->error_fn) {
     ctx->error_fn(ctx, msg, cl);
@@ -308,6 +330,7 @@ static void CollectGarbage(FeContext* ctx) {
     FeMark(ctx, ctx->gc_stack[i]);
   }
   FeMark(ctx, ctx->symbol_list);
+  FeMark(ctx, ctx->evaluation_result);
 
   // Sweep and unmark:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -721,7 +744,7 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
         }
         if (chr == '\\') {
           chr = fn(ctx, udata);
-          if (strchr("nrt", chr)) {
+          if (memchr("nrt", chr, 3) != nullptr) {
             chr = strchr("n\nr\rt\t", chr)[1];
           }
         }
@@ -774,6 +797,60 @@ static char ReadFile(FeContext*, void* udata) {
 
 FeObject* FeReadFile(FeContext* ctx, FILE* fp) {
   return FeRead(ctx, ReadFile, fp);
+}
+
+typedef struct StringInput {
+  const char* source;
+  size_t length;
+  size_t* offset;
+} StringInput;
+
+static char ReadString(FeContext* ctx, void* udata) {
+  StringInput* input = udata;
+  ctx->error_offset = *input->offset;
+  if (*input->offset == input->length) {
+    return '\0';
+  }
+  if (input->source == nullptr) {
+    FeHandleError(ctx, "null source");
+  }
+  const char chr = input->source[(*input->offset)++];
+  if (chr == '\0') {
+    FeHandleError(ctx, "embedded NUL byte");
+  }
+  return chr;
+}
+
+FeObject* FeReadString(FeContext* ctx,
+                       const char* source,
+                       size_t length,
+                       size_t* offset) {
+  size_t local_offset = 0;
+  size_t* position = offset != nullptr ? offset : &local_offset;
+  const char* saved_label = ctx->error_label;
+  const size_t saved_offset = ctx->error_offset;
+  const bool saved_has_offset = ctx->error_has_offset;
+  ctx->error_label = nullptr;
+  ctx->error_offset = *position;
+  ctx->error_has_offset = true;
+  ctx->nextchr = '\0';
+  if (source == nullptr && length != 0) {
+    FeHandleError(ctx, "null source");
+  }
+  if (*position > length) {
+    FeHandleError(ctx, "offset exceeds source length");
+  }
+
+  StringInput input = {.source = source, .length = length, .offset = position};
+  FeObject* result = FeRead(ctx, ReadString, &input);
+  if (ctx->nextchr != '\0') {
+    (*position)--;
+    ctx->nextchr = '\0';
+  }
+  ctx->error_label = saved_label;
+  ctx->error_offset = saved_offset;
+  ctx->error_has_offset = saved_has_offset;
+  return result;
 }
 
 static FeObject* Evaluate(FeContext* ctx,
@@ -1039,6 +1116,76 @@ FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {
   return Evaluate(ctx, obj, &nil, NULL);
 }
 
+static FeObject* EvaluateInput(FeContext* ctx,
+                               const char* label,
+                               FeReadFn* read,
+                               void* input) {
+  const char* saved_label = ctx->error_label;
+  const size_t saved_offset = ctx->error_offset;
+  const bool saved_has_offset = ctx->error_has_offset;
+  const size_t gc = FeSaveGC(ctx);
+  ctx->error_label = label;
+  ctx->error_has_offset = true;
+  ctx->nextchr = '\0';
+  ctx->evaluation_result = &nil;
+
+  while (true) {
+    FeRestoreGC(ctx, gc);
+    ctx->error_has_offset = true;
+    FeObject* object = FeRead(ctx, read, input);
+    if (object == nullptr) {
+      break;
+    }
+    ctx->error_has_offset = false;
+    ctx->evaluation_result = FeEvaluate(ctx, object);
+  }
+
+  FeRestoreGC(ctx, gc);
+  ctx->error_label = saved_label;
+  ctx->error_offset = saved_offset;
+  ctx->error_has_offset = saved_has_offset;
+  return ctx->evaluation_result;
+}
+
+FeObject* FeEvaluateString(FeContext* ctx,
+                           const char* label,
+                           const char* source,
+                           size_t length) {
+  size_t offset = 0;
+  StringInput input = {.source = source, .length = length, .offset = &offset};
+  return EvaluateInput(ctx, label, ReadString, &input);
+}
+
+typedef struct FileInput {
+  FILE* file;
+  size_t offset;
+} FileInput;
+
+static char ReadEvaluatedFile(FeContext* ctx, void* udata) {
+  FileInput* input = udata;
+  ctx->error_offset = input->offset;
+  if (input->file == nullptr) {
+    FeHandleError(ctx, "null file");
+  }
+  const int chr = fgetc(input->file);
+  if (chr == EOF) {
+    if (ferror(input->file)) {
+      FeHandleError(ctx, "file read error");
+    }
+    return '\0';
+  }
+  if (chr == '\0') {
+    FeHandleError(ctx, "embedded NUL byte");
+  }
+  input->offset++;
+  return (char)chr;
+}
+
+FeObject* FeEvaluateFile(FeContext* ctx, const char* label, FILE* file) {
+  FileInput input = {.file = file, .offset = 0};
+  return EvaluateInput(ctx, label, ReadEvaluatedFile, &input);
+}
+
 static size_t GetSymbolObjectCount(const char* name) {
   const size_t length = strlen(name);
   assert(length > 0);
@@ -1085,6 +1232,7 @@ FeContext* FeOpenContext(void* arena, size_t size) {
   ctx->call_list = &nil;
   ctx->free_list = &nil;
   ctx->symbol_list = &nil;
+  ctx->evaluation_result = &nil;
 
   // Populate the free_list:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -1114,5 +1262,6 @@ void FeCloseContext(FeContext* ctx) {
   // Clear the GC stack and symbol list: this makes all objects unreachable:
   ctx->gc_stack_index = 0;
   ctx->symbol_list = &nil;
+  ctx->evaluation_result = &nil;
   CollectGarbage(ctx);
 }

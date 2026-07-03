@@ -93,6 +93,10 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
 
 [[nodiscard]] FeObject* FeRead(FeContext* ctx, FeReadFn fn, void* udata);
 [[nodiscard]] FeObject* FeReadFile(FeContext* ctx, FILE* fp);
+[[nodiscard]] FeObject* FeReadString(FeContext* ctx,
+                                     const char* source,
+                                     size_t length,
+                                     size_t* offset);
 
 [[nodiscard]] size_t FeToString(FeContext* ctx,
                                 FeObject* obj,
@@ -104,5 +108,12 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 
 [[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);
 [[nodiscard]] FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
+[[nodiscard]] FeObject* FeEvaluateString(FeContext* ctx,
+                                         const char* label,
+                                         const char* source,
+                                         size_t length);
+[[nodiscard]] FeObject* FeEvaluateFile(FeContext* ctx,
+                                       const char* label,
+                                       FILE* file);
 
 #endif
