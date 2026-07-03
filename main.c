@@ -5,7 +5,6 @@
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdnoreturn.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -22,22 +21,33 @@ static const char* InterpreterVersion = "1.0";
 
 static jmp_buf top_level;
 
-noreturn static void HandleError(FeContext* ctx,
-                                 const char* message,
-                                 FeObject* stack) {
+static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
   fprintf(stderr, "error: %s\n", message);
   while (!FeIsNil(stack)) {
     char fn[1024];
-    FeToString(ctx, FeCar(ctx, stack), fn, sizeof(fn));
+    (void)FeToString(ctx, FeCar(ctx, stack), fn, sizeof(fn));
     fprintf(stderr, "%s\n", fn);
     stack = FeCdr(ctx, stack);
   }
+}
+
+[[noreturn]] static void HandleError(FeContext* ctx,
+                                     const char* message,
+                                     FeObject* stack) {
+  PrintError(ctx, message, stack);
   longjmp(top_level, -1);
+}
+
+[[noreturn]] static void HandleFatalError(FeContext* ctx,
+                                          const char* message,
+                                          FeObject* stack) {
+  PrintError(ctx, message, stack);
+  exit(EXIT_FAILURE);
 }
 
 static FeObject* Handle(FeContext* ctx, FeObject* args, const char* prefix) {
   char marked[1024];
-  FeToString(ctx, args, marked, sizeof(marked));
+  (void)FeToString(ctx, args, marked, sizeof(marked));
   fprintf(stderr, "%s: %s\n", prefix, marked);
   return &nil;
 }
@@ -50,7 +60,7 @@ static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
   return Handle(ctx, args, "gc");
 }
 
-noreturn static void PrintHelp(int status) {
+[[noreturn]] static void PrintHelp(int status) {
   FILE* out = status == 0 ? stdout : stderr;
   fprintf(out,
           "fe — Fe language interpreter\n\n"
@@ -135,7 +145,16 @@ int main(int count, char* arguments[]) {
 
   // Initialize the context:
   AUTO(char*, arena, malloc(arena_size), FreeChar);
-  AUTO(FeContext*, context, FeOpenContext(arena, arena_size), CloseContext);
+  FeContext* opened_context = FeOpenContext(arena, arena_size);
+  if (opened_context == nullptr) {
+    fprintf(stderr,
+            "could not initialize Fe: arena must be aligned and at least %zu "
+            "bytes\n",
+            FeMinimumArenaSize());
+    return EXIT_FAILURE;
+  }
+  AUTO(FeContext*, context, opened_context, CloseContext);
+  FeSetErrorFn(context, HandleFatalError);
   if (extensions) {
     FexInit(context);
     FexInstallIO(context);
@@ -145,12 +164,12 @@ int main(int count, char* arguments[]) {
     FexInstallTime(context);
   }
   if (debugging) {
-    FeGetHandlers(context)->mark = HandleMark;
-    FeGetHandlers(context)->gc = HandleGC;
+    FeSetMarkFn(context, HandleMark);
+    FeSetGCFn(context, HandleGC);
   }
   if (interactive) {
     setjmp(top_level);
-    FeGetHandlers(context)->error = HandleError;
+    FeSetErrorFn(context, HandleError);
   }
 
   // REPL the inputs:

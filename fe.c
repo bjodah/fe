@@ -8,8 +8,8 @@
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdckdint.h>
 #include <stdlib.h>
-#include <stdnoreturn.h>
 #include <string.h>
 
 #include "fe.h"
@@ -131,7 +131,10 @@ static void SetType(FeObject* o, FeType type) {
 }
 
 struct FeContext {
-  FeHandlers handlers;
+  FeErrorFn* error_fn;
+  FeNativeFn* mark_fn;
+  FeNativeFn* gc_fn;
+  void* userdata;
   FeObject* gc_stack[GcStackSize];
   size_t gc_stack_index;
   FeObject* objects;
@@ -143,8 +146,34 @@ struct FeContext {
   char nextchr;
 };
 
-FeHandlers* FeGetHandlers(FeContext* ctx) {
-  return &ctx->handlers;
+typedef struct FeArena {
+  FeContext context;
+  FeObject objects[];
+} FeArena;
+
+static_assert(offsetof(FeArena, objects) == sizeof(FeContext));
+static_assert(alignof(FeArena) >= alignof(FeContext));
+static_assert(alignof(FeArena) >= alignof(FeObject));
+static_assert(FeTFex0 > FeTPtr, "FeTFex* must be > FeTPtr");
+
+void FeSetUserData(FeContext* ctx, void* userdata) {
+  ctx->userdata = userdata;
+}
+
+void* FeGetUserData(const FeContext* ctx) {
+  return ctx->userdata;
+}
+
+void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn) {
+  ctx->error_fn = fn;
+}
+
+void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn) {
+  ctx->mark_fn = fn;
+}
+
+void FeSetGCFn(FeContext* ctx, FeNativeFn* fn) {
+  ctx->gc_fn = fn;
 }
 
 static void __attribute((format(printf, 3, 4))) Format(char* result,
@@ -171,21 +200,15 @@ static void __attribute((format(printf, 3, 4))) Format(char* result,
   assert(count < INT_MAX);
 }
 
-noreturn void FeHandleError(FeContext* ctx, const char* msg) {
+[[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
   FeObject* cl = ctx->call_list;
   // reset context state:
   ctx->call_list = &nil;
 
-  if (ctx->handlers.error) {
-    ctx->handlers.error(ctx, msg, cl);
+  if (ctx->error_fn) {
+    ctx->error_fn(ctx, msg, cl);
   }
-  fprintf(stderr, "error: %s\n", msg);
-  for (; !FeIsNil(cl); cl = CDR(cl)) {
-    char buf[64];
-    FeToString(ctx, CAR(cl), buf, sizeof(buf));
-    fprintf(stderr, "=> %s\n", buf);
-  }
-  exit(EXIT_FAILURE);
+  abort();
 }
 
 FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg) {
@@ -261,8 +284,8 @@ begin:
     case FeTFex0:
     case FeTFex1:
     case FeTFex2:
-      if (ctx->handlers.mark) {
-        ctx->handlers.mark(ctx, obj);
+      if (ctx->mark_fn) {
+        ctx->mark_fn(ctx, obj);
       }
       break;
 
@@ -293,8 +316,8 @@ static void CollectGarbage(FeContext* ctx) {
       continue;
     }
     if (~TAG(obj) & GcMarkBit) {
-      if (ctx->handlers.gc != NULL) {
-        ctx->handlers.gc(ctx, obj);
+      if (ctx->gc_fn != nullptr) {
+        ctx->gc_fn(ctx, obj);
       }
       SetType(obj, FeTFree);
       CDR(obj) = ctx->free_list;
@@ -859,7 +882,7 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
     case PFn:
     case PMacro:
       va = FeCons(ctx, env, arg);
-      FeGetNextArgument(ctx, &arg);
+      (void)FeGetNextArgument(ctx, &arg);
       res = MakeObject(ctx);
       SetType(res, GetPrimitive(fn) == PFn ? FeTFn : FeTMacro);
       CDR(res) = va;
@@ -1016,22 +1039,47 @@ FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {
   return Evaluate(ctx, obj, &nil, NULL);
 }
 
+static size_t GetSymbolObjectCount(const char* name) {
+  const size_t length = strlen(name);
+  assert(length > 0);
+  return 4 + (length - 1) / StringBufferSize;
+}
+
+static size_t GetCoreObjectCount(void) {
+  size_t count = GetSymbolObjectCount("t");
+  for (Primitive i = PAssert; i < PSentinel; i++) {
+    count += 1 + GetSymbolObjectCount(primitive_names[i]);
+  }
+  return count;
+}
+
+size_t FeMinimumArenaSize(void) {
+  return sizeof(FeArena) + GetCoreObjectCount() * sizeof(FeObject);
+}
+
+size_t FeArenaAlignment(void) {
+  return alignof(FeArena);
+}
+
 FeContext* FeOpenContext(void* arena, size_t size) {
-  if (size < sizeof(FeContext)) {
-    fprintf(stderr, "arena size (%zu) < minimum context size (%zu); exiting\n",
-            size, sizeof(FeContext));
-    exit(1);
+  uintptr_t arena_end;
+  const uintptr_t arena_address = (uintptr_t)arena;
+  bool invalid = arena == nullptr;
+  invalid |= size < FeMinimumArenaSize();
+  invalid |= arena_address % FeArenaAlignment() != 0;
+  invalid |= ckd_add(&arena_end, arena_address, size);
+  if (invalid) {
+    return nullptr;
   }
 
   // Initialize the context:
-  FeContext* ctx = arena;
+  FeArena* storage = arena;
+  FeContext* ctx = &storage->context;
   memset(ctx, 0, sizeof(FeContext));
-  arena = (char*)arena + sizeof(FeContext);
-  size -= sizeof(FeContext);
 
   // Initialize the objects memory region:
-  ctx->objects = (FeObject*)arena;
-  ctx->object_count = size / sizeof(FeObject);
+  ctx->objects = storage->objects;
+  ctx->object_count = (size - sizeof(FeArena)) / sizeof(FeObject);
 
   // Initialize the lists:
   ctx->call_list = &nil;

@@ -5,7 +5,17 @@
 The implementation uses a fixed-size region of memory supplied by the caller
 when creating the `FeContext`. The implementation stores the context at the
 start of this memory region and uses the rest of the region to store
-`FeObject`s.
+`FeObject`s. The arena must satisfy `alignof(FeContext)`; static assertions
+ensure that the object region is then also aligned.
+
+`FeMinimumArenaSize()` derives its result from the private context and object
+layouts and from the objects required to intern and bind every core primitive.
+`FeOpenContext()` validates null pointers, alignment, size, and address-space
+boundaries with checked arithmetic before writing to the arena. Invalid arenas
+return `nullptr` without invoking the error machinery.
+
+The context also stores one opaque host userdata pointer and its error, mark,
+and collection callback pointers. These details remain private to `fe.c`.
 
 ## Objects
 
@@ -74,23 +84,29 @@ does a full mark-and-sweep run, pushing unreachable objects back to the
 freelist. Thus, garbage collection may occur whenever a new object is created.
 
 The context maintains a `gc_stack` which protects objects that may not be
-reachable from being collected. These may include (for example) objects returned
-after an `eval`, or a list which is currently being constructed from multiple
-pairs. Newly created objects are automatically pushed to this stack.
+otherwise reachable. Newly created objects are automatically pushed to this
+stack. Reader and evaluator results are either protected there or remain
+reachable from an existing interpreter root. Accessors return existing objects
+without pushing them; their lifetime therefore depends on an existing root
+until the caller explicitly calls `FePushGC()`.
 
 ## Error Handling
 
-If an error occurs, Fe calls `FeHandleError`. This function resets the context
-to a safe state and calls the `error` handler if one is set. The error handler
-function is passed the error message and a list representing the call stack.
-(Both these values are valid only for this function’s duration.) The error
-handler can be safely `longjmp`’d out of to recover from the error, and use of
-the context can continue — this can be seen in the REPL in `main.c`. Do not
-create new objects from inside the error handler.
+If an error occurs, `FeHandleError()` detaches the active call trace and invokes
+the configured error callback. The borrowed error message and trace are valid
+only for that invocation. A recovering callback must `longjmp` or perform an
+equivalent nonlocal transfer; it must not allocate Fe objects. If the callback
+is absent or returns, Fe silently calls `abort()`. Error reporting and process
+exit policy belong to the host.
 
-If no error handler is set or if the error handler returns, Fe prints the error
-message and call stack to `stderr` and calls `exit` with the value
-`EXIT_FAILURE`.
+The host must save and restore its GC stack checkpoint around a recoverable
+operation. Error handling resets the evaluator's call-trace link, but cannot
+unwind host resources, the GC stack, or input callback state. Once the host has
+restored those invariants, the context remains usable.
+
+Native callbacks may synchronously re-enter evaluation on the same context.
+The evaluator's call trace and GC stack support nesting, but a context has no
+internal synchronization and must be used by only one thread at a time.
 
 ## Known Issues
 

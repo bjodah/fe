@@ -24,6 +24,8 @@ SRCS = main.c auto.c fe.c fex.c fex_io.c fex_math.c fex_process.c fex_re.c \
 HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o)
 SOURCES = $(SRCS) $(HDRS)
+TEST_API = test_api
+TEST_SRCS = test_api.c test_header.c
 
 # Fuzzing
 FUZZ_DIR ?= fuzz
@@ -59,7 +61,7 @@ COVERAGE_LCOV_ARGS ?= --quiet --branch-coverage --ignore-errors inconsistent,gco
 COVERAGE_GENHTML_ARGS ?= --quiet
 COVERAGE_MIN_LINES ?= 80
 CLANG_FORMAT ?= clang-format
-FORMAT_FILES = $(SOURCES) $(FUZZ_SRCS) $(FUZZ_DIR)/fuzz_support.h
+FORMAT_FILES = $(SOURCES) $(TEST_SRCS) $(FUZZ_SRCS) $(FUZZ_DIR)/fuzz_support.h
 BEAR ?= bear
 CLANG_CC ?= clang
 COMPILE_DB_FILE ?= compile_commands.json
@@ -72,7 +74,8 @@ all: $(TARGET)
 
 check: test
 
-test:
+test: test-header $(TEST_API) $(TARGET)
+	./$(TEST_API)
 	./test.sh
 
 run: fe
@@ -109,6 +112,12 @@ fuzz-eval-smoke: $(FUZZ_EVAL_BIN)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+$(TEST_API): test_api.o fe.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-header: test_header.c fe.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fsyntax-only test_header.c
+
 %.o: %.c $(HDRS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -128,7 +137,7 @@ sizes:
 	wc scripts/*.fe
 
 clean:
-	-rm -rf fe *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN)
+	-rm -rf fe $(TEST_API) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN)
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -186,6 +195,6 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test sizes clean fuzz fuzz-reader fuzz-eval fuzz-smoke fuzz-clean \
+.PHONY: all check test test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke complexity complexity-check pmccabe \
 	pmccabe-check coverage coverage-clean format format-check compile-db iwyu

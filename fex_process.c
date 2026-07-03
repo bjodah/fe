@@ -37,7 +37,7 @@ FeObject* FexExecute(FeContext* ctx, FeObject* arg) {
       FeHandleError(ctx, "not a string");
     }
     char string[1024];
-    FeToString(ctx, a, string, sizeof(string));
+    (void)FeToString(ctx, a, string, sizeof(string));
     arguments[i] = strdup(string);
     if (arguments[i] == NULL) {
       FreeArguments(arguments, i);

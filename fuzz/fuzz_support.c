@@ -1,12 +1,13 @@
 #include "fuzz_support.h"
 
 #include <setjmp.h>
+#include <stdlib.h>
 
 jmp_buf FuzzErrorJump;
 
-noreturn static void HandleError(FeContext* ctx,
-                                 const char* message,
-                                 FeObject* stack) {
+[[noreturn]] static void HandleError(FeContext* ctx,
+                                     const char* message,
+                                     FeObject* stack) {
   (void)ctx;
   (void)message;
   (void)stack;
@@ -15,7 +16,10 @@ noreturn static void HandleError(FeContext* ctx,
 
 FeContext* FuzzOpenContext(FuzzArena* arena) {
   FeContext* ctx = FeOpenContext(arena->bytes, sizeof(arena->bytes));
-  FeGetHandlers(ctx)->error = HandleError;
+  if (ctx == nullptr) {
+    abort();
+  }
+  FeSetErrorFn(ctx, HandleError);
   return ctx;
 }
 

@@ -5,9 +5,8 @@
 #ifndef FE_H
 #define FE_H
 
-#include <assert.h>
+#include <stddef.h>  // IWYU pragma: keep
 #include <stdio.h>
-#include <stdnoreturn.h>
 
 extern const char* FeVersion;
 
@@ -18,12 +17,6 @@ typedef FeObject* FeNativeFn(FeContext* ctx, FeObject* args);
 typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
-
-typedef struct FeHandlers {
-  FeErrorFn* error;
-  FeNativeFn* mark;
-  FeNativeFn* gc;
-} FeHandlers;
 
 typedef enum FeType {
   FeTPair,
@@ -60,49 +53,56 @@ typedef enum FeType {
   FeTSentinel,
 } FeType;
 
-static_assert(FeTFex0 > FeTPtr, "FeTFex* must be > FeTPtr");
-
 extern const char* type_names[];
 
 extern FeObject nil;
 
-FeContext* FeOpenContext(void* ptr, size_t size);
+[[nodiscard]] size_t FeMinimumArenaSize(void);
+[[nodiscard]] size_t FeArenaAlignment(void);
+[[nodiscard]] FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);
-FeHandlers* FeGetHandlers(FeContext* ctx);
-noreturn void FeHandleError(FeContext* ctx, const char* msg);
+void FeSetUserData(FeContext* ctx, void* userdata);
+[[nodiscard]] void* FeGetUserData(const FeContext* ctx);
+void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
+void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
+void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
+[[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
 
-FeType FeGetType(FeObject* obj);
-bool FeIsNil(const FeObject* obj);
+[[nodiscard]] FeType FeGetType(FeObject* obj);
+[[nodiscard]] bool FeIsNil(const FeObject* obj);
 
 void FePushGC(FeContext* ctx, FeObject* obj);
 void FeRestoreGC(FeContext* ctx, size_t idx);
-size_t FeSaveGC(const FeContext* ctx);
+[[nodiscard]] size_t FeSaveGC(const FeContext* ctx);
 void FeMark(FeContext* ctx, FeObject* obj);
 
-FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr);
-FeObject* FeMakeBool(FeContext* ctx, bool b);
-FeObject* FeMakeDouble(FeContext* ctx, FeDouble n);
-FeObject* FeMakeString(FeContext* ctx, const char* str);
-FeObject* FeMakeSymbol(FeContext* ctx, const char* name);
-FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn);
-FeObject* FeMakePtr(FeContext* ctx, FeType type, void* ptr);
-FeObject* FeMakeList(FeContext* ctx, FeObject** objs, size_t n);
+[[nodiscard]] FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr);
+[[nodiscard]] FeObject* FeMakeBool(FeContext* ctx, bool b);
+[[nodiscard]] FeObject* FeMakeDouble(FeContext* ctx, FeDouble n);
+[[nodiscard]] FeObject* FeMakeString(FeContext* ctx, const char* str);
+[[nodiscard]] FeObject* FeMakeSymbol(FeContext* ctx, const char* name);
+[[nodiscard]] FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn);
+[[nodiscard]] FeObject* FeMakePtr(FeContext* ctx, FeType type, void* ptr);
+[[nodiscard]] FeObject* FeMakeList(FeContext* ctx, FeObject** objs, size_t n);
 
-FeObject* FeCar(FeContext* ctx, FeObject* obj);
-FeObject* FeCdr(FeContext* ctx, FeObject* obj);
+[[nodiscard]] FeObject* FeCar(FeContext* ctx, FeObject* obj);
+[[nodiscard]] FeObject* FeCdr(FeContext* ctx, FeObject* obj);
 
 void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt);
 void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
 
-FeObject* FeRead(FeContext* ctx, FeReadFn fn, void* udata);
-FeObject* FeReadFile(FeContext* ctx, FILE* fp);
+[[nodiscard]] FeObject* FeRead(FeContext* ctx, FeReadFn fn, void* udata);
+[[nodiscard]] FeObject* FeReadFile(FeContext* ctx, FILE* fp);
 
-size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size);
-FeDouble FeToDouble(FeContext* ctx, FeObject* obj);
-void* FeToPtr(FeContext* ctx, FeObject* obj);
+[[nodiscard]] size_t FeToString(FeContext* ctx,
+                                FeObject* obj,
+                                char* dst,
+                                size_t size);
+[[nodiscard]] FeDouble FeToDouble(FeContext* ctx, FeObject* obj);
+[[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 
-FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);
-FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
+[[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);
+[[nodiscard]] FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
 
 #endif

@@ -36,7 +36,7 @@ static FeObject* FexGC(FeContext* ctx, FeObject* o) {
 void FexInit(FeContext* ctx) {
   type_names[FexTFile] = "file";
   type_names[FexTRE] = "regular-expression";
-  FeGetHandlers(ctx)->gc = FexGC;
+  FeSetGCFn(ctx, FexGC);
 }
 
 FeObject* BuildErrnoError(FeContext* ctx, int error) {
