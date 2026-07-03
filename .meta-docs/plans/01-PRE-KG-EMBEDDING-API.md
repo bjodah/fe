@@ -2,13 +2,34 @@
 
 ## Objective
 
-Stabilize Fe as a host-safe, extensible C23 library before kg vendors a pinned
-snapshot. The work should reduce integration-specific glue without turning the
-small interpreter into a framework.
+Stabilize Fe as a host-safe, extensible C23 library before kg pins its `fe`
+git submodule to a released commit. The work should reduce
+integration-specific glue without turning the small interpreter into a
+framework.
 
 The initial kg port needs native functions, multi-form evaluation, cancellation,
-safe errors, and persistent Lisp commands. It does not need Fe's existing I/O,
-process, regex, math, or time extensions.
+safe errors, source-labelled diagnostics, and persistent Lisp commands. It does
+not need Fe's existing I/O, process, regex, math, or time extensions.
+
+## Consumption model
+
+These integration decisions are settled on the kg side and define what this
+plan must deliver:
+
+- kg consumes Fe through its `fe/` git submodule pinned to an exact commit;
+  there is no separately copied `vendor/` snapshot. The repository layout must
+  stay stable, and `fe.c` plus `fe.h` must build as a standalone translation
+  unit without `fex*`, `auto.*`, or `main.c`.
+- kg compiles `fe.c` from its own Makefile, so it must be warning-clean under
+  both GCC and Clang with strict warnings-as-errors, not only under the
+  default Clang `-Weverything` build.
+- Lisp support in kg is compile-time optional (default on). Fe must never
+  print, exit, or otherwise touch process state on failure, so that the
+  feature can fail to initialize without affecting the editor.
+- kg loads user configuration (`init.fe`) and explicit extension packages
+  through a host-provided `(kg-load ...)` native that re-enters the evaluator.
+  Nested evaluation, budget inheritance, and per-source error labels are
+  therefore hard requirements, not conveniences.
 
 ## Priorities
 
@@ -26,16 +47,22 @@ process, regex, math, or time extensions.
 
 8. Per-context custom type registration replacing global extension slots
 9. Removal of public mutable globals from `fe.h`
-10. A reproducible core-library/vendoring target
+10. A reproducible core-only build target guarding standalone `fe.c` use
 
-If recommended work threatens the port schedule, kg can vendor only the core
-after the blocking API is stable and continue custom-type work upstream. Do not
-copy the current global type-registration mechanism into kg-specific code.
+If recommended work threatens the port schedule, kg can pin its submodule and
+compile only the core after the blocking API is stable, continuing custom-type
+work upstream. Do not copy the current global type-registration mechanism into
+kg-specific code.
 
 ## Phase 1: define compatibility and ownership contracts
 
 Keep Fe and kg on strict C23. Make `fe.h` self-contained under both GCC and
-Clang and add a compile-only public-header test.
+Clang and add a compile-only public-header test. Today the header uses `bool`
+and `size_t` without declaring where they come from and includes the
+obsolescent `<stdnoreturn.h>`; include exactly what it needs (`<stddef.h>`,
+C23 keywords or `[[noreturn]]`) so host inclusion order cannot break it.
+Verify `fe.c` compiles as a standalone translation unit, with no `fex*`
+dependency, under both compilers' strict flags.
 
 Document these contracts explicitly:
 
@@ -50,6 +77,26 @@ Document these contracts explicitly:
 
 Treat API changes in this plan as one intentional pre-1.0 break rather than
 accumulating compatibility shims for undocumented behavior.
+
+Since this break re-shapes the public surface anyway, use C23 affordances
+deliberately in the new API rather than freezing pre-C23 idioms:
+
+- `[[nodiscard]]` on every constructor, evaluation, extraction, and root
+  helper whose ignored result is a bug (`FeOpenContext`, `FeEvaluateString`,
+  `FeCreateRoot`, ...); `[[noreturn]]` on `FeHandleError` instead of
+  `<stdnoreturn.h>`.
+- `nullptr` in documentation and examples; document failure returns as
+  `nullptr`, not `0` or `NULL`.
+- `constexpr` object-like constants (or plain functions where the value
+  depends on layout) for arena alignment and minimums, with `static_assert`
+  tying them to the real object layout.
+- `<stdckdint.h>` checked arithmetic for arena-size and boundary validation in
+  `FeOpenContext` and for any capacity math added by the budget and root APIs.
+- A fixed underlying type for `FeType` once Phase 8 lands, with a
+  `static_assert` connecting tag capacity to the registration limit.
+
+Do not adopt syntax for its own sake elsewhere in the interpreter; the target
+is the new public surface and its validation paths.
 
 ## Phase 2: make context creation host-safe
 
@@ -122,8 +169,9 @@ to:
 ```c
 FeObject *FeReadString(FeContext *ctx, const char *source, size_t length,
     size_t *offset);
-FeObject *FeEvaluateString(FeContext *ctx, const char *source, size_t length);
-FeObject *FeEvaluateFile(FeContext *ctx, FILE *file);
+FeObject *FeEvaluateString(FeContext *ctx, const char *label,
+    const char *source, size_t length);
+FeObject *FeEvaluateFile(FeContext *ctx, const char *label, FILE *file);
 ```
 
 Requirements:
@@ -133,7 +181,9 @@ Requirements:
 - define embedded-NUL behavior instead of silently treating it as arbitrary EOF
 - restore temporary GC protection between forms without invalidating the final
   result
-- attach a source label or offset to errors if feasible
+- prefix reader and evaluator errors with the caller-supplied label and, where
+  available, an offset; kg reports init-file and `(kg-load ...)` failures
+  through this label, so it is required, not opportunistic
 - keep file ownership with the caller
 
 If file evaluation adds no value beyond a generic reader plus string helper,
@@ -165,8 +215,10 @@ expansion, function calls, and list evaluation. Polling must be deterministic
 enough for tests and cheap enough for normal use. Exhaustion and cancellation
 should raise distinct Fe errors through the normal recovery path.
 
-Define nested evaluation semantics: either controls stack per call or a nested
-call inherits the outer budget. Reject undocumented resets that let native
+Define nested evaluation semantics with inheritance as the default: kg's
+`(kg-load ...)` native re-enters the evaluator, and a loaded package must not
+be able to reset the limits its caller established. Per-call stacked controls
+may exist in addition, but reject undocumented resets that let native
 callbacks bypass limits.
 
 Add regression and fuzz cases for infinite loops, deep calls, macro expansion,
@@ -189,7 +241,9 @@ Separate raw string extraction from Lisp serialization. `FeToString` currently
 serves both roles and fixed buffers can truncate host commands silently. Add an
 API that validates `FeTString`, reports the required byte length, and either
 copies with an explicit truncation result or streams through a callback. kg
-needs to allocate exactly and pass the full text to editor operations.
+needs to allocate exactly and pass the full text to editor operations. The
+extraction API must cover symbol names as well as strings; kg needs symbol
+text for command dispatch and error messages.
 
 Const-correct read-only APIs such as `FeGetType`. Remove the need for embedders
 to reference `extern FeObject nil` or mutate `type_names` directly.
@@ -258,7 +312,7 @@ Requirements:
 
 Migrate regex and file extensions as proof. kg does not need custom pointer
 types for its initial bridge, so this phase may remain nonblocking if the core
-API can be vendored without exposing the old mechanism.
+API can be consumed without exposing the old mechanism.
 
 ## Phase 9: tests, packaging, and documentation
 
@@ -274,14 +328,16 @@ Add native C tests rather than relying only on `.fe` golden scripts. Cover:
 - root create/get/release and `FeCall`
 - custom type finalization if Phase 8 lands
 
-Provide a Makefile target that builds only the embeddable core and a tiny host
-example under GCC and Clang. Keep the public header warning-clean under the same
-strict C23 flags kg uses. Continue running reader/evaluator fuzz smoke and add
+Provide a Makefile target that builds only the embeddable core (`fe.c` as a
+lone object or `libfe.a`) and a tiny host example under GCC and Clang. kg
+compiles `fe.c` directly from its own Makefile, so this target is the guard
+that keeps standalone compilation working. Keep the public header
+warning-clean under the same strict C23 flags kg uses. Continue running reader/evaluator fuzz smoke and add
 new APIs to the bounded evaluator grammar where useful.
 
 Update `doc/c-api.md` and `doc/implementation.md` with complete ownership,
 error, cancellation, rooting, and type-registration contracts. Add an API
-version macro or function so kg can assert the vendored interface it expects.
+version macro or function so kg can assert the pinned interface it expects.
 
 ## Exit criteria for starting the kg port
 
@@ -292,5 +348,7 @@ version macro or function so kg can assert the vendored interface it expects.
 - A sample host can initialize, bind a native function, evaluate multiple
   forms with a finite budget, recover from an error, call a retained Lisp
   function, and shut down without leaks.
-- The Fe commit intended for vendoring is tagged or otherwise pinned and its
-  license/source update procedure is documented.
+- The Fe commit intended for kg's submodule pin is tagged, the branch kg
+  tracks is documented (rename or retire `analyzers-etc` if a stabler branch
+  is warranted), and the license, attribution, and update procedure for
+  downstream embedding are documented.
