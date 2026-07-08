@@ -239,15 +239,21 @@ static void EndEvaluationControl(FeContext* ctx, bool owns_control) {
   ctx->nextchr = '\0';
   ClearEvaluationControl(ctx);
 
-  if (label != nullptr && has_offset) {
-    Format(message, sizeof(message), "%s:%zu: %s", label, offset, msg);
-    msg = message;
-  } else if (label != nullptr) {
-    Format(message, sizeof(message), "%s: %s", label, msg);
-    msg = message;
-  } else if (has_offset) {
-    Format(message, sizeof(message), "byte %zu: %s", offset, msg);
-    msg = message;
+  switch ((label != nullptr) * 2 + has_offset) {
+    case 3:
+      Format(message, sizeof(message), "%s:%zu: %s", label, offset, msg);
+      msg = message;
+      break;
+    case 2:
+      Format(message, sizeof(message), "%s: %s", label, msg);
+      msg = message;
+      break;
+    case 1:
+      Format(message, sizeof(message), "byte %zu: %s", offset, msg);
+      msg = message;
+      break;
+    default:
+      break;
   }
 
   if (ctx->error_fn) {

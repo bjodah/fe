@@ -61,7 +61,8 @@ static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
 }
 
 [[noreturn]] static void PrintHelp(int status) {
-  FILE* out = status == 0 ? stdout : stderr;
+  FILE* outputs[] = {stdout, stderr};
+  FILE* out = outputs[status != EXIT_SUCCESS];
   fprintf(out,
           "fe — Fe language interpreter\n\n"
           "Usage:\n\n"
@@ -141,7 +142,7 @@ int main(int count, char* arguments[]) {
   }
   count -= optind;
   arguments += optind;
-  interactive = interactive || count == 0;
+  interactive |= count == 0;
 
   // Initialize the context:
   AUTO(char*, arena, malloc(arena_size), FreeChar);

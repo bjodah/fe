@@ -3,7 +3,6 @@
 
 #include <limits.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "fex.h"
 #include "fex_re.h"
@@ -15,17 +14,28 @@ struct FexRegex {
   re_t regex;
 };
 
+struct StatusInfo {
+  const char* code;
+  const char* message;
+};
+
+static void* Allocate(FeContext* ctx, size_t size, void* cleanup) {
+  void* allocation = malloc(size);
+  if (!allocation) {
+    free(cleanup);
+    FeHandleError(ctx, "out of memory");
+  }
+  return allocation;
+}
+
 void FexInstallRE(FeContext* ctx) {
   FexInstallNativeFn(ctx, "compile-re", FexCompileRE);
   FexInstallNativeFn(ctx, "match-re", FexMatchRE);
 }
 
-static char* CopyStringZ(FeContext* ctx, FeObject* obj) {
+static char* CopyStringZ(FeContext* ctx, const FeObject* obj) {
   size_t len = FeStringByteLength(ctx, obj);
-  char* bytes = malloc(len + 1);
-  if (!bytes) {
-    FeHandleError(ctx, "out of memory");
-  }
+  char* bytes = Allocate(ctx, len + 1, NULL);
   if (!FeCopyStringBytes(ctx, obj, bytes, len + 1)) {
     free(bytes);
     FeHandleError(ctx, "failed to copy string bytes");
@@ -41,9 +51,9 @@ static re_flags ParseCompileFlags(FeContext* ctx, FeObject** arg) {
     return flags;
   }
   FeObject* list = FeGetNextArgument(ctx, arg);
-  FeObject* icase = FeMakeSymbol(ctx, "icase");
+  const FeObject* icase = FeMakeSymbol(ctx, "icase");
   while (!FeIsNil(list)) {
-    FeObject* flag = FeGetNextArgument(ctx, &list);
+    const FeObject* flag = FeGetNextArgument(ctx, &list);
     if (flag == icase) {
       flags |= RE_FLAG_ICASE;
     } else {
@@ -53,36 +63,24 @@ static re_flags ParseCompileFlags(FeContext* ctx, FeObject** arg) {
   return flags;
 }
 
-static const char* status_to_code(re_status status) {
-  switch (status) {
-    case RE_STATUS_BAD_PATTERN:
-      return "bad-pattern";
-    case RE_STATUS_TOO_COMPLEX:
-      return "too-complex";
-    case RE_STATUS_BUFFER_TOO_SMALL:
-      return "buffer-too-small";
-    case RE_STATUS_NO_MATCH:
-      return "no-match";
-    case RE_STATUS_OK:
-      return "ok";
-  }
-  return "unknown-error";
-}
+static struct StatusInfo GetStatusInfo(re_status status) {
+  static const struct StatusInfo statuses[] = {
+      [RE_STATUS_OK] = {"ok", "success"},
+      [RE_STATUS_NO_MATCH] = {"no-match", "no match found"},
+      [RE_STATUS_BAD_PATTERN] = {"bad-pattern",
+                                 "bad pattern syntax or invalid escapes"},
+      [RE_STATUS_TOO_COMPLEX] =
+          {"too-complex", "backtracking limit exceeded or pattern too complex"},
+      [RE_STATUS_BUFFER_TOO_SMALL] =
+          {"buffer-too-small", "compiled regex buffer size was too small"},
+  };
+  static const struct StatusInfo unknown = {
+      "unknown-error", "an unknown regular expression error occurred"};
 
-static const char* status_to_message(re_status status) {
-  switch (status) {
-    case RE_STATUS_BAD_PATTERN:
-      return "bad pattern syntax or invalid escapes";
-    case RE_STATUS_TOO_COMPLEX:
-      return "backtracking limit exceeded or pattern too complex";
-    case RE_STATUS_BUFFER_TOO_SMALL:
-      return "compiled regex buffer size was too small";
-    case RE_STATUS_NO_MATCH:
-      return "no match found";
-    case RE_STATUS_OK:
-      return "success";
+  if ((unsigned)status >= sizeof(statuses) / sizeof(statuses[0])) {
+    return unknown;
   }
-  return "an unknown regular expression error occurred";
+  return statuses[status];
 }
 
 static FeObject* BuildError(FeContext* ctx,
@@ -95,8 +93,13 @@ static FeObject* BuildError(FeContext* ctx,
       3);
 }
 
+static FeObject* BuildStatusError(FeContext* ctx, re_status status) {
+  struct StatusInfo info = GetStatusInfo(status);
+  return BuildError(ctx, info.code, info.message);
+}
+
 FeObject* FexCompileRE(FeContext* ctx, FeObject* arg) {
-  FeObject* pattern_obj = FeGetNextArgument(ctx, &arg);
+  const FeObject* pattern_obj = FeGetNextArgument(ctx, &arg);
   re_flags flags = ParseCompileFlags(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
   char* pattern = CopyStringZ(ctx, pattern_obj);
@@ -108,28 +111,20 @@ FeObject* FexCompileRE(FeContext* ctx, FeObject* arg) {
       re_compile_checked(pattern, flags, NULL, &storage_size, &regex);
   if (status != RE_STATUS_BUFFER_TOO_SMALL) {
     free(pattern);
-    return BuildError(ctx, status_to_code(status), status_to_message(status));
+    return BuildStatusError(ctx, status);
   }
 
-  unsigned char* storage = malloc(storage_size);
-  if (!storage) {
-    free(pattern);
-    FeHandleError(ctx, "out of memory");
-  }
+  unsigned char* storage = Allocate(ctx, storage_size, pattern);
 
   status = re_compile_checked(pattern, flags, storage, &storage_size, &regex);
   free(pattern);
 
   if (status != RE_STATUS_OK) {
     free(storage);
-    return BuildError(ctx, status_to_code(status), status_to_message(status));
+    return BuildStatusError(ctx, status);
   }
 
-  struct FexRegex* rx = malloc(sizeof(struct FexRegex));
-  if (!rx) {
-    free(storage);
-    FeHandleError(ctx, "out of memory");
-  }
+  struct FexRegex* rx = Allocate(ctx, sizeof(struct FexRegex), storage);
 
   rx->storage = storage;
   rx->storage_size = storage_size;
@@ -139,7 +134,7 @@ FeObject* FexCompileRE(FeContext* ctx, FeObject* arg) {
 }
 
 static FeObject* BuildSpan(FeContext* ctx, const re_span* span) {
-  if (span->start < 0 || span->end < 0) {
+  if (span->start < 0) {
     return &nil;
   }
   FeObject* start_obj = FeMakeDouble(ctx, (double)span->start);
@@ -157,7 +152,7 @@ FeObject* FexMatchRE(FeContext* ctx, FeObject* arg) {
     FeHandleError(ctx, "invalid regular-expression pointer");
   }
 
-  FeObject* text_obj = FeGetNextArgument(ctx, &arg);
+  const FeObject* text_obj = FeGetNextArgument(ctx, &arg);
   int start_offset = 0;
   if (!FeIsNil(arg)) {
     double offset = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
@@ -169,21 +164,26 @@ FeObject* FexMatchRE(FeContext* ctx, FeObject* arg) {
   FeRequireNoArguments(ctx, arg);
   char* text = CopyStringZ(ctx, text_obj);
 
-  re_match_result match_res;
+  re_match_result match_res = {0};
   re_status status = re_exec(rx->regex, text, start_offset, &match_res);
   free(text);
 
-  if (status == RE_STATUS_OK) {
-    FeObject* spans_list[RE_MAX_SPANS];
-    for (int i = 0; i < match_res.nspans; i++) {
-      spans_list[i] = BuildSpan(ctx, &match_res.spans[i]);
+  switch (status) {
+    case RE_STATUS_OK: {
+      FeObject* spans_list[RE_MAX_SPANS];
+      for (int i = 0; i < match_res.nspans; i++) {
+        spans_list[i] = BuildSpan(ctx, &match_res.spans[i]);
+      }
+      return FeMakeList(ctx, spans_list, (size_t)match_res.nspans);
     }
-    return FeMakeList(ctx, spans_list, (size_t)match_res.nspans);
-  } else if (status == RE_STATUS_NO_MATCH) {
-    return &nil;
-  } else {
-    return BuildError(ctx, status_to_code(status), status_to_message(status));
+    case RE_STATUS_NO_MATCH:
+      return &nil;
+    case RE_STATUS_BAD_PATTERN:
+    case RE_STATUS_TOO_COMPLEX:
+    case RE_STATUS_BUFFER_TOO_SMALL:
+      return BuildStatusError(ctx, status);
   }
+  abort();
 }
 
 FeObject* FexGCRE(FeContext* ctx, FeObject* o) {
