@@ -1,6 +1,28 @@
 (= re (compile-re "goats?"))
-(assert-equals '("goats") (match-re re "hello, goats"))
-(assert-equals '("goat") (match-re re "hello, goat"))
-(assert-equals '("goats") (match-re re "goats are nice"))
-(assert-equals '("goat") (match-re re "goat is my profession"))
-(assert (is-finite (car (match-re re "pumpkins abound! beware"))))
+
+;; Verify compile error behavior
+(= bad-re (compile-re "\\"))
+(assert-equals 'error (car bad-re))
+(assert-equals 'bad-pattern (car (cdr bad-re)))
+
+;; Verify successful matches with span lists
+(assert-equals '((7 12)) (match-re re "hello, goats"))
+(assert-equals '((7 11)) (match-re re "hello, goat"))
+(assert-equals '((0 5)) (match-re re "goats are nice"))
+(assert-equals '((0 4)) (match-re re "goat is my profession"))
+
+;; Verify no-match returns nil
+(assert-nil (match-re re "pumpkins abound! beware"))
+
+;; Verify flags, offsets, captures, and row-local dot semantics.
+(= folded-re (compile-re "goat" '(icase)))
+(assert-equals '((0 4)) (match-re folded-re "GOAT"))
+(assert-equals '((5 9)) (match-re re "goat goat" 1))
+
+(= optional-re (compile-re "a\\(b\\)?c"))
+(assert-equals '((0 2) nil) (match-re optional-re "ac"))
+(assert-equals '((0 3) (1 2)) (match-re optional-re "abc"))
+
+(= dot-re (compile-re "a.b"))
+(assert-nil (match-re dot-re "a
+b"))

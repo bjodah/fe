@@ -48,6 +48,19 @@ source. An update consists of selecting the new released commit, reviewing any
 API-version change, advancing the submodule pin, and rerunning the downstream
 build and tests.
 
+## Regular Expression Extension
+
+If compiled with the regular expression extension (e.g., in `kg`), the following functions are available:
+
+### `(compile-re pattern [flags])`
+Compiles a regular expression pattern string. `flags` is an optional list containing the symbol `'icase` for case-insensitive matching.
+Returns a regex object on success, or `(error code message)` on failure (e.g., bad pattern, too complex).
+
+### `(match-re regex text [offset])`
+Matches the compiled `regex` against `text` string, starting at the optional byte `offset` (defaults to 0).
+Returns a list of match spans if a match is found, or `nil` if there is no match.
+Each span is a list `(start end)` of byte indexes. The first span is the overall match, followed by capture spans; unmatched optional captures are `nil`.
+
 ## License
 
 This program is free software; you can redistribute it and/or modify it under

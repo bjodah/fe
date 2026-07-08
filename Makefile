@@ -1,3 +1,7 @@
+ifeq ($(wildcard tiny-regex-c/re.c),)
+$(error tiny-regex-c/re.c is missing; run 'git submodule update --init --recursive')
+endif
+
 ifeq ($(origin CC),default)
 CC = clang
 endif
@@ -13,8 +17,10 @@ CFLAGS ?= -Weverything -Werror -std=c2x \
 	-Wno-implicit-fallthrough \
 	-Wno-unused-command-line-argument \
 	-Wno-unknown-warning-option \
+	-Wno-reserved-macro-identifier \
+	-Wno-reserved-identifier \
 	-Wno-extra-semi-stmt
-CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L
+CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -Itiny-regex-c
 LDLIBS ?= -lm
 
 PROG = fe
@@ -22,7 +28,7 @@ TARGET = $(PROG)
 SRCS = main.c auto.c fe.c fex.c fex_io.c fex_math.c fex_process.c fex_re.c \
 	fex_time.c
 HDRS = $(wildcard *.h)
-OBJS = $(SRCS:.c=.o)
+OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
 TEST_SRCS = test_api.c test_header.c
@@ -144,6 +150,9 @@ fe-core-clang.o: fe.c fe.h
 %.o: %.c $(HDRS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h
+	$(CC) $(CPPFLAGS) -O3 -Wall -Wextra -std=c2x -c $< -o $@
+
 $(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
 		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
@@ -160,7 +169,7 @@ sizes:
 	wc scripts/*.fe
 
 clean:
-	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN)
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) tiny-regex-c/*.o
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
