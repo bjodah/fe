@@ -7,6 +7,12 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.141592653589793
+#endif
+#ifndef M_E
+#define M_E 2.718281828459045
+#endif
 #include <stdarg.h>
 #include <stdckdint.h>
 #include <stdlib.h>
@@ -1423,10 +1429,126 @@ static size_t GetSymbolObjectCount(const char* name) {
   return 4 + (length - 1) / StringBufferSize;
 }
 
+static FeObject* native_sin(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, sin(x));
+}
+
+static FeObject* native_cos(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, cos(x));
+}
+
+static FeObject* native_tan(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, tan(x));
+}
+
+static FeObject* native_asin(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, asin(x));
+}
+
+static FeObject* native_acos(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, acos(x));
+}
+
+static FeObject* native_atan(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  if (FeIsNil(arg)) {
+    return FeMakeDouble(ctx, atan(x));
+  }
+  double y = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, atan2(y, x));
+}
+
+static FeObject* native_expt(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  double y = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, pow(x, y));
+}
+
+static FeObject* native_sqrt(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, sqrt(x));
+}
+
+static FeObject* native_exp(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, exp(x));
+}
+
+static FeObject* native_log(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  if (FeIsNil(arg)) {
+    return FeMakeDouble(ctx, log(x));
+  }
+  double base = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, log(x) / log(base));
+}
+
+static FeObject* native_floor(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  if (FeIsNil(arg)) {
+    return FeMakeDouble(ctx, floor(x));
+  }
+  double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, floor(x / d));
+}
+
+static FeObject* native_ceiling(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  if (FeIsNil(arg)) {
+    return FeMakeDouble(ctx, ceil(x));
+  }
+  double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, ceil(x / d));
+}
+
+static FeObject* native_round(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  if (FeIsNil(arg)) {
+    return FeMakeDouble(ctx, nearbyint(x));
+  }
+  double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, nearbyint(x / d));
+}
+
+static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
+  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  if (FeIsNil(arg)) {
+    return FeMakeDouble(ctx, trunc(x));
+  }
+  double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeRequireNoArguments(ctx, arg);
+  return FeMakeDouble(ctx, trunc(x / d));
+}
+
 static size_t GetCoreObjectCount(void) {
+  static const char* math_names[] = {
+      "sin", "cos", "tan",   "asin",    "acos",  "atan",     "expt", "sqrt",
+      "exp", "log", "floor", "ceiling", "round", "truncate", "pi",   "e",
+  };
   size_t count = GetSymbolObjectCount("t");
   for (Primitive i = PAssert; i < PSentinel; i++) {
     count += 1 + GetSymbolObjectCount(primitive_names[i]);
+  }
+  for (size_t i = 0; i < COUNT(math_names); i++) {
+    count += 1 + GetSymbolObjectCount(math_names[i]);
   }
   return count;
 }
@@ -1488,6 +1610,24 @@ FeContext* FeOpenContext(void* arena, size_t size) {
     FeSet(ctx, FeMakeSymbol(ctx, primitive_names[i]), v);
     FeRestoreGC(ctx, save);
   }
+
+  FeDefineNative(ctx, "sin", native_sin);
+  FeDefineNative(ctx, "cos", native_cos);
+  FeDefineNative(ctx, "tan", native_tan);
+  FeDefineNative(ctx, "asin", native_asin);
+  FeDefineNative(ctx, "acos", native_acos);
+  FeDefineNative(ctx, "atan", native_atan);
+  FeDefineNative(ctx, "expt", native_expt);
+  FeDefineNative(ctx, "sqrt", native_sqrt);
+  FeDefineNative(ctx, "exp", native_exp);
+  FeDefineNative(ctx, "log", native_log);
+  FeDefineNative(ctx, "floor", native_floor);
+  FeDefineNative(ctx, "ceiling", native_ceiling);
+  FeDefineNative(ctx, "round", native_round);
+  FeDefineNative(ctx, "truncate", native_truncate);
+  FeSet(ctx, FeMakeSymbol(ctx, "pi"), FeMakeDouble(ctx, M_PI));
+  FeSet(ctx, FeMakeSymbol(ctx, "e"), FeMakeDouble(ctx, M_E));
+  FeRestoreGC(ctx, save);
   return ctx;
 }
 

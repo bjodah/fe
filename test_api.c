@@ -623,11 +623,68 @@ static bool TestRootsAndCalls(void) {
   return true;
 }
 
+static bool TestMathNatives(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "math.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("(sin 0)", "0");
+  CHK("(cos 0)", "1");
+  CHK("(expt 2 8)", "256");
+  CHK("(expt 2 10)", "1024");
+  CHK("(sqrt 16)", "4");
+  CHK("(log (exp 1))", "1");
+  CHK("(log 100 10)", "2");
+  CHK("(atan 1)", "0.7853982");
+  CHK("(atan 1 1)", "0.7853982");
+
+  CHK("(floor 7)", "7");
+  CHK("(floor 7 2)", "3");
+  CHK("(floor -7 2)", "-4");
+  CHK("(floor -7 -2)", "3");
+  CHK("(floor 7.5)", "7");
+  CHK("(floor -7.5)", "-8");
+  CHK("(floor 7.5 2)", "3");
+  CHK("(floor -7.5 2)", "-4");
+
+  CHK("(ceiling 7)", "7");
+  CHK("(ceiling 7 2)", "4");
+  CHK("(ceiling -7 2)", "-3");
+  CHK("(ceiling 7.5)", "8");
+  CHK("(ceiling -7.5)", "-7");
+  CHK("(ceiling 7.5 2)", "4");
+  CHK("(ceiling -7.5 2)", "-3");
+
+  CHK("(round 7 2)", "4");
+  CHK("(round -7 2)", "-4");
+  CHK("(round 2.5)", "2");
+  CHK("(round 3.5)", "4");
+  CHK("(round -2.5)", "-2");
+  CHK("(round -3.5)", "-4");
+  CHK("(round 7.5 2)", "4");
+  CHK("(round -7.5 2)", "-4");
+
+  CHK("(truncate 7.5)", "7");
+  CHK("(truncate -7.5)", "-7");
+  CHK("(truncate 7.5 2)", "3");
+  CHK("(truncate -7.5 2)", "-3");
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
                  TestEvaluationControl() && TestExtensionAPI() &&
-                 TestRootsAndCalls()
+                 TestRootsAndCalls() && TestMathNatives()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
