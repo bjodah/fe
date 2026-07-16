@@ -11,3 +11,5 @@ fuzz/fuzz_reader
 fuzz/fuzz_eval
 fuzz/corpus/
 fuzz/artifacts/
+.repomixignore
+repomix-output.*
