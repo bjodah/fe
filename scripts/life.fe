@@ -52,10 +52,12 @@
     (get-cell grid (+ x 1)  y      )
     (get-cell grid (+ x 1)  (+ y 1))
   ))
-  (if
-    (and (is cell 1) (or (is n 2) (is n 3))) 1
-    (and (is cell 0) (is n 3)) 1
-    0
+  (if (and (is cell 1) (or (is n 2) (is n 3)))
+    1
+    (if (and (is cell 0) (is n 3))
+      1
+      0
+    )
   )
 ))
 

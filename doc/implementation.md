@@ -92,6 +92,11 @@ reachable from an existing interpreter root. Accessors return existing objects
 without pushing them; their lifetime therefore depends on an existing root
 until the caller explicitly calls `FePushGC()`.
 
+The `gc_stack` is a fixed 4096-slot array inside `FeContext`, so it also caps
+recursion: a self-recursive Fe function costs several slots per frame, which
+allows roughly 450 frames before `GC stack overflow`. Because the array lives in
+the arena, its size is the dominant term in `FeMinimumArenaSize()`.
+
 The context's three result/retention roots have separate lifetimes.
 `evaluation_result` holds the latest string or file evaluation result,
 `call_result` holds the latest `FeCall()` result, and `root_list` links explicit

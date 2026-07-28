@@ -16,7 +16,10 @@ updates a binding in the global environment.
 
 #### `(if condition then else ...)`
 
-If `condition` is true, evaluates `then`; otherwise, evaluates `else`.
+If `condition` is true, evaluates `then`; otherwise, evaluates every remaining
+form as an implicit `do` and returns the last one, exactly as Emacs Lisp's `if`
+does. `(if condition)` and `(if condition then)` with a false condition are
+`nil`.
 
 ```clojure
 fe > (= x 2)
@@ -24,25 +27,33 @@ nil
 fe > (if (is x 1) "one"
          "bleep")
 bleep
+fe > (if (is x 1) "one"
+         (print "not one")
+         "bleep")
+not one
+bleep
 ```
 
-`else` and `then` expressions can be chained to replicate the functionality of
-C’s `else if` and `switch`/`case` statements:
+Chain nested `if` forms to replicate the functionality of C's `else if` and
+`switch`/`case` statements. (Earlier versions of Fe read the trailing forms as
+an `else if` chain of alternating conditions and consequents instead.)
 
 ```clojure
 fe > (if (is x 1) "one"
-         (is x 2) "two"
-         (is x 3) "three"
-         "?")
+       (if (is x 2) "two"
+         (if (is x 3) "three"
+           "?")))
 two
 ```
 
-#### `(fn arguments ...)`
+#### `(lambda arguments ...)`
 
-Creates a new function.
+Creates a new function. `fn` is a synonym, kept because it is Fe's historical
+spelling; both names are bound to the same primitive, and functions print as
+`(lambda ...)`.
 
 ```clojure
-fe > (= square (fn (n) (* n n)))
+fe > (= square (lambda (n) (* n n)))
 nil
 fe > (square 4)
 16
@@ -118,9 +129,8 @@ nil  ;; There is no binding for the name wow, so its value is nil.
 fe > (quote wow)
 wow
 fe > (hello world)
-error: tried to call non-callable value  ;; There is no binding for the name
-                                         ;; hello, so its value is nil. And,
-                                         ;; nil is not callable.
+error: void-function hello  ;; There is no binding for the name hello, so its
+                            ;; value is nil. And, nil is not callable.
 fe > (quote (hello world))
 (hello world)
 ```
@@ -134,6 +144,25 @@ wow
 fe > '(hello world)
 (hello world)
 ```
+
+#### Reader macros
+
+Four more prefixes are syntactic sugar for ordinary forms. Only the reader
+knows about them; the host or a prelude has to supply `quasiquote`, `unquote`
+and `unquote-splicing`, which the core does not define.
+
+| Written | Read as |
+| --- | --- |
+| `'x` | `(quote x)` |
+| `` `x `` | `(quasiquote x)` |
+| `,x` | `(unquote x)` |
+| `,@x` | `(unquote-splicing x)` |
+| `#'x` | `x` |
+
+`` ` `` and `,` are symbol delimiters, so no symbol may contain them. `#` is
+not: it is an ordinary symbol character, and only the two-character sequence
+`#'` is a reader macro. Fe has one namespace, so Emacs Lisp's function quote
+`#'x` reads as plain `x`.
 
 #### `(and ...)`
 

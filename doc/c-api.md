@@ -247,7 +247,8 @@ one, or any other non-callable value, raises `tried to call non-callable value`.
 ```c
 size_t gc = FeSaveGC(ctx);
 FeObject* function = FeEvaluateString(
-    ctx, "host", "(fn (x y) (+ x y))", sizeof("(fn (x y) (+ x y))") - 1);
+    ctx, "host", "(lambda (x y) (+ x y))",
+    sizeof("(lambda (x y) (+ x y))") - 1);
 FeRoot* root = FeCreateRoot(ctx, function);
 FeObject* arguments[] = {
     FeMakeDouble(ctx, 10),

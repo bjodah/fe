@@ -59,7 +59,7 @@ typedef enum Primitive {
 
 static const char* primitive_names[] = {
     [PAssert] = "assert", [PEnv] = "env",       [PLet] = "let",
-    [PSet] = "=",         [PIf] = "if",         [PFn] = "fn",
+    [PSet] = "=",         [PIf] = "if",         [PFn] = "lambda",
     [PMacro] = "macro",   [PWhile] = "while",   [PQuote] = "quote",
     [PAnd] = "and",       [POr] = "or",         [PDo] = "do",
     [PCons] = "cons",     [PCar] = "car",       [PCdr] = "cdr",
@@ -69,6 +69,17 @@ static const char* primitive_names[] = {
     [PAdd] = "+",         [PSub] = "-",         [PMul] = "*",
     [PDiv] = "/"};
 
+typedef struct PrimitiveAlias {
+  const char* name;
+  Primitive primitive;
+} PrimitiveAlias;
+
+// Extra global names bound to the same primitive object as their canonical
+// spelling. `fn` is Fe's historical name for `lambda`.
+static const PrimitiveAlias primitive_aliases[] = {
+    {"fn", PFn},
+};
+
 const char* type_names[] = {
     [FeTPair] = "pair",
     [FeTFree] = "free",
@@ -76,7 +87,7 @@ const char* type_names[] = {
     [FeTDouble] = "double",
     [FeTSymbol] = "symbol",
     [FeTString] = "string",
-    [FeTFn] = "fn",
+    [FeTFn] = "lambda",
     [FeTMacro] = "macro",
     [FeTPrimitive] = "primitive",
     [FeTNativeFn] = "native-fn",
@@ -101,7 +112,9 @@ enum {
   // The 2nd-lowest-order bit of `Value.c` is the mark bit:
   GcMarkBit = 2,
   // TODO: This should scale with arena size?
-  GcStackSize = 512,
+  // A self-recursive Fe call costs several slots, so this also bounds usable
+  // recursion depth, at roughly 450 frames.
+  GcStackSize = 4096,
   StringBufferSize = (sizeof(FeObject*) - 1),
   DefaultEvalPollInterval = 1024,
 };
@@ -696,7 +709,7 @@ void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt) {
 
     case FeTFn:
       // TODO: Write a pretty-printer, and use it here and elsewhere.
-      FeWrite(ctx, FeCons(ctx, FeMakeSymbol(ctx, "fn"), CDR(CDR(obj))), fn,
+      FeWrite(ctx, FeCons(ctx, FeMakeSymbol(ctx, "lambda"), CDR(CDR(obj))), fn,
               udata, qt);
       break;
 
@@ -831,6 +844,48 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
 
 static FeObject rparen;
 
+// Reader macros — 'x, `x, ,x, ,@x and #'x — all expand to `(NAME form)`.
+static FeObject* ReadWrapped(FeContext* ctx,
+                             FeReadFn fn,
+                             void* udata,
+                             const char* name,
+                             const char* stray) {
+  FeObject* v = FeRead(ctx, fn, udata);
+  if (v == NULL) {
+    FeHandleError(ctx, stray);
+  }
+  return FeCons(ctx, FeMakeSymbol(ctx, name), FeCons(ctx, v, &nil));
+}
+
+// A number, `nil`, or a symbol. `chr` is the first character; a character
+// already pushed back into `ctx->nextchr` is consumed before the input.
+static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
+  char buf[64];
+  char* p = buf;
+  const char* delimiter = " \n\t\r();`,";
+  do {
+    if (p == buf + sizeof(buf) - 1) {
+      FeHandleError(ctx, "symbol too long");
+    }
+    *p++ = chr;
+    chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+    ctx->nextchr = '\0';
+  } while (chr && !strchr(delimiter, chr));
+  *p = '\0';
+  ctx->nextchr = chr;
+  // Try to read it as a double:
+  FeDouble n = strtod(buf, &p);
+  if (p != buf && strchr(delimiter, *p)) {
+    return FeMakeDouble(ctx, n);
+  }
+  // Try to read it as nil:
+  if (!strcmp(buf, "nil")) {
+    return &nil;
+  }
+  // It's a symbol:
+  return FeMakeSymbol(ctx, buf);
+}
+
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
   // Get next character:
   char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
@@ -878,12 +933,34 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
       return res;
     }
 
-    case '\'': {
-      FeObject* v = FeRead(ctx, fn, udata);
-      if (v == NULL) {
-        FeHandleError(ctx, "stray '''");
+    case '\'':
+      return ReadWrapped(ctx, fn, udata, "quote", "stray '''");
+
+    case '`':
+      return ReadWrapped(ctx, fn, udata, "quasiquote", "stray '`'");
+
+    case ',': {
+      const char next = fn(ctx, udata);
+      if (next == '@') {
+        return ReadWrapped(ctx, fn, udata, "unquote-splicing", "stray ',@'");
       }
-      return FeCons(ctx, FeMakeSymbol(ctx, "quote"), FeCons(ctx, v, &nil));
+      ctx->nextchr = next;
+      return ReadWrapped(ctx, fn, udata, "unquote", "stray ','");
+    }
+
+    // `#` is an ordinary symbol character, so only `#'` is a reader macro.
+    // Fe has one namespace, so Emacs Lisp's `#'x` is simply `x`.
+    case '#': {
+      const char next = fn(ctx, udata);
+      if (next == '\'') {
+        FeObject* v = FeRead(ctx, fn, udata);
+        if (v == NULL) {
+          FeHandleError(ctx, "stray '#''");
+        }
+        return v;
+      }
+      ctx->nextchr = next;
+      return ReadAtom(ctx, fn, udata, chr);
     }
 
     case '"': {
@@ -906,31 +983,8 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
       return res;
     }
 
-    default: {
-      char buf[64];
-      char* p = buf;
-      const char* delimiter = " \n\t\r();";
-      do {
-        if (p == buf + sizeof(buf) - 1) {
-          FeHandleError(ctx, "symbol too long");
-        }
-        *p++ = chr;
-        chr = fn(ctx, udata);
-      } while (chr && !strchr(delimiter, chr));
-      *p = '\0';
-      ctx->nextchr = chr;
-      // Try to read it as a double:
-      FeDouble n = strtod(buf, &p);
-      if (p != buf && strchr(delimiter, *p)) {
-        return FeMakeDouble(ctx, n);
-      }
-      // Try to read it as nil:
-      if (!strcmp(buf, "nil")) {
-        return &nil;
-      }
-      // It's a symbol:
-      return FeMakeSymbol(ctx, buf);
-    }
+    default:
+      return ReadAtom(ctx, fn, udata, chr);
   }
 }
 
@@ -1098,19 +1152,21 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
       va = CheckType(ctx, FeGetNextArgument(ctx, &arg), FeTSymbol);
       CDR(GetBound(ctx, va, env)) = EVAL_ARG();
       return res;
+    // `(if COND THEN ELSE...)`, as in Emacs Lisp: the trailing forms are an
+    // implicit `do`. (Fe used to read them as an `elif` chain.)
     case PIf:
-      while (!FeIsNil(arg)) {
-        va = EVAL_ARG();
-        if (!FeIsNil(va)) {
-          res = FeIsNil(arg) ? va : EVAL_ARG();
-          return res;
-        }
-        if (FeIsNil(arg)) {
-          return res;
-        }
-        arg = CDR(arg);
+      if (FeIsNil(arg)) {
+        return res;
       }
-      return res;
+      va = EVAL_ARG();
+      if (FeIsNil(arg)) {
+        return res;
+      }
+      if (!FeIsNil(va)) {
+        return EVAL_ARG();
+      }
+      (void)FeGetNextArgument(ctx, &arg);
+      return DoList(ctx, arg, env);
     case PFn:
     case PMacro:
       va = FeCons(ctx, env, arg);
@@ -1196,6 +1252,19 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
   abort();
 }
 
+// `(foo 1)` where `foo` has no function value names the culprit, the way
+// Emacs Lisp's `void-function` does; anything else is anonymous.
+[[noreturn]] static void HandleNonCallable(FeContext* ctx, FeObject* callee) {
+  if (FeGetType(callee) == FeTSymbol) {
+    char name[48];
+    char message[64];
+    (void)FeToString(ctx, callee, name, sizeof(name));
+    Format(message, sizeof(message), "void-function %s", name);
+    FeHandleError(ctx, message);
+  }
+  FeHandleError(ctx, "tried to call non-callable value");
+}
+
 static FeObject* Evaluate(FeContext* ctx,
                           FeObject* obj,
                           FeObject* env,
@@ -1257,7 +1326,7 @@ static FeObject* Evaluate(FeContext* ctx,
     case FeTFex0:
     case FeTFex1:
     case FeTFex2:
-      FeHandleError(ctx, "tried to call non-callable value");
+      HandleNonCallable(ctx, CAR(obj));
 
     case FeTSentinel:
       abort();
@@ -1547,6 +1616,9 @@ static size_t GetCoreObjectCount(void) {
   for (Primitive i = PAssert; i < PSentinel; i++) {
     count += 1 + GetSymbolObjectCount(primitive_names[i]);
   }
+  for (size_t i = 0; i < COUNT(primitive_aliases); i++) {
+    count += GetSymbolObjectCount(primitive_aliases[i].name);
+  }
   for (size_t i = 0; i < COUNT(math_names); i++) {
     count += 1 + GetSymbolObjectCount(math_names[i]);
   }
@@ -1608,6 +1680,13 @@ FeContext* FeOpenContext(void* arena, size_t size) {
     SetType(v, FeTPrimitive);
     PRIM(v) = (char)i;
     FeSet(ctx, FeMakeSymbol(ctx, primitive_names[i]), v);
+    FeRestoreGC(ctx, save);
+  }
+  for (size_t i = 0; i < COUNT(primitive_aliases); i++) {
+    const Primitive p = primitive_aliases[i].primitive;
+    FeObject* canonical = FeMakeSymbol(ctx, primitive_names[p]);
+    FeSet(ctx, FeMakeSymbol(ctx, primitive_aliases[i].name),
+          CDR(CDR(canonical)));
     FeRestoreGC(ctx, save);
   }
 

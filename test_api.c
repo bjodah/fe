@@ -34,7 +34,9 @@ typedef struct ErrorState {
   bool stack_was_nil;
 } ErrorState;
 
-enum { TestArenaSize = 16 * 1024 };
+// Must stay above `FeMinimumArenaSize()`, which is dominated by the
+// context's 4096-slot GC stack.
+enum { TestArenaSize = 64 * 1024 };
 
 typedef struct TestArena {
   alignas(max_align_t) unsigned char bytes[TestArenaSize];
