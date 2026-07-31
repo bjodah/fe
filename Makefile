@@ -116,8 +116,13 @@ FORMAT_FILES = $(SOURCES) $(TEST_SRCS) $(EXAMPLE_SRCS) $(FUZZ_SRCS) \
 BEAR ?= bear
 CLANG_CC ?= clang
 COMPILE_DB_FILE ?= compile_commands.json
-IWYU ?= /opt-3/iwyu-21/bin/include-what-you-use
-IWYU_TOOL ?= /opt-3/iwyu-21/bin/iwyu_tool.py
+# Found on PATH; the absolute path is one developer box's layout, kept
+# only as a last resort.  Override with `make IWYU=... IWYU_TOOL=...`.
+IWYU_FALLBACK_DIR ?= /opt-3/iwyu-21/bin
+IWYU ?= $(shell command -v include-what-you-use 2>/dev/null || \
+	echo $(IWYU_FALLBACK_DIR)/include-what-you-use)
+IWYU_TOOL ?= $(shell command -v iwyu_tool.py 2>/dev/null || \
+	echo $(IWYU_FALLBACK_DIR)/iwyu_tool.py)
 IWYU_ARGS ?= -Xiwyu --error=1
 IWYU_FILES = $(addprefix $(CURDIR)/,$(SRCS))
 
@@ -282,6 +287,16 @@ compile-db:
 iwyu:
 	@test -f $(COMPILE_DB_FILE) || { \
 		echo "$(COMPILE_DB_FILE) missing; run 'make compile-db' first"; \
+		exit 2; \
+	}
+	@command -v "$(IWYU)" >/dev/null 2>&1 || { \
+		echo "include-what-you-use not found (tried '$(IWYU)');" \
+		     "install it, or set IWYU=/path/to/include-what-you-use" >&2; \
+		exit 2; \
+	}
+	@command -v "$(IWYU_TOOL)" >/dev/null 2>&1 || { \
+		echo "iwyu_tool.py not found (tried '$(IWYU_TOOL)');" \
+		     "install it, or set IWYU_TOOL=/path/to/iwyu_tool.py" >&2; \
 		exit 2; \
 	}
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \

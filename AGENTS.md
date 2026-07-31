@@ -55,6 +55,13 @@ The full local run expects GCC, Clang/LLVM, ccache, Valgrind, `scc`, `pmccabe`,
 lcov, Bear, Include-What-You-Use, GNU parallel, cppcheck, and Python 3. The
 Woodpecker image is the canonical toolchain when local versions differ.
 
+The number is the execution order, and it is a total order: the runner
+globs `.ci/ci-[0-9][0-9]-*.sh`, so two stages sharing a number are
+sequenced by whatever their names sort as, which is not something anyone
+chose. The same rule holds in the parent repository and in
+`tiny-regex-c`. Give a new stage the next free number, or renumber the
+ones after it.
+
 Run a numbered `.ci/ci-NN-*.sh` directly while iterating on one class of
 failure. Before handing work over, run the complete pipeline. Valgrind and MSan
 skip the computationally expensive Mandelbrot example; it remains covered by
