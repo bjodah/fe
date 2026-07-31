@@ -23,6 +23,14 @@ CFLAGS ?= -Weverything -Werror -std=c2x \
 CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -Itiny-regex-c
 LDLIBS ?= -lm
 
+# tiny-regex-c is third-party and is not held to Fe's -Weverything build, but it
+# must carry whatever sanitizer flags CI puts in CFLAGS: otherwise the ASan and
+# MSan lanes cover only the Fe side of fex_re.c.
+RE_SANITIZE = $(filter -fsanitize%,$(CFLAGS)) \
+	$(filter -fno-sanitize%,$(CFLAGS)) \
+	$(filter -fno-omit-frame-pointer,$(CFLAGS))
+RE_CFLAGS ?= -O3 -Wall -Wextra -std=c2x $(RE_SANITIZE)
+
 PROG = fe
 TARGET = $(PROG)
 SRCS = main.c auto.c fe.c fex.c fex_io.c fex_math.c fex_process.c fex_re.c \
@@ -151,7 +159,7 @@ fe-core-clang.o: fe.c fe.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h
-	$(CC) $(CPPFLAGS) -O3 -Wall -Wextra -std=c2x -c $< -o $@
+	$(CC) $(CPPFLAGS) $(RE_CFLAGS) -c $< -o $@
 
 $(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
 		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
