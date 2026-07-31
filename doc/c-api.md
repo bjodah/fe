@@ -268,6 +268,34 @@ evaluation, the internal invocation consumes the existing step budget and
 uses its interrupt settings. Normal Fe errors and nonlocal recovery rules are
 unchanged.
 
+## Serializing Objects
+
+`FeWrite()` renders an object as Fe syntax one character at a time through a
+caller-supplied `FeWriteFn`; `FeWriteFile()` is the `FILE*` wrapper. `qt`
+selects quoted rendering, in which strings are surrounded by `"` and embedded
+`"` characters are escaped.
+
+`FeToString()` renders into a caller-supplied buffer:
+
+```c
+size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size);
+```
+
+- `size == 0` writes nothing at all, renders nothing, and returns 0. `dst` may
+  be null in that case, and it is the only case in which it may be.
+- `size > 0` requires a writable buffer of at least `size` bytes. At most
+  `size - 1` rendered bytes are stored and a NUL terminator always follows
+  them.
+- The return value is the number of bytes stored, not counting the terminator.
+  It never exceeds `size - 1`.
+
+The rendering is therefore truncating, not measuring: a return value equal to
+`size - 1` means the output may have been cut short, and there is no
+`snprintf`-style "required length". Computing one would mean walking the whole
+object graph with no bound, which is not safe for the cyclic structures
+`setcdr` can build. Use `FeStringByteLength()` and `FeCopyStringBytes()` when
+the goal is to extract a string's bytes rather than to display an object.
+
 ## Extending The Core
 
 For examples of using the extension API in full detail, refer to `fex.[ch]` and

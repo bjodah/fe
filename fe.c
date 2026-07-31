@@ -759,6 +759,11 @@ static void WriteBuffer(FeContext*, void* udata, char chr) {
 }
 
 size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size) {
+  // A zero-size destination has no room for the terminator, so nothing is
+  // rendered and nothing is written; `dst` may then be null.
+  if (size == 0) {
+    return 0;
+  }
   SizedString s = {.string = dst, .size = size - 1};
   FeWrite(ctx, obj, WriteBuffer, &s, 0);
   *s.string = '\0';

@@ -682,11 +682,73 @@ static bool TestMathNatives(void) {
   return true;
 }
 
+// Renders `source` into a `size`-byte window of a redzoned buffer and checks
+// the returned length, the stored bytes, and that nothing outside the window
+// was touched.
+static bool CheckRendered(FeContext* context,
+                          const char* source,
+                          size_t size,
+                          size_t expected_length,
+                          const char* expected) {
+  enum { Redzone = 8, BufferSize = 64 };
+  static_assert(BufferSize > 2 * Redzone);
+  char buffer[BufferSize];
+  memset(buffer, '#', sizeof(buffer));
+  CHECK(size <= BufferSize - 2 * Redzone);
+
+  FeObject* object =
+      FeEvaluateString(context, "render.fe", source, strlen(source));
+  const size_t written = FeToString(context, object, buffer + Redzone, size);
+  CHECK(written == expected_length);
+  for (size_t i = 0; i < Redzone; i++) {
+    CHECK(buffer[i] == '#');
+    CHECK(buffer[Redzone + size + i] == '#');
+  }
+  if (size == 0) {
+    return true;
+  }
+  CHECK(buffer[Redzone + written] == '\0');
+  CHECK(memcmp(buffer + Redzone, expected, written) == 0);
+  return true;
+}
+
+static bool TestSerialization(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // A zero-size destination writes nothing and accepts a null pointer.
+  CHECK(FeToString(context, FeNil(context), nullptr, 0) == 0);
+  CHECK(CheckRendered(context, "\"hello\"", 0, 0, ""));
+  CHECK(CheckRendered(context, "'(1 2 3)", 0, 0, ""));
+
+  // A one-byte destination holds only the terminator.
+  CHECK(CheckRendered(context, "\"hello\"", 1, 0, ""));
+
+  // Exact fit, one byte short, and generous.
+  CHECK(CheckRendered(context, "\"hello\"", 6, 5, "hello"));
+  CHECK(CheckRendered(context, "\"hello\"", 5, 4, "hell"));
+  CHECK(CheckRendered(context, "\"hello\"", 32, 5, "hello"));
+
+  // Atoms, nested lists, and truncation in the middle of one.
+  CHECK(CheckRendered(context, "nil", 8, 3, "nil"));
+  CHECK(CheckRendered(context, "42", 8, 2, "42"));
+  CHECK(CheckRendered(context, "'sym", 8, 3, "sym"));
+  CHECK(CheckRendered(context, "'(1 (2 3) . 4)", 32, 13, "(1 (2 3) . 4)"));
+  CHECK(CheckRendered(context, "'(1 (2 3) . 4)", 6, 5, "(1 (2"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
                  TestEvaluationControl() && TestExtensionAPI() &&
-                 TestRootsAndCalls() && TestMathNatives()
+                 TestRootsAndCalls() && TestMathNatives() && TestSerialization()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
