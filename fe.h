@@ -100,7 +100,19 @@ void FeMark(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeCar(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeCdr(FeContext* ctx, FeObject* obj);
 
+typedef struct FeWriteOptions {
+  size_t max_bytes;
+  size_t max_nodes;
+  size_t max_depth;
+} FeWriteOptions;
+
 void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt);
+[[nodiscard]] bool FeWriteWithOptions(FeContext* ctx,
+                                      FeObject* obj,
+                                      FeWriteFn fn,
+                                      void* udata,
+                                      int qt,
+                                      const FeWriteOptions* options);
 void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
 
 [[nodiscard]] FeObject* FeRead(FeContext* ctx, FeReadFn fn, void* udata);

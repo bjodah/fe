@@ -275,6 +275,51 @@ caller-supplied `FeWriteFn`; `FeWriteFile()` is the `FILE*` wrapper. `qt`
 selects quoted rendering, in which strings are surrounded by `"` and embedded
 `"` characters are escaped.
 
+Rendering is bounded, and always terminates:
+
+```c
+typedef struct FeWriteOptions {
+  size_t max_bytes;
+  size_t max_nodes;
+  size_t max_depth;
+} FeWriteOptions;
+
+bool FeWriteWithOptions(FeContext* ctx, FeObject* obj, FeWriteFn fn,
+                        void* udata, int qt, const FeWriteOptions* options);
+```
+
+A zero field takes the default, and a null `options` takes all three.
+`FeWriteWithOptions()` returns `true` when the whole object was rendered and
+`false` when it stopped early; `FeWrite()` is the same call with default
+options and the answer discarded.
+
+Three things can stop it, each with a marker in the output so a truncated
+rendering is not mistaken for a complete one:
+
+| Marker | Cause |
+| --- | --- |
+| `#<cycle>` | the list spine returns to a pair already on it |
+| `#<deep>` | `max_depth` levels of `car` nesting |
+| `#<truncated>` | `max_bytes` or `max_nodes` exhausted |
+
+The spine is walked iteratively with two pointers, so a cycle costs no
+allocation, no visited set, and no depth: `(setcdr x x)` renders as
+`(1 . #<cycle>)`. Only `car` nesting spends depth, and shared acyclic
+structure is therefore rendered in full every time it appears rather than
+being reported as a cycle. The byte and node budgets are backstops against
+structure that is finite but unreasonable.
+
+The writer does not allocate. Closures and macros used to be printed by consing
+their head onto their body, which meant printing could collect and raise `out of
+memory` part way through -- a `longjmp` out of a caller that was holding a
+destination buffer. They are now written directly.
+
+While a controlled evaluation is active, rendering spends its step budget and
+polls its interrupt callback, so printing a large object answers a host's
+cancellation the way evaluating one does. `FeWriteFn` returns `void`, so a
+failing write callback cannot report itself; `FeWriteFile()` correspondingly
+does not detect `fputc` failures.
+
 `FeToString()` renders into a caller-supplied buffer:
 
 ```c
@@ -292,8 +337,9 @@ size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size);
 The rendering is therefore truncating, not measuring: a return value equal to
 `size - 1` means the output may have been cut short, and there is no
 `snprintf`-style "required length". Computing one would mean walking the whole
-object graph with no bound, which is not safe for the cyclic structures
-`setcdr` can build. Use `FeStringByteLength()` and `FeCopyStringBytes()` when
+object graph, which for a cyclic object is work with no useful answer.
+`FeToString()` passes its destination size as `max_bytes`, so rendering a
+cyclic object into a small buffer costs that buffer's worth of work. Use `FeStringByteLength()` and `FeCopyStringBytes()` when
 the goal is to extract a string's bytes rather than to display an object.
 
 ## Extending The Core

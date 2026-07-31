@@ -43,9 +43,29 @@ evaluator deeply through `FeEvaluateWithOptions()` with a finite step budget as
 a final termination backstop; it does not replace raw reader fuzzing or
 end-to-end script tests.
 
+## Writer target
+
+`make fuzz-write` builds `fuzz/fuzz_write`. It generates a program that conses
+up to 32 pairs and then `setcar`/`setcdr`s each half to `nil`, an atom, or
+another node, so the resulting graph can contain cdr-spine cycles, car cycles,
+shared subgraphs and improper tails. The graph is built by evaluating generated
+source rather than through the C API, because pair mutation has no public C
+spelling.
+
+It then renders the graph twice: once through `FeWriteWithOptions()` with
+fuzzer-chosen `max_bytes`, `max_nodes` and `max_depth` (zero, meaning
+"default", included), and once through `FeToString()` into a fixed buffer. The
+properties checked are that rendering terminates at all, that it never emits
+more than `max_bytes`, that a rendering reported complete emitted something,
+and that `FeToString()` leaves exactly one NUL inside its destination at the
+offset it returned.
+
+This is the target that owns the writer's cycle and bound behaviour; the
+steered evaluator target below still excludes cycles, so it does not cover it.
+
 ## Smoke tests
 
-Build and run both targets for 1,000 inputs each:
+Build and run all three targets for 1,000 inputs each:
 
 ```sh
 make fuzz-smoke

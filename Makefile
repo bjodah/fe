@@ -66,8 +66,9 @@ FUZZ_ARTIFACT_DIR ?= $(FUZZ_DIR)/artifacts
 FUZZ_SUPPORT = $(FUZZ_DIR)/fuzz_support.c
 FUZZ_READER_BIN = $(FUZZ_DIR)/fuzz_reader
 FUZZ_EVAL_BIN = $(FUZZ_DIR)/fuzz_eval
+FUZZ_WRITE_BIN = $(FUZZ_DIR)/fuzz_write
 FUZZ_SRCS = $(FUZZ_SUPPORT) $(FUZZ_DIR)/fuzz_reader.c \
-	$(FUZZ_DIR)/fuzz_eval.c
+	$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_DIR)/fuzz_write.c
 
 # Project metrics
 SCC ?= scc
@@ -111,13 +112,15 @@ run: fe
 bench: clean
 	./bench.sh
 
-fuzz: fuzz-reader fuzz-eval
+fuzz: fuzz-reader fuzz-eval fuzz-write
 
 fuzz-reader: $(FUZZ_READER_BIN)
 
 fuzz-eval: $(FUZZ_EVAL_BIN)
 
-fuzz-smoke: fuzz-reader-smoke fuzz-eval-smoke
+fuzz-write: $(FUZZ_WRITE_BIN)
+
+fuzz-smoke: fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
 
 fuzz-reader-smoke: $(FUZZ_READER_BIN)
 	mkdir -p $(FUZZ_CORPUS_DIR)/reader $(FUZZ_ARTIFACT_DIR)/reader
@@ -135,6 +138,14 @@ fuzz-eval-smoke: $(FUZZ_EVAL_BIN)
 		-verbosity=$(FUZZ_VERBOSITY) \
 		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/eval/ \
 		$(FUZZ_CORPUS_DIR)/eval scripts
+
+fuzz-write-smoke: $(FUZZ_WRITE_BIN)
+	mkdir -p $(FUZZ_CORPUS_DIR)/write $(FUZZ_ARTIFACT_DIR)/write
+	./$(FUZZ_WRITE_BIN) -runs=$(FUZZ_RUNS) -max_len=$(FUZZ_MAX_LEN) \
+		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
+		-verbosity=$(FUZZ_VERBOSITY) \
+		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/write/ \
+		$(FUZZ_CORPUS_DIR)/write
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -171,13 +182,18 @@ $(FUZZ_EVAL_BIN): $(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) \
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
 		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
 
+$(FUZZ_WRITE_BIN): $(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
+	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
+		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
+
 sizes:
 	wc *.[ch]
 	wc *.md doc/*.md
 	wc scripts/*.fe
 
 clean:
-	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) tiny-regex-c/*.o
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -235,6 +251,6 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-smoke fuzz-clean \
-	fuzz-reader-smoke fuzz-eval-smoke complexity complexity-check pmccabe \
+.PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
+	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke complexity complexity-check pmccabe \
 	pmccabe-check coverage coverage-clean format format-check compile-db iwyu

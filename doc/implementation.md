@@ -187,7 +187,12 @@ to keep the implementation concise, but should not hinder normal usage.
 
 * The garbage collector recurses on the `car` of objects; thus, deeply nested
   `car`s may overflow the C stack. An object’s `cdr` is looped on and will not
-  overflow the stack.
+  overflow the stack. `FeMark()` also has no cycle detection of its own; it
+  relies on the mark bit, which the writer has no equivalent of. The writer
+  used to share the recursion and shares it no longer: `WriteObject()` bounds
+  `car` nesting with an explicit depth budget and walks the `cdr` spine with
+  two pointers, so the two are no longer the same shape and should not be
+  changed as if they were.
 * The storage of an object’s type and GC mark assumes a little-endian system and
   will not work correctly on systems of other endianness.
 * Proper tailcalls are not implemented — `while` can be used for iterating over

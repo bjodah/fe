@@ -640,83 +640,171 @@ FeObject* FeCdr(FeContext* ctx, FeObject* obj) {
   return GetPairMember(ctx, obj, GetCdr);
 }
 
-static void WriteString(FeContext* ctx,
-                        FeWriteFn fn,
-                        void* udata,
-                        const char* s) {
+// Writer bounds. The spine cycle check terminates `(setcdr x x)` structurally,
+// so these are backstops against shared structure that is finite but
+// unreasonable, not the cycle defence.
+enum {
+  DefaultWriteMaxBytes = 64u << 20,
+  DefaultWriteMaxNodes = 8u << 20,
+  DefaultWriteMaxDepth = 256,
+};
+
+typedef struct Writer {
+  FeContext* ctx;
+  FeWriteFn* fn;
+  void* udata;
+  size_t bytes;
+  size_t nodes;
+  bool complete;
+} Writer;
+
+static void Emit(Writer* w, char chr) {
+  if (w->bytes == 0) {
+    w->complete = false;
+    return;
+  }
+  w->bytes--;
+  w->fn(w->ctx, w->udata, chr);
+}
+
+static void EmitString(Writer* w, const char* s) {
   while (*s) {
-    fn(ctx, udata, *s++);
+    Emit(w, *s++);
   }
 }
 
-void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt) {
+// A string or a symbol's name. Never recurses: the cells are a cdr chain.
+static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
+  if (qt) {
+    Emit(w, '"');
+  }
+  while (!FeIsNil(obj)) {
+    for (size_t i = 0; i < StringBufferSize && STRING_BUFFER(obj)[i]; i++) {
+      if (qt && STRING_BUFFER(obj)[i] == '"') {
+        Emit(w, '\\');
+      }
+      Emit(w, STRING_BUFFER(obj)[i]);
+    }
+    obj = CDR(obj);
+  }
+  if (qt) {
+    Emit(w, '"');
+  }
+}
+
+static void EmitDouble(Writer* w, FeObject* obj) {
   char buf[32];
+  const double d = GetDouble(obj);
+  // cppcheck-suppress incorrectLogicOperator
+  if (d >= -0x1p63 && d < 0x1p63 && floor(d) == d) {
+    Format(buf, sizeof(buf), "%" PRId64, (int64_t)d);
+  } else {
+    Format(buf, sizeof(buf), "%.7g", d);
+  }
+  EmitString(w, buf);
+}
+
+static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth);
+
+// The elements of the list `obj` (a pair) and its dotted tail, without the
+// surrounding parentheses. The spine is walked iteratively -- only `car`
+// nesting costs depth -- and Floyd's two pointers over it terminate a cdr
+// cycle without a visited set and without allocating.
+static void WriteElements(Writer* w, FeObject* obj, size_t depth) {
+  FeObject* slow = obj;
+  bool move_slow = false;
+  while (true) {
+    WriteObject(w, CAR(obj), 1, depth);
+    FeObject* next = CDR(obj);
+    if (FeGetType(next) != FeTPair) {
+      if (!FeIsNil(next)) {
+        EmitString(w, " . ");
+        WriteObject(w, next, 1, depth);
+      }
+      return;
+    }
+    if (move_slow) {
+      slow = CDR(slow);
+    }
+    move_slow = !move_slow;
+    if (next == slow) {
+      EmitString(w, " . #<cycle>");
+      w->complete = false;
+      return;
+    }
+    if (w->bytes == 0 || w->nodes == 0) {
+      EmitString(w, " #<truncated>");
+      w->complete = false;
+      return;
+    }
+    obj = next;
+    Emit(w, ' ');
+  }
+}
+
+// A closure or macro prints as `(lambda PARAMS BODY...)`. This used to cons the
+// head onto the body, which meant the writer allocated: printing could collect
+// and raise `out of memory` part way through, longjmping out of whatever C
+// caller was holding the destination buffer.
+static void WriteClosure(Writer* w, FeObject* obj, size_t depth) {
+  Emit(w, '(');
+  EmitString(w, FeGetType(obj) == FeTFn ? "lambda" : "macro");
+  obj = CDR(CDR(obj));
+  if (FeGetType(obj) == FeTPair) {
+    Emit(w, ' ');
+    WriteElements(w, obj, depth);
+  } else if (!FeIsNil(obj)) {
+    EmitString(w, " . ");
+    WriteObject(w, obj, 1, depth);
+  }
+  Emit(w, ')');
+}
+
+static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
+  char buf[32];
+  // Printing is work: during a controlled evaluation it spends the step budget
+  // and polls the interrupt, so `(print cyclic-thing)` answers C-g.
+  if (w->ctx->evaluation_active) {
+    EvaluationStep(w->ctx);
+  }
+  if (w->nodes == 0 || w->bytes == 0) {
+    EmitString(w, "#<truncated>");
+    w->complete = false;
+    return;
+  }
+  w->nodes--;
+  if (depth == 0) {
+    EmitString(w, "#<deep>");
+    w->complete = false;
+    return;
+  }
+
   switch (FeGetType(obj)) {
     case FeTNil:
-      WriteString(ctx, fn, udata, "nil");
+      EmitString(w, "nil");
       break;
 
-    case FeTDouble: {
-      const double d = GetDouble(obj);
-      // cppcheck-suppress incorrectLogicOperator
-      if (d >= -0x1p63 && d < 0x1p63 && floor(d) == d) {
-        Format(buf, sizeof(buf), "%" PRId64, (int64_t)d);
-      } else {
-        Format(buf, sizeof(buf), "%.7g", GetDouble(obj));
-      }
-      WriteString(ctx, fn, udata, buf);
+    case FeTDouble:
+      EmitDouble(w, obj);
       break;
-    }
 
     case FeTPair:
-      fn(ctx, udata, '(');
-      while (true) {
-        FeWrite(ctx, CAR(obj), fn, udata, 1);
-        obj = CDR(obj);
-        if (FeGetType(obj) != FeTPair) {
-          break;
-        }
-        fn(ctx, udata, ' ');
-      }
-      if (!FeIsNil(obj)) {
-        WriteString(ctx, fn, udata, " . ");
-        FeWrite(ctx, obj, fn, udata, 1);
-      }
-      fn(ctx, udata, ')');
+      Emit(w, '(');
+      WriteElements(w, obj, depth - 1);
+      Emit(w, ')');
       break;
 
     case FeTSymbol:
-      FeWrite(ctx, CAR(CDR(obj)), fn, udata, 0);
+      EmitStoredString(w, CAR(CDR(obj)), 0);
       break;
 
     case FeTString:
-      if (qt) {
-        fn(ctx, udata, '"');
-      }
-      while (!FeIsNil(obj)) {
-        for (size_t i = 0; i < StringBufferSize && STRING_BUFFER(obj)[i]; i++) {
-          if (qt && STRING_BUFFER(obj)[i] == '"') {
-            fn(ctx, udata, '\\');
-          }
-          fn(ctx, udata, STRING_BUFFER(obj)[i]);
-        }
-        obj = CDR(obj);
-      }
-      if (qt) {
-        fn(ctx, udata, '"');
-      }
+      EmitStoredString(w, obj, qt);
       break;
 
     case FeTFn:
-      // TODO: Write a pretty-printer, and use it here and elsewhere.
-      FeWrite(ctx, FeCons(ctx, FeMakeSymbol(ctx, "lambda"), CDR(CDR(obj))), fn,
-              udata, qt);
-      break;
-
     case FeTMacro:
-      // TODO: Write a pretty-printer, and use it here and elsewhere.
-      FeWrite(ctx, FeCons(ctx, FeMakeSymbol(ctx, "macro"), CDR(CDR(obj))), fn,
-              udata, qt);
+      WriteClosure(w, obj, depth - 1);
       break;
 
     case FeTPrimitive:
@@ -726,13 +814,41 @@ void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt) {
     case FeTFex1:
     case FeTFex2:
       Format(buf, sizeof(buf), "[%s]", GetTypeName(FeGetType(obj)));
-      WriteString(ctx, fn, udata, buf);
+      EmitString(w, buf);
       break;
 
     case FeTFree:
     case FeTSentinel:
       abort();
   }
+}
+
+static size_t OptionOr(size_t value, size_t fallback) {
+  return value != 0 ? value : fallback;
+}
+
+bool FeWriteWithOptions(FeContext* ctx,
+                        FeObject* obj,
+                        FeWriteFn fn,
+                        void* udata,
+                        int qt,
+                        const FeWriteOptions* options) {
+  static const FeWriteOptions defaults = {0};
+  const FeWriteOptions* o = options != nullptr ? options : &defaults;
+  Writer w = {
+      .ctx = ctx,
+      .fn = fn,
+      .udata = udata,
+      .bytes = OptionOr(o->max_bytes, DefaultWriteMaxBytes),
+      .nodes = OptionOr(o->max_nodes, DefaultWriteMaxNodes),
+      .complete = true,
+  };
+  WriteObject(&w, obj, qt, OptionOr(o->max_depth, DefaultWriteMaxDepth));
+  return w.complete;
+}
+
+void FeWrite(FeContext* ctx, FeObject* obj, FeWriteFn fn, void* udata, int qt) {
+  (void)FeWriteWithOptions(ctx, obj, fn, udata, qt, nullptr);
 }
 
 // TODO: See if `void*` is really necessary here, in `WriteBuffer`, et c., or if
@@ -765,7 +881,10 @@ size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size) {
     return 0;
   }
   SizedString s = {.string = dst, .size = size - 1};
-  FeWrite(ctx, obj, WriteBuffer, &s, 0);
+  // Nothing beyond the destination can be stored, so nothing beyond it is
+  // rendered either: a cyclic object costs `size` bytes of work, not a walk.
+  const FeWriteOptions options = {.max_bytes = size};
+  (void)FeWriteWithOptions(ctx, obj, WriteBuffer, &s, 0, &options);
   *s.string = '\0';
   return size - s.size - 1;
 }

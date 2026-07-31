@@ -682,6 +682,138 @@ static bool TestMathNatives(void) {
   return true;
 }
 
+typedef struct Rendered {
+  char text[512];
+  size_t length;
+  size_t dropped;
+} Rendered;
+
+static Rendered render_target;
+
+static void Collect(FeContext*, void* udata, char chr) {
+  Rendered* r = udata;
+  if (r->length + 1 < sizeof(r->text)) {
+    r->text[r->length++] = chr;
+  } else {
+    r->dropped++;
+  }
+  r->text[r->length] = '\0';
+}
+
+// Renders through a native function, so the write happens inside a controlled
+// evaluation and can be charged and cancelled.
+static FeObject* RenderNative(FeContext* context, FeObject* arguments) {
+  FeObject* object = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  render_target = (Rendered){0};
+  return FeMakeBool(context, FeWriteWithOptions(context, object, Collect,
+                                                &render_target, 0, nullptr));
+}
+
+static bool Renders(FeContext* context,
+                    const char* source,
+                    const FeWriteOptions* options,
+                    const char* expected,
+                    bool expected_complete) {
+  const size_t gc = FeSaveGC(context);
+  FeObject* object =
+      FeEvaluateString(context, "write.fe", source, strlen(source));
+  Rendered rendered = {0};
+  const bool complete =
+      FeWriteWithOptions(context, object, Collect, &rendered, 0, options);
+  CHECK(complete == expected_complete);
+  CHECK(rendered.dropped == 0);
+  CHECK(strcmp(rendered.text, expected) == 0);
+  FeRestoreGC(context, gc);
+  return true;
+}
+
+static bool TestWriter(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Cycles through the cdr spine terminate, with the two-pointer walk finding
+  // both a self-loop and a longer one.
+  CHECK(Renders(context, "(do (= a (cons 1 nil)) (setcdr a a) a)", nullptr,
+                "(1 . #<cycle>)", false));
+  CHECK(Renders(context,
+                "(do (= b (cons 1 (cons 2 nil))) (setcdr (cdr b) b) b)",
+                nullptr, "(1 2 1 . #<cycle>)", false));
+
+  // A cycle through a car is bounded by depth instead, and depth is spent only
+  // on nesting: a long flat list is not deep.
+  const FeWriteOptions shallow = {.max_depth = 4};
+  CHECK(Renders(context, "(do (= c (cons 1 nil)) (setcar c c) c)", &shallow,
+                "((((#<deep>))))", false));
+  CHECK(Renders(context, "'(1 2 3 4 5 6 7 8)", &shallow, "(1 2 3 4 5 6 7 8)",
+                true));
+  CHECK(Renders(context, "'(((1)))", &shallow, "(((1)))", true));
+  const FeWriteOptions shallower = {.max_depth = 3};
+  CHECK(Renders(context, "'(((1)))", &shallower, "(((#<deep>)))", false));
+
+  // Shared but acyclic structure is printed in full, every time it appears.
+  CHECK(Renders(context, "(do (= s '(1 2)) (list s s s))", nullptr,
+                "((1 2) (1 2) (1 2))", true));
+
+  // Byte and node budgets, at the boundary and one below it.
+  const FeWriteOptions bytes_exact = {.max_bytes = 7};
+  const FeWriteOptions bytes_short = {.max_bytes = 6};
+  CHECK(Renders(context, "'(1 2 3)", &bytes_exact, "(1 2 3)", true));
+  CHECK(Renders(context, "'(1 2 3)", &bytes_short, "(1 2 3", false));
+  const FeWriteOptions nodes_exact = {.max_nodes = 4};
+  const FeWriteOptions nodes_short = {.max_nodes = 3};
+  CHECK(Renders(context, "'(1 2 3)", &nodes_exact, "(1 2 3)", true));
+  CHECK(
+      Renders(context, "'(1 2 3)", &nodes_short, "(1 2 #<truncated>)", false));
+
+  // Closures print without allocating, so this cannot collect or raise.
+  CHECK(Renders(context, "(lambda (a b) (+ a b))", nullptr,
+                "(lambda (a b) (+ a b))", true));
+  CHECK(Renders(context, "(macro (a) a)", nullptr, "(macro (a) a)", true));
+
+  // The writer spends the evaluation budget, so a long render answers an
+  // interrupt. `long` is built first, then rendered from a native function
+  // under an interrupt that cancels well after evaluation has finished.
+  FeDefineNative(context, "render", RenderNative);
+  static const char build[] =
+      "(= long nil)"
+      "(= n 0)"
+      "(while (< n 400) (= long (cons n long)) (= n (+ n 1)))";
+  (void)FeEvaluateString(context, "build.fe", build, sizeof(build) - 1);
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .cancel_after = SIZE_MAX};
+  const FeEvalOptions counted = {
+      .poll_interval = 1, .interrupt = Interrupt, .userdata = &interrupt};
+  (void)FeEvaluateStringWithOptions(context, "count.fe", "long", 4, &counted);
+  const size_t without_render = interrupt.polls;
+  interrupt.polls = 0;
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "count.fe",
+                                               "(render long)", 13, &counted),
+                   "t"));
+  CHECK(interrupt.polls > without_render + 400);
+  CHECK(render_target.length > 400);
+
+  interrupt.polls = 0;
+  interrupt.cancel_after = without_render + 20;
+  CHECK(ExpectEvaluationOptionsError(context, &state, "cancel.fe",
+                                     "(render long)", 13, &counted,
+                                     "cancel.fe: evaluation cancelled"));
+  CHECK(render_target.length > 0);
+
+  // The context still works afterwards.
+  CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 2 3)", 7),
+                   "5"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestMacroExpansion(void) {
   // Deliberately tight: the expansion has to survive the collections that
   // evaluating it provokes, and nothing but Fe's GC stack refers to it.
@@ -852,7 +984,7 @@ int main(void) {
                  TestEvaluationControl() && TestExtensionAPI() &&
                  TestRootsAndCalls() && TestMathNatives() &&
                  TestSerialization() && TestDottedLists() &&
-                 TestMacroExpansion()
+                 TestMacroExpansion() && TestWriter()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
