@@ -9,6 +9,7 @@ coverage/
 *.gcno
 fuzz/fuzz_reader
 fuzz/fuzz_eval
+fuzz/fuzz_write
 fuzz/corpus/
 fuzz/artifacts/
 .repomixignore
