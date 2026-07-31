@@ -1,5 +1,43 @@
 # Language
 
+## Syntax
+
+A list is written `(` element … `)`. The final `cdr` may be given explicitly
+with a dot:
+
+```clojure
+fe > '(a b c)
+(a b c)
+fe > '(a . b)
+(a . b)
+fe > '(a . (b c))
+(a b c)
+```
+
+The dot is the pair marker only in that position, and the reader accepts
+exactly
+
+```text
+list := '(' element* [ '.' element ] ')'
+```
+
+with at least one element before the dot. Everything else is a syntax error,
+because the alternative is a list that quietly means something other than what
+was written:
+
+| Written | Result |
+| --- | --- |
+| `(. a)` | error: `'.' at start of list` |
+| `(a .)` | error: `missing value after '.'` |
+| `(a . b c)` | error: `extra value after dotted tail` |
+| `(a . b . c)` | error: `extra value after dotted tail` |
+
+(Earlier versions of Fe read `(a . b c)` as `(a c)`, `(a . b . c)` as `(a . c)`
+and `(. a)` as `a`.)
+
+Outside a list, `.` is an ordinary symbol, and a leading dot still starts a
+number: `'.` is the symbol `.` and `.5` is `0.5`.
+
 ## Forms
 
 ### Special Forms

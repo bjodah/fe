@@ -891,6 +891,63 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   return FeMakeSymbol(ctx, buf);
 }
 
+static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata);
+
+static bool IsDot(const FeObject* v) {
+  return FeGetType(v) == FeTSymbol && IsStringEqual(CAR(CDR(v)), ".");
+}
+
+// Reads the rest of a list, the opening '(' already consumed. A '.' is the
+// dotted-pair marker only inside a list; elsewhere it is the ordinary symbol
+// `.` that `ReadAtom` interns. The grammar this accepts is exactly
+//
+//   list := '(' element* [ '.' element ] ')'
+//
+// with at least one element before a '.'; anything else is a syntax error
+// rather than a list that quietly means something else.
+static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
+  FeObject* res = &nil;
+  FeObject** tail = &res;
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, res);  // To cause error on too-deep nesting
+  FeObject* v;
+  while ((v = Read(ctx, fn, udata)) != &rparen) {
+    if (v == NULL) {
+      FeHandleError(ctx, "unclosed list");
+    }
+    if (IsDot(v)) {
+      if (FeIsNil(res)) {
+        FeHandleError(ctx, "'.' at start of list");
+      }
+      // Only the internal `Read` reports ')' as `&rparen`; `FeRead` would turn
+      // it into the misleading `stray ')'`.
+      v = Read(ctx, fn, udata);
+      if (v == NULL) {
+        FeHandleError(ctx, "unclosed list");
+      }
+      if (v == &rparen) {
+        FeHandleError(ctx, "missing value after '.'");
+      }
+      *tail = v;
+      FeRestoreGC(ctx, gc);
+      FePushGC(ctx, res);
+      v = Read(ctx, fn, udata);
+      if (v == NULL) {
+        FeHandleError(ctx, "unclosed list");
+      }
+      if (v != &rparen) {
+        FeHandleError(ctx, "extra value after dotted tail");
+      }
+      break;
+    }
+    *tail = FeCons(ctx, v, &nil);
+    tail = &CDR(*tail);
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, res);
+  }
+  return res;
+}
+
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
   // Get next character:
   char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
@@ -914,29 +971,8 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
     case ')':
       return &rparen;
 
-    case '(': {
-      FeObject* res = &nil;
-      FeObject** tail = &res;
-      size_t gc = FeSaveGC(ctx);
-      FePushGC(ctx, res);  // To cause error on too-deep nesting
-      FeObject* v;
-      while ((v = Read(ctx, fn, udata)) != &rparen) {
-        if (v == NULL) {
-          FeHandleError(ctx, "unclosed list");
-        }
-        if (FeGetType(v) == FeTSymbol && IsStringEqual(CAR(CDR(v)), ".")) {
-          // Dotted pair
-          *tail = FeRead(ctx, fn, udata);
-        } else {
-          // Proper pair
-          *tail = FeCons(ctx, v, &nil);
-          tail = &CDR(*tail);
-        }
-        FeRestoreGC(ctx, gc);
-        FePushGC(ctx, res);
-      }
-      return res;
-    }
+    case '(':
+      return ReadList(ctx, fn, udata);
 
     case '\'':
       return ReadWrapped(ctx, fn, udata, "quote", "stray '''");

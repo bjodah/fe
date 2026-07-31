@@ -682,6 +682,69 @@ static bool TestMathNatives(void) {
   return true;
 }
 
+static bool ReadsAs(FeContext* context,
+                    const char* source,
+                    const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  size_t offset = 0;
+  FeObject* object = FeReadString(context, source, strlen(source), &offset);
+  CHECK(object != nullptr);
+  CHECK(IsRendered(context, object, expected));
+  CHECK(offset == strlen(source));
+  FeRestoreGC(context, gc);
+  return true;
+}
+
+static bool TestDottedLists(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Well-formed lists, proper and improper, nested both ways.
+  CHECK(ReadsAs(context, "(a b c)", "(a b c)"));
+  CHECK(ReadsAs(context, "(a . b)", "(a . b)"));
+  CHECK(ReadsAs(context, "(a b . c)", "(a b . c)"));
+  CHECK(ReadsAs(context, "(a . (b c))", "(a b c)"));
+  CHECK(ReadsAs(context, "(a . nil)", "(a)"));
+  CHECK(ReadsAs(context, "((a . b) (c . d))", "((a . b) (c . d))"));
+  CHECK(ReadsAs(context, "(a (b . (c . d)) . e)", "(a (b c . d) . e)"));
+  CHECK(ReadsAs(context, "()", "nil"));
+
+  // Whitespace and comments around the dot do not change the parse.
+  CHECK(ReadsAs(context, "(a\n .\n b)", "(a . b)"));
+  CHECK(ReadsAs(context, "(a ; comment\n . b)", "(a . b)"));
+  CHECK(ReadsAs(context, "(a . b ; trailing\n )", "(a . b)"));
+
+  // Outside a list, `.` is an ordinary symbol and `.5` is still a number.
+  CHECK(ReadsAs(context, ".", "."));
+  CHECK(ReadsAs(context, ".5", "0.5"));
+  CHECK(ReadsAs(context, "(.5 x)", "(0.5 x)"));
+
+  // Malformed dotted syntax is refused, with the offset of the byte that
+  // settled it.
+  CHECK(ExpectReadError(context, &state, "(. a)", 5,
+                        "byte 2: '.' at start of list"));
+  CHECK(ExpectReadError(context, &state, "(a .)", 5,
+                        "byte 4: missing value after '.'"));
+  CHECK(ExpectReadError(context, &state, "(a . b c)", 9,
+                        "byte 8: extra value after dotted tail"));
+  CHECK(ExpectReadError(context, &state, "(a . b . c)", 11,
+                        "byte 8: extra value after dotted tail"));
+  CHECK(ExpectReadError(context, &state, "(a .", 4, "byte 4: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(a . b", 6, "byte 6: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(a . b c", 8,
+                        "byte 8: extra value after dotted tail"));
+
+  // The reader is still usable afterwards.
+  CHECK(ReadsAs(context, "(1 . 2)", "(1 . 2)"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 // Renders `source` into a `size`-byte window of a redzoned buffer and checks
 // the returned length, the stored bytes, and that nothing outside the window
 // was touched.
@@ -748,7 +811,8 @@ int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
                  TestEvaluationControl() && TestExtensionAPI() &&
-                 TestRootsAndCalls() && TestMathNatives() && TestSerialization()
+                 TestRootsAndCalls() && TestMathNatives() &&
+                 TestSerialization() && TestDottedLists()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
