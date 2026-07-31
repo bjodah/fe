@@ -136,6 +136,7 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
 [[nodiscard]] FeDouble FeToDouble(FeContext* ctx, FeObject* obj);
 [[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
+[[nodiscard]] bool FeIsBound(FeContext* ctx, FeObject* sym);
 void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn);
 
 [[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);

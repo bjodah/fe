@@ -6,9 +6,8 @@
         (let aa a)
         (while (cdr (cdr a))
             (= a (cdr a)))
-        (if (atom b)
-                (setcdr a (cons b nil))
-                (setcdr a (cons (car (cdr a)) b)))
+        (setcdr a (cons (car (cdr a))
+                        (if (atom b) (cons b nil) b)))
         aa))))
 
 (assert-equals '(1 2 3 4 5 6) (# '(1 2 3) '(4 5 6)))

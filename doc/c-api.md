@@ -124,6 +124,15 @@ context.
 `FeNil()` returns Fe's nil object without requiring an embedder to reference
 the legacy public `nil` global.
 
+`FeIsBound()` reports whether a symbol has a global value. A symbol exists as
+soon as it is read or interned, but its value cell starts out holding a private
+sentinel that no API returns and Lisp cannot reach; evaluating such a symbol
+raises `void-variable NAME`, and in head position `void-function NAME`.
+`FeSet()` and Lisp's `=` create or update the binding, and `nil` is an ordinary
+bound value. The Lisp-level spellings are `(boundp 'name)` and
+`(makunbound 'name)`, which also see lexical bindings; `FeIsBound()` has no
+environment to consult and answers about the global one.
+
 ## Reading And Running Source
 
 `FeReadString()` reads one form from an explicitly sized byte sequence. The

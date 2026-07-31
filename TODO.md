@@ -27,8 +27,9 @@ and so on.
 Ensure that everything declared in fe.h really needs to be public.
 
 Functions add their arguments to the global environment, but they should be
-creating their own and destorying it upon return. Similarly, just naming a
-non-existent variable creates it in the global env, but should not.
+creating their own and destorying it upon return. (Naming a non-existent
+variable no longer creates it: an unassigned symbol's value cell holds a
+private sentinel and evaluating it raises `void-variable`.)
 
 Add time functions.
 

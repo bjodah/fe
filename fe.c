@@ -34,6 +34,8 @@ typedef enum Primitive {
   PMacro,
   PWhile,
   PQuote,
+  PBoundp,
+  PMakeUnbound,
   PAnd,
   POr,
   PDo,
@@ -57,17 +59,36 @@ typedef enum Primitive {
   PSentinel
 } Primitive;
 
-static const char* primitive_names[] = {
-    [PAssert] = "assert", [PEnv] = "env",       [PLet] = "let",
-    [PSet] = "=",         [PIf] = "if",         [PFn] = "lambda",
-    [PMacro] = "macro",   [PWhile] = "while",   [PQuote] = "quote",
-    [PAnd] = "and",       [POr] = "or",         [PDo] = "do",
-    [PCons] = "cons",     [PCar] = "car",       [PCdr] = "cdr",
-    [PSetCar] = "setcar", [PSetCdr] = "setcdr", [PList] = "list",
-    [PNot] = "not",       [PIs] = "is",         [PAtom] = "atom",
-    [PPrint] = "print",   [PLess] = "<",        [PLessEqual] = "<=",
-    [PAdd] = "+",         [PSub] = "-",         [PMul] = "*",
-    [PDiv] = "/"};
+static const char* primitive_names[] = {[PAssert] = "assert",
+                                        [PEnv] = "env",
+                                        [PLet] = "let",
+                                        [PSet] = "=",
+                                        [PIf] = "if",
+                                        [PFn] = "lambda",
+                                        [PMacro] = "macro",
+                                        [PWhile] = "while",
+                                        [PQuote] = "quote",
+                                        [PBoundp] = "boundp",
+                                        [PMakeUnbound] = "makunbound",
+                                        [PAnd] = "and",
+                                        [POr] = "or",
+                                        [PDo] = "do",
+                                        [PCons] = "cons",
+                                        [PCar] = "car",
+                                        [PCdr] = "cdr",
+                                        [PSetCar] = "setcar",
+                                        [PSetCdr] = "setcdr",
+                                        [PList] = "list",
+                                        [PNot] = "not",
+                                        [PIs] = "is",
+                                        [PAtom] = "atom",
+                                        [PPrint] = "print",
+                                        [PLess] = "<",
+                                        [PLessEqual] = "<=",
+                                        [PAdd] = "+",
+                                        [PSub] = "-",
+                                        [PMul] = "*",
+                                        [PDiv] = "/"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -125,6 +146,16 @@ struct FeObject {
 
 FeObject nil = {.car = {.c = FeTNil << GcMarkBit | OtherCell},
                 .cdr = {.o = NULL}};
+
+// The value of a symbol that has never been assigned. Like `nil` it is a
+// static object outside the arena, so the collector neither sweeps it nor has
+// to mark it, and `FeMark` treats it as a leaf. It is never returned to Lisp or
+// to a host: the only place it lives is a symbol's value cell, which Lisp
+// cannot reach (`(cdr sym)` is a type error) and which every reader of a value
+// cell turns into `void-variable`. It is tagged `FeTFree` so that an escape
+// aborts in the writer instead of impersonating a value.
+static FeObject unbound = {.car = {.c = FeTFree << GcMarkBit | OtherCell},
+                           .cdr = {.o = NULL}};
 
 #define CAR(x) ((x)->car.o)
 #define CDR(x) ((x)->cdr.o)
@@ -588,7 +619,7 @@ FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
   // Create new object, push to symbol_list and return:
   obj = MakeObject(ctx);
   SetType(obj, FeTSymbol);
-  CDR(obj) = FeCons(ctx, FeMakeString(ctx, name), &nil);
+  CDR(obj) = FeCons(ctx, FeMakeString(ctx, name), &unbound);
   ctx->symbol_list = FeCons(ctx, obj, ctx->symbol_list);
   return obj;
 }
@@ -973,6 +1004,10 @@ static FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env) {
 
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
   CDR(GetBound(ctx, sym, &nil)) = v;
+}
+
+bool FeIsBound(FeContext* ctx, FeObject* sym) {
+  return CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil)) != &unbound;
 }
 
 static FeObject rparen;
@@ -1400,6 +1435,15 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
     }
     case PQuote:
       return FeGetNextArgument(ctx, &arg);
+    case PBoundp:
+      va = CheckType(ctx, EVAL_ARG(), FeTSymbol);
+      FeRequireNoArguments(ctx, arg);
+      return FeMakeBool(ctx, CDR(GetBound(ctx, va, env)) != &unbound);
+    case PMakeUnbound:
+      va = CheckType(ctx, EVAL_ARG(), FeTSymbol);
+      FeRequireNoArguments(ctx, arg);
+      CDR(GetBound(ctx, va, env)) = &unbound;
+      return va;
     case PAnd:
       while (!FeIsNil(arg) && !FeIsNil(res = EVAL_ARG()))
         ;
@@ -1465,17 +1509,38 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
   abort();
 }
 
+[[noreturn]] static void HandleVoidSymbol(FeContext* ctx,
+                                          FeObject* symbol,
+                                          const char* kind) {
+  char name[48];
+  char message[64];
+  (void)FeToString(ctx, symbol, name, sizeof(name));
+  Format(message, sizeof(message), "%s %s", kind, name);
+  FeHandleError(ctx, message);
+}
+
 // `(foo 1)` where `foo` has no function value names the culprit, the way
 // Emacs Lisp's `void-function` does; anything else is anonymous.
 [[noreturn]] static void HandleNonCallable(FeContext* ctx, FeObject* callee) {
   if (FeGetType(callee) == FeTSymbol) {
-    char name[48];
-    char message[64];
-    (void)FeToString(ctx, callee, name, sizeof(name));
-    Format(message, sizeof(message), "void-function %s", name);
-    FeHandleError(ctx, message);
+    HandleVoidSymbol(ctx, callee, "void-function");
   }
   FeHandleError(ctx, "tried to call non-callable value");
+}
+
+// The head of a call is looked up here rather than through `Evaluate` so that
+// an unassigned name is `void-function`, as in Emacs Lisp, even though Fe has
+// one namespace and would otherwise say `void-variable`.
+static FeObject* EvaluateHead(FeContext* ctx, FeObject* head, FeObject* env) {
+  if (FeGetType(head) != FeTSymbol) {
+    return Evaluate(ctx, head, env, NULL);
+  }
+  EvaluationStep(ctx);
+  FeObject* value = CDR(GetBound(ctx, head, env));
+  if (value == &unbound) {
+    HandleNonCallable(ctx, head);
+  }
+  return value;
 }
 
 static FeObject* Evaluate(FeContext* ctx,
@@ -1484,7 +1549,11 @@ static FeObject* Evaluate(FeContext* ctx,
                           FeObject** newenv) {
   EvaluationStep(ctx);
   if (FeGetType(obj) == FeTSymbol) {
-    return CDR(GetBound(ctx, obj, env));
+    FeObject* value = CDR(GetBound(ctx, obj, env));
+    if (value == &unbound) {
+      HandleVoidSymbol(ctx, obj, "void-variable");
+    }
+    return value;
   }
   if (FeGetType(obj) != FeTPair) {
     return obj;
@@ -1498,7 +1567,7 @@ static FeObject* Evaluate(FeContext* ctx,
   ctx->call_list = &cl;
 
   const size_t gc = FeSaveGC(ctx);
-  FeObject* fn = Evaluate(ctx, CAR(obj), env, NULL);
+  FeObject* fn = EvaluateHead(ctx, CAR(obj), env);
   FeObject* arg = CDR(obj);
   FeObject* res = &nil;
   FeObject* va;

@@ -52,6 +52,20 @@ Sets the existing binding of `symbol` to the value `value` in the current
 environment. If there is no such binding in the current environment, creates or
 updates a binding in the global environment.
 
+Assignment is the only thing that creates a global binding. Naming a symbol
+that has never been assigned is `void-variable`, not `nil`:
+
+```clojure
+fe > typo
+error: void-variable typo
+fe > (= typo nil)
+nil
+fe > typo
+nil
+```
+
+`nil` is a value like any other, so a variable assigned `nil` is bound.
+
 #### `(if condition then else ...)`
 
 If `condition` is true, evaluates `then`; otherwise, evaluates every remaining
@@ -207,12 +221,12 @@ Returns `expression` unevaluated.
 
 ```clojure
 fe > wow
-nil  ;; There is no binding for the name wow, so its value is nil.
+error: void-variable wow  ;; There is no binding for the name wow.
 fe > (quote wow)
 wow
 fe > (hello world)
-error: void-function hello  ;; There is no binding for the name hello, so its
-                            ;; value is nil. And, nil is not callable.
+error: void-function hello  ;; Fe has one namespace, but a name in head
+                            ;; position is reported as a missing function.
 fe > (quote (hello world))
 (hello world)
 ```
@@ -245,6 +259,26 @@ and `unquote-splicing`, which the core does not define.
 not: it is an ordinary symbol character, and only the two-character sequence
 `#'` is a reader macro. Fe has one namespace, so Emacs Lisp's function quote
 `#'x` reads as plain `x`.
+
+#### `(boundp symbol)`
+
+Evaluates `symbol` and returns `t` if it has a binding in the current
+environment or the global one, otherwise `nil`. A variable whose value is `nil`
+is bound.
+
+```clojure
+fe > (boundp 'typo)
+nil
+fe > (= typo nil)
+nil
+fe > (boundp 'typo)
+t
+```
+
+#### `(makunbound symbol)`
+
+Evaluates `symbol`, removes the value from its innermost binding, and returns
+the symbol. Naming it afterwards is `void-variable` again.
 
 #### `(and ...)`
 

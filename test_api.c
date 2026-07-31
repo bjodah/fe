@@ -895,6 +895,65 @@ static bool TestParameterLists(void) {
   return true;
 }
 
+static bool TestBinding(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // A symbol exists as soon as it is interned; having a value is separate.
+  FeObject* absent = FeMakeSymbol(context, "absent");
+  CHECK(!FeIsBound(context, absent));
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "t")));
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "car")));
+
+  CHECK(ExpectEvaluationError(context, &state, "void.fe", "absent", 6,
+                              "void.fe: void-variable absent"));
+  CHECK(ExpectEvaluationError(context, &state, "void.fe", "(absent 1)", 10,
+                              "void.fe: void-function absent"));
+  CHECK(ExpectEvaluationError(context, &state, "void.fe", "(+ 1 absent)", 12,
+                              "void.fe: void-variable absent"));
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "bind.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("(boundp 'absent)", "nil");
+  CHK("(= absent 7)", "nil");
+  CHK("(boundp 'absent)", "t");
+  CHK("absent", "7");
+  CHK("(makunbound 'absent)", "absent");
+  CHK("(boundp 'absent)", "nil");
+
+  // nil is an ordinary value, not an absence.
+  CHK("(= holds-nil nil)", "nil");
+  CHK("(boundp 'holds-nil)", "t");
+  CHK("holds-nil", "nil");
+
+  // boundp and makunbound see lexical bindings; FeIsBound answers about the
+  // global one.
+  CHK("((lambda (p) (boundp 'p)) 1)", "t");
+  CHK("(boundp 'p)", "nil");
+  CHK("((lambda (p) (do (makunbound 'p) (boundp 'p))) 1)", "nil");
+
+  // The sentinel is not reachable: a symbol's cell is not a pair to Lisp, and
+  // (env) yields symbols, which print as their names.
+  CHECK(ExpectEvaluationError(context, &state, "reach.fe", "(cdr 'absent)", 13,
+                              "reach.fe: expected pair, got symbol"));
+  CHK("(is (car (env)) (car (env)))", "t");
+
+#undef CHK
+
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "holds-nil")));
+  CHECK(!FeIsBound(context, absent));
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestMacroExpansion(void) {
   // Deliberately tight: the expansion has to survive the collections that
   // evaluating it provokes, and nothing but Fe's GC stack refers to it.
@@ -1065,7 +1124,8 @@ int main(void) {
                  TestEvaluationControl() && TestExtensionAPI() &&
                  TestRootsAndCalls() && TestMathNatives() &&
                  TestSerialization() && TestDottedLists() &&
-                 TestMacroExpansion() && TestWriter() && TestParameterLists()
+                 TestMacroExpansion() && TestWriter() && TestParameterLists() &&
+                 TestBinding()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

@@ -15,7 +15,7 @@
         (= xs (cdr xs)))
     r))
 
-(assert-equals '(1 2 3 4) (all '(1 2 3 4)))
+(assert (all '(1 2 3 4)))
 
 (= is-even (fn (x)
     (is 0 (% x 2))))

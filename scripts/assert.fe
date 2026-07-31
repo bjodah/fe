@@ -4,23 +4,24 @@
 (= assert-nil (fn (value)
     (assert-is nil value)))
 
-(= assert-not-nil (fn value)
-    (not (assert-is nil value)))
+(= assert-not-nil (fn (value)
+    (assert value)))
 
 (= equals (fn (a b)
   (if (and (atom a) (atom b))
     (is a b)
     (do
-      (while (and a b (equals (car a) (car b)))
+      (while (and (not (atom a)) (not (atom b))
+                  (equals (car a) (car b)))
         (= a (cdr a))
         (= b (cdr b)))
-      (and (is nil a) (is nil b))))))
+      (and (atom a) (atom b) (is a b))))))
 
-(= assert-equals (fn expectation value)
-    (assert (equals expectation value)))
+(= assert-equals (fn (expectation value)
+    (assert (equals expectation value))))
 
-(= assert-not-equals (fn expectation value)
-    (not (assert-equals expectation value)))
+(= assert-not-equals (fn (expectation value)
+    (assert (not (equals expectation value)))))
 
 (assert-equals 1 1)
 (assert-equals 'hello 'hello)

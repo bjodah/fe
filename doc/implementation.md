@@ -74,7 +74,19 @@ place of an arguments list.
 
 Environments are stored as association lists; for example, an environment with
 the symbol `x` bound to `10` and `y` bound to `20` would be `((x . 10) (y .
-20))`. Globally bound values are stored directly in the symbol object.
+20))`. Globally bound values are stored directly in the symbol object: a symbol's
+`cdr` is the pair `(name . value)`, so a global binding and a lexical one are
+the same shape and one lookup returns the cell either way.
+
+A symbol exists as soon as it is read, which is not the same as having a value.
+A fresh symbol's value cell holds `unbound`, a private static object outside the
+arena — like `nil`, so the collector neither sweeps nor has to mark it, and
+`FeMark` treats it as a leaf. Nothing returns it: Lisp cannot reach a value cell
+(`(cdr sym)` is a type error, and `(env)` yields symbols whose printed form is
+their name), and the two readers of a value cell — symbol evaluation and the
+head of a call — turn it into `void-variable NAME` and `void-function NAME`. It
+is tagged `FeTFree` so that an escape aborts in the writer rather than
+impersonating a value.
 
 ## Garbage Collection
 
