@@ -14,7 +14,9 @@ Fe is a small, embeddable Lisp-like language implemented in C23. Read
 - `auto.[ch]`: cleanup helpers based on the compiler `cleanup` attribute.
 - `scripts/*.fe`: executable examples and regression-test inputs.
 - `tests/*.out` and `tests/*.err`: exact golden output for the scripts.
-- `doc/`: language, implementation, and C API documentation.
+- `doc/`: language, implementation, C API and fuzzing documentation, plus
+  `unwind-design.md`, which is a design for cleanup/unwinding that is
+  deliberately not implemented yet.
 - `.ci/`: the numbered CI stages and their shared environment.
 - `utils/`: complexity-budget checks used by CI.
 - `fuzz/`: raw-reader and grammar-steered evaluator fuzz harnesses.
