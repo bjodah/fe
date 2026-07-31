@@ -9,3 +9,29 @@
 ;; (= g (fn (name) (open-file name "r")))
 ;; (g "goat")
 ;; (close-file 2)
+
+;; Paths, modes and written data are exact bytes, not a fixed-size rendering.
+;; This path is longer than the 8-byte buffer the mode used to be copied into
+;; and shorter than nothing else in particular; the point is that it round
+;; trips.
+(= scratch "fe-io-scratch.tmp")
+(= w (open-file scratch "w"))
+(assert-not-nil w)
+(assert-is 12 (write-file w "hello, file\n"))
+(assert-nil (close-file w))
+
+(= r (open-file scratch "r"))
+(assert-is "hello, file\n" (read-file r "\n"))
+(assert-nil (close-file r))
+(assert-nil (remove-file scratch))
+
+;; A symbol is accepted where a string is, and its name is what is written.
+(= w (open-file scratch "w"))
+(assert-is 3 (write-file w 'abc))
+(assert-nil (close-file w))
+(assert-nil (remove-file scratch))
+
+;; Exit status, and 128 + signal for a killed child.
+(assert-is 0 (execute "true"))
+(assert-is 1 (execute "false"))
+(assert-is 143 (execute "sh" "-c" "kill -TERM $$"))

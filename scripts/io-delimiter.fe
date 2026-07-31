@@ -1,0 +1,5 @@
+;; A death test: the record delimiter is exactly one byte, not the first byte
+;; of whatever the printer made of the argument.
+(= f (open-file "fe.c" "r"))
+(read-file f "ab")
+(print "not reached")

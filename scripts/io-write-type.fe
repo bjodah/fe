@@ -1,0 +1,3 @@
+;; A death test: write-file writes bytes, so it wants something made of bytes.
+(write-file stdout 42)
+(print "not reached")

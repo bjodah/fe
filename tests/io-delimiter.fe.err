@@ -1,0 +1,2 @@
+error: delimiter must be one byte
+(read-file f "ab")

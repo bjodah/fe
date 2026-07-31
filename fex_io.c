@@ -4,7 +4,6 @@
 #include <sys/types.h>
 
 #include <errno.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -102,24 +101,39 @@ FeObject* FexCloseFile(FeContext* ctx, FeObject* arg) {
 }
 
 FeObject* FexOpenFile(FeContext* ctx, FeObject* arg) {
-  char pathname[PATH_MAX + 1];
-  (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), pathname,
-                   sizeof(pathname));
-  char mode[8];
-  (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), mode, sizeof(mode));
+  // Both arguments are taken before either is copied: FeGetNextArgument raises
+  // on a missing one, and doing that while holding an allocation would lose it.
+  FeObject* path_object = FeGetNextArgument(ctx, &arg);
+  FeObject* mode_object = FeGetNextArgument(ctx, &arg);
+  FeRequireNoArguments(ctx, arg);
+  char* pathname = FexCopyStringZ(ctx, path_object, NULL);
+  char* mode = FexCopyStringZ(ctx, mode_object, pathname);
   FILE* file = fopen(pathname, mode);
-  return file != NULL ? MakeFile(ctx, file, true) : BuildErrnoError(ctx, errno);
+  const int error = errno;
+  free(mode);
+  free(pathname);
+  return file != NULL ? MakeFile(ctx, file, true) : BuildErrnoError(ctx, error);
 }
 
 FeObject* FexReadFile(FeContext* ctx, FeObject* arg) {
   FILE* file = GetOpenFile(ctx, &arg);
-  char delimiter[16];
-  (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), delimiter,
-                   sizeof(delimiter));
+  FeObject* delimiter_object = FeGetNextArgument(ctx, &arg);
+  FeRequireNoArguments(ctx, arg);
+  // `getdelim` takes one byte, so anything else is refused rather than silently
+  // reduced to its first byte -- which used to turn `nil` into `n`, because a
+  // non-string was rendered by the printer first.
+  if (FeGetType(delimiter_object) != FeTString) {
+    FeHandleError(ctx, "delimiter is not a string");
+  }
+  char delimiter;
+  if (!FeCopyStringBytes(ctx, delimiter_object, &delimiter, 1) ||
+      FeStringByteLength(ctx, delimiter_object) != 1) {
+    FeHandleError(ctx, "delimiter must be one byte");
+  }
 
   char* record = NULL;
   size_t capacity = 0;
-  const ssize_t r = getdelim(&record, &capacity, delimiter[0], file);
+  const ssize_t r = getdelim(&record, &capacity, delimiter, file);
   const int error = errno;
   FeObject* result =
       r >= 0 ? FeMakeString(ctx, record) : BuildErrnoError(ctx, error);
@@ -128,26 +142,39 @@ FeObject* FexReadFile(FeContext* ctx, FeObject* arg) {
 }
 
 FeObject* FexRemoveFile(FeContext* ctx, FeObject* arg) {
-  char pathname[PATH_MAX + 1];
-  (void)FeToString(ctx, FeGetNextArgument(ctx, &arg), pathname,
-                   sizeof(pathname));
-  return remove(pathname) == 0 ? &nil : BuildErrnoError(ctx, errno);
+  FeObject* path_object = FeGetNextArgument(ctx, &arg);
+  FeRequireNoArguments(ctx, arg);
+  char* pathname = FexCopyStringZ(ctx, path_object, NULL);
+  const bool removed = remove(pathname) == 0;
+  const int error = errno;
+  free(pathname);
+  return removed ? &nil : BuildErrnoError(ctx, error);
 }
 
+// Writes the exact bytes of a string or symbol, not the printer's rendering of
+// an arbitrary object, and not through a 4 MiB buffer that silently truncated
+// anything longer and read errno even on success. Returns the byte count.
 FeObject* FexWriteFile(FeContext* ctx, FeObject* arg) {
   FILE* file = GetOpenFile(ctx, &arg);
-  const size_t arbitrary_limit = 4 * 1024 * 1024;  // TODO
-  char* buffer = malloc(arbitrary_limit);
-  if (buffer == NULL) {
-    FeHandleError(ctx, "out of memory");
+  FeObject* object = FeGetNextArgument(ctx, &arg);
+  FeRequireNoArguments(ctx, arg);
+  const size_t length = FeStringByteLength(ctx, object);
+  char* bytes = FexCopyStringZ(ctx, object, NULL);
+
+  size_t written = 0;
+  int error = 0;
+  while (written < length) {
+    const size_t n = fwrite(bytes + written, 1, length - written, file);
+    if (n == 0) {
+      error = ferror(file) != 0 ? errno : 0;
+      break;
+    }
+    written += n;
   }
-  const size_t size =
-      FeToString(ctx, FeGetNextArgument(ctx, &arg), buffer, arbitrary_limit);
-  // cppcheck-suppress nullPointerOutOfMemory
-  const size_t written = fwrite(buffer, 1, size, file);
-  const int error = errno;
-  FeObject* result = written == size ? FeMakeDouble(ctx, (double)written)
-                                     : BuildErrnoError(ctx, error);
-  free(buffer);
-  return result;
+  free(bytes);
+  if (written == length) {
+    return FeMakeDouble(ctx, (double)written);
+  }
+  return error != 0 ? BuildErrnoError(ctx, error)
+                    : FeMakeDouble(ctx, (double)written);
 }

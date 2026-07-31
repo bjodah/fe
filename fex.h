@@ -14,5 +14,8 @@ extern const char* FexVersion;
 void FexInit(FeContext* ctx);
 FeObject* BuildErrnoError(FeContext* ctx, int error);
 void FexInstallNativeFn(FeContext* ctx, const char* name, FeNativeFn fn);
+[[nodiscard]] char* FexCopyStringZ(FeContext* ctx,
+                                   const FeObject* obj,
+                                   void* cleanup);
 
 #endif

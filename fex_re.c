@@ -33,17 +33,6 @@ void FexInstallRE(FeContext* ctx) {
   FexInstallNativeFn(ctx, "match-re", FexMatchRE);
 }
 
-static char* CopyStringZ(FeContext* ctx, const FeObject* obj) {
-  size_t len = FeStringByteLength(ctx, obj);
-  char* bytes = Allocate(ctx, len + 1, NULL);
-  if (!FeCopyStringBytes(ctx, obj, bytes, len + 1)) {
-    free(bytes);
-    FeHandleError(ctx, "failed to copy string bytes");
-  }
-  bytes[len] = '\0';
-  return bytes;
-}
-
 static re_flags ParseCompileFlags(FeContext* ctx, FeObject** arg) {
   re_flags flags = RE_FLAG_NONE;
 
@@ -102,7 +91,7 @@ FeObject* FexCompileRE(FeContext* ctx, FeObject* arg) {
   const FeObject* pattern_obj = FeGetNextArgument(ctx, &arg);
   re_flags flags = ParseCompileFlags(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
-  char* pattern = CopyStringZ(ctx, pattern_obj);
+  char* pattern = FexCopyStringZ(ctx, pattern_obj, NULL);
 
   unsigned storage_size = 0;
   re_t regex = NULL;
@@ -162,7 +151,7 @@ FeObject* FexMatchRE(FeContext* ctx, FeObject* arg) {
     start_offset = (int)offset;
   }
   FeRequireNoArguments(ctx, arg);
-  char* text = CopyStringZ(ctx, text_obj);
+  char* text = FexCopyStringZ(ctx, text_obj, NULL);
 
   re_match_result match_res = {0};
   re_status status = re_exec(rx->regex, text, start_offset, &match_res);

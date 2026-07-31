@@ -1,6 +1,7 @@
 // Copyright 2024 Chris Palmer, https://noncombatant.org/
 // SPDX-License-Identifier: MIT
 
+#include <stdckdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -50,4 +51,30 @@ FeObject* BuildErrnoError(FeContext* ctx, int error) {
 
 void FexInstallNativeFn(FeContext* ctx, const char* name, FeNativeFn fn) {
   FeDefineNative(ctx, name, fn);
+}
+
+// The exact bytes of a string or symbol, NUL terminated, in storage the caller
+// frees. Unlike `FeToString` this is not the printer: it does not quote, does
+// not escape, and cannot truncate. `cleanup` is freed before raising, which is
+// how a caller that already holds an allocation hands it over; `FeHandleError`
+// does not return, so there is no other way to release it.
+char* FexCopyStringZ(FeContext* ctx, const FeObject* obj, void* cleanup) {
+  const size_t length = FeStringByteLength(ctx, obj);
+  size_t size;
+  if (ckd_add(&size, length, 1)) {
+    free(cleanup);
+    FeHandleError(ctx, "string too long");
+  }
+  char* bytes = malloc(size);
+  if (bytes == NULL) {
+    free(cleanup);
+    FeHandleError(ctx, "out of memory");
+  }
+  if (!FeCopyStringBytes(ctx, obj, bytes, length)) {
+    free(bytes);
+    free(cleanup);
+    FeHandleError(ctx, "failed to copy string bytes");
+  }
+  bytes[length] = '\0';
+  return bytes;
 }
