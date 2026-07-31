@@ -21,6 +21,30 @@ static const char* InterpreterVersion = "1.0";
 
 static jmp_buf top_level;
 
+static FeContext* live_context;
+static char* live_arena;
+static FILE* live_input;
+
+// `exit()` does not run the `cleanup` attributes, so the fatal path has to
+// release the interpreter itself. Otherwise every diagnostic leaves the arena
+// behind and, worse, never runs the extension finalizers, so open files are
+// never closed.
+static void ReleaseInterpreter(void) {
+  FeContext* ctx = live_context;
+  char* arena = live_arena;
+  live_context = nullptr;
+  live_arena = nullptr;
+  FILE* input = live_input;
+  live_input = nullptr;
+  if (ctx != nullptr) {
+    FeCloseContext(ctx);
+  }
+  free(arena);
+  if (input != nullptr) {
+    (void)fclose(input);
+  }
+}
+
 static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
   fprintf(stderr, "error: %s\n", message);
   while (!FeIsNil(stack)) {
@@ -42,6 +66,7 @@ static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
                                           const char* message,
                                           FeObject* stack) {
   PrintError(ctx, message, stack);
+  ReleaseInterpreter();
   exit(EXIT_FAILURE);
 }
 
@@ -160,6 +185,8 @@ int main(int count, char* arguments[]) {
     return EXIT_FAILURE;
   }
   AUTO(FeContext*, context, opened_context, CloseContext);
+  live_context = opened_context;
+  live_arena = arena;
   FeSetErrorFn(context, HandleFatalError);
   FeSetStrictArity(context, strict_arity);
   if (extensions) {
@@ -189,7 +216,9 @@ int main(int count, char* arguments[]) {
     if (!input) {
       FeHandleError(context, "could not open input file");
     }
+    live_input = input;
     gc = ReadEvaluatePrint(context, input, gc);
+    live_input = nullptr;
   }
   if (interactive) {
     ReadEvaluatePrint(context, stdin, gc);
