@@ -77,6 +77,8 @@ void FeSetUserData(FeContext* ctx, void* userdata);
 void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
 void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
+void FeSetStrictArity(FeContext* ctx, bool strict);
+[[nodiscard]] bool FeGetStrictArity(const FeContext* ctx);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
 
 [[nodiscard]] FeType FeGetType(const FeObject* obj);

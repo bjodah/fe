@@ -72,6 +72,16 @@ use must remain valid until replaced or until `FeCloseContext()` returns. The
 mark and GC callbacks can run during any operation that allocates an Fe object,
 including context close.
 
+`FeSetStrictArity()` turns on argument-count checking for lambda and macro
+calls in that context, and `FeGetStrictArity()` reports it. It is off by
+default, which is Fe's historical behaviour: a missing argument binds `nil`, an
+extra one is dropped, and a non-symbol parameter binds nothing. With it on, a
+parameter before `&optional` must have an argument, an argument must have
+somewhere to go, and a parameter must be a symbol. It is a per-context setting
+that can be changed at any time and does not affect native functions, which
+enforce their own arity with `FeGetNextArgument()` and
+`FeRequireNoArguments()`.
+
 An Fe native callback may re-enter the reader or evaluator on the same context.
 This nesting is supported on the same thread. The callback must observe the GC
 protection rules below, and an error escaping nested evaluation must unwind all

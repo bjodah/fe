@@ -126,6 +126,15 @@ recognized by name, so they cannot also be used as parameter names.
 
 Macros take their parameters the same way, over the caller's unevaluated forms.
 
+By default Fe does not check argument counts at all: `((lambda (x) x))` is
+`nil`, `((lambda () 1) 2)` is `1`, and `((lambda (1) 5) 2)` is `5`. A host can
+ask for the checks with `FeSetStrictArity()`, and `fe -a` turns them on for the
+interpreter. Then a parameter before `&optional` must have an argument, an
+argument must have a parameter or a rest parameter to go to, and a parameter
+must be a symbol; the failures are `wrong-number-of-arguments` and `parameter
+is not a symbol`. Optional and rest parameters are unaffected, and passing
+`nil` explicitly is still passing an argument.
+
 #### `(macro arguments ...)`
 
 Creates a new macro.

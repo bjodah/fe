@@ -5,7 +5,7 @@
 (assert-is (id 5) (id (+ 4 1)))
 (assert-equals '(1 2 3 4) (id '(1 2 3 4)))
 
-(= all (fn (xs predicate)
+(= all (fn (xs &optional predicate)
     (if (not predicate)
         (= predicate id))
     (let r t)
@@ -29,7 +29,7 @@
 (assert (all '(2 4 6 8) is-even))
 (assert-nil (all '(2 4 6 7) is-even))
 
-(= any (fn (xs predicate)
+(= any (fn (xs &optional predicate)
     (if (not predicate)
         (= predicate id))
     (let r nil)

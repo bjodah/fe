@@ -171,6 +171,7 @@ struct FeContext {
   size_t error_offset;
   bool evaluation_active;
   bool evaluation_limited;
+  bool strict_arity;
   bool error_has_offset;
   char nextchr;
 };
@@ -203,6 +204,14 @@ void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn) {
 
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn) {
   ctx->gc_fn = fn;
+}
+
+void FeSetStrictArity(FeContext* ctx, bool strict) {
+  ctx->strict_arity = strict;
+}
+
+bool FeGetStrictArity(const FeContext* ctx) {
+  return ctx->strict_arity;
 }
 
 static void __attribute((format(printf, 3, 4))) Format(char* result,
@@ -1262,13 +1271,17 @@ static FeObject* Bind(FeContext* ctx,
 
 // Binds a lambda or macro parameter list to an argument list. Three spellings
 // collect the remaining arguments: Fe's dotted tail `(a . r)`, Fe's bare symbol
-// `r`, and Emacs Lisp's `(a &rest r)`. `&optional` is accepted and, for now,
-// only says out loud what the binder already did: a parameter with no argument
-// is nil.
+// `r`, and Emacs Lisp's `(a &rest r)`. Under `FeSetStrictArity()` a parameter
+// before `&optional` must have an argument, an argument must have somewhere to
+// go, and a parameter must be a symbol; otherwise a missing argument is nil, an
+// extra one is dropped, and a non-symbol parameter binds nothing -- Fe's
+// historical behaviour.
 static FeObject* ArgsToEnv(FeContext* ctx,
                            FeObject* prm,
                            FeObject* arg,
                            FeObject* env) {
+  const bool strict = ctx->strict_arity;
+  bool optional = false;
   while (!FeIsNil(prm)) {
     EvaluationStep(ctx);
     if (FeGetType(prm) != FeTPair) {
@@ -1277,6 +1290,7 @@ static FeObject* ArgsToEnv(FeContext* ctx,
     FeObject* name = CAR(prm);
     prm = CDR(prm);
     if (IsNamedSymbol(name, "&optional")) {
+      optional = true;
       continue;
     }
     if (IsNamedSymbol(name, "&rest")) {
@@ -1288,8 +1302,19 @@ static FeObject* ArgsToEnv(FeContext* ctx,
       }
       return Bind(ctx, env, CAR(prm), arg);
     }
+    if (strict) {
+      if (FeGetType(name) != FeTSymbol) {
+        FeHandleError(ctx, "parameter is not a symbol");
+      }
+      if (!optional && FeIsNil(arg)) {
+        FeHandleError(ctx, "wrong-number-of-arguments");
+      }
+    }
     env = Bind(ctx, env, name, FeCar(ctx, arg));
     arg = FeCdr(ctx, arg);
+  }
+  if (strict && !FeIsNil(arg)) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
   }
   return env;
 }

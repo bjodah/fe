@@ -26,11 +26,11 @@ run_test() {
         continue
         ;;
     esac
-    ${FE_RUNNER:-} ./fe scripts/assert.fe "$s" > out 2> err
-    check_results "tests/$b.out" "tests/$b.err" "$s"
+    ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} scripts/assert.fe "$s" > out 2> err
+    check_results "tests/$b.out" "tests/$b.err" "$s${FE_COMMENT:-}"
   done
-  ${FE_RUNNER:-} ./fe -e '(print "hello, world!")' > out 2> err
-  check_results "tests/one-liner.out" "tests/one-liner.err" "one-liner"
+  ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} -e '(print "hello, world!")' > out 2> err
+  check_results "tests/one-liner.out" "tests/one-liner.err" "one-liner${FE_COMMENT:-}"
   rm out err
 }
 
@@ -40,6 +40,9 @@ run_test
 make clean
 RELEASE=1 make fe
 run_test
+
+# Every script is arity-correct, so -a must not change a single byte of output.
+FE_FLAGS="-a" FE_COMMENT=" (-a)" run_test
 
 if [[ $failed -eq 0 ]]; then
   echo "✅ all tests passed"

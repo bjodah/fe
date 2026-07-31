@@ -847,6 +847,50 @@ static bool TestParameterLists(void) {
                               strlen("((lambda (a &rest r x) a) 1)"),
                               "rest.fe: &rest must be the last parameter"));
 
+  // Lax by default: a missing argument is nil, an extra one is dropped, and a
+  // non-symbol parameter binds nothing.
+  CHECK(!FeGetStrictArity(context));
+#define LAX(expr, expected)                                                 \
+  CHECK(IsRendered(                                                         \
+      context, FeEvaluateString(context, "lax.fe", expr, sizeof(expr) - 1), \
+      expected))
+  LAX("((lambda (x) x))", "nil");
+  LAX("((lambda () 1) 2)", "1");
+  LAX("((lambda (1) 5) 2)", "5");
+#undef LAX
+
+  FeSetStrictArity(context, true);
+  CHECK(FeGetStrictArity(context));
+#define STRICT(expr, message)                                     \
+  CHECK(ExpectEvaluationError(context, &state, "strict.fe", expr, \
+                              strlen(expr), message))
+  STRICT("((lambda (x) x))", "strict.fe: wrong-number-of-arguments");
+  STRICT("((lambda (a b) a) 1)", "strict.fe: wrong-number-of-arguments");
+  STRICT("((lambda () 1) 2)", "strict.fe: wrong-number-of-arguments");
+  STRICT("((lambda (a) a) 1 2)", "strict.fe: wrong-number-of-arguments");
+  STRICT("((lambda (1) 5) 2)", "strict.fe: parameter is not a symbol");
+  STRICT("((macro (a) a))", "strict.fe: wrong-number-of-arguments");
+#undef STRICT
+
+  // What strict arity still accepts.
+#define OK(expr, expected)                                                     \
+  CHECK(IsRendered(context,                                                    \
+                   FeEvaluateString(context, "ok.fe", expr, sizeof(expr) - 1), \
+                   expected))
+  OK("((lambda (a &optional b) (list a b)) 1)", "(1 nil)");
+  OK("((lambda (a &optional b) (list a b)) 1 2)", "(1 2)");
+  OK("((lambda (a &rest r) (list a r)) 1)", "(1 nil)");
+  OK("((lambda (a &rest r) (list a r)) 1 2 3)", "(1 (2 3))");
+  OK("((lambda (a . r) (list a r)) 1)", "(1 nil)");
+  OK("((lambda r r) 1 2 3)", "(1 2 3)");
+  OK("((lambda (a) a) nil)", "nil");
+#undef OK
+
+  FeSetStrictArity(context, false);
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "again.fe", "((lambda (x) x))", 16),
+      "nil"));
+
   FeCloseContext(context);
   return true;
 }
