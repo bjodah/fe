@@ -1,0 +1,5 @@
+;; A death test: closing a file twice is an error, not undefined behaviour.
+(= f (open-file "fe.c" "r"))
+(assert-nil (close-file f))
+(close-file f)
+(print "not reached")

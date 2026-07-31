@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "fex.h"
+#include "fex_io.h"
 #include "fex_re.h"
 
 const char* FexVersion = "0.1";
@@ -22,9 +23,10 @@ static FeObject* FexGC(FeContext* ctx, FeObject* o) {
     case FeTPrimitive:
     case FeTNativeFn:
     case FeTPtr:
-    case FexTFile:
     case FeTFex2:
       return &nil;
+    case FexTFile:
+      return FexGCFile(ctx, o);
     case FexTRE:
       return FexGCRE(ctx, o);
     case FeTSentinel:

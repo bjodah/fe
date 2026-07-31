@@ -13,5 +13,6 @@ FeObject* FexOpenFile(FeContext* ctx, FeObject* arg);
 FeObject* FexReadFile(FeContext* ctx, FeObject* arg);
 FeObject* FexRemoveFile(FeContext* ctx, FeObject* arg);
 FeObject* FexWriteFile(FeContext* ctx, FeObject* arg);
+FeObject* FexGCFile(FeContext* ctx, FeObject* o);
 
 #endif

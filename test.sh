@@ -26,10 +26,11 @@ run_test() {
         continue
         ;;
     esac
-    ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} scripts/assert.fe "$s" > out 2> err
+    # A script may die on purpose; the golden stderr is what decides.
+    ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} scripts/assert.fe "$s" > out 2> err || true
     check_results "tests/$b.out" "tests/$b.err" "$s${FE_COMMENT:-}"
   done
-  ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} -e '(print "hello, world!")' > out 2> err
+  ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} -e '(print "hello, world!")' > out 2> err || true
   check_results "tests/one-liner.out" "tests/one-liner.err" "one-liner${FE_COMMENT:-}"
   rm out err
 }

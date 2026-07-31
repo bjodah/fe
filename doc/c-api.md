@@ -431,6 +431,23 @@ They are process-global legacy interfaces, are not safe as per-context type
 registrations, and are slated for removal when Phase 8 introduces per-context
 custom types. New kg-style embedders must not use them.
 
+The in-tree file extension shows what such a type has to do. An `FexTFile` cell
+does not hold a bare `FILE*`; it holds a heap record with the stream, whether
+Fex owns it, and whether it has been closed. Every native validates the type and
+the live state before touching the stream, `close-file` marks the record closed
+before calling `fclose` so a failed close cannot hand the stream back to stdio,
+closing twice and reading after close are errors rather than undefined
+behaviour, and `stdin`/`stdout`/`stderr` are marked unowned so Lisp cannot close
+the host's streams. The GC callback closes an owned, unclosed file exactly once
+and frees the record, which is what stops an unclosed file from leaking its
+descriptor for the life of the process; because it runs on every swept object it
+allocates nothing and is not reentrant.
+
+One hazard has no clean answer under the current API: the record must be
+allocated before `FeMakePtr()`, and `FeMakePtr()` can collect and raise, so an
+out-of-memory error at exactly that point loses the record. Fixing it needs a
+C-side cleanup stack that survives the `longjmp`.
+
 `FeMakePtr()`, `FeSetMarkFn()`, `FeSetGCFn()`, and `FeMark()` support that legacy
 Fex model: the mark callback marks Fe objects reachable through an external
 pointer, and the GC callback releases external resources. Until the deferred

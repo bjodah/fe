@@ -1,0 +1,3 @@
+;; A death test: the standard streams belong to the host.
+(close-file stdout)
+(print "not reached")
