@@ -136,13 +136,36 @@ static FeObject* BuildFunctionCall(FeContext* ctx,
       ctx, (FeObject*[]){function, BuildExpression(ctx, input, depth + 1)}, 2);
 }
 
+// A macro body. A list expansion is the interesting structural case, but the
+// atom expansions are the ones that used to be miscompiled: the expansion was
+// copied over the call site, and `nil` and interned symbols are compared by
+// address, so a copy of either was a different object.
+static FeObject* BuildMacroBody(FeContext* ctx,
+                                FuzzInput* input,
+                                FeObject* parameter) {
+  switch (FuzzTakeByte(input) % 5) {
+    case 0:
+      return &nil;
+    case 1:
+      return MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "t"));
+    case 2:
+      return MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "x"));
+    case 3:
+      return BuildNumber(ctx, input);
+    default: {
+      FeObject* quoted_quote =
+          MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "quote"));
+      return MakeBinary(ctx, "list", quoted_quote, parameter);
+    }
+  }
+}
+
 static FeObject* BuildMacroCall(FeContext* ctx,
                                 FuzzInput* input,
                                 unsigned depth) {
   FeObject* parameter = FeMakeSymbol(ctx, "x");
   FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
-  FeObject* quoted_quote = MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "quote"));
-  FeObject* body = MakeBinary(ctx, "list", quoted_quote, parameter);
+  FeObject* body = BuildMacroBody(ctx, input, parameter);
   FeObject* macro = MakeForm(ctx, "macro", (FeObject*[]){parameters, body}, 2);
   return FeMakeList(ctx,
                     (FeObject*[]){macro, BuildDatum(ctx, input, depth + 1)}, 2);

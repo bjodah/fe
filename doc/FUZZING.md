@@ -24,7 +24,9 @@ intentionally not consumed.
 `make fuzz-eval` builds `fuzz/fuzz_eval`. Arbitrary bytes select a bounded AST
 grammar, built through the public C API. Generated expressions cover atoms,
 quoted data, lists, arithmetic, comparisons, conditionals, short-circuiting,
-bindings, functions, macros, and non-cyclic pair mutation.
+bindings, functions, macros, and non-cyclic pair mutation. Macro bodies expand
+to a list, to `nil`, to `t`, to a symbol, or to a number, so the target reaches
+the atom expansions as well as the structural one.
 
 The grammar deliberately excludes:
 

@@ -102,9 +102,9 @@ fe > (square 4)
 Creates a new macro.
 
 Macros work similar to functions, but receive their arguments unevaluated and
-return code which is evaluated in the scope of the caller. The first time a
-macro is called the call site is replaced by the generated code, such that the
-macro itself is only run once in each call site.
+return code which is evaluated in the scope of the caller. The macro runs on
+every call: the expansion is evaluated as it stands and the call site keeps the
+macro call.
 
 For example, we could define a macro named `++` to increment a numeric value by
 1:
@@ -124,19 +124,25 @@ Then we could use it in the following `while` loop:
   (++ i))
 ```
 
-Upon the first call to `++`, the program code would be modified in place,
-replacing the call to the macro with the code it generated. Thus, the above code
-expands to, and is equivalent to, this code:
+Each iteration expands `(++ i)` afresh, so the loop body behaves as if it had
+been written
 
 ```clojure
 (= i 0)
-(while (< i 0)
+(while (< i 10)
   (print i)
   (= i (+ i 1)))
 ```
 
-Subsequent iterations of the loop would run the new code which now exists where
-the macro call was originally.
+Earlier versions of Fe expanded once and then overwrote the call site with the
+generated code. That made a macro's own definition unreachable after the first
+call, and it was wrong for expansions that are not lists: overwriting the call
+site copied the returned object, and `nil` and interned symbols are compared by
+address, so a macro expanding to `nil` produced a `nil` that was true, and one
+expanding to a symbol produced a symbol that missed every lexical binding of
+that name. Expanding each time costs one expansion per call -- charged against
+the host's evaluation-step budget -- and buys back a macro that means what it
+says.
 
 For more examples, see [macros.fe](../scripts/macros.fe).
 

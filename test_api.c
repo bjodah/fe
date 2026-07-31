@@ -682,6 +682,45 @@ static bool TestMathNatives(void) {
   return true;
 }
 
+static bool TestMacroExpansion(void) {
+  // Deliberately tight: the expansion has to survive the collections that
+  // evaluating it provokes, and nothing but Fe's GC stack refers to it.
+  TestArena arena;
+  const size_t size = FeMinimumArenaSize() + 8192;
+  CHECK(size <= sizeof(arena.bytes));
+  FeContext* context = FeOpenContext(arena.bytes, size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char loop[] =
+      "(= make (macro (a b) (list 'list a b)))"
+      "(= n 0)"
+      "(= acc nil)"
+      "(while (< n 200) (= acc (make n n)) (= n (+ n 1)))"
+      "acc";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "gc.fe", loop, sizeof(loop) - 1),
+                   "(199 199)"));
+
+  // An error raised by the expansion, and one raised while expanding, both
+  // leave the context usable.
+  CHECK(ExpectEvaluationError(context, &state, "expansion.fe",
+                              "(= bad (macro () '(car 1))) (bad)",
+                              strlen("(= bad (macro () '(car 1))) (bad)"),
+                              "expansion.fe: expected pair, got double"));
+  CHECK(ExpectEvaluationError(context, &state, "expander.fe",
+                              "(= worse (macro () (car 1))) (worse)",
+                              strlen("(= worse (macro () (car 1))) (worse)"),
+                              "expander.fe: expected pair, got double"));
+  CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
+                   "3"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool ReadsAs(FeContext* context,
                     const char* source,
                     const char* expected) {
@@ -812,7 +851,8 @@ int main(void) {
                  TestStringInput() && TestFileInput() &&
                  TestEvaluationControl() && TestExtensionAPI() &&
                  TestRootsAndCalls() && TestMathNatives() &&
-                 TestSerialization() && TestDottedLists()
+                 TestSerialization() && TestDottedLists() &&
+                 TestMacroExpansion()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

@@ -33,3 +33,51 @@
 (for x items
   (print ">" x)
 )
+
+
+;; A macro is expanded on every call, and the expansion is evaluated as it
+;; stands: it is never copied over the call site. Copying used to clone the
+;; returned atom, and both `nil` and interned symbols are compared by address.
+
+(= expands-to-nil (macro () nil))
+(assert-nil (expands-to-nil))
+(assert (not (expands-to-nil)))
+(assert-is 'else (if (expands-to-nil) 'then 'else))
+
+(= expands-to-t (macro () t))
+(= expands-to-number (macro () 42))
+(= expands-to-string (macro () "wow"))
+(assert-is t (expands-to-t))
+(assert-is 42 (expands-to-number))
+(assert-is "wow" (expands-to-string))
+
+;; The expansion is a symbol, and the call site is inside a lambda that binds
+;; that same name. A cloned symbol misses the lexical binding and reads the
+;; global value instead.
+(= shadowed 42)
+(= expands-to-symbol (macro () 'shadowed))
+(assert-is 7 ((fn (shadowed) (expands-to-symbol)) 7))
+(assert-is 42 (expands-to-symbol))
+
+;; A quoted list handed out by a macro stays intact for the next caller.
+(= shared-expansion '(+ 1 2))
+(= expands-to-shared (macro () shared-expansion))
+(assert-is 3 (expands-to-shared))
+(assert-equals '(+ 1 2) shared-expansion)
+(assert-is 3 (expands-to-shared))
+
+;; Redefining a macro changes what an existing call site does.
+(= versioned (macro () 1))
+(= call-versioned (fn () (versioned)))
+(assert-is 1 (call-versioned))
+(= versioned (macro () 2))
+(assert-is 2 (call-versioned))
+
+;; Repeated invocation from a loop body.
+(= bump-count 0)
+(= bump (macro () '(= bump-count (+ bump-count 1))))
+(= bump-i 0)
+(while (< bump-i 3)
+  (bump)
+  (= bump-i (+ bump-i 1)))
+(assert-is 3 bump-count)
