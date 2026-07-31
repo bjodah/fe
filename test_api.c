@@ -814,6 +814,43 @@ static bool TestWriter(void) {
   return true;
 }
 
+static bool TestParameterLists(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "args.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("((lambda (a &optional b) (list a b)) 1)", "(1 nil)");
+  CHK("((lambda (a &optional b) (list a b)) 1 2)", "(1 2)");
+  CHK("((lambda (a &rest r) (list a r)) 1 2 3)", "(1 (2 3))");
+  CHK("((lambda (a &rest r) (list a r)) 1)", "(1 nil)");
+  CHK("((lambda (&rest r) r) 1 2 3)", "(1 2 3)");
+  CHK("((lambda (a . r) (list a r)) 1 2 3)", "(1 (2 3))");
+  CHK("((lambda r r) 1 2 3)", "(1 2 3)");
+  CHK("((macro (a &rest r) (cons 'list (cons a r))) 1 2 3)", "(1 2 3)");
+
+#undef CHK
+
+  CHECK(ExpectEvaluationError(context, &state, "rest.fe",
+                              "((lambda (a &rest) a) 1)",
+                              strlen("((lambda (a &rest) a) 1)"),
+                              "rest.fe: &rest needs a parameter name"));
+  CHECK(ExpectEvaluationError(context, &state, "rest.fe",
+                              "((lambda (a &rest r x) a) 1)",
+                              strlen("((lambda (a &rest r x) a) 1)"),
+                              "rest.fe: &rest must be the last parameter"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestMacroExpansion(void) {
   // Deliberately tight: the expansion has to survive the collections that
   // evaluating it provokes, and nothing but Fe's GC stack refers to it.
@@ -984,7 +1021,7 @@ int main(void) {
                  TestEvaluationControl() && TestExtensionAPI() &&
                  TestRootsAndCalls() && TestMathNatives() &&
                  TestSerialization() && TestDottedLists() &&
-                 TestMacroExpansion() && TestWriter()
+                 TestMacroExpansion() && TestWriter() && TestParameterLists()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

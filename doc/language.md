@@ -97,6 +97,35 @@ fe > (square 4)
 16
 ```
 
+##### Parameter lists
+
+A parameter list is a list of symbols. A parameter with no corresponding
+argument is `nil`, and `&optional` may be written before such parameters to say
+so:
+
+```clojure
+fe > ((lambda (a &optional b) (list a b)) 1)
+(1 nil)
+```
+
+Three spellings collect the remaining arguments into a list. Fe's dotted tail
+and bare symbol are the historical ones; `&rest` is Emacs Lisp's, and nothing
+may follow its parameter:
+
+```clojure
+fe > ((lambda (a . r) (list a r)) 1 2 3)
+(1 (2 3))
+fe > ((lambda r r) 1 2 3)
+(1 2 3)
+fe > ((lambda (a &rest r) (list a r)) 1 2 3)
+(1 (2 3))
+```
+
+`(a &rest)` and `(a &rest r x)` are errors. `&optional` and `&rest` are
+recognized by name, so they cannot also be used as parameter names.
+
+Macros take their parameters the same way, over the caller's unevaluated forms.
+
 #### `(macro arguments ...)`
 
 Creates a new macro.

@@ -46,3 +46,22 @@
 (assert (any '(nil nil nil 4)))
 
 ;; TODO: filter, map
+
+;; Parameter lists. A parameter with no argument is nil; `&optional` says so
+;; out loud. Three spellings collect the rest: a dotted tail, a bare symbol,
+;; and `&rest`.
+
+(assert-equals '(1 nil) ((fn (a &optional b) (list a b)) 1))
+(assert-equals '(1 2) ((fn (a &optional b) (list a b)) 1 2))
+(assert-equals '(1 nil nil) ((fn (a &optional b c) (list a b c)) 1))
+
+(assert-equals '(1 (2 3)) ((fn (a . r) (list a r)) 1 2 3))
+(assert-equals '(1 2 3) ((fn r r) 1 2 3))
+(assert-equals '(1 (2 3)) ((fn (a &rest r) (list a r)) 1 2 3))
+(assert-equals '(1 nil) ((fn (a &rest r) (list a r)) 1))
+(assert-equals '(1 2 3) ((fn (&rest r) r) 1 2 3))
+(assert-equals '(1 (2 3)) ((fn (a &optional b &rest r) (list a (cons b r))) 1 2 3))
+
+;; Macros take their parameters the same way.
+(= rest-macro (macro (a &rest r) (cons 'list (cons a r))))
+(assert-equals '(1 2 3) (rest-macro 1 2 3))

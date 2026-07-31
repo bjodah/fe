@@ -1012,8 +1012,12 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
 
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata);
 
+static bool IsNamedSymbol(const FeObject* v, const char* name) {
+  return FeGetType(v) == FeTSymbol && IsStringEqual(CAR(CDR(v)), name);
+}
+
 static bool IsDot(const FeObject* v) {
-  return FeGetType(v) == FeTSymbol && IsStringEqual(CAR(CDR(v)), ".");
+  return IsNamedSymbol(v, ".");
 }
 
 // Reads the rest of a list, the opening '(' already consumed. A '.' is the
@@ -1249,6 +1253,18 @@ static FeObject* DoList(FeContext* ctx, FeObject* lst, FeObject* env) {
   return res;
 }
 
+static FeObject* Bind(FeContext* ctx,
+                      FeObject* env,
+                      FeObject* name,
+                      FeObject* value) {
+  return FeCons(ctx, FeCons(ctx, name, value), env);
+}
+
+// Binds a lambda or macro parameter list to an argument list. Three spellings
+// collect the remaining arguments: Fe's dotted tail `(a . r)`, Fe's bare symbol
+// `r`, and Emacs Lisp's `(a &rest r)`. `&optional` is accepted and, for now,
+// only says out loud what the binder already did: a parameter with no argument
+// is nil.
 static FeObject* ArgsToEnv(FeContext* ctx,
                            FeObject* prm,
                            FeObject* arg,
@@ -1256,11 +1272,23 @@ static FeObject* ArgsToEnv(FeContext* ctx,
   while (!FeIsNil(prm)) {
     EvaluationStep(ctx);
     if (FeGetType(prm) != FeTPair) {
-      env = FeCons(ctx, FeCons(ctx, prm, arg), env);
-      break;
+      return Bind(ctx, env, prm, arg);
     }
-    env = FeCons(ctx, FeCons(ctx, CAR(prm), FeCar(ctx, arg)), env);
+    FeObject* name = CAR(prm);
     prm = CDR(prm);
+    if (IsNamedSymbol(name, "&optional")) {
+      continue;
+    }
+    if (IsNamedSymbol(name, "&rest")) {
+      if (FeGetType(prm) != FeTPair) {
+        FeHandleError(ctx, "&rest needs a parameter name");
+      }
+      if (!FeIsNil(CDR(prm))) {
+        FeHandleError(ctx, "&rest must be the last parameter");
+      }
+      return Bind(ctx, env, CAR(prm), arg);
+    }
+    env = Bind(ctx, env, name, FeCar(ctx, arg));
     arg = FeCdr(ctx, arg);
   }
   return env;
