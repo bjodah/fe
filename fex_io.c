@@ -32,7 +32,7 @@ static FexFile* GetFile(FeContext* ctx, FeObject** arg) {
 }
 
 static FILE* GetOpenFile(FeContext* ctx, FeObject** arg) {
-  FexFile* file = GetFile(ctx, arg);
+  const FexFile* file = GetFile(ctx, arg);
   if (file->closed) {
     FeHandleError(ctx, "file is closed");
   }
@@ -103,8 +103,8 @@ FeObject* FexCloseFile(FeContext* ctx, FeObject* arg) {
 FeObject* FexOpenFile(FeContext* ctx, FeObject* arg) {
   // Both arguments are taken before either is copied: FeGetNextArgument raises
   // on a missing one, and doing that while holding an allocation would lose it.
-  FeObject* path_object = FeGetNextArgument(ctx, &arg);
-  FeObject* mode_object = FeGetNextArgument(ctx, &arg);
+  const FeObject* path_object = FeGetNextArgument(ctx, &arg);
+  const FeObject* mode_object = FeGetNextArgument(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
   char* pathname = FexCopyStringZ(ctx, path_object, NULL);
   char* mode = FexCopyStringZ(ctx, mode_object, pathname);
@@ -117,7 +117,7 @@ FeObject* FexOpenFile(FeContext* ctx, FeObject* arg) {
 
 FeObject* FexReadFile(FeContext* ctx, FeObject* arg) {
   FILE* file = GetOpenFile(ctx, &arg);
-  FeObject* delimiter_object = FeGetNextArgument(ctx, &arg);
+  const FeObject* delimiter_object = FeGetNextArgument(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
   // `getdelim` takes one byte, so anything else is refused rather than silently
   // reduced to its first byte -- which used to turn `nil` into `n`, because a
@@ -142,7 +142,7 @@ FeObject* FexReadFile(FeContext* ctx, FeObject* arg) {
 }
 
 FeObject* FexRemoveFile(FeContext* ctx, FeObject* arg) {
-  FeObject* path_object = FeGetNextArgument(ctx, &arg);
+  const FeObject* path_object = FeGetNextArgument(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
   char* pathname = FexCopyStringZ(ctx, path_object, NULL);
   const bool removed = remove(pathname) == 0;
@@ -156,7 +156,7 @@ FeObject* FexRemoveFile(FeContext* ctx, FeObject* arg) {
 // anything longer and read errno even on success. Returns the byte count.
 FeObject* FexWriteFile(FeContext* ctx, FeObject* arg) {
   FILE* file = GetOpenFile(ctx, &arg);
-  FeObject* object = FeGetNextArgument(ctx, &arg);
+  const FeObject* object = FeGetNextArgument(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
   const size_t length = FeStringByteLength(ctx, object);
   char* bytes = FexCopyStringZ(ctx, object, NULL);

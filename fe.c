@@ -732,7 +732,7 @@ static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
   }
 }
 
-static void EmitDouble(Writer* w, FeObject* obj) {
+static void EmitDouble(Writer* w, const FeObject* obj) {
   char buf[32];
   const double d = GetDouble(obj);
   // cppcheck-suppress incorrectLogicOperator

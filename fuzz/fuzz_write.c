@@ -56,7 +56,7 @@ static void AppendNumber(Source* source, unsigned value) {
     value /= 10;
   } while (value != 0);
   while (count > 0) {
-    char one[2] = {digits[--count], '\0'};
+    const char one[2] = {digits[--count], '\0'};
     AppendText(source, one);
   }
 }
