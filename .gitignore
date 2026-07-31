@@ -3,6 +3,7 @@ example_host
 *.o
 *.dSYM
 .vscode
+.build-flags
 compile_commands.json
 coverage/
 *.gcda

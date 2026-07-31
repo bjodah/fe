@@ -31,6 +31,18 @@ RE_SANITIZE = $(filter -fsanitize%,$(CFLAGS)) \
 	$(filter -fno-omit-frame-pointer,$(CFLAGS))
 RE_CFLAGS ?= -O3 -Wall -Wextra -std=c2x $(RE_SANITIZE)
 
+# Nothing below makes an object depend on the flags it was compiled with,
+# and every CI lane here changes them: the sanitizer stages get away with
+# it only because they pass -B.  A lane that forgets to (or a developer
+# switching between two flag sets by hand) links objects from the previous
+# one, and an MSan stage once passed against a re.o that MSan had never
+# seen.  This stamp holds the current flag set, and every object depends
+# on it, so a changed flag set is a changed prerequisite.
+BUILD_STAMP := .build-flags
+BUILD_ID := $(CC)|$(CPPFLAGS)|$(CFLAGS)|$(RE_CFLAGS)|$(LDFLAGS)|$(LDLIBS)
+$(shell [ "$$(cat $(BUILD_STAMP) 2>/dev/null)" = '$(BUILD_ID)' ] || \
+	printf '%s' '$(BUILD_ID)' >$(BUILD_STAMP))
+
 PROG = fe
 TARGET = $(PROG)
 SRCS = main.c auto.c fe.c fex.c fex_io.c fex_math.c fex_process.c fex_re.c \
@@ -84,6 +96,15 @@ SCC_FILE_COMPLEXITY_MAX ?= 98
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
+# The scc total above is a floor, not a measurement (its string-state
+# machine desynchronizes on fe.c's '"' character literals and stops
+# counting keywords below them).  This manifest is the honest gate:
+# pmccabe reads every function, its complexity is recorded per symbol, no
+# symbol may exceed its entry, and a function with no entry is new and has
+# to arrive at or under PMCCABE_NEW_FUNCTION_MAX.  `make pmccabe-baseline`
+# is the only thing that rewrites it.
+PMCCABE_BASELINE ?= .ci/pmccabe-baseline.json
+PMCCABE_NEW_FUNCTION_MAX ?= 15
 COVERAGE_DIR ?= coverage
 COVERAGE_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x -O0 -g --coverage
 COVERAGE_LCOV_ARGS ?= --quiet --branch-coverage --ignore-errors inconsistent,gcov
@@ -165,30 +186,30 @@ test-header: test_header.c fe.h
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
 
-fe-core-gcc.o: fe.c fe.h
+fe-core-gcc.o: fe.c fe.h $(BUILD_STAMP)
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -c fe.c -o $@
 
-fe-core-clang.o: fe.c fe.h
+fe-core-clang.o: fe.c fe.h $(BUILD_STAMP)
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe.c -o $@
 
-%.o: %.c $(HDRS)
+%.o: %.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h
+tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(RE_CFLAGS) -c $< -o $@
 
 $(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h $(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
 		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
 
 $(FUZZ_EVAL_BIN): $(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h $(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
 		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
 
 $(FUZZ_WRITE_BIN): $(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h $(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
 		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
 
@@ -198,6 +219,7 @@ sizes:
 	wc scripts/*.fe
 
 clean:
+	-rm -f $(BUILD_STAMP)
 	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o
 	-rm -f scripts/*.csv scripts/*.times
 
@@ -220,7 +242,16 @@ pmccabe:
 pmccabe-check:
 	$(PMCCABE) $(PMCCABE_PATHS) | \
 		python3 utils/check_pmccabe_complexity.py \
-			--max-function $(PMCCABE_FUNCTION_COMPLEXITY_MAX)
+			--max-function $(PMCCABE_FUNCTION_COMPLEXITY_MAX) \
+			--max-new-function $(PMCCABE_NEW_FUNCTION_MAX) \
+			--baseline $(PMCCABE_BASELINE)
+
+pmccabe-baseline:
+	$(PMCCABE) $(PMCCABE_PATHS) | \
+		python3 utils/check_pmccabe_complexity.py \
+			--max-function $(PMCCABE_FUNCTION_COMPLEXITY_MAX) \
+			--max-new-function $(PMCCABE_NEW_FUNCTION_MAX) \
+			--write-baseline $(PMCCABE_BASELINE)
 
 coverage: coverage-clean
 	$(MAKE) clean
@@ -258,4 +289,4 @@ iwyu:
 
 .PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke complexity complexity-check pmccabe \
-	pmccabe-check coverage coverage-clean format format-check compile-db iwyu
+	pmccabe-check pmccabe-baseline coverage coverage-clean format format-check compile-db iwyu
