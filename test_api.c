@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fe.h"
 
@@ -1261,6 +1262,251 @@ static bool TestSerialization(void) {
   return true;
 }
 
+// State for `with-resource`, below. A plain static rather than context
+// userdata because `ErrorState` already occupies that slot in every test
+// that also wants error recovery.
+typedef struct ResourceState {
+  FILE* file;
+  bool open;
+  int close_result;
+  int close_count;
+} ResourceState;
+
+static ResourceState resource_state;
+
+static void ResetResourceState(void) {
+  resource_state = (ResourceState){0};
+}
+
+// The `FeCleanupFn` `with-resource` registers with `FeProtectWithCleanup`.
+// Closes the real FILE* opened by `with-resource`, so a failure to run (or a
+// double run) is visible as a wrong `fclose` result or count, not just a
+// flag.
+static void CloseResourceCleanup(
+    // cppcheck-suppress constParameterCallback
+    FeContext* context,
+    void* data) {
+  (void)context;
+  ResourceState* state = data;
+  state->close_result = fclose(state->file);
+  state->open = false;
+  state->close_count++;
+}
+
+// `(with-resource THUNK)`: opens a real file, registers its cleanup through
+// `FeProtectWithCleanup`, then calls THUNK (a zero-argument closure) and
+// returns its result. This is the shape the sub-plan's kg-side consumers
+// (`save-excursion`, `with-current-buffer`) are meant to use: a native that
+// protects a resource around a Lisp body it was handed, not around itself.
+static FeObject* WithResource(FeContext* context, FeObject* args) {
+  FeObject* thunk = FeGetNextArgument(context, &args);
+  FeRequireNoArguments(context, args);
+  resource_state.file = tmpfile();
+  if (resource_state.file == nullptr) {
+    FeHandleError(context, "tmpfile failed");
+  }
+  resource_state.open = true;
+  FeProtectWithCleanup(context, CloseResourceCleanup, &resource_state);
+  return FeCall(context, thunk, nullptr, 0);
+}
+
+static bool TestUnwindHostAPI(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "with-resource", WithResource);
+
+  // Normal return: the cleanup still runs, exactly once.
+  ResetResourceState();
+  static const char normal[] = "(with-resource (fn () 42))";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "host.fe", normal, sizeof(normal) - 1),
+      "42"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_result == 0);
+  CHECK(resource_state.close_count == 1);
+
+  // Error: the body raises, the cleanup still runs exactly once, and the
+  // error still propagates to the host.
+  ResetResourceState();
+  static const char erroring[] = "(with-resource (fn () (car 1)))";
+  CHECK(ExpectEvaluationError(context, &state, "host.fe", erroring,
+                              sizeof(erroring) - 1,
+                              "host.fe: expected pair, got double"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+
+  // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
+  ResetResourceState();
+  static const char looping[] = "(with-resource (fn () (while t 1)))";
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectEvaluationOptionsError(context, &state, "host.fe", looping,
+                                     sizeof(looping) - 1, &interrupt_options,
+                                     "host.fe: evaluation cancelled"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+
+  // Budget exhaustion: the cleanup is not gated on steps remaining -- it
+  // still runs to completion (a bare `fclose`, so this mainly documents the
+  // invariant) even though the body's own budget hit zero.
+  ResetResourceState();
+  const FeEvalOptions tiny_budget = {.step_limit = 8};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "host.fe", looping, sizeof(looping) - 1, &tiny_budget,
+      "host.fe: evaluation step limit exceeded"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+
+  FeCloseContext(context);
+  return true;
+}
+
+static bool TestUnwindLisp(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                    \
+  CHECK(IsRendered(                                                            \
+      context, FeEvaluateString(context, "unwind.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // Normal return: the cleanup runs, exactly once, and the body's value
+  // still comes back.
+  CHK("(= run-count 0) (unwind-protect 42 (= run-count (+ run-count 1)))",
+      "42");
+  CHK("run-count", "1");
+
+  // Error: the body raises, the cleanup still runs exactly once, and the
+  // error still propagates to the host with its own message intact.
+  CHK("(= run-count 0)", "nil");
+  static const char erroring[] =
+      "(unwind-protect (car 1) (= run-count (+ run-count 1)))";
+  CHECK(ExpectEvaluationError(context, &state, "unwind.fe", erroring,
+                              sizeof(erroring) - 1,
+                              "unwind.fe: expected pair, got double"));
+  CHK("run-count", "1");
+
+  // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
+  CHK("(= run-count 0)", "nil");
+  static const char looping[] =
+      "(unwind-protect (while t 1) (= run-count (+ run-count 1)))";
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectEvaluationOptionsError(context, &state, "unwind.fe", looping,
+                                     sizeof(looping) - 1, &interrupt_options,
+                                     "unwind.fe: evaluation cancelled"));
+  CHK("run-count", "1");
+
+  // Budget exhaustion: cleanup is not gated on steps remaining, and still
+  // runs exactly once. The cleanup form itself needs more steps than the
+  // tiny budget the body exhausted, which would fail immediately if it were
+  // still charged against that budget instead of running unbounded, as
+  // `doc/unwind-design.md` and the sub-plan both require.
+  CHK("(= run-count 0) (= spin-count 0)", "nil");
+  static const char budget_cleanup[] =
+      "(unwind-protect (while t 1) "
+      "  (do (while (< spin-count 200) (= spin-count (+ spin-count 1))) "
+      "      (= run-count (+ run-count 1))))";
+  const FeEvalOptions tiny_budget = {.step_limit = 8};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "unwind.fe", budget_cleanup, sizeof(budget_cleanup) - 1,
+      &tiny_budget, "unwind.fe: evaluation step limit exceeded"));
+  CHK("run-count", "1");
+  CHK("spin-count", "200");
+
+  // Three levels of nesting, inner error: cleanups run innermost first
+  // (LIFO), and the nesting is visible in the order they append to `log`.
+  CHK("(= log '())", "nil");
+  static const char nested[] =
+      "(unwind-protect"
+      "  (unwind-protect"
+      "    (unwind-protect"
+      "      (assert nil)"
+      "      (= log (cons 'inner log)))"
+      "    (= log (cons 'middle log)))"
+      "  (= log (cons 'outer log)))";
+  CHECK(ExpectEvaluationError(context, &state, "unwind.fe", nested,
+                              sizeof(nested) - 1,
+                              "unwind.fe: assertion failure"));
+  CHK("log", "(outer middle inner)");
+
+  // A cleanup that itself errors: a diagnostic is printed rather than
+  // swallowed, the original error ("assertion failure") is still what
+  // reaches the host, and the outer cleanup still runs.
+  CHK("(= outer-ran nil)", "nil");
+  static const char failing_cleanup[] =
+      "(unwind-protect"
+      "  (unwind-protect"
+      "    (assert nil)"
+      "    (car 1))"
+      "  (= outer-ran t))";
+  fflush(stderr);
+  const int saved_stderr = dup(STDERR_FILENO);
+  CHECK(saved_stderr != -1);
+  FILE* capture = tmpfile();
+  CHECK(capture != nullptr);
+  CHECK(dup2(fileno(capture), STDERR_FILENO) != -1);
+  const bool evaluated = ExpectEvaluationError(
+      context, &state, "unwind.fe", failing_cleanup,
+      sizeof(failing_cleanup) - 1, "unwind.fe: assertion failure");
+  fflush(stderr);
+  CHECK(dup2(saved_stderr, STDERR_FILENO) != -1);
+  close(saved_stderr);
+  char captured[512] = {0};
+  rewind(capture);
+  const size_t captured_length =
+      fread(captured, 1, sizeof(captured) - 1, capture);
+  captured[captured_length] = '\0';
+  fclose(capture);
+  CHECK(evaluated);
+  CHECK(strstr(captured, "cleanup error") != nullptr);
+  CHECK(strstr(captured, "expected pair, got double") != nullptr);
+  CHK("outer-ran", "t");
+
+  // Root survival: a lexical binding created in the body -- reachable only
+  // through the environment `unwind-protect` captured, not through the
+  // global symbol table -- must still resolve to the right object in the
+  // cleanup after the body allocates heavily enough to force repeated
+  // collections.
+  CHK("(= survivor nil)", "nil");
+  static const char root_survival[] =
+      "(do"
+      "  (let x (cons 111 222))"
+      "  (unwind-protect"
+      "    (do"
+      "      (= gc-pressure-i 0)"
+      "      (while (< gc-pressure-i 4000)"
+      "        (cons gc-pressure-i gc-pressure-i)"
+      "        (= gc-pressure-i (+ gc-pressure-i 1)))"
+      "      (assert nil))"
+      "    (= survivor x)))";
+  CHECK(ExpectEvaluationError(context, &state, "unwind.fe", root_survival,
+                              sizeof(root_survival) - 1,
+                              "unwind.fe: assertion failure"));
+  CHK("survivor", "(111 . 222)");
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -1268,7 +1514,8 @@ int main(void) {
                  TestRootsAndCalls() && TestCallWithOptions() &&
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
-                 TestParameterLists() && TestBinding()
+                 TestParameterLists() && TestBinding() && TestUnwindHostAPI() &&
+                 TestUnwindLisp()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

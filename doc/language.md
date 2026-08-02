@@ -319,6 +319,48 @@ wow
 7
 ```
 
+#### `(unwind-protect body cleanup...)`
+
+Evaluates `body`, then evaluates the `cleanup` forms as an implicit `do`.
+The cleanup forms run exactly once on every way out of `body`: an ordinary
+return, a Lisp error, a host interrupt, or evaluation step-budget
+exhaustion. The value of the whole form is `body`'s value; the cleanup
+forms' values are discarded.
+
+```clojure
+fe > (unwind-protect 42 (print "cleanup"))
+cleanup
+42
+fe > (unwind-protect (car 1) (print "cleanup ran anyway"))
+cleanup ran anyway
+error: expected pair, got double
+```
+
+Nested `unwind-protect` forms run their cleanups innermost first (LIFO),
+whether or not `body` errors:
+
+```clojure
+fe > (unwind-protect
+       (unwind-protect 1 (print "inner"))
+       (print "outer"))
+inner
+outer
+1
+```
+
+If a cleanup form itself raises, that failure is reported directly (it does
+not become a normal, catchable Fe error) and cleanup evaluation moves on to
+the next entry -- an enclosing `unwind-protect`'s own cleanup, or, for the
+outermost one, the host. Whichever error was already unwinding when the
+cleanup failed is still what ultimately reaches the caller or the host; the
+cleanup's own failure does not replace it and does not stop any other
+pending cleanup from running.
+
+Cleanup forms see the lexical environment `unwind-protect` was entered
+with, not any bindings `body` introduced, and objects that environment
+reaches remain valid for the cleanup to use even if `body` triggers
+garbage collection before it exits.
+
 ### Functions
 
 #### `(cons car cdr)`

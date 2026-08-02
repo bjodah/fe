@@ -192,6 +192,58 @@ clears the complete control record before invoking the host error callback.
 Consequently a nonlocal transfer cannot leave a stale budget active in a
 recovered context.
 
+## Unwinding And Cleanup
+
+`doc/unwind-design.md` is the design this section's implementation follows;
+it also records which parts of that design (checkpoints and tokens for a
+rollback-on-error registry, distinct completion kinds, `catch`/`throw`,
+`condition-case`) are still future work.
+
+Lisp `unwind-protect` and the host's `FeProtectWithCleanup()` share one
+registry, `FeContext.cleanup_stack`: a fixed-size array of entries, each
+either a C function pointer and `void*` or a pair of Fe objects (the unwind
+forms and the environment to evaluate them in). One registry, rather than
+one per kind, is what gives host and Lisp cleanups a single interleaved
+last-in-first-out order when they nest.
+
+`Evaluate()` saves `cleanup_stack_index` at entry, the same way it saves the
+GC stack index, and on an ordinary return drains the registry back down to
+that checkpoint: an entry pushed while evaluating one call form always runs
+by the time that call form's own `Evaluate()` frame returns, whether the
+push came from the `unwind-protect` primitive registering its own unwind
+forms or from a native reaching into the C API. `unwind-protect` itself
+does nothing more than push its entry and evaluate its body; it never runs
+its own cleanup directly, because the enclosing `Evaluate()` call always
+does.
+
+`FeHandleError()` is the other path an entry can be run from, and the only
+one for the abnormal exits (error, interrupt, budget exhaustion): since it
+does not return to any of the C frames between the raise and itself, no
+frame's own "drain to my checkpoint" tail ever executes for those, so
+`FeHandleError()` drains the entire registry down to zero, unconditionally,
+before invoking `error_fn`. It does this after clearing the ambient
+evaluation-control record (see below), so a cleanup's own evaluation is
+never charged against a budget or interrupt schedule that already ran out
+-- the reason a body that exhausted its step budget still gets a working
+cleanup. It also does this before `error_fn` can `longjmp` the host away, so
+every cleanup still sees the GC stack exactly as populated as it was when
+the error was raised (see "Garbage Collection" above and "Error Handling"
+below).
+
+A cleanup that itself raises is the one case `FeHandleError()` treats
+differently: `cleanup_catch`, a `jmp_buf*` naming the local `setjmp()` a
+helper (`RunOneCleanupEntry()`) installed around that one entry's execution,
+is non-null exactly while that entry is running. `FeHandleError()` checks it
+first, before anything else, and when it is set, resumes there directly
+instead of reaching `error_fn` -- reaching a callback contracted to never
+return would abandon every cleanup entry still below this one. The message
+is copied into context-owned storage first, since the frame that formatted
+it is what is about to be unwound past, then printed to `stderr` once
+control resumes at the `setjmp()`. Whichever error, interrupt, or budget
+exhaustion was already unwinding when the cleanup failed is what
+`RunCleanupsDownTo()`'s caller still eventually reports: a cleanup failure
+never replaces it, and the loop moves on to the next entry.
+
 ## Known Issues
 
 The implementation has some known issues. These exist as a side effect of trying

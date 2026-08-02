@@ -1,0 +1,10 @@
+error: assertion failure
+(assert nil)
+(do (read-file f "
+") (assert nil))
+(unwind-protect (do (read-file f "
+") (assert nil)) (print "inner"))
+(unwind-protect (unwind-protect (do (read-file f "
+") (assert nil)) (print "inner")) (print "middle"))
+(unwind-protect (unwind-protect (unwind-protect (do (read-file f "
+") (assert nil)) (print "inner")) (print "middle")) (do (close-file f) (print "outer")))

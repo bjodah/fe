@@ -19,6 +19,10 @@ typedef struct FeRoot FeRoot;
 typedef FeObject* FeNativeFn(FeContext* ctx, FeObject* args);
 typedef bool FeInterruptFn(FeContext* ctx, void* userdata);
 typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
+// A host cleanup registered with `FeProtectWithCleanup`. It runs at most once,
+// must not raise, must not call back into the evaluator, and must not create
+// Fe objects -- see `FeProtectWithCleanup`'s comment for the full contract.
+typedef void FeCleanupFn(FeContext* ctx, void* data);
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
 
@@ -89,6 +93,28 @@ void FePushGC(FeContext* ctx, FeObject* obj);
 void FeRestoreGC(FeContext* ctx, size_t idx);
 [[nodiscard]] size_t FeSaveGC(const FeContext* ctx);
 void FeMark(FeContext* ctx, FeObject* obj);
+
+// Registers a C cleanup that runs exactly once, in the same last-in-first-out
+// order as Lisp `unwind-protect` cleanups (both share one registry): on an
+// ordinary return, a Lisp error, a host interrupt, or step-budget exhaustion.
+// Call it from within an active evaluation -- typically a native function
+// that is about to call `FeCall`/`FeEvaluate*` on a body it was handed, the
+// way `unwind-protect` itself does. It runs when the nearest enclosing call
+// form finishes evaluating (normally the native's own call, since that is
+// the form still being evaluated when the native runs), or earlier still if
+// some form enclosing that one raises first. Calling it outside any active
+// evaluation registers a cleanup with no enclosing form to attach to, so
+// nothing drains it on an ordinary return; only a later error will.
+//
+// `fn` is called with `data` and must not fail, must not call back into the
+// evaluator, and must not create Fe objects; it may free non-Fe resources and
+// call plain C or extension-internal functions. There is no cancellation:
+// register only once ownership of the cleanup's resource is final. The
+// registry is a fixed-size array sized like the GC stack; exceeding it
+// raises "cleanup stack overflow" before `fn` or `data` are recorded, so the
+// caller has allocated nothing through this call that it must now release
+// itself.
+void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 
 [[nodiscard]] FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr);
 [[nodiscard]] FeObject* FeMakeBool(FeContext* ctx, bool b);

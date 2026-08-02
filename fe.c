@@ -13,6 +13,7 @@
 #ifndef M_E
 #define M_E 2.718281828459045
 #endif
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdckdint.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@ typedef enum Primitive {
   PAnd,
   POr,
   PDo,
+  PUnwindProtect,
   PCons,
   PCar,
   PCdr,
@@ -73,6 +75,7 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PAnd] = "and",
                                         [POr] = "or",
                                         [PDo] = "do",
+                                        [PUnwindProtect] = "unwind-protect",
                                         [PCons] = "cons",
                                         [PCar] = "car",
                                         [PCdr] = "cdr",
@@ -138,11 +141,39 @@ enum {
   GcStackSize = 4096,
   StringBufferSize = (sizeof(FeObject*) - 1),
   DefaultEvalPollInterval = 1024,
+  // Cleanup entries are pushed only by `unwind-protect` and
+  // `FeProtectWithCleanup`, not by every object creation the way the GC
+  // stack is, so nesting this deep is not a realistic program; it is sized
+  // generously rather than to match `GcStackSize` slot for slot.
+  CleanupStackSize = 256,
 };
 
 struct FeObject {
   Value car, cdr;
 };
+
+// One pending `unwind-protect`/`FeProtectWithCleanup` registration. Lisp and
+// C cleanups interleave in one registry so they share a single ordering, per
+// `doc/unwind-design.md`: unwinding always drains the most recently pushed
+// entry first, whichever kind it is.
+typedef enum FeCleanupKind {
+  FeCleanupNative,
+  FeCleanupLisp,
+} FeCleanupKind;
+
+typedef struct FeCleanupEntry {
+  FeCleanupKind kind;
+  union {
+    struct {
+      FeCleanupFn* fn;
+      void* data;
+    } native;
+    struct {
+      FeObject* forms;  // The unwind forms, evaluated as an implicit `do`.
+      FeObject* env;    // The environment `unwind-protect` was entered with.
+    } lisp;
+  } as;
+} FeCleanupEntry;
 
 FeObject nil = {.car = {.c = FeTNil << GcMarkBit | OtherCell},
                 .cdr = {.o = NULL}};
@@ -200,6 +231,15 @@ struct FeContext {
   size_t evaluation_poll_countdown;
   const char* error_label;
   size_t error_offset;
+  FeCleanupEntry cleanup_stack[CleanupStackSize];
+  size_t cleanup_stack_index;
+  // Non-null while a cleanup entry's own `fn`/unwind-forms are running: the
+  // `jmp_buf` of the `RunOneCleanupEntry` frame currently waiting for it.
+  // `FeHandleError` checks this first, so a cleanup's own error resumes
+  // there instead of reaching the host and abandoning the rest of the
+  // cleanup stack.
+  jmp_buf* cleanup_catch;
+  char cleanup_error_message[256];
   bool evaluation_active;
   bool evaluation_limited;
   bool strict_arity;
@@ -285,6 +325,74 @@ static void EndEvaluationControl(FeContext* ctx, bool owns_control) {
   }
 }
 
+// Forward-declared so `FeHandleError`, near the top of the file for
+// historical reasons, can drain pending `unwind-protect` forms; defined with
+// the rest of the evaluator below.
+static FeObject* DoList(FeContext* ctx, FeObject* lst, FeObject* env);
+
+static void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
+  if (ctx->cleanup_stack_index == CleanupStackSize) {
+    FeHandleError(ctx, "cleanup stack overflow");
+  }
+  ctx->cleanup_stack[ctx->cleanup_stack_index++] = entry;
+}
+
+// Copies an error message raised while a cleanup entry was itself running
+// into context-owned storage, since the formatted message `FeHandleError` is
+// about to `longjmp` away from lives on that frame's stack and would
+// otherwise be gone by the time `RunOneCleanupEntry` reads it.
+static void SaveCleanupErrorMessage(FeContext* ctx, const char* msg) {
+  const size_t capacity = sizeof(ctx->cleanup_error_message) - 1;
+  size_t length = 0;
+  while (length < capacity && msg[length] != '\0') {
+    length++;
+  }
+  memcpy(ctx->cleanup_error_message, msg, length);
+  ctx->cleanup_error_message[length] = '\0';
+}
+
+// Runs one cleanup entry. A cleanup that itself raises does not reach
+// `error_fn` -- that would let the host `longjmp` away and abandon the rest
+// of the stack -- so `FeHandleError` redirects here instead (see
+// `cleanup_catch`) and the failure becomes a printed diagnostic. Per
+// `doc/unwind-design.md`, the original error or interrupt that is actually
+// unwinding takes priority: it is what every remaining entry, and finally
+// the host, still sees.
+static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
+  jmp_buf local_jump;
+  jmp_buf* const saved_catch = ctx->cleanup_catch;
+  ctx->cleanup_catch = &local_jump;
+  if (setjmp(local_jump) == 0) {
+    if (entry->kind == FeCleanupNative) {
+      entry->as.native.fn(ctx, entry->as.native.data);
+    } else {
+      DoList(ctx, entry->as.lisp.forms, entry->as.lisp.env);
+    }
+  } else {
+    fprintf(stderr, "fe: unwind-protect cleanup error: %s\n",
+            ctx->cleanup_error_message);
+  }
+  ctx->cleanup_catch = saved_catch;
+}
+
+// Drains cleanup entries down to (but not including) `target`, most recently
+// pushed first. Called both by `FeHandleError`, unconditionally down to 0
+// (an error, quit, or budget exhaustion abandons every call still on the C
+// stack, so every pending cleanup must run before it does), and by
+// `Evaluate`, down to the checkpoint it saved on entry, so a call form that
+// returns normally drains only what it pushed.
+static void RunCleanupsDownTo(FeContext* ctx, size_t target) {
+  while (ctx->cleanup_stack_index > target) {
+    const FeCleanupEntry entry = ctx->cleanup_stack[--ctx->cleanup_stack_index];
+    RunOneCleanupEntry(ctx, &entry);
+  }
+}
+
+void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
+  PushCleanup(ctx, (FeCleanupEntry){.kind = FeCleanupNative,
+                                    .as.native = {.fn = fn, .data = data}});
+}
+
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
   FeObject* cl = ctx->call_list;
   const char* label = ctx->error_label;
@@ -314,6 +422,20 @@ static void EndEvaluationControl(FeContext* ctx, bool owns_control) {
     default:
       break;
   }
+
+  if (ctx->cleanup_catch != nullptr) {
+    // A cleanup entry's own `fn` or unwind-forms raised. Resume at
+    // `RunOneCleanupEntry`'s `setjmp` instead of reaching the host: that
+    // keeps unwinding the cleanup stack instead of abandoning it, and
+    // preserves whatever error is already in flight above this one.
+    SaveCleanupErrorMessage(ctx, msg);
+    longjmp(*ctx->cleanup_catch, 1);
+  }
+
+  // `evaluation_active`/`evaluation_limited` are already cleared above, so
+  // cleanup forms run unbounded: a body that hit the step limit or `C-g`
+  // must still be able to finish its own cleanup.
+  RunCleanupsDownTo(ctx, 0);
 
   if (ctx->error_fn) {
     ctx->error_fn(ctx, msg, cl);
@@ -1454,6 +1576,18 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
       return res;
     case PDo:
       return DoList(ctx, arg, env);
+    // `(unwind-protect BODY CLEANUP...)`: evaluates BODY, and evaluates the
+    // CLEANUP forms as an implicit `do` on every exit -- normal return,
+    // error, interrupt, or budget exhaustion. This case only registers the
+    // cleanup and evaluates BODY; the enclosing `Evaluate` call for this
+    // whole form is what actually runs it, on whichever path it takes
+    // (see the `cleanup` checkpoint there, and `FeHandleError`).
+    case PUnwindProtect: {
+      FeObject* body = FeGetNextArgument(ctx, &arg);
+      PushCleanup(ctx, (FeCleanupEntry){.kind = FeCleanupLisp,
+                                        .as.lisp = {.forms = arg, .env = env}});
+      return Evaluate(ctx, body, env, NULL);
+    }
     case PCons:
       va = EVAL_ARG();
       return FeCons(ctx, va, EVAL_ARG());
@@ -1567,6 +1701,13 @@ static FeObject* Evaluate(FeContext* ctx,
   ctx->call_list = &cl;
 
   const size_t gc = FeSaveGC(ctx);
+  // Every cleanup entry pushed while this call form is being evaluated --
+  // by a nested `unwind-protect`, or by a native calling
+  // `FeProtectWithCleanup` -- is drained back to this checkpoint below on an
+  // ordinary return, the same way `gc` bounds the GC stack. An error drains
+  // the whole registry instead, from `FeHandleError`, since nothing between
+  // here and there runs on that path.
+  const size_t cleanup = ctx->cleanup_stack_index;
   FeObject* fn = EvaluateHead(ctx, CAR(obj), env);
   FeObject* arg = CDR(obj);
   FeObject* res = &nil;
@@ -1597,6 +1738,7 @@ static FeObject* Evaluate(FeContext* ctx,
       // atom the macro returned, and `nil` and interned symbols are compared by
       // address.
       vb = DoList(ctx, CDR(vb), ArgsToEnv(ctx, CAR(vb), arg, CAR(va)));
+      RunCleanupsDownTo(ctx, cleanup);
       FeRestoreGC(ctx, gc);
       FePushGC(ctx, vb);  // Nothing else refers to the expansion now.
       ctx->call_list = CDR(&cl);
@@ -1618,6 +1760,7 @@ static FeObject* Evaluate(FeContext* ctx,
       abort();
   }
 
+  RunCleanupsDownTo(ctx, cleanup);
   FeRestoreGC(ctx, gc);
   FePushGC(ctx, res);
   ctx->call_list = CDR(&cl);

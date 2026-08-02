@@ -1,0 +1,32 @@
+;; `unwind-protect` on the normal-return path: the cleanup runs, the body's
+;; value is still what the whole form returns, multiple cleanup forms are an
+;; implicit `do`, nesting runs innermost-first even without an error, and a
+;; resource opened in the body is closed by the cleanup.
+
+(assert-equals 42 (unwind-protect 42 (assert t)))
+
+(= ran nil)
+(assert-equals 42 (unwind-protect 42 (= ran t)))
+(assert ran)
+
+(= steps '())
+(unwind-protect
+  1
+  (= steps (cons 'a steps))
+  (= steps (cons 'b steps)))
+(assert-equals '(b a) steps)
+
+(= order '())
+(unwind-protect
+  (unwind-protect
+    1
+    (= order (cons 'inner order)))
+  (= order (cons 'outer order)))
+(assert-equals '(outer inner) order)
+
+(= f (open-file "scripts/unwind.fe" "r"))
+(assert-equals
+  ";; `unwind-protect` on the normal-return path: the cleanup runs, the body's\n"
+  (unwind-protect
+    (read-file f "\n")
+    (close-file f)))

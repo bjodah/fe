@@ -298,6 +298,65 @@ error signalling and the internal GC-stack frame are identical. A host that
 invokes a rooted callable under a budget should prefer this to evaluating a
 source-string trampoline, which only exists to reach the same accounting.
 
+## Unwinding And Cleanup
+
+`FeProtectWithCleanup()` registers a C cleanup that runs exactly once,
+whatever way the call form currently being evaluated finishes: an ordinary
+return, a Lisp error, a host interrupt, or step-budget exhaustion. It shares
+one registry, and one last-in-first-out order, with Lisp `unwind-protect`
+(`doc/language.md`) -- the two interleave correctly when a host cleanup
+wraps a Lisp body that itself uses `unwind-protect`.
+
+```c
+typedef void FeCleanupFn(FeContext* ctx, void* data);
+void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
+```
+
+Call it from within an active evaluation -- concretely, from a native
+function that is about to hand a body it was given to `FeCall()` or
+`FeEvaluate()`, the same shape `unwind-protect` itself uses internally.
+`fn` runs when the nearest enclosing call form finishes: normally that is
+the native's own call, since that is the form still being evaluated while
+the native is running.
+
+```c
+static void CloseFileCleanup(FeContext* ctx, void* data) {
+  (void)ctx;
+  fclose(data);
+}
+
+// (with-open-file THUNK): opens a fixed path, protects it, calls THUNK.
+static FeObject* WithOpenFile(FeContext* ctx, FeObject* args) {
+  FeObject* thunk = FeGetNextArgument(ctx, &args);
+  FeRequireNoArguments(ctx, args);
+  FILE* file = fopen("state.dat", "r");
+  if (file == NULL) {
+    FeHandleError(ctx, "could not open state.dat");
+  }
+  FeProtectWithCleanup(ctx, CloseFileCleanup, file);
+  return FeCall(ctx, thunk, nullptr, 0);
+}
+```
+
+`fn` must not fail, must not call back into the evaluator, and must not
+create Fe objects; it may free non-Fe resources and call plain C or
+extension-internal functions. A cleanup pushed with `FeProtectWithCleanup()`
+but never reached by a normal return -- for example, one registered directly
+from host code outside of any active evaluation, rather than from within a
+native -- has no enclosing call form to drain it, so only a later error
+still runs it. There is no cancellation: call it only once ownership of the
+resource is final. The registry is a fixed-size array sized like the GC
+stack; exceeding it raises `"cleanup stack overflow"` before `fn` or `data`
+are recorded, so nothing has been allocated through this call that the
+caller must now release itself.
+
+A cleanup that itself raises -- Lisp or C -- does not reach `error_fn`: that
+callback's contract (below) is to transfer control away and never return,
+which would abandon every cleanup still pending behind it. Instead its
+message is printed to `stderr` and the remaining cleanups, inner to outer,
+still run. Whichever error, interrupt, or budget exhaustion was actually
+unwinding when the cleanup failed is still what `error_fn` eventually sees.
+
 ## Serializing Objects
 
 `FeWrite()` renders an object as Fe syntax one character at a time through a
@@ -484,4 +543,12 @@ trace, but does not restore the host's GC checkpoint or callback input state.
 After the nonlocal transfer, restore that checkpoint before continuing. The
 context can then be used again. C cleanup attributes and ordinary stack
 unwinding do not run across `longjmp`, so the host must also release any
-external temporary resources explicitly.
+external temporary resources explicitly, unless they were registered with
+`FeProtectWithCleanup()`.
+
+Before `error_fn` runs, `FeHandleError()` runs every pending `unwind-protect`
+and `FeProtectWithCleanup()` cleanup, most recently registered first, while
+the GC stack is still exactly as populated as it was when the error was
+raised. This is why a cleanup can safely reference an object the failing call
+created: the host has not yet had a chance to reset its GC checkpoint out
+from under it. `error_fn`, once it does run, sees an empty cleanup registry.
