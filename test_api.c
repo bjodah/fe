@@ -174,6 +174,19 @@ static FeObject* ReenterEvaluation(FeContext* context, FeObject* arguments) {
                                      sizeof(source) - 1, &options);
 }
 
+static FeObject* ReenterCallWithOptions(
+    FeContext* context,
+    // cppcheck-suppress constParameterCallback
+    FeObject* arguments) {
+  (void)arguments;
+  const ErrorState* state = FeGetUserData(context);
+  const FeEvalOptions options = {.poll_interval = 1,
+                                 .interrupt = Interrupt,
+                                 .userdata = state->nested_interrupt};
+  return FeCallWithOptions(context, FeGetRoot(state->root), nullptr, 0,
+                           &options);
+}
+
 static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
   const double x = FeToDouble(context, FeGetNextArgument(context, &arguments));
   const double y = FeToDouble(context, FeGetNextArgument(context, &arguments));
@@ -248,6 +261,25 @@ static bool ExpectCallError(FeContext* context,
   state->expected_message = expected;
   if (setjmp(state->jump) == 0) {
     (void)FeCall(context, callable, nullptr, 0);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  return true;
+}
+
+static bool ExpectCallWithOptionsError(FeContext* context,
+                                       ErrorState* state,
+                                       FeObject* callable,
+                                       FeObject* const* arguments,
+                                       size_t count,
+                                       const FeEvalOptions* options,
+                                       const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    (void)FeCallWithOptions(context, callable, arguments, count, options);
     CHECK(false);
   }
   FeRestoreGC(context, gc);
@@ -621,6 +653,117 @@ static bool TestRootsAndCalls(void) {
       &options, "call.fe: evaluation step limit exceeded"));
   FeReleaseRoot(context, state.root);
 
+  FeCloseContext(context);
+  return true;
+}
+
+static bool TestCallWithOptions(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char add_function[] = "(fn (x y) (+ x y))";
+  FeRoot* root =
+      FeCreateRoot(context, FeEvaluateString(context, "call.fe", add_function,
+                                             sizeof(add_function) - 1));
+  const FeEvalOptions generous = {.step_limit = 64};
+  FeObject* arguments[] = {FeMakeDouble(context, 10),
+                           FeMakeDouble(context, 20)};
+  CHECK(IsRendered(
+      context,
+      FeCallWithOptions(context, FeGetRoot(root), arguments, 2, &generous),
+      "30"));
+
+  // A controlled call restores its internal GC frame, so repeated calls do
+  // not grow the stack and the rooted callable survives each one.
+  const size_t call_gc = FeSaveGC(context);
+  for (size_t i = 0; i < 16; i++) {
+    CHECK(IsRendered(
+        context,
+        FeCallWithOptions(context, FeGetRoot(root), arguments, 2, &generous),
+        "30"));
+    CHECK(FeSaveGC(context) == call_gc);
+  }
+
+  // Wrong arity raises only under strict arity, like any other call.
+  static const char one_arg_function[] = "(fn (x) x)";
+  FeRoot* arity_root = FeCreateRoot(
+      context, FeEvaluateString(context, "call.fe", one_arg_function,
+                                sizeof(one_arg_function) - 1));
+  FeSetStrictArity(context, true);
+  CHECK(ExpectCallWithOptionsError(context, &state, FeGetRoot(arity_root),
+                                   nullptr, 0, &generous,
+                                   "wrong-number-of-arguments"));
+  FeSetStrictArity(context, false);
+
+  // Error propagation: a body that raises, and a non-callable value.
+  static const char raise_function[] = "(fn () (car 1))";
+  FeRoot* raise_root =
+      FeCreateRoot(context, FeEvaluateString(context, "call.fe", raise_function,
+                                             sizeof(raise_function) - 1));
+  CHECK(ExpectCallWithOptionsError(context, &state, FeGetRoot(raise_root),
+                                   nullptr, 0, &generous,
+                                   "expected pair, got double"));
+  CHECK(ExpectCallWithOptionsError(context, &state, FeMakeDouble(context, 1),
+                                   nullptr, 0, &generous,
+                                   "tried to call non-callable value"));
+  FeReleaseRoot(context, raise_root);
+  FeReleaseRoot(context, arity_root);
+
+  // Deterministic step exhaustion mid-call.
+  static const char loop_function[] = "(fn () (while t 1))";
+  state.root =
+      FeCreateRoot(context, FeEvaluateString(context, "call.fe", loop_function,
+                                             sizeof(loop_function) - 1));
+  const FeEvalOptions small = {.step_limit = 32};
+  CHECK(ExpectCallWithOptionsError(context, &state, FeGetRoot(state.root),
+                                   nullptr, 0, &small,
+                                   "evaluation step limit exceeded"));
+
+  // Interrupt: the polled host check fires during the call.
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectCallWithOptionsError(context, &state, FeGetRoot(state.root),
+                                   nullptr, 0, &interrupt_options,
+                                   "evaluation cancelled"));
+  CHECK(interrupt.polls == interrupt.cancel_after);
+  CHECK(interrupt.userdata_seen);
+  CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "1", 1),
+                   "1"));
+
+  // Nested ambient budget: a native calling FeCallWithOptions inside an
+  // active evaluation shares the outer budget; its own options are ignored.
+  InterruptState nested_interrupt = {.context = context,
+                                     .expected_userdata = &nested_interrupt,
+                                     .polls = 0,
+                                     .cancel_after = 1};
+  state.nested_interrupt = &nested_interrupt;
+  const size_t gc = FeSaveGC(context);
+  FeSet(context, FeMakeSymbol(context, "reenter-call-with-options"),
+        FeMakeNativeFn(context, ReenterCallWithOptions));
+  FeRestoreGC(context, gc);
+  static const char nested[] = "(reenter-call-with-options)";
+  const FeEvalOptions outer = {.step_limit = 24};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "outer.fe", nested, sizeof(nested) - 1, &outer,
+      "outer.fe: evaluation step limit exceeded"));
+  CHECK(nested_interrupt.polls == 0);
+
+  // One failed invocation does not poison later independent calls.
+  CHECK(IsRendered(
+      context,
+      FeCallWithOptions(context, FeGetRoot(root), arguments, 2, &generous),
+      "30"));
+
+  FeReleaseRoot(context, state.root);
+  FeReleaseRoot(context, root);
   FeCloseContext(context);
   return true;
 }
@@ -1122,10 +1265,10 @@ int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
                  TestEvaluationControl() && TestExtensionAPI() &&
-                 TestRootsAndCalls() && TestMathNatives() &&
-                 TestSerialization() && TestDottedLists() &&
-                 TestMacroExpansion() && TestWriter() && TestParameterLists() &&
-                 TestBinding()
+                 TestRootsAndCalls() && TestCallWithOptions() &&
+                 TestMathNatives() && TestSerialization() &&
+                 TestDottedLists() && TestMacroExpansion() && TestWriter() &&
+                 TestParameterLists() && TestBinding()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

@@ -30,6 +30,7 @@
   "fe.c:EvaluationStep": 6,
   "fe.c:FeArenaAlignment": 1,
   "fe.c:FeCall": 5,
+  "fe.c:FeCallWithOptions": 1,
   "fe.c:FeCar": 1,
   "fe.c:FeCdr": 1,
   "fe.c:FeCloseContext": 1,

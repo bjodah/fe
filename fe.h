@@ -148,6 +148,11 @@ void FeReleaseRoot(FeContext* ctx, FeRoot* root);
                                FeObject* callable,
                                FeObject* const* arguments,
                                size_t count);
+[[nodiscard]] FeObject* FeCallWithOptions(FeContext* ctx,
+                                          FeObject* callable,
+                                          FeObject* const* arguments,
+                                          size_t count,
+                                          const FeEvalOptions* options);
 [[nodiscard]] FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeEvaluateWithOptions(FeContext* ctx,
                                               FeObject* obj,

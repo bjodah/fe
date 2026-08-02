@@ -287,6 +287,17 @@ evaluation, the internal invocation consumes the existing step budget and
 uses its interrupt settings. Normal Fe errors and nonlocal recovery rules are
 unchanged.
 
+`FeCallWithOptions()` is the controlled counterpart: it takes the same
+callable, argument array, and count as `FeCall()`, plus a `FeEvalOptions*`.
+Its semantics are exactly those of the other `*WithOptions()` entry points —
+when no evaluation is active it establishes a fresh step budget and interrupt
+scope, and when called during an active evaluation it is ambient: the outer
+budget and interrupt settings apply and its own options are ignored. The
+callable is invoked through `FeCall()`, so GC protection, argument handling,
+error signalling and the internal GC-stack frame are identical. A host that
+invokes a rooted callable under a budget should prefer this to evaluating a
+source-string trampoline, which only exists to reach the same accounting.
+
 ## Serializing Objects
 
 `FeWrite()` renders an object as Fe syntax one character at a time through a

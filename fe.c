@@ -1678,6 +1678,17 @@ FeObject* FeCall(FeContext* ctx,
   return ctx->call_result;
 }
 
+FeObject* FeCallWithOptions(FeContext* ctx,
+                            FeObject* callable,
+                            FeObject* const* arguments,
+                            size_t count,
+                            const FeEvalOptions* options) {
+  const bool owns_control = BeginEvaluationControl(ctx, options);
+  FeObject* result = FeCall(ctx, callable, arguments, count);
+  EndEvaluationControl(ctx, owns_control);
+  return result;
+}
+
 FeObject* FeEvaluateWithOptions(FeContext* ctx,
                                 FeObject* obj,
                                 const FeEvalOptions* options) {
