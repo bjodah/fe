@@ -146,6 +146,17 @@ enum {
   // stack is, so nesting this deep is not a realistic program; it is sized
   // generously rather than to match `GcStackSize` slot for slot.
   CleanupStackSize = 256,
+  // The per-entry step budget a cleanup gets when `FeEvalOptions`'s
+  // `cleanup_step_limit` is 0 (the common case: most callers never think
+  // about this at all). Generous enough that the `test_api.c` regression
+  // for "a body that exhausted a tiny budget still gets a working cleanup"
+  // needs no per-test override -- a cleanup doing realistic restore-state
+  // work is at most a few hundred evaluator steps -- and small enough that
+  // a runaway one is a bounded pause, not a hang: at Fe's own evaluator
+  // rate this is well under a second even in a debug build. A host that
+  // wants a different bound, tighter or looser, sets `cleanup_step_limit`
+  // explicitly instead of tuning this constant.
+  DefaultCleanupStepLimit = 4096,
 };
 
 struct FeObject {
@@ -229,6 +240,12 @@ struct FeContext {
   size_t evaluation_steps;
   size_t evaluation_poll_interval;
   size_t evaluation_poll_countdown;
+  // The ambient call's configured `FeEvalOptions.cleanup_step_limit` (0
+  // until set, meaning "use `DefaultCleanupStepLimit`"). Captured by
+  // `FeHandleError` before it clears the rest of the control record, so
+  // the fresh per-entry budget every cleanup runs under while unwinding
+  // still reflects what the host asked for.
+  size_t cleanup_step_limit;
   const char* error_label;
   size_t error_offset;
   FeCleanupEntry cleanup_stack[CleanupStackSize];
@@ -317,6 +334,7 @@ static void ClearEvaluationControl(FeContext* ctx) {
   ctx->evaluation_poll_countdown = 0;
   ctx->evaluation_active = false;
   ctx->evaluation_limited = false;
+  ctx->cleanup_step_limit = 0;
 }
 
 static void EndEvaluationControl(FeContext* ctx, bool owns_control) {
@@ -376,16 +394,62 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
 }
 
 // Drains cleanup entries down to (but not including) `target`, most recently
-// pushed first. Called both by `FeHandleError`, unconditionally down to 0
-// (an error, quit, or budget exhaustion abandons every call still on the C
-// stack, so every pending cleanup must run before it does), and by
-// `Evaluate`, down to the checkpoint it saved on entry, so a call form that
-// returns normally drains only what it pushed.
+// pushed first, leaving the ambient evaluation-control record exactly as it
+// was found. Used only by `Evaluate`, down to the checkpoint it saved on
+// entry, so a call form that returns normally drains what it pushed under
+// whatever budget was already ambient -- the same one the rest of the
+// program is running under, nothing special. `FeHandleError`'s abnormal
+// drain is `RunCleanupsAfterError`, below, not this.
 static void RunCleanupsDownTo(FeContext* ctx, size_t target) {
   while (ctx->cleanup_stack_index > target) {
     const FeCleanupEntry entry = ctx->cleanup_stack[--ctx->cleanup_stack_index];
     RunOneCleanupEntry(ctx, &entry);
   }
+}
+
+// The evaluation control `RunCleanupsAfterError` re-arms fresh for every
+// cleanup entry it runs, captured from the ambient record before
+// `FeHandleError` clears it. `step_limit` of 0 means "the host did not set
+// `FeEvalOptions.cleanup_step_limit`," resolved to `DefaultCleanupStepLimit`
+// where it is used, not here, since the resolved value does not need to
+// survive a `longjmp`.
+typedef struct FeCleanupBudget {
+  FeInterruptFn* interrupt;
+  void* userdata;
+  size_t poll_interval;
+  size_t step_limit;
+} FeCleanupBudget;
+
+// Drains the entire cleanup registry after an error, a host interrupt, or
+// step-budget exhaustion: every call form still on the C stack is being
+// abandoned, so every pending cleanup must run before `FeHandleError`
+// reaches the host. Each entry gets its own fresh copy of `budget`, not one
+// shared across the whole drain and not the exhausted or cancelled control
+// the body was running under: a body that ran out of steps still gets a
+// working cleanup (the budget below is new), and a cleanup that does not
+// return terminates on its own instead of hanging with no escape (the
+// budget below is bounded). Interrupt polling stays live on the same
+// re-armed schedule, so a second host interrupt during a runaway cleanup
+// aborts that one entry -- caught by its own `RunOneCleanupEntry`, like any
+// other cleanup failure -- without a stale poll countdown from the body
+// either firing on the first step or (via unsigned underflow) never firing
+// again. Leaves the control record cleared when done, matching
+// `FeHandleError`'s existing guarantee that the host sees an inactive one.
+static void RunCleanupsAfterError(FeContext* ctx, const FeCleanupBudget* budget) {
+  const size_t step_limit =
+      budget->step_limit != 0 ? budget->step_limit : DefaultCleanupStepLimit;
+  while (ctx->cleanup_stack_index > 0) {
+    const FeCleanupEntry entry = ctx->cleanup_stack[--ctx->cleanup_stack_index];
+    ctx->evaluation_interrupt = budget->interrupt;
+    ctx->evaluation_userdata = budget->userdata;
+    ctx->evaluation_poll_interval = budget->poll_interval;
+    ctx->evaluation_poll_countdown = budget->poll_interval;
+    ctx->evaluation_limited = true;
+    ctx->evaluation_steps = step_limit;
+    ctx->evaluation_active = true;
+    RunOneCleanupEntry(ctx, &entry);
+  }
+  ClearEvaluationControl(ctx);
 }
 
 void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
@@ -398,6 +462,15 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   const char* label = ctx->error_label;
   const size_t offset = ctx->error_offset;
   const bool has_offset = ctx->error_has_offset;
+  // The ambient control record is about to be cleared; this is the fresh
+  // budget every cleanup entry runs under below, captured while it is still
+  // here to capture.
+  const FeCleanupBudget cleanup_budget = {
+      .interrupt = ctx->evaluation_interrupt,
+      .userdata = ctx->evaluation_userdata,
+      .poll_interval = ctx->evaluation_poll_interval,
+      .step_limit = ctx->cleanup_step_limit,
+  };
   char message[1024];
   // reset context state:
   ctx->call_list = &nil;
@@ -432,10 +505,9 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     longjmp(*ctx->cleanup_catch, 1);
   }
 
-  // `evaluation_active`/`evaluation_limited` are already cleared above, so
-  // cleanup forms run unbounded: a body that hit the step limit or `C-g`
-  // must still be able to finish its own cleanup.
-  RunCleanupsDownTo(ctx, 0);
+  // A fresh, bounded budget, not the exhausted or cancelled one the body
+  // was running under and not no budget at all: see `RunCleanupsAfterError`.
+  RunCleanupsAfterError(ctx, &cleanup_budget);
 
   if (ctx->error_fn) {
     ctx->error_fn(ctx, msg, cl);
@@ -460,6 +532,7 @@ static bool BeginEvaluationControl(FeContext* ctx,
                                       ? options->poll_interval
                                       : DefaultEvalPollInterval;
   ctx->evaluation_poll_countdown = ctx->evaluation_poll_interval;
+  ctx->cleanup_step_limit = options->cleanup_step_limit;
   return true;
 }
 

@@ -31,6 +31,17 @@ typedef struct FeEvalOptions {
   size_t poll_interval;
   FeInterruptFn* interrupt;
   void* userdata;
+  // The per-entry step budget every `unwind-protect`/`FeProtectWithCleanup`
+  // cleanup gets while this call is unwinding through an error, an
+  // interrupt, or its own `step_limit` running out. Zero selects a built-in
+  // default. It is never the exhausted or cancelled budget the body was
+  // running under -- a cleanup always gets a fresh one, so a body that ran
+  // out of steps still gets a working cleanup -- and it is never unbounded
+  // either, so a runaway cleanup terminates instead of hanging with no
+  // escape. `interrupt`/`userdata`/`poll_interval` stay live for the same
+  // drain, re-armed fresh per entry. See `doc/c-api.md`'s "Unwinding And
+  // Cleanup" for the worst-case bound this implies.
+  size_t cleanup_step_limit;
 } FeEvalOptions;
 
 typedef enum FeType {

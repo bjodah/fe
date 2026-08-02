@@ -21,6 +21,12 @@ typedef struct InterruptState {
   void* expected_userdata;
   size_t polls;
   size_t cancel_after;
+  // A second trigger point, for tests that need the interrupt to fire once
+  // during the body and again later, during a cleanup that keeps running
+  // past the first cancellation. 0 (every existing caller's default) never
+  // matches, since `polls` is incremented before the comparison and so is
+  // never 0 when checked.
+  size_t cancel_after_second;
   bool userdata_seen;
 } InterruptState;
 
@@ -158,7 +164,8 @@ static bool Interrupt(
   state->userdata_seen =
       state->context == context && state->expected_userdata == userdata;
   state->polls++;
-  return state->polls == state->cancel_after;
+  return state->polls == state->cancel_after ||
+         state->polls == state->cancel_after_second;
 }
 
 static FeObject* ReenterEvaluation(FeContext* context, FeObject* arguments) {
@@ -1507,6 +1514,118 @@ static bool TestUnwindLisp(void) {
   return true;
 }
 
+// A cleanup's fresh budget (`FeEvalOptions.cleanup_step_limit`) is what
+// stops it from hanging kg with no escape when it does not return on its
+// own -- the property `RunCleanupsAfterError` exists for. These two cases
+// are its regression coverage: the step-limit escape hatch and the
+// interrupt escape hatch, each exercised in isolation from the other so a
+// fix to one path cannot silently rely on the other one also catching it.
+static bool TestUnwindCleanupBudget(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "budget.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // A cleanup that never returns is terminated by its own fresh budget --
+  // not left to hang forever, the way leaving evaluation unbounded during
+  // the drain would -- and the *original* error (the body's, not the
+  // cleanup's own step-limit failure) is still what reaches the host.
+  static const char runaway_cleanup[] = "(unwind-protect (car 1) (while t 1))";
+  const FeEvalOptions small_cleanup_budget = {.cleanup_step_limit = 50};
+  fflush(stderr);
+  int saved_stderr = dup(STDERR_FILENO);
+  CHECK(saved_stderr != -1);
+  FILE* capture = tmpfile();
+  CHECK(capture != nullptr);
+  CHECK(dup2(fileno(capture), STDERR_FILENO) != -1);
+  bool evaluated = ExpectEvaluationOptionsError(
+      context, &state, "budget.fe", runaway_cleanup,
+      sizeof(runaway_cleanup) - 1, &small_cleanup_budget,
+      "budget.fe: expected pair, got double");
+  fflush(stderr);
+  CHECK(dup2(saved_stderr, STDERR_FILENO) != -1);
+  close(saved_stderr);
+  char captured[512] = {0};
+  rewind(capture);
+  size_t captured_length = fread(captured, 1, sizeof(captured) - 1, capture);
+  captured[captured_length] = '\0';
+  fclose(capture);
+  CHECK(evaluated);
+  CHECK(strstr(captured, "cleanup error") != nullptr);
+  CHECK(strstr(captured, "evaluation step limit exceeded") != nullptr);
+
+  // The regression this whole feature exists to keep passing: a body that
+  // exhausted a tiny budget of its own still gets a cleanup that runs to
+  // completion, because the fresh budget above is a *replacement*, not a
+  // further restriction stacked on top of what the body already spent.
+  CHK("(= tiny-budget-ran nil)", "nil");
+  static const char tiny_body_budget[] =
+      "(unwind-protect (while t 1) (= tiny-budget-ran t))";
+  const FeEvalOptions tiny_budget = {.step_limit = 8};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "budget.fe", tiny_body_budget,
+      sizeof(tiny_body_budget) - 1, &tiny_budget,
+      "budget.fe: evaluation step limit exceeded"));
+  CHK("tiny-budget-ran", "t");
+
+  // A cleanup that never returns is instead interrupted by a *second* host
+  // interrupt -- the first one is what unwound the body in the first
+  // place, and must not also immediately abort the cleanup that runs
+  // because of it. That one cleanup entry aborts (a printed diagnostic,
+  // like any other cleanup failure), and the drain still continues to the
+  // outer entry.
+  CHK("(= outer-ran nil)", "nil");
+  static const char runaway_interrupted_cleanup[] =
+      "(unwind-protect"
+      "  (unwind-protect (while t 1) (while t 1))"
+      "  (= outer-ran t))";
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3,
+                              .cancel_after_second = 10};
+  const FeEvalOptions interrupted_cleanup_budget = {
+      .poll_interval = 4,
+      .interrupt = Interrupt,
+      .userdata = &interrupt,
+      .cleanup_step_limit = 5000};
+  fflush(stderr);
+  saved_stderr = dup(STDERR_FILENO);
+  CHECK(saved_stderr != -1);
+  capture = tmpfile();
+  CHECK(capture != nullptr);
+  CHECK(dup2(fileno(capture), STDERR_FILENO) != -1);
+  evaluated = ExpectEvaluationOptionsError(
+      context, &state, "budget.fe", runaway_interrupted_cleanup,
+      sizeof(runaway_interrupted_cleanup) - 1, &interrupted_cleanup_budget,
+      "budget.fe: evaluation cancelled");
+  fflush(stderr);
+  CHECK(dup2(saved_stderr, STDERR_FILENO) != -1);
+  close(saved_stderr);
+  memset(captured, 0, sizeof(captured));
+  rewind(capture);
+  captured_length = fread(captured, 1, sizeof(captured) - 1, capture);
+  captured[captured_length] = '\0';
+  fclose(capture);
+  CHECK(evaluated);
+  CHECK(interrupt.polls >= interrupt.cancel_after_second);
+  CHECK(strstr(captured, "cleanup error") != nullptr);
+  CHECK(strstr(captured, "evaluation cancelled") != nullptr);
+  CHK("outer-ran", "t");
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -1515,7 +1634,7 @@ int main(void) {
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestUnwindHostAPI() &&
-                 TestUnwindLisp()
+                 TestUnwindLisp() && TestUnwindCleanupBudget()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
