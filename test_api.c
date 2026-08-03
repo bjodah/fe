@@ -1528,8 +1528,8 @@ static bool TestUnwindCleanupBudget(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
-#define CHK(expr, expected)                                                  \
-  CHECK(IsRendered(                                                          \
+#define CHK(expr, expected)                                                    \
+  CHECK(IsRendered(                                                            \
       context, FeEvaluateString(context, "budget.fe", expr, sizeof(expr) - 1), \
       expected))
 
@@ -1591,11 +1591,10 @@ static bool TestUnwindCleanupBudget(void) {
                               .polls = 0,
                               .cancel_after = 3,
                               .cancel_after_second = 10};
-  const FeEvalOptions interrupted_cleanup_budget = {
-      .poll_interval = 4,
-      .interrupt = Interrupt,
-      .userdata = &interrupt,
-      .cleanup_step_limit = 5000};
+  const FeEvalOptions interrupted_cleanup_budget = {.poll_interval = 4,
+                                                    .interrupt = Interrupt,
+                                                    .userdata = &interrupt,
+                                                    .cleanup_step_limit = 5000};
   fflush(stderr);
   saved_stderr = dup(STDERR_FILENO);
   CHECK(saved_stderr != -1);

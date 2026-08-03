@@ -350,6 +350,31 @@ stack; exceeding it raises `"cleanup stack overflow"` before `fn` or `data`
 are recorded, so nothing has been allocated through this call that the
 caller must now release itself.
 
+### The cleanup budget
+
+Cleanup does not run under the budget the body was using: by the time a
+cleanup runs, that budget may be exactly what ran out. Nor does it run
+unbounded, which would leave a host with no way to escape a runaway
+cleanup. Each entry gets a **fresh** budget of
+`FeEvalOptions.cleanup_step_limit` evaluator steps, or 4096 when that field
+is left 0.
+
+`interrupt`, `userdata` and `poll_interval` stay live for the drain and are
+re-armed per entry, so the interrupt that caused the unwind does not
+immediately abort its own cleanup, and a *second* interrupt during a
+runaway cleanup aborts that one entry while the remaining cleanups still
+run.
+
+The worst case a host must be able to tolerate is therefore
+
+    CleanupStackSize (256) x cleanup_step_limit
+
+evaluator steps between the moment an error is raised and the moment
+`error_fn` sees it -- 1,048,576 steps at the default, and bounded rather
+than open-ended even if every cleanup on a full registry misbehaves. A host
+that cannot afford that pause sets `cleanup_step_limit` lower; one running
+cleanups that legitimately do more work sets it higher.
+
 A cleanup that itself raises -- Lisp or C -- does not reach `error_fn`: that
 callback's contract (below) is to transfer control away and never return,
 which would abandon every cleanup still pending behind it. Instead its

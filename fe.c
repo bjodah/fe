@@ -435,7 +435,8 @@ typedef struct FeCleanupBudget {
 // either firing on the first step or (via unsigned underflow) never firing
 // again. Leaves the control record cleared when done, matching
 // `FeHandleError`'s existing guarantee that the host sees an inactive one.
-static void RunCleanupsAfterError(FeContext* ctx, const FeCleanupBudget* budget) {
+static void RunCleanupsAfterError(FeContext* ctx,
+                                  const FeCleanupBudget* budget) {
   const size_t step_limit =
       budget->step_limit != 0 ? budget->step_limit : DefaultCleanupStepLimit;
   while (ctx->cleanup_stack_index > 0) {
