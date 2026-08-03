@@ -93,8 +93,19 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # not a measurement: its C string-state machine desynchronizes on fe.c's
 # `'"'` character literals, so keywords below them are not counted at all.
 # pmccabe below sees the whole file.
-SCC_COMPLEXITY_MAX ?= 210
-SCC_FILE_COMPLEXITY_MAX ?= 105
+#
+# Raised again, 210->220 / 105->112, by kg's
+# 2026-08-03-elisp-subset-and-fe-evaluator-subplans/00a-budget-and-fe-structure.md:
+# the Emacs-subset program's Phase 0 needs a handful of read-only arena
+# counters (object/free slot counts, peak live objects, GC count) in fe.c
+# before kg's Phase 0 baseline can be taken at all -- see that sub-plan's
+# Decision for the reasoning and the measured spike that this budget does
+# NOT yet cover (a translation-unit split of fe.c, priced separately when
+# Phase 3 lands). This is a small, named, immediate need, not a program-wide
+# promise: every later phase of that program prices and requests its own
+# raise against this file's measured total when its own sub-plan lands.
+SCC_COMPLEXITY_MAX ?= 220
+SCC_FILE_COMPLEXITY_MAX ?= 112
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
