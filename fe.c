@@ -137,10 +137,32 @@ enum {
   GcMarkBit = 2,
   // TODO: This should scale with arena size?
   // A self-recursive Fe call costs several slots, so this also bounds usable
-  // recursion depth, at roughly 450 frames.
+  // recursion depth, at roughly 450 frames -- but that is a side effect of
+  // slot consumption, not a designed bound; `DefaultEvaluationDepth` below
+  // is the designed one, and is tuned to fire first.
   GcStackSize = 4096,
   StringBufferSize = (sizeof(FeObject*) - 1),
   DefaultEvalPollInterval = 1024,
+  // The default `evaluation_depth` ceiling (see `struct FeContext`) when
+  // `FeEvalOptions.max_depth` is left 0. Recursion was previously bounded
+  // only by `GcStackSize` slot consumption -- an accident of how many GC
+  // stack slots a call happens to use, not a designed limit -- so a build
+  // with fatter per-call C frames than the one that measured "roughly 450
+  // frames" (any sanitizer, `-O0`, a debug build) could exhaust the real C
+  // stack first, crashing instead of raising a catchable error. This is a
+  // measured value, not a guessed one, and it is measured in
+  // `evaluation_depth` units, which count Evaluate() re-entries -- several
+  // per level of ordinary recursion like `(deep n)`'s own `if`/`+`/`-`
+  // sub-forms, not one -- so it is not directly comparable to a Lisp
+  // recursion count `N`. See the commit that introduced this constant for
+  // the full binary search across `-Os`, ASan/UBSan and MSan builds and
+  // the conversion between the two units; in short, MSan's fatter frames
+  // are what make the C stack the binding constraint, and this default
+  // stays comfortably under that measured ceiling while keeping a
+  // multiple of the >200 floor `test_recursion_depth` requires, since
+  // that measured ceiling turned out closer to the floor than a flat
+  // "half the ceiling" rule leaves room for.
+  DefaultEvaluationDepth = 1000,
   // Cleanup entries are pushed only by `unwind-protect` and
   // `FeProtectWithCleanup`, not by every object creation the way the GC
   // stack is, so nesting this deep is not a realistic program; it is sized
@@ -246,6 +268,18 @@ struct FeContext {
   // the fresh per-entry budget every cleanup runs under while unwinding
   // still reflects what the host asked for.
   size_t cleanup_step_limit;
+  // Live recursion depth: incremented and decremented around the pair path
+  // of `Evaluate` only (see the comment there), so it counts exactly the
+  // recursion that consumes C stack. Reset to 0 by `ClearEvaluationControl`,
+  // which `FeHandleError` calls before draining cleanup entries, so a
+  // cleanup that recurses after a depth overflow starts from 0 too -- the
+  // same fresh-re-arm treatment `RunCleanupsAfterError` already gives
+  // `evaluation_steps`.
+  size_t evaluation_depth;
+  // The ambient call's configured `FeEvalOptions.max_depth` (0 until set,
+  // meaning "use `DefaultEvaluationDepth`"), resolved where it is checked,
+  // not here, for the same reason `cleanup_step_limit` is not.
+  size_t evaluation_depth_limit;
   const char* error_label;
   size_t error_offset;
   FeCleanupEntry cleanup_stack[CleanupStackSize];
@@ -335,6 +369,8 @@ static void ClearEvaluationControl(FeContext* ctx) {
   ctx->evaluation_active = false;
   ctx->evaluation_limited = false;
   ctx->cleanup_step_limit = 0;
+  ctx->evaluation_depth = 0;
+  ctx->evaluation_depth_limit = 0;
 }
 
 static void EndEvaluationControl(FeContext* ctx, bool owns_control) {
@@ -534,6 +570,7 @@ static bool BeginEvaluationControl(FeContext* ctx,
                                       : DefaultEvalPollInterval;
   ctx->evaluation_poll_countdown = ctx->evaluation_poll_interval;
   ctx->cleanup_step_limit = options->cleanup_step_limit;
+  ctx->evaluation_depth_limit = options->max_depth;
   return true;
 }
 
@@ -550,6 +587,24 @@ static void EvaluationStep(FeContext* ctx) {
     if (ctx->evaluation_interrupt(ctx, ctx->evaluation_userdata)) {
       FeHandleError(ctx, "evaluation cancelled");
     }
+  }
+}
+
+// Bounds C-stack recursion explicitly, instead of the accidental bound
+// `GcStackSize` slot consumption used to provide (see
+// `DefaultEvaluationDepth`). Called once from `Evaluate`'s pair path, which
+// brackets exactly the region `call_list` above it also brackets: both
+// restore points there (the macro tail call and the ordinary return)
+// decrement `evaluation_depth` back down, and `FeHandleError`, via
+// `ClearEvaluationControl`, resets it to 0 on any error the way it resets
+// `call_list` to `&nil` -- see the field's comment on `struct FeContext`.
+static void EnterEvaluationDepth(FeContext* ctx) {
+  ctx->evaluation_depth++;
+  const size_t depth_limit = ctx->evaluation_depth_limit != 0
+                                 ? ctx->evaluation_depth_limit
+                                 : DefaultEvaluationDepth;
+  if (ctx->evaluation_depth > depth_limit) {
+    FeHandleError(ctx, "evaluation depth limit exceeded");
   }
 }
 
@@ -1773,6 +1828,7 @@ static FeObject* Evaluate(FeContext* ctx,
   // This stack link is restored below or reset by FeHandleError before longjmp.
   // cppcheck-suppress autoVariables
   ctx->call_list = &cl;
+  EnterEvaluationDepth(ctx);
 
   const size_t gc = FeSaveGC(ctx);
   // Every cleanup entry pushed while this call form is being evaluated --
@@ -1816,7 +1872,17 @@ static FeObject* Evaluate(FeContext* ctx,
       FeRestoreGC(ctx, gc);
       FePushGC(ctx, vb);  // Nothing else refers to the expansion now.
       ctx->call_list = CDR(&cl);
-      return Evaluate(ctx, vb, env, NULL);
+      // Evaluating the expansion is a tail call in Fe but not in C: the
+      // sanitizer lanes build with `-fno-optimize-sibling-calls`, and those
+      // are exactly the builds where the C stack is the binding constraint,
+      // so this frame is still live underneath. Hold the depth across the
+      // call and drop it after, rather than before: decrementing first let
+      // a macro whose expansion is another macro call recurse on the C
+      // stack without the counter ever moving, and it crashed with a
+      // MemorySanitizer stack-overflow instead of raising.
+      res = Evaluate(ctx, vb, env, NULL);
+      ctx->evaluation_depth--;
+      return res;
 
     case FeTPair:
     case FeTFree:
@@ -1838,6 +1904,7 @@ static FeObject* Evaluate(FeContext* ctx,
   FeRestoreGC(ctx, gc);
   FePushGC(ctx, res);
   ctx->call_list = CDR(&cl);
+  ctx->evaluation_depth--;
   return res;
 }
 

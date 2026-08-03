@@ -109,6 +109,17 @@ recursion: a self-recursive Fe function costs several slots per frame, which
 allows roughly 450 frames before `GC stack overflow`. Because the array lives in
 the arena, its size is the dominant term in `FeMinimumArenaSize()`.
 
+That cap is incidental, not designed: it tracks GC-stack slot consumption,
+not C-stack usage, so a build with fatter per-call C frames (a sanitizer,
+`-O0`, a debug build) can exhaust the real C stack first and crash instead
+of raising `GC stack overflow`. `Evaluate()`'s recursion is bounded
+separately and explicitly by `evaluation_depth` against
+`FeEvalOptions.max_depth` (`DefaultEvaluationDepth` when left 0), checked on
+every pair-form evaluation regardless of whether any `*WithOptions()` control
+is active. See `doc/c-api.md`'s "Bounding Recursion". `evaluation_depth` is
+reset to 0 by `FeHandleError()`, the same way `call_list` is, since a
+`longjmp` skips every pending decrement.
+
 The context's three result/retention roots have separate lifetimes.
 `evaluation_result` holds the latest string or file evaluation result,
 `call_result` holds the latest `FeCall()` result, and `root_list` links explicit

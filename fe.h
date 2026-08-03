@@ -42,6 +42,13 @@ typedef struct FeEvalOptions {
   // drain, re-armed fresh per entry. See `doc/c-api.md`'s "Unwinding And
   // Cleanup" for the worst-case bound this implies.
   size_t cleanup_step_limit;
+  // The maximum live recursion depth `Evaluate` may reach -- a C-stack
+  // bound, not an evaluation-step count. Zero selects the built-in
+  // default (`DefaultEvaluationDepth`), sized for the fattest per-call C
+  // frames any of kg's own sanitizer builds measured. A host embedding Fe
+  // with a smaller C stack than that sets this lower explicitly; see
+  // `doc/c-api.md`'s "Bounding And Cancelling Evaluation".
+  size_t max_depth;
 } FeEvalOptions;
 
 typedef enum FeType {

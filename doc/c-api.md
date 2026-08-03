@@ -235,6 +235,23 @@ control through the error callback. Cancellation is cooperative at evaluator
 step boundaries: a native callback that does not return cannot be preempted by
 Fe.
 
+### Bounding Recursion
+
+`max_depth` is the maximum live recursion depth `Evaluate()` may reach; zero
+selects the built-in default. Attempting to exceed it raises `evaluation
+depth limit exceeded`. This is a **C-stack** bound, not an evaluation-step
+count: before it existed, recursion was bounded only as a side effect of how
+many GC-stack slots a self-recursive call happens to consume (the arena is
+fixed-size; see `Bounding Recursion` in `doc/implementation.md` for the slot
+mechanics), which tracks C-stack usage only by accident. A build with fatter
+per-call C frames than the one the built-in default was measured against --
+a sanitizer, `-O0`, a debug build -- could exhaust the real C stack before
+the GC stack noticed, crashing the process instead of raising a catchable
+error. `max_depth` is the designed bound instead: a host embedding Fe with a
+smaller C stack than kg's own sanitizer CI measured against sets it lower
+explicitly, the same way `cleanup_step_limit` is set lower or higher than
+its own built-in default.
+
 The control state is ambient for the complete outermost `*WithOptions()` call.
 Evaluation re-entered from a native callback through either a plain evaluator
 or another controlled evaluator consumes the same outer step budget and uses
@@ -247,11 +264,19 @@ ignored.
 
 The plain `FeEvaluate()`, `FeEvaluateString()`, and `FeEvaluateFile()` functions
 remain unlimited when no ambient control is active. When called during a
-controlled evaluation, they inherit and consume its controls. Successful
-return from the outermost controlled call clears the control state.
-`FeHandleError()` also clears it before calling the host error callback, so a
-context recovered with `longjmp` starts its next top-level evaluation fresh.
-The exhaustion and cancellation messages pass through normal label handling;
+controlled evaluation, they inherit and consume its controls. Recursion depth
+is the one exception: unlike `step_limit` and `interrupt`, it is not opt-in.
+`Evaluate()` checks it on every call, controlled or plain, so the plain
+functions are bounded by the built-in default even with no `FeEvalOptions` in
+sight -- the point being that this bound protects the C stack whether or not
+a host ever thinks about evaluation control at all. Successful return from
+the outermost controlled call clears the control state, including
+`evaluation_depth`. `FeHandleError()` also clears it before calling the host
+error callback, so a context recovered with `longjmp` starts its next
+top-level evaluation fresh -- a `longjmp` skips every pending decrement, so
+without this reset the next legal deep call would see a depth already
+exhausted by one that failed. The exhaustion and cancellation messages pass
+through normal label handling;
 for example, a controlled string call labelled `init.fe` reports
 `init.fe: evaluation cancelled`.
 
@@ -364,6 +389,13 @@ re-armed per entry, so the interrupt that caused the unwind does not
 immediately abort its own cleanup, and a *second* interrupt during a
 runaway cleanup aborts that one entry while the remaining cleanups still
 run.
+
+Recursion depth gets the same fresh treatment, for free: `FeHandleError()`
+resets `evaluation_depth` to 0 before it drains the cleanup registry (see
+"Bounding Recursion" above), so a cleanup that itself recurses starts from
+an empty counter rather than one already at the limit that just fired. A
+cleanup body that recurses as deep as `max_depth` allows is therefore
+exactly as legal as a top-level call doing the same.
 
 The worst case a host must be able to tolerate is therefore
 

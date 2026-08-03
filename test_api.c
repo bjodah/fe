@@ -1625,6 +1625,82 @@ static bool TestUnwindCleanupBudget(void) {
   return true;
 }
 
+// `evaluation_depth` (`FeEvalOptions.max_depth`) bounds C-stack recursion
+// explicitly, replacing the accidental bound `GcStackSize` slot consumption
+// used to provide. Four properties, mirroring what `TestEvaluationControl`
+// already covers for the step budget: the limit fires, the error it raises
+// is an ordinary catchable one, a later legal deep call still works (the
+// counter is reset the same way `call_list` is, in `FeHandleError`), and an
+// `unwind-protect` cleanup still runs after the overflow (the counter gets
+// the same fresh re-arm `RunCleanupsAfterError` already gives the step
+// budget for cleanup entries).
+static bool TestEvaluationDepth(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // A tight explicit `max_depth` against unbounded self-recursion -- the
+  // same shape `TestEvaluationControl`'s step-limit recursion case uses --
+  // fires well before the call could otherwise terminate, so the test does
+  // not depend on exactly how many `evaluation_depth` units one Lisp
+  // recursion level costs.
+  static const char recursion[] =
+      "(= recurse (fn (x) (recurse x))) (recurse 1)";
+  const FeEvalOptions tight_depth = {.max_depth = 5};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "depth.fe", recursion, sizeof(recursion) - 1,
+      &tight_depth, "depth.fe: evaluation depth limit exceeded"));
+
+  // The reset: a bounded, legal recursion right after the overflow must not
+  // see the exhausted counter the call above left behind.
+  static const char deep[] =
+      "(= deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep 40)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "recovered.fe", deep, sizeof(deep) - 1), "40"));
+
+  // An unwind-protect cleanup still runs after a depth overflow: the
+  // overflow unwinds through `RunCleanupsAfterError` the same way a step-
+  // budget exhaustion or an ordinary error does.
+  static const char reset_flag[] = "(= cleanup-ran nil)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "reset.fe", reset_flag, sizeof(reset_flag) - 1),
+      "nil"));
+  static const char overflow_with_cleanup[] =
+      "(= loop (fn (x) (loop x))) "
+      "(unwind-protect (loop 1) (= cleanup-ran t))";
+  const FeEvalOptions tight_depth_cleanup = {.max_depth = 5};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "cleanup-depth.fe", overflow_with_cleanup,
+      sizeof(overflow_with_cleanup) - 1, &tight_depth_cleanup,
+      "cleanup-depth.fe: evaluation depth limit exceeded"));
+  static const char check_cleanup_ran[] = "cleanup-ran";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "check.fe", check_cleanup_ran,
+                                    sizeof(check_cleanup_ran) - 1),
+                   "t"));
+
+  // A macro whose expansion is another macro call recurses through
+  // `Evaluate`'s macro arm, which evaluates the expansion in what is a tail
+  // call in Fe but not in C. The counter has to be held across that call
+  // rather than dropped before it: released early, this recursed on the C
+  // stack with `evaluation_depth` never moving, and crashed under MSan
+  // instead of raising. Function recursion above does not cover this arm.
+  static const char macro_recursion[] = "(= m (macro () (list (quote m)))) (m)";
+  const FeEvalOptions tight_macro_depth = {.max_depth = 5};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "macro-depth.fe", macro_recursion,
+      sizeof(macro_recursion) - 1, &tight_macro_depth,
+      "macro-depth.fe: evaluation depth limit exceeded"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -1633,7 +1709,8 @@ int main(void) {
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestUnwindHostAPI() &&
-                 TestUnwindLisp() && TestUnwindCleanupBudget()
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestEvaluationDepth()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
