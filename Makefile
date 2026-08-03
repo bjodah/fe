@@ -118,6 +118,9 @@ PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
 # is the only thing that rewrites it.
 PMCCABE_BASELINE ?= .ci/pmccabe-baseline.json
 PMCCABE_NEW_FUNCTION_MAX ?= 15
+COMPAT_ROOT ?= compat
+COMPAT_EMACS ?=
+COMPAT_ORACLE_ARGS ?=
 COVERAGE_DIR ?= coverage
 COVERAGE_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x -O0 -g --coverage
 COVERAGE_LCOV_ARGS ?= --quiet --branch-coverage --ignore-errors inconsistent,gcov
@@ -288,6 +291,21 @@ coverage-clean:
 	rm -rf $(COVERAGE_DIR)
 	find . -maxdepth 1 \( -name '*.gcda' -o -name '*.gcno' \) -delete
 
+# compat/ is the Emacs-oracle differential corpus (00b-oracle-and-differential-
+# corpus.md).  `compat` never touches Emacs: it checks the manifest against
+# the cases and snapshots on disk, then replays every case against $(TARGET)
+# and the checked-in oracle/*.json snapshots.  `compat-oracle` is the only
+# target that runs Emacs, and only it may rewrite those snapshots.
+compat: $(TARGET)
+	python3 utils/check_compat_manifest.py \
+		--manifest $(COMPAT_ROOT)/features.json
+	python3 utils/run-fe-compat.py --fe ./$(TARGET) \
+		--corpus-root $(COMPAT_ROOT)
+
+compat-oracle:
+	python3 utils/run-emacs-oracle.py $(COMPAT_ROOT) \
+		--emacs '$(COMPAT_EMACS)' $(COMPAT_ORACLE_ARGS)
+
 format:
 	$(CLANG_FORMAT) -i $(FORMAT_FILES)
 
@@ -317,4 +335,4 @@ iwyu:
 
 .PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke complexity complexity-check pmccabe \
-	pmccabe-check pmccabe-baseline coverage coverage-clean format format-check compile-db iwyu
+	pmccabe-check pmccabe-baseline coverage coverage-clean compat compat-oracle format format-check compile-db iwyu

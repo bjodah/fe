@@ -1,0 +1,56 @@
+{
+	"schema": "fe-compat-features/1",
+	"note": "Fe's half of the Phase 0 manifest (00b-oracle-and-differential-corpus.md). kg owns the sibling test/lisp-compat/features.json (sub-plan 00C); the two id spaces must not collide, checked by utils/check_compat_manifest.py. This file intentionally holds only the handful of entries needed to prove the mechanism -- populating the corpus is 00C's job, not this one's.",
+	"features": [
+		{
+			"id": "self-eval-integer",
+			"category": "reader-and-literals",
+			"status": "supported",
+			"owner": "fe-core",
+			"comparison": "emacs",
+			"cases": ["value-literal-integer"],
+			"kg_test": null,
+			"rationale": null
+		},
+		{
+			"id": "arith-add-integral",
+			"category": "values-and-equality",
+			"status": "supported",
+			"owner": "fe-core",
+			"comparison": "emacs",
+			"cases": ["value-arith-add"],
+			"kg_test": null,
+			"rationale": null
+		},
+		{
+			"id": "void-function-error",
+			"category": "errors-and-non-local-exits",
+			"status": "supported",
+			"owner": "fe-core",
+			"comparison": "emacs",
+			"cases": ["condition-void-function"],
+			"kg_test": null,
+			"rationale": "Fe's error text already carries Emacs' condition name ('void-function <symbol>'), by design (see fe.c's HandleNonCallable/HandleVoidSymbol comments), but until Phase 6 it is prose in FeHandleError()'s message rather than a structured, catchable condition object. Every recorded Fe-side record for this feature carries condition_source: \"message\" for exactly that reason."
+		},
+		{
+			"id": "hash-tables",
+			"category": "values-and-equality",
+			"status": "unsupported",
+			"owner": "fe-core",
+			"comparison": "emacs",
+			"cases": ["unsupported-hash-table-p"],
+			"kg_test": null,
+			"rationale": "Fe has no hash-table type, no reader syntax for one, and no primitives that construct or query one. Not on this program's roadmap; the compat runner short-circuits cases naming this feature instead of running them and pattern-matching an unbound-symbol error that would look identical to a real gap."
+		},
+		{
+			"id": "signal-and-quit",
+			"category": "errors-and-non-local-exits",
+			"status": "planned",
+			"owner": "fe-core",
+			"comparison": "emacs",
+			"cases": ["planned-quit-signal"],
+			"kg_test": null,
+			"rationale": "Fe has no signal primitive and no condition hierarchy; both arrive with Phase 6 (parent plan section 6, 'Introduce structured completion and non-local control'). Until then Fe reports an ordinary void-function condition instead of the quit Emacs raises for (signal 'quit nil); this is deliberately not a required-match feature yet, so run-fe-compat.py reports the gap without failing the corpus over it."
+		}
+	]
+}

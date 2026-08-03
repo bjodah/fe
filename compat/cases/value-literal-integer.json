@@ -1,0 +1,6 @@
+{
+	"id": "value-literal-integer",
+	"setup": [],
+	"expr": "42",
+	"note": "Bare integral literal self-evaluation; oracle-comparable in both dialects and already agreeing."
+}

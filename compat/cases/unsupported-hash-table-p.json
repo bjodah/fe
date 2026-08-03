@@ -1,0 +1,6 @@
+{
+	"id": "unsupported-hash-table-p",
+	"setup": [],
+	"expr": "(hash-table-p (make-hash-table))",
+	"note": "Fe has no hash-table type, reader syntax, or primitives at all. The fe runner short-circuits on this case's features.json status ('unsupported') without invoking fe, rather than running it and pattern-matching the resulting void-function error -- the two currently look the same (an unbound symbol), but only one of them is a structural 'this does not exist' answer."
+}

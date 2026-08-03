@@ -1,0 +1,6 @@
+{
+	"id": "condition-void-function",
+	"setup": [],
+	"expr": "(kg-compat-nonexistent-fn 1 2)",
+	"note": "Calling an unbound name signals void-function on both sides. Fe's message ('void-function <name>') already mirrors Emacs' condition symbol by design (fe.c's HandleNonCallable/HandleVoidSymbol), though Fe reports it as a message (condition_source: message) rather than a structured condition object until Phase 6."
+}

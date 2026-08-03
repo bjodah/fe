@@ -1,0 +1,6 @@
+{
+	"id": "value-arith-add",
+	"setup": [],
+	"expr": "(+ 1 2)",
+	"note": "Small integral arithmetic result. Fe's double printer omits the fractional part for integral values (fe.c's EmitDouble), so this already agrees with Emacs' fixnum printing even before Phase 5 adds a real integer type; do not read this case as proof that the numeric tower already matches -- a non-integral or large-magnitude case would not."
+}
