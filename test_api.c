@@ -1317,6 +1317,87 @@ static FeObject* WithResource(FeContext* context, FeObject* args) {
   return FeCall(context, thunk, nullptr, 0);
 }
 
+// Redirects `stderr` into a tempfile for the duration of `body(userdata)`,
+// then restores it and copies everything captured into `buffer`
+// (NUL-terminated, `size` including the terminator). The cleanup tests use
+// this to assert on the diagnostic a failing `unwind-protect` cleanup
+// prints.
+//
+// Every early exit releases whatever it already acquired before returning
+// `false`, which is the real fix -- the original inline version of this
+// code (one copy per test) leaked `saved_stderr` and the tempfile on
+// exactly these paths.
+//
+// The two `dup2`s are deliberately unchecked. `-fanalyzer` models the
+// descriptor `dup2` returns as a fresh leakable resource, so *any* form
+// that reads the return value is reported as a leak -- including storing
+// it in a variable and testing that, which was measured. It cannot be
+// satisfied here, because the descriptor `dup2` returns is `STDERR_FILENO`
+// itself and outlives the process. Checking `errno` instead would silence
+// it while asserting something POSIX does not promise: `errno` is
+// unspecified after a *successful* call, so a libc that probes internally
+// would make this report a failure that did not happen. Not checking
+// asserts nothing false. A failed redirect still fails the test, one step
+// later and for the honest reason -- the diagnostic goes to the real
+// stderr, `buffer` comes back empty, and the caller's `strstr` finds
+// nothing.
+static bool CaptureStderr(void (*body)(void* userdata),
+                          void* userdata,
+                          char* buffer,
+                          size_t size) {
+  fflush(stderr);
+  const int saved_stderr = dup(STDERR_FILENO);
+  if (saved_stderr == -1) {
+    return false;
+  }
+  FILE* file = tmpfile();
+  // Spelled `!file` rather than `file == nullptr`: cppcheck's exhaustive
+  // value-flow analysis does not recognise C23 `nullptr` as the null
+  // constant `tmpfile()` returns, and reads the `return false` below as
+  // leaking a `file` that is null on exactly that path.
+  if (!file) {
+    close(saved_stderr);
+    return false;
+  }
+  (void)dup2(fileno(file), STDERR_FILENO);
+
+  body(userdata);
+
+  fflush(stderr);
+  (void)dup2(saved_stderr, STDERR_FILENO);
+  close(saved_stderr);
+  rewind(file);
+  const size_t read_length = fread(buffer, 1, size - 1, file);
+  buffer[read_length] = '\0';
+  fclose(file);
+  return true;
+}
+
+// `CaptureStderr`'s `body`: runs one `Expect*Error` call and stashes its
+// result, so a capture site only needs to fill in the arguments and read
+// `result` back out.
+typedef struct EvalCall {
+  FeContext* context;
+  ErrorState* state;
+  const char* label;
+  const char* source;
+  size_t length;
+  const FeEvalOptions* options;  // nullptr selects `ExpectEvaluationError`.
+  const char* expected;
+  bool result;
+} EvalCall;
+
+static void RunEvalCall(void* userdata) {
+  EvalCall* call = userdata;
+  call->result =
+      call->options
+          ? ExpectEvaluationOptionsError(
+                call->context, call->state, call->label, call->source,
+                call->length, call->options, call->expected)
+          : ExpectEvaluationError(call->context, call->state, call->label,
+                                  call->source, call->length, call->expected);
+}
+
 static bool TestUnwindHostAPI(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -1463,25 +1544,17 @@ static bool TestUnwindLisp(void) {
       "    (assert nil)"
       "    (car 1))"
       "  (= outer-ran t))";
-  fflush(stderr);
-  const int saved_stderr = dup(STDERR_FILENO);
-  CHECK(saved_stderr != -1);
-  FILE* capture = tmpfile();
-  CHECK(capture != nullptr);
-  CHECK(dup2(fileno(capture), STDERR_FILENO) != -1);
-  const bool evaluated = ExpectEvaluationError(
-      context, &state, "unwind.fe", failing_cleanup,
-      sizeof(failing_cleanup) - 1, "unwind.fe: assertion failure");
-  fflush(stderr);
-  CHECK(dup2(saved_stderr, STDERR_FILENO) != -1);
-  close(saved_stderr);
-  char captured[512] = {0};
-  rewind(capture);
-  const size_t captured_length =
-      fread(captured, 1, sizeof(captured) - 1, capture);
-  captured[captured_length] = '\0';
-  fclose(capture);
-  CHECK(evaluated);
+  EvalCall failing_cleanup_call = {.context = context,
+                                   .state = &state,
+                                   .label = "unwind.fe",
+                                   .source = failing_cleanup,
+                                   .length = sizeof(failing_cleanup) - 1,
+                                   .options = nullptr,
+                                   .expected = "unwind.fe: assertion failure"};
+  char captured[512];
+  CHECK(CaptureStderr(RunEvalCall, &failing_cleanup_call, captured,
+                      sizeof(captured)));
+  CHECK(failing_cleanup_call.result);
   CHECK(strstr(captured, "cleanup error") != nullptr);
   CHECK(strstr(captured, "expected pair, got double") != nullptr);
   CHK("outer-ran", "t");
@@ -1539,25 +1612,18 @@ static bool TestUnwindCleanupBudget(void) {
   // cleanup's own step-limit failure) is still what reaches the host.
   static const char runaway_cleanup[] = "(unwind-protect (car 1) (while t 1))";
   const FeEvalOptions small_cleanup_budget = {.cleanup_step_limit = 50};
-  fflush(stderr);
-  int saved_stderr = dup(STDERR_FILENO);
-  CHECK(saved_stderr != -1);
-  FILE* capture = tmpfile();
-  CHECK(capture != nullptr);
-  CHECK(dup2(fileno(capture), STDERR_FILENO) != -1);
-  bool evaluated = ExpectEvaluationOptionsError(
-      context, &state, "budget.fe", runaway_cleanup,
-      sizeof(runaway_cleanup) - 1, &small_cleanup_budget,
-      "budget.fe: expected pair, got double");
-  fflush(stderr);
-  CHECK(dup2(saved_stderr, STDERR_FILENO) != -1);
-  close(saved_stderr);
-  char captured[512] = {0};
-  rewind(capture);
-  size_t captured_length = fread(captured, 1, sizeof(captured) - 1, capture);
-  captured[captured_length] = '\0';
-  fclose(capture);
-  CHECK(evaluated);
+  EvalCall runaway_cleanup_call = {
+      .context = context,
+      .state = &state,
+      .label = "budget.fe",
+      .source = runaway_cleanup,
+      .length = sizeof(runaway_cleanup) - 1,
+      .options = &small_cleanup_budget,
+      .expected = "budget.fe: expected pair, got double"};
+  char captured[512];
+  CHECK(CaptureStderr(RunEvalCall, &runaway_cleanup_call, captured,
+                      sizeof(captured)));
+  CHECK(runaway_cleanup_call.result);
   CHECK(strstr(captured, "cleanup error") != nullptr);
   CHECK(strstr(captured, "evaluation step limit exceeded") != nullptr);
 
@@ -1595,25 +1661,17 @@ static bool TestUnwindCleanupBudget(void) {
                                                     .interrupt = Interrupt,
                                                     .userdata = &interrupt,
                                                     .cleanup_step_limit = 5000};
-  fflush(stderr);
-  saved_stderr = dup(STDERR_FILENO);
-  CHECK(saved_stderr != -1);
-  capture = tmpfile();
-  CHECK(capture != nullptr);
-  CHECK(dup2(fileno(capture), STDERR_FILENO) != -1);
-  evaluated = ExpectEvaluationOptionsError(
-      context, &state, "budget.fe", runaway_interrupted_cleanup,
-      sizeof(runaway_interrupted_cleanup) - 1, &interrupted_cleanup_budget,
-      "budget.fe: evaluation cancelled");
-  fflush(stderr);
-  CHECK(dup2(saved_stderr, STDERR_FILENO) != -1);
-  close(saved_stderr);
-  memset(captured, 0, sizeof(captured));
-  rewind(capture);
-  captured_length = fread(captured, 1, sizeof(captured) - 1, capture);
-  captured[captured_length] = '\0';
-  fclose(capture);
-  CHECK(evaluated);
+  EvalCall runaway_interrupted_call = {
+      .context = context,
+      .state = &state,
+      .label = "budget.fe",
+      .source = runaway_interrupted_cleanup,
+      .length = sizeof(runaway_interrupted_cleanup) - 1,
+      .options = &interrupted_cleanup_budget,
+      .expected = "budget.fe: evaluation cancelled"};
+  CHECK(CaptureStderr(RunEvalCall, &runaway_interrupted_call, captured,
+                      sizeof(captured)));
+  CHECK(runaway_interrupted_call.result);
   CHECK(interrupt.polls >= interrupt.cancel_after_second);
   CHECK(strstr(captured, "cleanup error") != nullptr);
   CHECK(strstr(captured, "evaluation cancelled") != nullptr);
