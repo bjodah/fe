@@ -577,7 +577,7 @@
     "primitive-setq-value-error"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 02B lands `setq` as a core special form (fe.c's EvaluateSetq, reached from EvaluatePrimitive's PSetq arm): pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. Assignment `=` (primitive-assign-eq) still coexists until 02C deletes it.",
+   "rationale": "Sub-plan 02B lands `setq` as a core special form (fe.c's EvaluateSetq, reached from EvaluatePrimitive's PSetq arm): pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. Sub-plan 02C then deleted the historical assignment `=` it landed beside, so `setq` is Fe's only assignment special form and `=` is numeric equality (primitive-numeric-eq).",
    "source_name": "setq"
   },
   {
