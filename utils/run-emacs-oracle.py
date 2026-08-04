@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Regenerate and verify the Emacs oracle snapshots for a compat corpus.
 
-Drives `emacs -Q --batch -l oracle/emacs-shim.el CASE.json` once per case
-and writes oracle/<id>.json: the shim's one-line JSON record plus the
-exact Emacs version that produced it.  "Emacs 31" is not a pin -- a
+Drives `emacs -Q --batch -l oracle/emacs-shim.el CASE.json` once per
+Emacs-compared case and writes oracle/<id>.json: the shim's one-line JSON
+record plus the exact Emacs version that produced it.  Which cases those
+are comes from features.json, not from globbing cases/ -- see
+emacs_compared_cases().  "Emacs 31" is not a pin -- a
 branch build's behaviour can move -- so an existing snapshot is never
 silently overwritten by a run under a different version; that fails
 loudly instead (--allow-version-change is the deliberate override).
@@ -65,6 +67,26 @@ def emacs_version(emacs):
 			f"FAIL: {emacs} --eval '(emacs-version)' exited "
 			f"{proc.returncode}: {proc.stderr.decode('utf-8', 'replace')}")
 	return proc.stdout.decode("utf-8").strip()
+
+
+def emacs_compared_cases(corpus_root):
+	"""Case ids the oracle owns: those of `comparison: "emacs"` features.
+
+	A case belongs to a feature, and a feature says what it is compared
+	against.  Only `emacs` features have an Emacs answer at all: a
+	`kg-policy` feature records a decision this project made, so running
+	Emacs over its case would write a snapshot the corpus deliberately
+	does not have -- and `primitive-print`, whose expression writes to
+	stdout itself, would break the shim's one-record-per-line protocol
+	and abort the whole run.  Enumerating from the manifest rather than
+	globbing cases/ is what keeps those two facts in one place.
+	"""
+	manifest = corpus_root / "features.json"
+	with open(manifest, "r", encoding="utf-8") as fp:
+		features = json.load(fp)["features"]
+	return {case
+		for feature in features if feature["comparison"] == "emacs"
+		for case in feature["cases"]}
 
 
 def run_case(emacs, shim, case_path, timeout):
@@ -132,8 +154,17 @@ def main():
 
 	cases_dir = args.corpus_root / "cases"
 	case_paths = sorted(cases_dir.glob("*.json"))
+	oracle_cases = emacs_compared_cases(args.corpus_root)
+	skipped = [p for p in case_paths if p.stem not in oracle_cases]
+	case_paths = [p for p in case_paths if p.stem in oracle_cases]
 	if args.case:
 		wanted = set(args.case)
+		not_compared = sorted(wanted & {p.stem for p in skipped})
+		if not_compared:
+			raise SystemExit(
+				f"FAIL: --case {not_compared} belongs to a feature "
+				"that is not compared against Emacs; it has no "
+				"oracle snapshot by design")
 		case_paths = [p for p in case_paths if p.stem in wanted]
 		missing = wanted - {p.stem for p in case_paths}
 		if missing:
@@ -177,7 +208,8 @@ def main():
 		written += 1
 
 	print(f"oracle: {len(case_paths)} case(s), {written} written/updated, "
-	      f"{unchanged} unchanged, {len(failed)} failed")
+	      f"{unchanged} unchanged, {len(failed)} failed, "
+	      f"{len(skipped)} not compared against Emacs")
 	if failed:
 		print("FAIL:", file=sys.stderr)
 		for line in failed:
