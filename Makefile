@@ -104,20 +104,51 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # Phase 3 lands). This is a small, named, immediate need, not a program-wide
 # promise: every later phase of that program prices and requests its own
 # raise against this file's measured total when its own sub-plan lands.
-SCC_COMPLEXITY_MAX ?= 220
-SCC_FILE_COMPLEXITY_MAX ?= 112
+#
+# Raised a third time, 220->420 / 112->240, by sub-plan 03A of the same
+# program's Phase 3 Decision (set README, dated 2026-08-04). This is the
+# large one: 03A's throwaway split spike (fe.c -> fe.c + fe_eval.c, exactly
+# 03B's cut) measured the total jumping 214->286 from the mechanical move
+# alone, with the new fe_eval.c file alone scoring 108 of the *old* 112 file
+# cap before a single frame-machine line exists -- confirming scc's own
+# comment below: the evaluator was invisible to scc while it lived past
+# fe.c's `'"'`-literal desync, and extracting it un-blinds real complexity
+# that was always there. 03A's Decision funds two things ahead of when they
+# land, per Rule 6: 03B's measured split (an unconditional total floor of
+# 286, no substance yet) plus a frame-machine substance estimate obtained by
+# roughly doubling fe_eval.c's own *measured* 108, not the stale cross-file
+# 00A estimate this comment used to cite. `PMCCABE_TOTAL_MAX` below is the
+# authoritative aggregate for the core from this Decision on; scc's total
+# and file caps remain secondary ratchets -- they still catch an unbudgeted
+# new file or complexity in the `fex_*` files, where no desync applies.
+SCC_COMPLEXITY_MAX ?= 420
+SCC_FILE_COMPLEXITY_MAX ?= 240
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
 # The scc total above is a floor, not a measurement (its string-state
 # machine desynchronizes on fe.c's '"' character literals and stops
-# counting keywords below them).  This manifest is the honest gate:
-# pmccabe reads every function, its complexity is recorded per symbol, no
-# symbol may exceed its entry, and a function with no entry is new and has
-# to arrive at or under PMCCABE_NEW_FUNCTION_MAX.  `make pmccabe-baseline`
-# is the only thing that rewrites it.
+# counting keywords below them).  This manifest is the per-symbol
+# no-regression ratchet: pmccabe reads every function, its complexity is
+# recorded per symbol, no symbol may exceed its entry, and a function with
+# no entry is new and has to arrive at or under PMCCABE_NEW_FUNCTION_MAX.
+# `make pmccabe-baseline` is the only thing that rewrites it, and -- since
+# sub-plan 03A's Decision -- it may not do so for a tree outside either
+# budget below; both are checked first.
 PMCCABE_BASELINE ?= .ci/pmccabe-baseline.json
 PMCCABE_NEW_FUNCTION_MAX ?= 15
+# The funded whole-program pmccabe aggregate (sub-plan 03A, set README
+# Decision, 2026-08-04): the authoritative core measure from this Decision
+# on, because scc's total is not one (see above). Audited at 500 across 202
+# symbols before this Decision; 03A's split spike measured the total
+# *conserved exactly* across the mechanical fe.c -> fe.c + fe_eval.c move
+# (500 before, 500 after -- pmccabe reads every function regardless of which
+# file it is in). This raise funds 03C-03E's frame-machine substance ahead
+# of when it lands, per Rule 6: roughly doubling fe_eval.c's own measured
+# evaluator weight (104 across 29 symbols in the spike) is +100 to +140,
+# landing the total at 600-640; funded at 630, near the top of that range
+# with a small margin, not the program's full uncertainty range.
+PMCCABE_TOTAL_MAX ?= 630
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -264,6 +295,7 @@ pmccabe-check:
 	$(PMCCABE) $(PMCCABE_PATHS) | \
 		python3 utils/check_pmccabe_complexity.py \
 			--max-function $(PMCCABE_FUNCTION_COMPLEXITY_MAX) \
+			--max-total $(PMCCABE_TOTAL_MAX) \
 			--max-new-function $(PMCCABE_NEW_FUNCTION_MAX) \
 			--baseline $(PMCCABE_BASELINE)
 
@@ -271,6 +303,7 @@ pmccabe-baseline:
 	$(PMCCABE) $(PMCCABE_PATHS) | \
 		python3 utils/check_pmccabe_complexity.py \
 			--max-function $(PMCCABE_FUNCTION_COMPLEXITY_MAX) \
+			--max-total $(PMCCABE_TOTAL_MAX) \
 			--max-new-function $(PMCCABE_NEW_FUNCTION_MAX) \
 			--write-baseline $(PMCCABE_BASELINE)
 

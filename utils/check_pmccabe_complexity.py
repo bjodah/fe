@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
-"""Check pmccabe output against a per-symbol baseline and a global budget.
+"""Check pmccabe output against a per-symbol baseline and two budgets.
 
-The aggregate budget (--max-function) is a backstop: it says nothing about
-a function that grows from 12 to 40, which is how complexity actually
+--max-function is a per-function backstop: it says nothing about a
+function that grows from 12 to 40, which is how complexity actually
 arrives.  The baseline manifest is the ratchet -- every symbol's measured
 complexity, checked in, with "no increase" as the rule and one command
 (`make pmccabe-baseline`) to record a decrease or a new function.
+
+--max-total is the funded whole-program aggregate (sub-plan 03A of kg's
+Emacs-subset program): the sum of every measured function's complexity,
+reviewed and raised explicitly per named piece of work.  It exists because
+scc's C string-state machine desynchronizes on fe.c's `'"'` character
+literals and stops counting keywords below the desync, so scc's total is a
+floor on fe.c, not a measurement of it; pmccabe reads every function
+regardless of where it sits in the file, and its total is the honest
+whole-program number.  Neither budget may be raised by `make
+pmccabe-baseline`; both are checked before it is allowed to write.
 """
 
 import argparse
@@ -198,6 +208,12 @@ def check_baseline(functions, baseline, max_new):
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--max-function", type=int, required=True)
+	parser.add_argument(
+		"--max-total", type=int, required=True,
+		help="funded aggregate pmccabe complexity across every "
+		     "measured function -- the authoritative core measure "
+		     "once scc's total stops being one (see the Makefile "
+		     "comment next to SCC_COMPLEXITY_MAX)")
 	parser.add_argument("--top", type=int, default=10)
 	parser.add_argument("--baseline",
 			    help="per-symbol baseline manifest to enforce")
@@ -237,9 +253,14 @@ def main():
 		return 1
 
 	max_complexity = functions[0]["complexity"]
+	total_complexity = sum(f["complexity"] for f in functions)
 	print(
 		f"pmccabe max function complexity: {max_complexity} "
 		f"(limit {args.max_function})"
+	)
+	print(
+		f"pmccabe total complexity: {total_complexity}/{len(functions)} "
+		f"symbols (limit {args.max_total})"
 	)
 	print("pmccabe most complex functions:")
 	for func in functions[:args.top]:
@@ -248,26 +269,39 @@ def main():
 			f"{func['location']}"
 		)
 
-	if args.write_baseline:
-		write_baseline(args.write_baseline, functions,
-			       args.max_new_function)
-		return 0
-
+	# Both funded envelopes are checked before `--write-baseline` can
+	# return.  `make pmccabe-baseline` regenerating the per-symbol
+	# manifest from an over-budget measurement would look clean
+	# afterward -- every symbol would match its own freshly written
+	# entry -- while the tree is still over its funded per-function or
+	# aggregate limit.  Baseline regeneration is not an escape hatch from
+	# either.
 	over_limit = [
 		func for func in functions if func["complexity"] > args.max_function
 	]
+	failures = []
 	if over_limit:
-		print(
-			f"FAIL: {len(over_limit)} function(s) exceed complexity "
-			f"limit {args.max_function}",
-			file=sys.stderr,
-		)
+		failures.append(
+			f"{len(over_limit)} function(s) exceed complexity limit "
+			f"{args.max_function}")
+	if total_complexity > args.max_total:
+		failures.append(
+			f"total complexity {total_complexity} exceeds funded "
+			f"budget {args.max_total} "
+			f"(+{total_complexity - args.max_total})")
+	if failures:
+		print(f"FAIL: {'; '.join(failures)}", file=sys.stderr)
 		for func in over_limit:
 			print(
 				f"  {func['complexity']:4d}  {func['location']}",
 				file=sys.stderr,
 			)
 		return 1
+
+	if args.write_baseline:
+		write_baseline(args.write_baseline, functions,
+			       args.max_new_function)
+		return 0
 
 	if args.baseline:
 		baseline = load_baseline(args.baseline)
