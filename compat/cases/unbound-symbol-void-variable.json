@@ -1,0 +1,6 @@
+{
+ "id": "unbound-symbol-void-variable",
+ "setup": [],
+ "expr": "totally-unbound-zzz",
+ "note": "Evaluating a bare unbound symbol already raises void-variable in both languages -- but this agreement is itself a recorded divergence from *upstream* (vanilla) Fe, not a trivial 'nothing to see here' case."
+}

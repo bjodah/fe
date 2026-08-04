@@ -1,0 +1,6 @@
+{
+ "id": "primitive-assign-eq",
+ "setup": [],
+ "expr": "(= x 5)",
+ "note": "Central divergence (entry number one): Fe binds `=` to assignment -- `(= SYM VALUE)` sets SYM and (today) returns nil. Emacs's `=` is numeric equality and evaluates its arguments as expressions, so `(= x 5)` in Emacs tries to read the *value* of the unbound variable x and signals void-variable."
+}

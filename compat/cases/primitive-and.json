@@ -1,0 +1,6 @@
+{
+ "id": "primitive-and",
+ "setup": [],
+ "expr": "(and 1 2 3)",
+ "note": "Already agrees: last true value."
+}

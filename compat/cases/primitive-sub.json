@@ -1,0 +1,6 @@
+{
+ "id": "primitive-sub",
+ "setup": [],
+ "expr": "(- 10 3 2)",
+ "note": "Already agrees."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "arity-not-strict",
+ "setup": [],
+ "expr": "((lambda (x) x))",
+ "note": "Fe's default (non `-a`) arity checking is lenient: calling a one-parameter lambda with zero arguments binds x to nil rather than erroring. Emacs signals wrong-number-of-arguments."
+}

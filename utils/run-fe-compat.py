@@ -23,6 +23,13 @@ means the oracle and fe must agree, and disagreement is a regression.
 "planned", "unsupported", and "divergent" are known, expected gaps and are
 reported without failing -- that distinction (compatibility work still
 pending vs. a regression) is this whole mechanism's reason to exist.
+
+A feature's comparison mode decides whether an oracle is consulted at all:
+"comparison": "kg-policy" (00b-oracle-and-differential-corpus.md's split)
+means this construct has no Emacs analogue worth snapshotting -- fe still
+runs so a crash or a runner-level failure still surfaces, but the result is
+reported as pinned by the feature's kg_test rather than compared against
+oracle/<id>.json, and no such snapshot is expected to exist.
 """
 
 import argparse
@@ -141,6 +148,18 @@ def main():
 			fe_record, runner_error = run_fe_case(fe_bin, case, args.timeout)
 		if runner_error:
 			failures.append(f"{case_id}: {runner_error}")
+			continue
+
+		# comparison: kg-policy means this feature has no Emacs oracle at
+		# all (see ../compat/README.md and 00b-oracle-and-differential-
+		# corpus.md's split) -- its correctness is pinned by kg_test, not
+		# by agreement with a snapshot, so there is deliberately no
+		# oracle/<id>.json for it and none is expected here.
+		if feature.get("comparison") == "kg-policy":
+			passed += 1
+			print(f"# {case_id} (feature {feature['id']}, comparison "
+			      f"kg-policy): pinned by kg_test {feature.get('kg_test')!r}, "
+			      f"not compared to an Emacs oracle -- fe={fe_record!r}")
 			continue
 
 		oracle_path = args.corpus_root / "oracle" / f"{case_id}.json"

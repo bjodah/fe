@@ -1,0 +1,6 @@
+{
+ "id": "reader-no-integers",
+ "setup": [],
+ "expr": "42.0",
+ "note": "Fe has one numeric type (double); its writer omits the fractional part for integral values (EmitDouble), so the literal 42.0 prints identically to the integer 42 -- \"42\", with no decimal point. Emacs distinguishes the integer and float types and prints the float literally as \"42.0\"."
+}

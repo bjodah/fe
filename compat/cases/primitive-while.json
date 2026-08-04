@@ -1,0 +1,6 @@
+{
+ "id": "primitive-while",
+ "setup": [],
+ "expr": "(while nil 1)",
+ "note": "Minimal agreement case (the loop body never runs): both languages return nil. A case exercising loop iteration needs Fe's `=` for the counter, which is itself the central divergence above, so it is not used here to keep this case isolated to `while` alone."
+}

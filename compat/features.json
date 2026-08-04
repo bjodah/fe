@@ -1,56 +1,578 @@
 {
-	"schema": "fe-compat-features/1",
-	"note": "Fe's half of the Phase 0 manifest (00b-oracle-and-differential-corpus.md). kg owns the sibling test/lisp-compat/features.json (sub-plan 00C); the two id spaces must not collide, checked by utils/check_compat_manifest.py. This file intentionally holds only the handful of entries needed to prove the mechanism -- populating the corpus is 00C's job, not this one's.",
-	"features": [
-		{
-			"id": "self-eval-integer",
-			"category": "reader-and-literals",
-			"status": "supported",
-			"owner": "fe-core",
-			"comparison": "emacs",
-			"cases": ["value-literal-integer"],
-			"kg_test": null,
-			"rationale": null
-		},
-		{
-			"id": "arith-add-integral",
-			"category": "values-and-equality",
-			"status": "supported",
-			"owner": "fe-core",
-			"comparison": "emacs",
-			"cases": ["value-arith-add"],
-			"kg_test": null,
-			"rationale": null
-		},
-		{
-			"id": "void-function-error",
-			"category": "errors-and-non-local-exits",
-			"status": "supported",
-			"owner": "fe-core",
-			"comparison": "emacs",
-			"cases": ["condition-void-function"],
-			"kg_test": null,
-			"rationale": "Fe's error text already carries Emacs' condition name ('void-function <symbol>'), by design (see fe.c's HandleNonCallable/HandleVoidSymbol comments), but until Phase 6 it is prose in FeHandleError()'s message rather than a structured, catchable condition object. Every recorded Fe-side record for this feature carries condition_source: \"message\" for exactly that reason."
-		},
-		{
-			"id": "hash-tables",
-			"category": "values-and-equality",
-			"status": "unsupported",
-			"owner": "fe-core",
-			"comparison": "emacs",
-			"cases": ["unsupported-hash-table-p"],
-			"kg_test": null,
-			"rationale": "Fe has no hash-table type, no reader syntax for one, and no primitives that construct or query one. Not on this program's roadmap; the compat runner short-circuits cases naming this feature instead of running them and pattern-matching an unbound-symbol error that would look identical to a real gap."
-		},
-		{
-			"id": "signal-and-quit",
-			"category": "errors-and-non-local-exits",
-			"status": "planned",
-			"owner": "fe-core",
-			"comparison": "emacs",
-			"cases": ["planned-quit-signal"],
-			"kg_test": null,
-			"rationale": "Fe has no signal primitive and no condition hierarchy; both arrive with Phase 6 (parent plan section 6, 'Introduce structured completion and non-local control'). Until then Fe reports an ordinary void-function condition instead of the quit Emacs raises for (signal 'quit nil); this is deliberately not a required-match feature yet, so run-fe-compat.py reports the gap without failing the corpus over it."
-		}
-	]
+ "schema": "fe-compat-features/1",
+ "note": "Fe's half of the Phase 0 manifest (00b-oracle-and-differential-corpus.md). kg owns the sibling test/lisp-compat/features.json (sub-plan 00C); the two id spaces must not collide, checked by utils/check_compat_manifest.py. This file intentionally holds only the handful of entries needed to prove the mechanism -- populating the corpus is 00C's job, not this one's.",
+ "features": [
+  {
+   "id": "self-eval-integer",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "value-literal-integer"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "arith-add-integral",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "value-arith-add"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "void-function-error",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "condition-void-function"
+   ],
+   "kg_test": null,
+   "rationale": "Fe's error text already carries Emacs' condition name ('void-function <symbol>'), by design (see fe.c's HandleNonCallable/HandleVoidSymbol comments), but until Phase 6 it is prose in FeHandleError()'s message rather than a structured, catchable condition object. Every recorded Fe-side record for this feature carries condition_source: \"message\" for exactly that reason.",
+   "source_name": null
+  },
+  {
+   "id": "hash-tables",
+   "category": "values-and-equality",
+   "status": "unsupported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "unsupported-hash-table-p"
+   ],
+   "kg_test": null,
+   "rationale": "Fe has no hash-table type, no reader syntax for one, and no primitives that construct or query one. Not on this program's roadmap; the compat runner short-circuits cases naming this feature instead of running them and pattern-matching an unbound-symbol error that would look identical to a real gap.",
+   "source_name": null
+  },
+  {
+   "id": "signal-and-quit",
+   "category": "errors-and-non-local-exits",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "planned-quit-signal"
+   ],
+   "kg_test": null,
+   "rationale": "Fe has no signal primitive and no condition hierarchy; both arrive with Phase 6 (parent plan section 6, 'Introduce structured completion and non-local control'). Until then Fe reports an ordinary void-function condition instead of the quit Emacs raises for (signal 'quit nil); this is deliberately not a required-match feature yet, so run-fe-compat.py reports the gap without failing the corpus over it.",
+   "source_name": null
+  },
+  {
+   "id": "primitive-assert",
+   "category": "errors-and-non-local-exits",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-assert"
+   ],
+   "kg_test": null,
+   "rationale": "Emacs's plain (non-cl-lib) namespace does not define `assert` at all under `emacs -Q --batch`; Fe's `assert` is a core primitive with no direct oracle analogue by this name. Recorded as divergent rather than kg-policy because the disagreement is meaningfully demonstrated by a real oracle snapshot (void-function), not merely undemonstrable.",
+   "source_name": "assert"
+  },
+  {
+   "id": "primitive-env",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-env"
+   ],
+   "kg_test": null,
+   "rationale": "Emacs has no `env` primitive bound in `emacs -Q --batch`; Fe's `env` is a core introspection primitive returning the interpreter's whole current symbol list (fe.c's PEnv arm), a Fe-specific capability with no Emacs analogue by this name.",
+   "source_name": "env"
+  },
+  {
+   "id": "primitive-let",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-let"
+   ],
+   "kg_test": null,
+   "rationale": "Same name, incompatible shape: Emacs's `let` takes a bindings list as its first argument and signals wrong-type-argument when given a bare symbol; Fe's `let` takes a bare symbol directly and has no separate body argument at all. kg's prelude `let` macro (tracked in kg's own manifest, owner kg, comparison emacs) is the Emacs-shaped construct; this entry is Fe's distinct low-level primitive.",
+   "source_name": "let"
+  },
+  {
+   "id": "primitive-assign-eq",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-assign-eq"
+   ],
+   "kg_test": null,
+   "rationale": "This is the reason the whole Elisp-subset program exists (parent plan section 6, 'Hard-cut assignment and numeric =`): Fe's `=` performs `CDR(GetBound(ctx, va, env)) = EVAL_ARG()` (fe.c's PSet arm) -- assignment, not comparison -- and currently returns nil rather than the assigned value. Phase 2 replaces this with a core `setq` special form and repurposes `=` as numeric equality; until then, this entry records the live divergence with a real oracle snapshot rather than only in prose.",
+   "source_name": "="
+  },
+  {
+   "id": "primitive-if",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-if"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "if"
+  },
+  {
+   "id": "primitive-lambda",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-lambda"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "lambda"
+  },
+  {
+   "id": "primitive-macro",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "primitive-macro"
+   ],
+   "kg_test": "fe/test_api.c:TestMacroExpansion",
+   "rationale": null,
+   "source_name": "macro"
+  },
+  {
+   "id": "primitive-while",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-while"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "while"
+  },
+  {
+   "id": "primitive-quote",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-quote"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "quote"
+  },
+  {
+   "id": "primitive-boundp",
+   "category": "bindings",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-boundp"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "boundp"
+  },
+  {
+   "id": "primitive-makunbound",
+   "category": "bindings",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-makunbound"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "makunbound"
+  },
+  {
+   "id": "primitive-and",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-and"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "and"
+  },
+  {
+   "id": "primitive-or",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-or"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "or"
+  },
+  {
+   "id": "primitive-do",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "primitive-do"
+   ],
+   "kg_test": "fe/test_api.c:TestEvaluationControl",
+   "rationale": null,
+   "source_name": "do"
+  },
+  {
+   "id": "primitive-unwind-protect",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-unwind-protect"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "unwind-protect"
+  },
+  {
+   "id": "primitive-cons",
+   "category": "sequences",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-cons"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "cons"
+  },
+  {
+   "id": "primitive-car",
+   "category": "sequences",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-car"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "car"
+  },
+  {
+   "id": "primitive-cdr",
+   "category": "sequences",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-cdr"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "cdr"
+  },
+  {
+   "id": "primitive-setcar",
+   "category": "sequences",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-setcar"
+   ],
+   "kg_test": null,
+   "rationale": "Return-value divergence only; the mutation itself (CAR becomes 9) is not independently observable through this case's shared single-expression protocol, but the printed return value already demonstrates the disagreement.",
+   "source_name": "setcar"
+  },
+  {
+   "id": "primitive-setcdr",
+   "category": "sequences",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-setcdr"
+   ],
+   "kg_test": null,
+   "rationale": "Return-value divergence, same root cause as primitive-setcar: fe.c's PSetCdr arm never assigns its `res` return value.",
+   "source_name": "setcdr"
+  },
+  {
+   "id": "primitive-list",
+   "category": "sequences",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-list"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "list"
+  },
+  {
+   "id": "primitive-not",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-not"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "not"
+  },
+  {
+   "id": "primitive-is",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "primitive-is"
+   ],
+   "kg_test": "fe/test_api.c:TestBinding",
+   "rationale": null,
+   "source_name": "is"
+  },
+  {
+   "id": "primitive-atom",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-atom"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "atom"
+  },
+  {
+   "id": "primitive-print",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "primitive-print"
+   ],
+   "kg_test": "fe/test_api.c:TestWriter",
+   "rationale": null,
+   "source_name": "print"
+  },
+  {
+   "id": "primitive-less",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-less"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "<"
+  },
+  {
+   "id": "primitive-less-equal",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-less-equal"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "<="
+  },
+  {
+   "id": "primitive-add",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-add"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "+"
+  },
+  {
+   "id": "primitive-sub",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-sub"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "-"
+  },
+  {
+   "id": "primitive-mul",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-mul"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "*"
+  },
+  {
+   "id": "primitive-div",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-div"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "/"
+  },
+  {
+   "id": "primitive-alias-fn-lambda",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "primitive-alias-fn-lambda"
+   ],
+   "kg_test": "fe/test_api.c:TestParameterLists",
+   "rationale": null,
+   "source_name": "fn"
+  },
+  {
+   "id": "one-namespace-boundp",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "one-namespace-boundp"
+   ],
+   "kg_test": null,
+   "rationale": "Fe is a Lisp-1 (fe.c: a symbol is `(name . value)`, and GetBound's global path returns CDR(sym) directly); Emacs is a Lisp-2. Phase 4 of the parent plan ('Replace Fe's Lisp-1 name resolution with Lisp-2 value and function namespaces') is what closes this gap; until then `(setq f 7)` followed by `(defun f () 9)` clobber each other in Fe, and this boundp case is the cheapest single-expression demonstration of the same root cause.",
+   "source_name": null
+  },
+  {
+   "id": "reader-sharp-quote-identity",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-sharp-quote-identity"
+   ],
+   "kg_test": null,
+   "rationale": "fe.c:1411 (ReadAtom's `#` handling) does not implement `#'` as a distinct reader macro; kg's own `function` prelude form (see kg's manifest, owner kg) is a plain identity lambda that only coincidentally acts right when its argument is already a symbol, not a real substitute for the reader-level rewrite. Untracked until Phase 4 or later reader work; no phase is currently funded for it, so this stays `divergent` rather than `planned`.",
+   "source_name": null
+  },
+  {
+   "id": "reader-no-integers",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-no-integers"
+   ],
+   "kg_test": null,
+   "rationale": "Parent plan section 2's numeric model ('Add: signed 64-bit integers; existing floating-point values') is Phase 5, not yet implemented; fe.c has exactly one FeTNumber double representation today, and its writer (EmitDouble) special-cases integral values to omit the fractional part -- matching Emacs' printed form for genuine integers by coincidence, and diverging from it for floats that happen to be integral. This is one of the plan's named day-one divergences ('No integers. 42 and 42.0 are the same object and print the same.').",
+   "source_name": null
+  },
+  {
+   "id": "reader-char-literal-unsupported",
+   "category": "reader-and-literals",
+   "status": "unsupported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-char-literal-unsupported"
+   ],
+   "kg_test": null,
+   "rationale": "Deliberately not implemented: FeReadFn (fe.h's public read callback) yields one raw byte at a time with no lookahead buffer for multi-byte reassembly at the reader's character-literal site, so `?\u00c3\u00a9` (a two-byte UTF-8 encoding) would read only its first byte -- exactly the silent wrongness this compat manifest exists to prevent. Failing clearly (void-variable on the resulting bare symbol) is the current, intentional behavior rather than a bug to fix; a real implementation needs the reader's byte source to support decoding a full codepoint, which is untracked.",
+   "source_name": null
+  },
+  {
+   "id": "arity-not-strict",
+   "category": "functions-and-macros",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "arity-not-strict"
+   ],
+   "kg_test": null,
+   "rationale": "Parent plan section 7 ('Make strict arity normal') is Phase 7, milestone 2, not yet implemented or funded by this slice's Decision. Fe's `-a`/`fe -a` strict-arity pass exists standalone (test.sh's third pass) but is opt-in, not the evaluator's default -- this entry tracks the *default* mode's behavior, which is what an ordinary `(lambda ...)` call site sees.",
+   "source_name": null
+  },
+  {
+   "id": "unbound-symbol-void-variable",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "unbound-symbol-void-variable"
+   ],
+   "kg_test": null,
+   "rationale": "This is the parent plan's own example of a divergence-from-Fe that is an agreement-with-Emacs: kg's fe fork changed vanilla Fe's historical behavior (silently returning nil for an unbound symbol) specifically to match Emacs's void-variable signal, and doc/fe-upstream.md's divergence table records that as a deliberate, already-landed change, not a Phase 2+ item. Status is `supported` because the oracle comparison is what this manifest tracks; the vanilla-Fe distinction is prose context only, not a comparison axis this schema has a field for.",
+   "source_name": null
+  },
+  {
+   "id": "writer-bounded-output",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "writer-bounded-output"
+   ],
+   "kg_test": "fe/test_api.c:TestWriter",
+   "rationale": "This is kg/fe's own deliberate policy, not an Emacs contract: the parent kg repository's CLAUDE.md already states the precedent for exactly this shape of decision (kg_regex_match_backward's backward-matching policy is kg's own, not Emacs', so an oracle for it would have to encode kg's policy rather than read Emacs'), and 00b-oracle-and-differential-corpus.md's own 'What this does not do' names cyclic-structure printing explicitly. Pinned by fe/test_api.c's TestWriter, which already asserts all three bounded forms (#<cycle>, #<deep>, #<truncated>).",
+   "source_name": null
+  }
+ ]
 }

@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setcar",
+ "setup": [],
+ "expr": "(setcar (cons 1 2) 9)",
+ "note": "Fe's setcar returns nil (fe.c's PSetCar arm never assigns its `res` return value); Emacs's setcar returns the new car value (9)."
+}

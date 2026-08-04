@@ -1,0 +1,6 @@
+{
+ "id": "primitive-quote",
+ "setup": [],
+ "expr": "(quote (1 2 3))",
+ "note": "Quoting already agrees."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "primitive-not",
+ "setup": [],
+ "expr": "(not nil)",
+ "note": "Already agrees."
+}

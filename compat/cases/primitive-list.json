@@ -1,0 +1,6 @@
+{
+ "id": "primitive-list",
+ "setup": [],
+ "expr": "(list 1 2 3)",
+ "note": "Already agrees."
+}

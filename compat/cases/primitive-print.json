@@ -1,0 +1,6 @@
+{
+ "id": "primitive-print",
+ "setup": [],
+ "expr": "(print 1)",
+ "note": "print writes directly to stdout in both languages. Both runners' protocols depend on stdout carrying exactly one thing (the fe runner takes the whole captured stdout as the case's printed value; the Emacs oracle shim requires exactly one JSON record line on its own stdout) -- exercising `print` itself through either mechanism corrupts that single channel rather than testing the primitive cleanly, which is a mechanical reason for kg-policy independent of whether Fe and Emacs actually agree."
+}

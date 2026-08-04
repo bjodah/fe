@@ -1,0 +1,6 @@
+{
+ "id": "primitive-if",
+ "setup": [],
+ "expr": "(if t 1 2)",
+ "note": "Basic three-argument if, already agreeing: Fe's `(if COND THEN ELSE...)` accepts an implicit `do` (progn) of trailing else-forms, matching Emacs's `if` shape exactly."
+}

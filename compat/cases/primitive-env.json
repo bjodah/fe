@@ -1,0 +1,6 @@
+{
+ "id": "primitive-env",
+ "setup": [],
+ "expr": "(env)",
+ "note": "Fe's introspection primitive returning the full current symbol list (fe.c's PEnv arm returns ctx->symbol_list directly, ignoring arguments). No Emacs equivalent is bound under this name in `emacs -Q --batch`."
+}

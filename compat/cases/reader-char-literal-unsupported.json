@@ -1,0 +1,6 @@
+{
+ "id": "reader-char-literal-unsupported",
+ "setup": [],
+ "expr": "?a",
+ "note": "Fe's reader has no `?a` character-literal syntax; `?a` reads as the bare symbol named \"?a\" (ReadAtom falls through to the generic atom path), which then fails as an unbound variable when evaluated -- a clear failure, not a silently wrong number. Emacs reads `?a` as the integer 97."
+}

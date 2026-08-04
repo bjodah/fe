@@ -1,0 +1,6 @@
+{
+ "id": "primitive-makunbound",
+ "setup": [],
+ "expr": "(makunbound (quote totally-unbound-xyz))",
+ "note": "Already agrees: both return the symbol, whether or not it was previously bound."
+}

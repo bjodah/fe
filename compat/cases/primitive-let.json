@@ -1,0 +1,6 @@
+{
+ "id": "primitive-let",
+ "setup": [],
+ "expr": "(let x 5)",
+ "note": "Fe's raw `let` primitive binds exactly one symbol to one evaluated value in the *rest of the enclosing body* (a sequential local declaration, not a nested form with its own body) -- fundamentally different in shape from Emacs's `(let (BINDINGS) BODY...)`. kg's Emacs-shaped, multi-binding `let` macro (test/lisp-compat, owner kg) shadows this primitive under the alias `internal--let`."
+}

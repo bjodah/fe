@@ -1,0 +1,6 @@
+{
+ "id": "primitive-boundp",
+ "setup": [],
+ "expr": "(boundp (quote totally-unbound-xyz))",
+ "note": "Baseline agreement on a genuinely unbound symbol. The one-namespace divergence this primitive also exposes (a symbol naming a Fe primitive reads as bound) is recorded separately as its own feature (`one-namespace-boundp`) with a case that isolates that specific disagreement."
+}

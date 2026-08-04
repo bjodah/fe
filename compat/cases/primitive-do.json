@@ -1,0 +1,6 @@
+{
+ "id": "primitive-do",
+ "setup": [],
+ "expr": "(do 1 2 3)",
+ "note": "Fe's sequencing primitive is spelled `do`; Emacs's equivalent is `progn`, and stock Emacs has no bare `do` bound at all in batch -Q (no cl-lib autoload). kg's Emacs-shaped alias `progn` (tracked in kg's own manifest, owner kg, comparison emacs) is the user-facing, oracle-comparable spelling."
+}

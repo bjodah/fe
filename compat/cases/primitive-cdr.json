@@ -1,0 +1,6 @@
+{
+ "id": "primitive-cdr",
+ "setup": [],
+ "expr": "(cdr (list 1 2))",
+ "note": "Already agrees."
+}

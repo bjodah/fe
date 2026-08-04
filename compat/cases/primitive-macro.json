@@ -1,0 +1,6 @@
+{
+ "id": "primitive-macro",
+ "setup": [],
+ "expr": "((macro (x) x) 5)",
+ "note": "Fe treats `macro` as a first-class object type directly callable like a function (the call-site form is passed unevaluated and returned/expanded). Emacs has no anonymous-macro-object calling convention at all -- macros exist only via `defmacro`-bound symbols invoked in function position -- so `((macro (x) x) 5)` is simply invalid-function in Emacs."
+}

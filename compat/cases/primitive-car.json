@@ -1,0 +1,6 @@
+{
+ "id": "primitive-car",
+ "setup": [],
+ "expr": "(car (list 1 2))",
+ "note": "Already agrees."
+}

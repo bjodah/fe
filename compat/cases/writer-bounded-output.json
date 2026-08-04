@@ -1,0 +1,6 @@
+{
+ "id": "writer-bounded-output",
+ "setup": [],
+ "expr": "(do (= p (list 1 2)) (setcdr (cdr p) p) p)",
+ "note": "Fe's writer is deliberately bounded and never allocates or loops proportionally to structure sharing or depth: a cycle prints `#<cycle>`, excessive depth prints `#<deep>`, and a long list is cut off with `#<truncated>` (fe.c's WriteElements/EmitStoredString, tested directly in test_api.c's TestWriter). Emacs' default printer has no such bound and its behavior on a genuine cycle under `emacs -Q --batch` depends on internal safety valves that are not part of Emacs' documented contract and observed to vary across builds -- exactly the kind of moving target 00b-oracle-and-differential-corpus.md warns a development-branch Emacs snapshot must not be pinned against."
+}

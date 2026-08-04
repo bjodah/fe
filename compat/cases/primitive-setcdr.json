@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setcdr",
+ "setup": [],
+ "expr": "(setcdr (cons 1 2) 9)",
+ "note": "Same shape as setcar: Fe returns nil, Emacs returns the new cdr value (9)."
+}

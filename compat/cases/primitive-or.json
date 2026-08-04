@@ -1,0 +1,6 @@
+{
+ "id": "primitive-or",
+ "setup": [],
+ "expr": "(or nil nil 3)",
+ "note": "Already agrees: first non-nil value."
+}

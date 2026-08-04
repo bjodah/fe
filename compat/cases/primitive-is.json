@@ -1,0 +1,6 @@
+{
+ "id": "primitive-is",
+ "setup": [],
+ "expr": "(is (quote a) (quote a))",
+ "note": "Fe's identity/equality primitive is spelled `is`; Emacs's equivalent is `eq`, not bound in stock Emacs under the name `is`. kg's Emacs-shaped alias `eq` (tracked in kg's own manifest, owner kg, comparison emacs) is the oracle-comparable spelling."
+}

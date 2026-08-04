@@ -1,0 +1,6 @@
+{
+ "id": "primitive-cons",
+ "setup": [],
+ "expr": "(cons 1 2)",
+ "note": "Already agrees."
+}

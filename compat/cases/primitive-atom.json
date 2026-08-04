@@ -1,0 +1,6 @@
+{
+ "id": "primitive-atom",
+ "setup": [],
+ "expr": "(atom 1)",
+ "note": "Already agrees."
+}

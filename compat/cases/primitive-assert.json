@@ -1,0 +1,6 @@
+{
+ "id": "primitive-assert",
+ "setup": [],
+ "expr": "(assert t)",
+ "note": "Fe's core assert primitive: signals an error if its evaluated argument is nil, otherwise returns nil. Stock Emacs -Q has no bare `assert` (it lives in cl-lib as `cl-assert`, not autoloaded in batch -Q), so a case naming this by Fe's spelling always shows the oracle side as void-function."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "primitive-div",
+ "setup": [],
+ "expr": "(/ 10 2)",
+ "note": "Already agrees."
+}

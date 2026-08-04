@@ -1,0 +1,6 @@
+{
+ "id": "primitive-unwind-protect",
+ "setup": [],
+ "expr": "(unwind-protect 1 2)",
+ "note": "Basic body-value-is-returned agreement; both discard the cleanup form's value. Structured completion kinds (catch/throw/condition-case) are Phase 6 and unimplemented in Fe today; this case only exercises normal-return unwind-protect."
+}

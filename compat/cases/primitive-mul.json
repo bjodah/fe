@@ -1,0 +1,6 @@
+{
+ "id": "primitive-mul",
+ "setup": [],
+ "expr": "(* 2 3 4)",
+ "note": "Already agrees."
+}

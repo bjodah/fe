@@ -1,0 +1,6 @@
+{
+ "id": "primitive-alias-fn-lambda",
+ "setup": [],
+ "expr": "((fn (x) x) 7)",
+ "note": "`fn` is Fe's historical alternate name for `lambda` (fe.c's primitive_aliases[]), bound to the identical primitive object. Emacs has no `fn` binding at all."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "primitive-add",
+ "setup": [],
+ "expr": "(+ 1 2 3)",
+ "note": "Already agrees."
+}
