@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <setjmp.h>
 #include <stdckdint.h>
 #include <stdint.h>
@@ -200,6 +201,33 @@ static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
   const double y = FeToDouble(context, FeGetNextArgument(context, &arguments));
   FeRequireNoArguments(context, arguments);
   return FeMakeDouble(context, x + y);
+}
+
+// The C-stack high-water probe (03A of kg's Emacs-subset program). Records
+// its own C frame address, invoked from the deepest point of a Lisp
+// recursion, so `TestEvaluationStackProbe` can compare a "depth zero" call
+// against a "depth n" one and see whether Lisp-level nesting is costing C
+// stack. One process-wide slot is fine: `test_api` is single-threaded and
+// every caller reads the value immediately after the evaluation that set it.
+static uintptr_t stack_probe_last_address;
+
+static FeObject* StackProbe(FeContext* context,
+                            // cppcheck-suppress constParameterCallback
+                            FeObject* arguments) {
+  FeRequireNoArguments(context, arguments);
+  // `__builtin_frame_address(0)`, never a nonzero depth (unsupported and
+  // warns), and never the address of a `volatile` local: AddressSanitizer
+  // may place an address-taken local on its fake stack, which would turn
+  // the ASan row into a heap-layout measurement rather than a C-stack one.
+  // The intermediate `void*` avoids casting a function call's result
+  // straight to an integer type, which `-Wbad-function-cast` rejects.
+  void* const frame = __builtin_frame_address(0);
+  stack_probe_last_address = (uintptr_t)frame;
+  // Zero is part of the fixture: `deep` sums 1 per level on the way back
+  // out, so `(deep n)` returning anything but `n` means the probe ran at
+  // the wrong point in the evaluation and the stack assertion below would
+  // otherwise still look fine by accident.
+  return FeMakeDouble(context, 0);
 }
 
 static FeObject* CallRoot(FeContext* context,
@@ -2047,6 +2075,97 @@ static bool TestArenaStats(void) {
   return true;
 }
 
+// The C-stack high-water probe (sub-plan 03A of kg's Emacs-subset program).
+// Phase 3's gate is "a measured C-stack high-water mark is flat across
+// `(deep 10)`, `(deep 1000)` and `(deep 100000)`"; nothing before this test
+// measured that property at all, only crash points (GC-stack overflow, an
+// MSan crash) that show where the recursive evaluator stops, not whether a
+// number stopped growing. This is the "before" the post-Phase-3 flatness
+// assertion will be compared against; that assertion is 03F's, not this
+// slice's -- see the function comment below and the sub-plan's own Status
+// for the recorded pre-change table.
+//
+// `(deep 100000)` cannot run yet: `DefaultEvaluationDepth` (1000) and this
+// fixture's arena both bound recursion far below it, and that is the
+// row Phase 3 has to change, not something to work around here by
+// disabling the guard. Widening either bound to chase the physical
+// crash boundary is exactly the "drive a sanitizer process into a
+// host-stack crash" 03A warns against, since `evaluation_depth`'s own
+// guard is what stands between today's builds and that crash.
+static bool TestEvaluationStackProbe(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "stack-probe", StackProbe);
+
+  static const char deep_def[] =
+      "(setq deep (fn (n) (if (<= n 0) (stack-probe) (+ 1 (deep (- n "
+      "1))))))";
+  CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
+                         sizeof(deep_def) - 1) != nullptr);
+
+  // "Depth zero", measured the same way as every other depth: the same
+  // native, called through the same evaluator, with no `deep` wrapper
+  // around it. This is the reference the deltas below are taken against,
+  // not an automatic in this function -- an automatic here would mix this
+  // test's own call-path layout into the number and make a compiler
+  // rebuild look like evaluator growth.
+  stack_probe_last_address = 0;
+  static const char bare_probe[] = "(stack-probe)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "bare.fe", bare_probe, sizeof(bare_probe) - 1),
+      "0"));
+  CHECK(stack_probe_last_address != 0);
+  const uintptr_t baseline = stack_probe_last_address;
+
+  static const size_t depths[] = {10, 100, 200};
+  for (size_t i = 0; i < sizeof(depths) / sizeof(depths[0]); i++) {
+    char source[32];
+    const int written =
+        snprintf(source, sizeof(source), "(deep %zu)", depths[i]);
+    CHECK(written > 0 && (size_t)written < sizeof(source));
+    char label[32];
+    (void)snprintf(label, sizeof(label), "deep-%zu.fe", depths[i]);
+    char expected[16];
+    (void)snprintf(expected, sizeof(expected), "%zu", depths[i]);
+
+    stack_probe_last_address = 0;
+    CHECK(IsRendered(context,
+                     FeEvaluateString(context, label, source, (size_t)written),
+                     expected));
+    CHECK(stack_probe_last_address != 0);
+    const uintptr_t probed = stack_probe_last_address;
+    const uintptr_t delta =
+        probed > baseline ? probed - baseline : baseline - probed;
+    printf("stack probe: n=%5zu baseline=%#" PRIxPTR " probe=%#" PRIxPTR
+           " delta=%" PRIuPTR " bytes\n",
+           depths[i], baseline, probed, delta);
+  }
+
+  // The expected pre-change depth error, recovered without poisoning the
+  // context -- the same shape `TestEvaluationDepth` already proves for the
+  // recursive evaluator's existing ceiling. A tight explicit `max_depth`
+  // is used rather than searching for the arena- or default-depth-bound
+  // failure point: that search is this sub-plan's manual measurement
+  // exercise (recorded in the Status table), not something to repeat, at
+  // sanitizer-build cost, on every `make check`.
+  const FeEvalOptions tight_depth = {.max_depth = 5};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "probe-depth.fe", "(deep 50)", sizeof("(deep 50)") - 1,
+      &tight_depth, "probe-depth.fe: evaluation depth limit exceeded"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(deep 20)",
+                                    sizeof("(deep 20)") - 1),
+                   "20"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -2057,7 +2176,8 @@ int main(void) {
                  TestParameterLists() && TestBinding() && TestSetqAndSet() &&
                  TestNumericEqual() && TestUnwindHostAPI() &&
                  TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestEvaluationDepth() && TestArenaStats()
+                 TestEvaluationDepth() && TestArenaStats() &&
+                 TestEvaluationStackProbe()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
