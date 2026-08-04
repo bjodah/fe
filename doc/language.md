@@ -48,6 +48,13 @@ Creates a new binding of `symbol` to the value `value` in the current environmen
 
 #### `(= symbol value)`
 
+**Transitional.** This is Fe's historical, non-Emacs assignment primitive.
+Sub-plan 02B of the Emacs-subset hard cut adds `setq` and `set` below
+alongside it; `=` keeps its assignment meaning only until sub-plan 02C
+deletes it and repurposes `=` as numeric equality, matching Emacs Lisp. Do
+not read the coexistence of `=` and `setq` here as a compatibility promise
+that both will remain -- prefer `setq` for anything new.
+
 Sets the existing binding of `symbol` to the value `value` in the current
 environment. If there is no such binding in the current environment, creates or
 updates a binding in the global environment.
@@ -65,6 +72,42 @@ nil
 ```
 
 `nil` is a value like any other, so a variable assigned `nil` is bound.
+
+#### `(setq symbol value ...)`
+
+The Emacs Lisp assignment special form. Takes any number of `symbol value`
+pairs and processes them left to right: each `value` form is evaluated --
+already seeing every earlier pair's new value, since they run in order --
+and then bound the same way `=` above binds its one pair: to the innermost
+lexical binding of `symbol` if one exists in the current environment, else
+to the global value cell. `(setq)`, with no pairs, is `nil`; otherwise
+`setq` returns the value of the last pair.
+
+Each `symbol` is checked to be a symbol before its paired `value` form is
+evaluated: a non-symbol target is `wrong-type-argument`. A dangling final
+`symbol` with no paired value is `wrong-number-of-arguments`, but only
+diagnosed after every earlier complete pair has already run -- those
+assignments stand even though the call as a whole signals an error.
+
+```clojure
+fe > (setq a 1 b a)
+1
+fe > (list a b)
+(1 1)
+fe > ((lambda () (setq x 9) (list ((lambda (x) (setq x 2) x) 1) x)))
+(2 9)
+fe > (setq a 1 b)
+error: wrong-number-of-arguments
+fe > a
+1
+```
+
+The last example above shows both halves of the lexical/global rule in one
+call: the inner lambda's `setq x 2` updates its own parameter, and the
+outer `setq x 9` -- reached from a scope with no lexical `x` -- creates a
+global one that the inner assignment never touches.
+
+`setq` is the assignment spelling sub-plan 02C keeps; see `=` above.
 
 #### `(if condition then else ...)`
 
@@ -401,6 +444,35 @@ fe > (cdr p)
 #### `(env)`
 
 Returns a list of all symbols in the current environment.
+
+#### `(set symbol value)`
+
+An ordinary function, unlike `setq` above: both `symbol` and `value` are
+evaluated, so the target is usually quoted. `set` always writes `symbol`'s
+*global* value cell, even when a lexical binding of the same name is in
+scope in the calling environment -- that lexical binding is neither read
+nor written. Returns `value`.
+
+Requires exactly two arguments; a wrong argument count is
+`wrong-number-of-arguments`, checked before either argument form is
+evaluated. Once the count is right, both forms are evaluated left to right,
+and only then is the resulting first value checked to be a symbol
+(`wrong-type-argument` if not) -- so a type error in that check never
+erases a side effect the second form already had.
+
+```clojure
+fe > (set 'fresh 7)
+7
+fe > fresh
+7
+fe > ((lambda () (setq x 9)
+        (list ((lambda (x) (list (set 'x 2) x)) 1) x)))
+((2 1) 2)
+```
+
+In the last example, the inner lambda's parameter `x` shadows the outer
+lexical `x`; `set` ignores it and writes straight through to the same
+global cell the outer `(setq x 9)` created.
 
 #### `(setcar pair value)`
 

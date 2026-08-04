@@ -29,6 +29,11 @@ typedef enum Primitive {
   PAssert,
   PEnv,
   PLet,
+  // Fe's historical, non-Emacs assignment primitive. `=` keeps this meaning
+  // only until sub-plan 02C of the Emacs-subset hard cut deletes it and
+  // repurposes `=` as numeric equality; see doc/language.md.
+  PAssign,
+  PSetq,
   PSet,
   PIf,
   PFn,
@@ -64,7 +69,9 @@ typedef enum Primitive {
 static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PEnv] = "env",
                                         [PLet] = "let",
-                                        [PSet] = "=",
+                                        [PAssign] = "=",
+                                        [PSetq] = "setq",
+                                        [PSet] = "set",
                                         [PIf] = "if",
                                         [PFn] = "lambda",
                                         [PMacro] = "macro",
@@ -1656,6 +1663,57 @@ static FeObject* ArgsToEnv(FeContext* ctx,
     res = FeMakeBool(ctx, GetDouble(va) op GetDouble(vb)); \
   }
 
+// `setq` special form: raw SYMBOL VALUE pairs, evaluated left to right. Each
+// target is checked to be a symbol before its value form is evaluated, so a
+// non-symbol target is diagnosed without evaluating anything; a dangling
+// final SYMBOL is diagnosed only once every earlier complete pair has
+// already assigned, so those assignments stand. Assignment goes through
+// `GetBound(ctx, target, env)`, exactly like `PAssign` below: an existing
+// lexical binding wins over the global cell. See doc/language.md.
+static FeObject* EvaluateSetq(FeContext* ctx, FeObject* arg, FeObject* env) {
+  FeObject* res = &nil;
+  while (!FeIsNil(arg)) {
+    if (FeGetType(arg) != FeTPair) {
+      FeHandleError(ctx, "wrong-number-of-arguments");
+    }
+    FeObject* target = CAR(arg);
+    if (FeGetType(target) != FeTSymbol) {
+      FeHandleError(ctx, "wrong-type-argument");
+    }
+    arg = CDR(arg);
+    if (FeGetType(arg) != FeTPair) {
+      FeHandleError(ctx, "wrong-number-of-arguments");
+    }
+    res = Evaluate(ctx, CAR(arg), env, NULL);
+    arg = CDR(arg);
+    CDR(GetBound(ctx, target, env)) = res;
+  }
+  return res;
+}
+
+// `set`: ordinary-function semantics, unlike `setq` above -- its symbol
+// argument is evaluated like any other. Exact two-argument arity is
+// rejected before either raw form is evaluated; the two forms are then
+// evaluated left to right via the same `EvaluateList()` path an ordinary
+// call uses, so a type error in the resulting first value never erases a
+// side effect the second form already had. `FeSet()` looks up with the
+// global environment (`&nil`), so a same-named lexical binding is neither
+// read nor written.
+static FeObject* EvaluateSet(FeContext* ctx, FeObject* arg, FeObject* env) {
+  if (FeGetType(arg) != FeTPair || FeGetType(CDR(arg)) != FeTPair ||
+      !FeIsNil(CDR(CDR(arg)))) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+  FeObject* evaluated = EvaluateList(ctx, arg, env);
+  FeObject* symbol = CAR(evaluated);
+  FeObject* value = CAR(CDR(evaluated));
+  if (FeGetType(symbol) != FeTSymbol) {
+    FeHandleError(ctx, "wrong-type-argument");
+  }
+  FeSet(ctx, symbol, value);
+  return value;
+}
+
 static FeObject* EvaluatePrimitive(FeContext* ctx,
                                    FeObject* obj,
                                    FeObject* env,
@@ -1680,10 +1738,14 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
         *newenv = FeCons(ctx, FeCons(ctx, va, EVAL_ARG()), env);
       }
       return res;
-    case PSet:
+    case PAssign:
       va = CheckType(ctx, FeGetNextArgument(ctx, &arg), FeTSymbol);
       CDR(GetBound(ctx, va, env)) = EVAL_ARG();
       return res;
+    case PSetq:
+      return EvaluateSetq(ctx, arg, env);
+    case PSet:
+      return EvaluateSet(ctx, arg, env);
     // `(if COND THEN ELSE...)`, as in Emacs Lisp: the trailing forms are an
     // implicit `do`. (Fe used to read them as an `elif` chain.)
     case PIf:

@@ -577,7 +577,7 @@
   {
    "id": "primitive-setq",
    "category": "bindings",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -590,13 +590,13 @@
     "primitive-setq-value-error"
    ],
    "kg_test": null,
-   "rationale": "Phase 2 (parent plan section 6, 'Hard-cut assignment and numeric =') replaces Fe's assignment `=` with a core `setq` special form: pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. 02A pins the Emacs answers from the oracle before 02B writes the implementation; until then Fe has no `setq` binding at all, so every case here is a known, expected gap rather than a regression.",
-   "source_name": null
+   "rationale": "Sub-plan 02B lands `setq` as a core special form (fe.c's EvaluateSetq, reached from EvaluatePrimitive's PSetq arm): pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. Assignment `=` (primitive-assign-eq) still coexists until 02C deletes it.",
+   "source_name": "setq"
   },
   {
    "id": "primitive-set",
    "category": "bindings",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -607,8 +607,8 @@
     "primitive-set-arity-too-many"
    ],
    "kg_test": null,
-   "rationale": "Phase 2 (parent plan section 6) adds `set` as an ordinary, strict-arity function using the global setter -- it always writes the symbol's global value cell and never reads or changes a lexical binding of the same spelling, unlike `setq`. 02A pins the Emacs answers, including the lexical-ignoring case that is the regression a later cleanup must not reintroduce, before 02B writes the implementation; until then Fe has no `set` binding at all, so every case here is a known, expected gap rather than a regression.",
-   "source_name": null
+   "rationale": "Sub-plan 02B lands `set` (fe.c's EvaluateSet, reached from EvaluatePrimitive's PSet arm) as an ordinary, exact-arity function using the existing global setter FeSet() -- it always writes the symbol's global value cell and never reads or changes a lexical binding of the same spelling, unlike `setq`.",
+   "source_name": "set"
   },
   {
    "id": "primitive-numeric-eq",

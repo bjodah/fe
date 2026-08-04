@@ -1105,6 +1105,126 @@ static bool TestBinding(void) {
   return true;
 }
 
+// Sub-plan 02B: core `setq` (a special form) and `set` (ordinary-function
+// semantics) alongside the still-working assignment `=` primitive. The
+// compat corpus (fe/compat/) proves agreement with Emacs on the same
+// properties; these are the implementation-focused assertions a
+// process-per-case protocol cannot observe, e.g. state after a recovered
+// error and evaluation order via a side effect.
+static bool TestSetqAndSet(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "setq.fe", expr, sizeof(expr) - 1), \
+      expected))
+#define SETQ_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "setq.fe", expr, strlen(expr), \
+                              message))
+
+  // Zero pairs is nil; multiple pairs return the last value, and a later
+  // pair's value form already observes an earlier pair's new value.
+  CHK("(setq)", "nil");
+  CHK("(setq a 1 b a)", "1");
+  CHK("(list a b)", "(1 1)");
+
+  // A global assignment creates a previously unbound value.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "fresh-global")));
+  CHK("(setq fresh-global 42)", "42");
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "fresh-global")));
+
+  // A lexical assignment changes the local cell and leaves an existing
+  // global cell of the same name unchanged.
+  CHK("(setq shared 1)", "1");
+  CHK("((lambda (shared) (setq shared 2) shared) 99)", "2");
+  CHK("shared", "1");
+
+  // On a value error, prior pairs remain assigned and later pairs do not
+  // run; the same context goes on to evaluate other forms afterwards.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "p3")));
+  SETQ_ERR("(setq p1 1 p2 missing-thing p3 3)",
+           "setq.fe: void-variable missing-thing");
+  CHK("p1", "1");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "p3")));
+
+  // Odd form count: the earlier pair still stands; the dangling final
+  // symbol is diagnosed only once it is reached.
+  SETQ_ERR("(setq odd-a 5 odd-b)", "setq.fe: wrong-number-of-arguments");
+  CHK("odd-a", "5");
+
+  // A non-symbol target is a type error, checked before any value form
+  // would be evaluated.
+  SETQ_ERR("(setq 1 2)", "setq.fe: wrong-type-argument");
+
+#undef SETQ_ERR
+#undef CHK
+
+  // `set`: ordinary-function semantics, and it always writes the global
+  // cell -- the regression a later cleanup must not turn into an alias for
+  // `setq`.
+#define SET_CHK(expr, expected)                                             \
+  CHECK(IsRendered(                                                         \
+      context, FeEvaluateString(context, "set.fe", expr, sizeof(expr) - 1), \
+      expected))
+#define SET_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "set.fe", expr, strlen(expr), \
+                              message))
+
+  SET_CHK("(set 'set-fresh 7)", "7");
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "set-fresh")));
+
+  SET_CHK("(setq set-shared 9)", "9");
+  SET_CHK("((lambda (set-shared) (list (set 'set-shared 2) set-shared)) 1)",
+          "(2 1)");
+  SET_CHK("set-shared", "2");
+
+  // An arity error is raised before any raw argument form is evaluated.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe")));
+  SET_ERR("(set 'set-target 1 (do (setq set-probe t) 2))",
+          "set.fe: wrong-number-of-arguments");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe")));
+  SET_ERR("(set 'x)", "set.fe: wrong-number-of-arguments");
+
+  // An arity-correct call evaluates both forms left to right before
+  // validating the first value's type, so a type error never erases a side
+  // effect the second form already had.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
+  SET_ERR("(set 1 (do (setq set-probe2 t) 2))", "set.fe: wrong-type-argument");
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
+
+  // Exact arity for `setq`/`set` does not move with `FeSetStrictArity()`;
+  // the lax-arity option applies only to user functions/macros.
+  CHECK(!FeGetStrictArity(context));
+  FeSetStrictArity(context, true);
+  CHECK(FeGetStrictArity(context));
+  SET_ERR("(set 'x)", "set.fe: wrong-number-of-arguments");
+  SET_ERR("(set 'x 1 2)", "set.fe: wrong-number-of-arguments");
+  CHECK(ExpectEvaluationError(context, &state, "setq.fe", "(setq a 1 b)",
+                              strlen("(setq a 1 b)"),
+                              "setq.fe: wrong-number-of-arguments"));
+  FeSetStrictArity(context, false);
+
+#undef SET_ERR
+#undef SET_CHK
+
+  // Regression: assignment `=` still assigns and still returns its old nil
+  // result. Sub-plan 02C deletes this meaning of `=`.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "old-name")));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "assign.fe", "(= old-name 7)", 14),
+                   "nil"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "assign.fe", "old-name", 8), "7"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestMacroExpansion(void) {
   // Deliberately tight: the expansion has to survive the collections that
   // evaluating it provokes, and nothing but Fe's GC stack refers to it.
@@ -1863,9 +1983,10 @@ int main(void) {
                  TestRootsAndCalls() && TestCallWithOptions() &&
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
-                 TestParameterLists() && TestBinding() && TestUnwindHostAPI() &&
-                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestEvaluationDepth() && TestArenaStats()
+                 TestParameterLists() && TestBinding() && TestSetqAndSet() &&
+                 TestUnwindHostAPI() && TestUnwindLisp() &&
+                 TestUnwindCleanupBudget() && TestEvaluationDepth() &&
+                 TestArenaStats()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
