@@ -151,6 +151,64 @@ typedef struct FeCleanupEntry {
 // explicit GC-rooting decision in FeMarkEvaluatorRoots().
 typedef enum FeFrameKind {
   FeFrameExpression,
+  // A pair form whose head is not a symbol: the frame has switched from
+  // `FeFrameExpression`, pushed the head expression on the frame stack, and
+  // is waiting for that expression's value (delivered into `callee`).
+  FeFrameCallHead,
+  // An ordinary callable's (native function or lambda) argument list: the
+  // frame switches from `FeFrameCallHead`/`FeFrameExpression`, stores the
+  // callable in `fn` and the remaining raw arguments in `rest`, and pushes
+  // each argument as a sub-expression frame. Each argument's value is
+  // delivered into `callee` (prepended onto `accumulator`, so the list is
+  // built reversed and reordered when complete); `callee` is `&unbound`
+  // between deliveries, marking a frame no argument has completed in yet.
+  // When `rest` is empty the callable is dispatched on the evaluated list.
+  FeFrameCallArguments,
+  // A lambda application: the frame has switched from `FeFrameCallArguments`
+  // once the argument list is complete and the callable is a lambda.
+  // `ArgsToEnv` (allocating, never evaluating, so it stays an ordinary
+  // helper rather than a frame of its own) has already produced the callee
+  // environment into `env`, and `rest` holds the raw body forms. The resume
+  // case switches the frame to `FeFrameBody` and starts the first body form.
+  FeFrameLambda,
+  // A sequential body (a lambda's body forms): `env` is the callee
+  // environment, `rest` the remaining raw forms, `callee` the just-delivered
+  // form's value (`&unbound` marks a freshly set up frame), and `accumulator`
+  // the last completed value, which becomes the result when `rest` is empty.
+  // Each form is pushed as a sub-expression frame whose `bind` points at this
+  // frame's `env`, so a `let` in the body extends the environment the
+  // following forms see, exactly as `DoList`'s `&env` out-parameter did.
+  FeFrameBody,
+  // A macro call: the frame has switched from `FeFrameCallHead`/
+  // `FeFrameExpression` when the resolved head is a `FeTMacro`. `ArgsToEnv`
+  // (allocating, never evaluating, like the lambda frame's) has already
+  // bound the raw, unevaluated arguments into the macro's closure
+  // environment (into `env`), `rest` holds the raw body forms, and `fn`
+  // holds the caller environment -- the environment the expansion must be
+  // evaluated in, which the body otherwise overwrites. The resume case
+  // evaluates the body forms one at a time as sub-expression frames whose
+  // `bind` points at this frame's `env`, exactly as `DoList`'s `&env` out-
+  // parameter did; once `rest` is empty the last completed value is the
+  // expansion, the call's trace/GC/cleanup checkpoints are restored, and the
+  // frame switches to `FeFrameMacroExpansion`.
+  FeFrameMacro,
+  // A macro call whose body has produced its expansion: the frame switched
+  // from `FeFrameMacro`, restored the macro call's trace, GC and cleanup
+  // checkpoints so the expansion is evaluated as if written at the call
+  // site, and pushed the raw expansion as a sub-expression frame in the
+  // caller environment (`fn`). The value that frame delivers into `callee`
+  // is the macro call's result.
+  FeFrameMacroExpansion,
+  // A native function whose evaluated argument list is ready: the frame has
+  // switched from `FeFrameCallArguments` once the callable resolved to a
+  // `FeTNativeFn` and the reordered argument list was moved into
+  // `accumulator`. The loop's resume case invokes the native synchronously
+  // -- no per-native setjmp, the enclosing `RunEvaluation` barrier is the
+  // only one in effect -- while bounding the live native C activations with
+  // `native_reentry_depth`, so a native that calls back into
+  // `FeCall`/`FeCallWithOptions` starts a nested run on a fresh C frame and
+  // counts as another active level until it returns.
+  FeFrameNative,
   FeFrameTemporaryRecursive,
 } FeFrameKind;
 
@@ -166,6 +224,21 @@ typedef struct FeEvalFrame {
   FeFrameKind kind;
   FeObject* expr;
   FeObject* env;
+  // The `newenv`/`bind` target this frame passes to the temporary recursive
+  // dispatch: NULL for a computed head, an argument sub-frame, or a frame
+  // with no surrounding sequence, and `&env` of the enclosing `FeFrameBody`
+  // for a body form, so a `let` there extends the environment the following
+  // body forms see. It points at a frame's `env` field or at a caller's C
+  // local, never at an arena object, so it is not a GC root and the
+  // collector must not touch it.
+  FeObject** bind;
+  // The callable an `FeFrameCallArguments` frame is dispatching to, and --
+  // after `ArgsToEnv` has captured the closure environment into `env` -- the
+  // caller environment a `FeFrameMacro` frame evaluates its expansion in.
+  // Either value must outlive the argument evaluations or the macro body (a
+  // collection may run between them), and the collector marks it with the
+  // other fields.
+  FeObject* fn;
   FeObject* rest;
   FeObject* accumulator;
   FeObject* callee;
@@ -177,10 +250,15 @@ typedef struct FeEvalFrame {
 enum {
   MinFrameCapacity = 64,
   CleanupFrameReserve = 32,
-  FrameArenaPercent = 8,
+  // The share of the bytes beyond the minimum that become frame storage. 10%
+  // keeps kg's 1 MiB arena at 1100 frames -- above `DefaultEvaluationDepth`'s
+  // 1000 -- so the legacy logical depth limit, not the physical frame wall,
+  // remains the bound on the canonical `(deep N)` chain. The 8% -> 10% retune
+  // and its object-slot cost are recorded in kg's 03D Decision follow-up.
+  FrameArenaPercent = 10,
 };
 
-static_assert(sizeof(FeEvalFrame) == 80);
+static_assert(sizeof(FeEvalFrame) == 96);
 static_assert(alignof(FeEvalFrame) == alignof(FeObject));
 
 // The value of a symbol that has never been assigned. Like `nil` it is a
@@ -259,6 +337,24 @@ struct FeContext {
   // meaning "use `DefaultEvaluationDepth`"), resolved where it is checked,
   // not here, for the same reason `cleanup_step_limit` is not.
   size_t evaluation_depth_limit;
+  // The number of native invocations currently active, each one a live C
+  // activation on top of its `RunEvaluation` loop. An ordinary native is one
+  // level; a native that synchronously calls `FeCall`/`FeCallWithOptions`
+  // starts a nested run and then another active native level, so this counts
+  // exactly the C growth that legitimately happens through the native
+  // boundary. The `FeFrameNative` resume saves this counter and
+  // `evaluation_depth` together before the call and restores both saved
+  // values on the ordinary return -- an owning nested `FeCallWithOptions`
+  // runs `EndEvaluationControl` and clears the whole control record (both
+  // counters included) before the native returns, so the enclosing frames'
+  // accounting must be put back rather than decremented or left at 0. Each
+  // `RunEvaluation` barrier also saves and restores this counter beside
+  // `evaluator_catch` on both the normal and the longjmp paths, and
+  // `ClearEvaluationControl` resets it to 0 with the other live-depth state,
+  // so a recovered context starts fresh. Until 03F it shares
+  // `evaluation_depth_limit`/`DefaultEvaluationDepth` and the old
+  // `evaluation depth limit exceeded` text.
+  size_t native_reentry_depth;
   const char* error_label;
   size_t error_offset;
   FeCleanupEntry cleanup_stack[CleanupStackSize];

@@ -30,6 +30,7 @@ static void ClearEvaluationControl(FeContext* ctx) {
   ctx->cleanup_step_limit = 0;
   ctx->evaluation_depth = 0;
   ctx->evaluation_depth_limit = 0;
+  ctx->native_reentry_depth = 0;
 }
 
 void EndEvaluationControl(FeContext* ctx, bool owns_control) {
@@ -79,6 +80,7 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
   jmp_buf* const saved_catch = ctx->cleanup_catch;
   jmp_buf* const saved_evaluator_catch = ctx->evaluator_catch;
   const size_t saved_frame_stack_index = ctx->frame_stack_index;
+  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
   FeObject* const saved_call_list = ctx->call_list;
   ctx->cleanup_catch = &local_jump;
   if (setjmp(local_jump) == 0) {
@@ -97,6 +99,7 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
   // automatic jmp_buf, its frames, or its trace link live in the context.
   ctx->evaluator_catch = saved_evaluator_catch;
   ctx->frame_stack_index = saved_frame_stack_index;
+  ctx->native_reentry_depth = saved_native_reentry_depth;
   ctx->call_list = saved_call_list;
 }
 
@@ -297,6 +300,32 @@ static void EnterEvaluationDepth(FeContext* ctx) {
   if (ctx->evaluation_depth > depth_limit) {
     FeHandleError(ctx, "evaluation depth limit exceeded");
   }
+}
+
+// Bounds the native-re-entry boundary explicitly: `native_reentry_depth`
+// counts the currently active native C activations. The `FeFrameNative`
+// resume saves both this counter and `evaluation_depth` before calling
+// through this helper, and restores both saved values on the ordinary return
+// (an owning nested `FeCallWithOptions` can clear the whole control record --
+// both counters included -- before the native returns, so the enclosing
+// frames' accounting must be put back); an error skips the restore and is the
+// enclosing run barrier's job, and `ClearEvaluationControl` resets the
+// counter to 0 with the other live-depth state. An ordinary native is one
+// level; only a native that synchronously calls `FeCall`/`FeCallWithOptions`
+// starts a nested run and another level, which is the one place a fresh C
+// frame legitimately enters through this boundary. Until 03F it shares the
+// ambient legacy `evaluation_depth_limit`/`DefaultEvaluationDepth` ceiling
+// and the old `evaluation depth limit exceeded` text, so no public
+// expectation moves mid-migration; 03F gives native re-entry its own public
+// option, statistic and message.
+static void EnterNativeDepth(FeContext* ctx) {
+  const size_t depth_limit = ctx->evaluation_depth_limit != 0
+                                 ? ctx->evaluation_depth_limit
+                                 : DefaultEvaluationDepth;
+  if (ctx->native_reentry_depth >= depth_limit) {
+    FeHandleError(ctx, "evaluation depth limit exceeded");
+  }
+  ctx->native_reentry_depth++;
 }
 
 static FeObject* Evaluate(FeContext* ctx,
@@ -673,70 +702,24 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
   FeHandleError(ctx, "tried to call non-callable value");
 }
 
-// The head of a call is looked up here rather than through `Evaluate` so that
-// an unassigned name is `void-function`, as in Emacs Lisp, even though Fe has
-// one namespace and would otherwise say `void-variable`.
-static FeObject* EvaluateHead(FeContext* ctx, FeObject* head, FeObject* env) {
-  if (FeGetType(head) != FeTSymbol) {
-    return Evaluate(ctx, head, env, NULL);
-  }
-  EvaluationStep(ctx);
-  FeObject* value = CDR(GetBound(ctx, head, env));
-  if (value == &unbound) {
-    HandleNonCallable(ctx, head);
-  }
-  return value;
-}
+// The head of a call is resolved on the frame stack rather than through
+// `Evaluate` so that an unassigned name is `void-function`, as in Emacs Lisp,
+// even though Fe has one namespace and would otherwise say `void-variable`. A
+// symbol head resolves synchronously in `RunEvaluation`'s expression branch;
+// a computed head is pushed as a sub-expression and the frame resumes as
+// `FeFrameCallHead` once its value is known.
 
 static FeObject* EvaluatePair(FeContext* ctx,
                               FeObject* obj,
                               FeObject* env,
                               FeObject** newenv,
-                              FeObject* fn,
-                              FeEvalFrame* frame) {
-  FeObject* arg = CDR(obj);
+                              const FeObject* fn) {
   FeObject* res = &nil;
-  FeObject* va;
-  FeObject* vb;
 
   switch (FeGetType(fn)) {
     case FeTPrimitive:
       res = EvaluatePrimitive(ctx, obj, env, newenv, fn);
       break;
-
-    case FeTNativeFn:
-      res = GetNativeFn(fn)(ctx, EvaluateList(ctx, arg, env));
-      break;
-
-    case FeTFn:
-      arg = EvaluateList(ctx, arg, env);
-      va = CDR(fn);  // (env params ...)
-      vb = CDR(va);  // (params ...)
-      res = DoList(ctx, CDR(vb), ArgsToEnv(ctx, CAR(vb), arg, CAR(va)));
-      break;
-
-    case FeTMacro:
-      va = CDR(fn);  // (env params ...)
-      vb = CDR(va);  // (params ...)
-      // Expand, then evaluate the expansion in the caller's environment. The
-      // expansion is not copied over the call site: doing that cloned whatever
-      // atom the macro returned, and `nil` and interned symbols are compared by
-      // address.
-      vb = DoList(ctx, CDR(vb), ArgsToEnv(ctx, CAR(vb), arg, CAR(va)));
-      RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
-      FeRestoreGC(ctx, frame->gc_checkpoint);
-      FePushGC(ctx, vb);  // Nothing else refers to the expansion now.
-      ctx->call_list = CDR(&frame->trace_cell);
-      // Evaluating the expansion is a tail call in Fe but not in C: the
-      // sanitizer lanes build with `-fno-optimize-sibling-calls`, and those
-      // are exactly the builds where the C stack is the binding constraint,
-      // so this frame is still live underneath. Hold the depth across the
-      // call and drop it after, rather than before: decrementing first let
-      // a macro whose expansion is another macro call recurse on the C
-      // stack without the counter ever moving, and it crashed with a
-      // MemorySanitizer stack-overflow instead of raising.
-      res = Evaluate(ctx, vb, env, NULL);
-      return res;
 
     case FeTPair:
     case FeTFree:
@@ -750,6 +733,13 @@ static FeObject* EvaluatePair(FeContext* ctx,
     case FeTFex2:
       HandleNonCallable(ctx, CAR(obj));
 
+    // Ordinary callables and macros moved to frame kinds in
+    // `DispatchResolvedCall` -- a lambda proceeds through `FeFrameLambda`
+    // and `FeFrameBody`, a macro through `FeFrameMacro` and
+    // `FeFrameMacroExpansion` -- so none can reach this temporary dispatch.
+    case FeTFn:
+    case FeTNativeFn:
+    case FeTMacro:
     case FeTSentinel:
       abort();
   }
@@ -757,7 +747,72 @@ static FeObject* EvaluatePair(FeContext* ctx,
   return res;
 }
 
-static void PushEvaluationFrame(FeContext* ctx, FeObject* obj, FeObject* env) {
+// Dispatches a call whose head has already resolved to `fn`. `quote`
+// short-circuits on its first raw argument. An ordinary callable (native
+// function or lambda) switches the frame to `FeFrameCallArguments` -- the
+// caller resumes the loop, and each argument is evaluated as a sub-expression
+// frame rather than through a recursive `EvaluateList` -- and returns false.
+// A macro switches the frame to `FeFrameMacro` -- its arguments stay raw and
+// unevaluated, bound by `ArgsToEnv` the way the recursive arm bound them --
+// and returns false. Everything else (the remaining primitives, and the
+// non-callable values) keeps the temporary recursive dispatch and returns
+// true with `*result` holding the completed value. Every resolved-call path
+// funnels through here so the bookkeeping cannot drift between a symbol head
+// and a computed head.
+static bool DispatchResolvedCall(FeContext* ctx,
+                                 FeEvalFrame* frame,
+                                 FeObject* fn,
+                                 FeObject** frame_bind,
+                                 FeObject** result) {
+  if (FeGetType(fn) == FeTPrimitive && PRIM(fn) == PQuote) {
+    FeObject* arguments = CDR(frame->expr);
+    *result = FeGetNextArgument(ctx, &arguments);
+    return true;
+  }
+  if (FeGetType(fn) == FeTNativeFn || FeGetType(fn) == FeTFn) {
+    frame->kind = FeFrameCallArguments;
+    frame->fn = fn;
+    frame->rest = CDR(frame->expr);
+    frame->accumulator = &nil;
+    // Sentinel: the argument frame's resume case appends `callee` when it
+    // holds a delivered argument value, so `&unbound` marks a frame no
+    // argument has completed in yet and the case starts the first argument
+    // instead. No expression can evaluate to `&unbound` (reading it is
+    // `void-variable`), and the static `FeTFree` object is a GC leaf, so it
+    // is safe both as a marker and to be collected over.
+    frame->callee = &unbound;
+    return false;
+  }
+  if (FeGetType(fn) == FeTMacro) {
+    frame->kind = FeFrameMacro;
+    // Root the callable while `ArgsToEnv` below allocates (a collection may
+    // run inside it): `frame->fn` is a collector root. It is then
+    // overwritten with the caller environment, which the expansion must be
+    // evaluated in -- the body otherwise replaces `frame->env` with the
+    // argument bindings over the macro's closure environment.
+    frame->fn = fn;
+    frame->accumulator = &nil;
+    frame->callee = &unbound;
+    FeObject* va = CDR(fn);  // (env params ...)
+    FeObject* vb = CDR(va);  // (params ...)
+    // The raw, unevaluated arguments are bound by the same allocating,
+    // never-evaluating helper, charging one step per parameter walk exactly
+    // as the recursive arm did.
+    FeObject* const caller_env = frame->env;
+    frame->env = ArgsToEnv(ctx, CAR(vb), CDR(frame->expr), CAR(va));
+    frame->rest = CDR(vb);
+    frame->fn = caller_env;
+    return false;
+  }
+  frame->kind = FeFrameTemporaryRecursive;
+  *result = EvaluatePair(ctx, frame->expr, frame->env, frame_bind, fn);
+  return true;
+}
+
+static void PushEvaluationFrame(FeContext* ctx,
+                                FeObject* obj,
+                                FeObject* env,
+                                FeObject** bind) {
   const size_t reserve =
       ctx->completion == FeCompletionNormal ? 0 : CleanupFrameReserve;
   if (ctx->frame_stack_index == ctx->frame_stack_capacity + reserve) {
@@ -767,19 +822,183 @@ static void PushEvaluationFrame(FeContext* ctx, FeObject* obj, FeObject* env) {
   *frame = (FeEvalFrame){.kind = FeFrameExpression,
                          .expr = obj,
                          .env = env,
+                         .bind = bind,
+                         .fn = &nil,
                          .rest = &nil,
                          .accumulator = &nil,
                          .callee = &nil};
 }
 
+// One argument-frame step: append `callee` -- the just-delivered argument
+// value, unless it is still the `&unbound` sentinel that marks a freshly set
+// up frame -- and then either start the next argument (charging one step,
+// taking the raw argument, and pushing it as a sub-expression frame) or, once
+// `rest` is exhausted, dispatch the callable. The accumulator is built
+// reversed and reordered here. A native callable switches the frame to
+// `FeFrameNative` -- the loop's resume invokes it synchronously from that
+// explicit state, bounded by `native_reentry_depth` -- while a lambda
+// switches the frame to `FeFrameLambda`: `ArgsToEnv` produces the callee
+// environment (allocating, never evaluating) and the frame hands it, with
+// the raw body forms, to the sequential-body frame. Returns false when a
+// frame was pushed or the frame was switched and the loop must continue.
+static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
+  if (frame->callee != &unbound) {
+    frame->accumulator = FeCons(ctx, frame->callee, frame->accumulator);
+    frame->callee = &unbound;
+  }
+  if (!FeIsNil(frame->rest)) {
+    EvaluationStep(ctx);
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  FeObject* arguments = &nil;
+  while (!FeIsNil(frame->accumulator)) {
+    FeObject* next = CDR(frame->accumulator);
+    CDR(frame->accumulator) = arguments;
+    arguments = frame->accumulator;
+    frame->accumulator = next;
+  }
+  FeObject* const fn = frame->fn;
+  if (FeGetType(fn) == FeTNativeFn) {
+    // The evaluated argument list is ready: switch to the native frame and
+    // let the loop invoke the callable from the `FeFrameNative` resume, so
+    // the native boundary is its own explicit state. The reordered list
+    // moves into `accumulator`, a collector root, so it survives the native's
+    // own allocations and any nested run it starts.
+    frame->kind = FeFrameNative;
+    frame->accumulator = arguments;
+    frame->callee = &unbound;
+    return false;
+  }
+  FeObject* va = CDR(fn);  // (env params ...)
+  FeObject* vb = CDR(va);  // (params ...)
+  frame->kind = FeFrameLambda;
+  frame->env = ArgsToEnv(ctx, CAR(vb), arguments, CAR(va));
+  frame->rest = CDR(vb);
+  // Sentinel, as for the argument frame: marks a freshly set up body frame no
+  // form has completed in yet.
+  frame->callee = &unbound;
+  return false;
+}
+
+// One sequential-body step: append `callee` -- the just-delivered body form's
+// value, unless it is still the `&unbound` sentinel that marks a freshly set
+// up frame -- and then either start the next form (charging one step, taking
+// the raw form, and pushing it as a sub-expression frame whose `bind` points
+// at this frame's `env`, so a `let` in the form updates the environment the
+// following forms see) or, once `rest` is exhausted, complete with the last
+// completed value. `accumulator` keeps that value across resumes, and the GC
+// stack is restored to the call form's checkpoint on every resume so a body
+// of unbounded length does not consume GC-stack slots: everything the body
+// needs to survive the next form's allocations is a frame field and therefore
+// a mark-phase root. Returns false when a next-form frame was pushed and the
+// loop must continue.
+static bool ResumeBody(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    frame->accumulator = frame->callee;
+    frame->callee = &unbound;
+  }
+  if (!FeIsNil(frame->rest)) {
+    EvaluationStep(ctx);
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    FePushGC(ctx, frame->env);
+    FePushGC(ctx, frame->rest);
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        &frame->env);
+    return false;
+  }
+  *result = frame->accumulator;
+  return true;
+}
+
+// One macro-body step: append `callee` -- the just-delivered body form's
+// value, unless it is still the `&unbound` sentinel that marks a freshly set
+// up frame -- and then either start the next form (charging one step, taking
+// the raw form, and pushing it as a sub-expression frame whose `bind` points
+// at this frame's `env`, so a `let` in the form extends the environment the
+// following forms see, exactly as `DoList`'s `&env` out-parameter did) or,
+// once `rest` is exhausted, hand the last completed value -- the expansion --
+// to the caller. The expansion handoff is the recursive `FeTMacro` arm's own
+// tail, in its exact order: drain the cleanups the body pushed, restore the
+// macro call's GC checkpoint and push the expansion onto the GC stack
+// (nothing else refers to the expansion now), and unlink the macro call from
+// the call trace -- the expansion is evaluated as if written at the call
+// site, so an error inside it must not name the macro. The expansion is then
+// pushed, still raw, as a sub-expression frame in the caller environment
+// (`fn`) with a NULL `bind`, exactly as the recursive arm's
+// `Evaluate(ctx, vb, env, NULL)` did, and this frame switches to
+// `FeFrameMacroExpansion`. Every step pushes a frame, so this never
+// completes the macro frame itself.
+static void ResumeMacroBody(FeContext* ctx, FeEvalFrame* frame) {
+  if (frame->callee != &unbound) {
+    frame->accumulator = frame->callee;
+    frame->callee = &unbound;
+  }
+  if (!FeIsNil(frame->rest)) {
+    EvaluationStep(ctx);
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    FePushGC(ctx, frame->env);
+    FePushGC(ctx, frame->rest);
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        &frame->env);
+    return;
+  }
+  FeObject* const expansion = frame->accumulator;
+  RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+  FeRestoreGC(ctx, frame->gc_checkpoint);
+  FePushGC(ctx, expansion);  // Nothing else refers to the expansion now.
+  ctx->call_list = CDR(&frame->trace_cell);
+  frame->kind = FeFrameMacroExpansion;
+  PushEvaluationFrame(ctx, expansion, frame->fn, NULL);
+}
+
+// The expansion sub-expression above this frame completed and delivered its
+// value into `callee` -- the macro call's result. `callee` is never the
+// `&unbound` sentinel here: this kind is switched to and the expansion pushed
+// in the same step, so no freshly set up macro-expansion frame ever reaches
+// the loop. The shared `CompletePairFrame` tail then restores the call's
+// cleanup, GC and call-trace checkpoints again (idempotent with the handoff
+// above) and releases the logical depth the macro call entered, held across
+// the expansion exactly as the recursive arm held it.
+static bool ResumeMacroExpansion(FeEvalFrame* frame, FeObject** result) {
+  *result = frame->callee;
+  frame->callee = &unbound;
+  return true;
+}
+
+// One resumable-step dispatch for the two call continuations that evaluate
+// their operands as sub-expression frames: an argument list (`frame->rest`
+// holds the raw arguments) and a lambda body (`frame->rest` holds the raw
+// forms). Both accumulate the delivered values the same way -- into `callee`,
+// then into `accumulator` -- so one resume point in `RunEvaluation` serves
+// both; only the completing dispatch differs. Returns false when a
+// sub-expression frame was pushed and the loop must continue, true when the
+// frame completed into `*result`.
+static bool ResumeCallStep(FeContext* ctx,
+                           FeEvalFrame* frame,
+                           FeObject** result) {
+  if (frame->kind == FeFrameCallArguments) {
+    return ResumeArguments(ctx, frame);
+  }
+  return ResumeBody(ctx, frame, result);
+}
 void FeMarkEvaluatorRoots(FeContext* ctx) {
   for (size_t i = 0; i < ctx->frame_stack_index; i++) {
     const FeEvalFrame* frame = &ctx->frame_stack[i];
     switch (frame->kind) {
       case FeFrameExpression:
+      case FeFrameCallHead:
+      case FeFrameCallArguments:
+      case FeFrameLambda:
+      case FeFrameBody:
+      case FeFrameMacro:
+      case FeFrameMacroExpansion:
+      case FeFrameNative:
       case FeFrameTemporaryRecursive:
         FeMark(ctx, frame->expr);
         FeMark(ctx, frame->env);
+        FeMark(ctx, frame->fn);
         FeMark(ctx, frame->rest);
         FeMark(ctx, frame->accumulator);
         FeMark(ctx, frame->callee);
@@ -788,68 +1007,243 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
   }
 }
 
+// The frame kinds that wait for a delivered sub-expression value: a
+// computed-head frame, an argument frame, a body or macro-body frame, and a
+// macro frame waiting for its expansion's value. Anything else popping above
+// one of these is an internal error.
+static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
+  return frame->kind == FeFrameCallHead ||
+         frame->kind == FeFrameCallArguments || frame->kind == FeFrameBody ||
+         frame->kind == FeFrameMacro || frame->kind == FeFrameMacroExpansion;
+}
+
+// The ordinary-return tail of a pair form: drain the cleanups pushed while
+// this form was being evaluated, restore its GC checkpoint, protect its
+// result, and unlink its call-trace cell. Every pair form completes through
+// here -- a symbol head, a resolved computed head, or a temporary recursive
+// dispatch -- so the evaluation_depth and call_list bookkeeping (and the
+// `macro` arm's own internal restore) cannot drift between the paths.
+static void CompletePairFrame(FeContext* ctx,
+                              FeEvalFrame* frame,
+                              FeObject* result) {
+  RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+  FeRestoreGC(ctx, frame->gc_checkpoint);
+  FePushGC(ctx, result);
+  ctx->call_list = CDR(&frame->trace_cell);
+  ctx->evaluation_depth--;
+}
+
+// Transfers an evaluator-run error to the enclosing barrier, or to the host
+// when there is none. Only the outermost `RunEvaluation`'s error path calls
+// this, so the extra C call never sits on a recursion's persistent depth.
+[[noreturn]] static void TransferRunError(FeContext* ctx,
+                                          jmp_buf* saved_catch) {
+  if (saved_catch != nullptr) {
+    longjmp(*saved_catch, 1);
+  }
+  if (ctx->error_fn != nullptr) {
+    ctx->error_fn(ctx, ctx->evaluator_error_message,
+                  ctx->evaluator_error_trace);
+  }
+  abort();
+}
+
+// Installs a run's own error barrier: saves the enclosing catch, makes
+// `jump` the active one, and -- only at the outermost barrier -- resets the
+// completion state, which a nested run must leave alone. Called once per
+// run, before the run's own `setjmp`, so the extra C call is never on the
+// recursion's persistent depth. The returned pointer is valid only while
+// the caller's `jump` is live, and the caller restores it on every exit.
+static jmp_buf* BeginRunBarrier(FeContext* ctx, jmp_buf* jump) {
+  jmp_buf* const saved = ctx->evaluator_catch;
+  ctx->evaluator_catch = jump;
+  if (saved == nullptr) {
+    ctx->completion = FeCompletionNormal;
+  }
+  return saved;
+}
+
 static FeObject* RunEvaluation(FeContext* ctx,
                                FeObject* obj,
                                FeObject* env,
                                FeObject** bind) {
   const size_t base = ctx->frame_stack_index;
+  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
   jmp_buf jump;
-  jmp_buf* const saved_catch = ctx->evaluator_catch;
-  ctx->evaluator_catch = &jump;
-  if (saved_catch == nullptr) {
-    ctx->completion = FeCompletionNormal;
-  }
+  jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
 
   if (setjmp(jump) != 0) {
     ctx->frame_stack_index = base;
     ctx->call_list = &nil;
     ctx->evaluator_catch = saved_catch;
-    if (saved_catch != nullptr) {
-      longjmp(*saved_catch, 1);
-    }
-    if (ctx->error_fn != nullptr) {
-      ctx->error_fn(ctx, ctx->evaluator_error_message,
-                    ctx->evaluator_error_trace);
-    }
-    abort();
+    ctx->native_reentry_depth = saved_native_reentry_depth;
+    TransferRunError(ctx, saved_catch);
   }
 
-  PushEvaluationFrame(ctx, obj, env);
-  FeEvalFrame* frame = &ctx->frame_stack[base];
-  FeObject* result;
-  if (FeGetType(obj) == FeTSymbol) {
-    EvaluationStep(ctx);
-    result = CDR(GetBound(ctx, obj, env));
-    if (result == &unbound) {
-      HandleVoidSymbol(ctx, obj, "void-variable");
+  PushEvaluationFrame(ctx, obj, env, bind);
+  FeObject* result = &nil;
+  while (ctx->frame_stack_index > base) {
+    FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
+    FeObject* const expr = frame->expr;
+    FeObject* const frame_env = frame->env;
+    // The `bind`/`newenv` target this frame carries: the run's own for the
+    // base frame, `&frame->env` for a body form (so a `let` in the form
+    // extends the environment the following body forms see), and NULL for a
+    // computed-head sub-frame or an argument sub-frame, exactly as the
+    // recursive `Evaluate` called each with.
+    FeObject** const frame_bind = frame->bind;
+    switch (frame->kind) {
+      case FeFrameExpression:
+        if (FeGetType(expr) == FeTPair) {
+          EvaluationStep(ctx);
+          CAR(&frame->trace_cell) = expr;
+          CDR(&frame->trace_cell) = ctx->call_list;
+          ctx->call_list = &frame->trace_cell;
+          EnterEvaluationDepth(ctx);
+          frame->gc_checkpoint = FeSaveGC(ctx);
+          frame->cleanup_checkpoint = ctx->cleanup_stack_index;
+          FeObject* const head = CAR(expr);
+          if (FeGetType(head) != FeTSymbol) {
+            // Computed head: evaluate the head expression on the frame stack
+            // and resume this frame as `FeFrameCallHead` when its value is
+            // known. Previously `EvaluateHead` recursed into `Evaluate` here.
+            frame->kind = FeFrameCallHead;
+            PushEvaluationFrame(ctx, head, frame_env, NULL);
+            continue;
+          }
+          EvaluationStep(ctx);
+          FeObject* fn = CDR(GetBound(ctx, head, frame_env));
+          if (fn == &unbound) {
+            HandleNonCallable(ctx, head);
+          }
+          if (!DispatchResolvedCall(ctx, frame, fn, frame_bind, &result)) {
+            // The frame switched to `FeFrameCallArguments`; the resume case
+            // at the top of the loop starts the first argument.
+            continue;
+          }
+          CompletePairFrame(ctx, frame, result);
+        } else if (FeGetType(expr) == FeTSymbol) {
+          EvaluationStep(ctx);
+          result = CDR(GetBound(ctx, expr, frame_env));
+          if (result == &unbound) {
+            HandleVoidSymbol(ctx, expr, "void-variable");
+          }
+        } else {
+          EvaluationStep(ctx);
+          result = expr;
+        }
+        break;
+
+      case FeFrameCallHead:
+        // The head expression above this frame completed and delivered its
+        // value into `callee`; resume the call with it.
+        {
+          FeObject* fn = frame->callee;
+          if (!DispatchResolvedCall(ctx, frame, fn, frame_bind, &result)) {
+            // The frame switched to `FeFrameCallArguments`; the resume case
+            // at the top of the loop starts the first argument.
+            continue;
+          }
+          CompletePairFrame(ctx, frame, result);
+        }
+        break;
+
+      case FeFrameLambda:
+        // The lambda application is complete: `ArgsToEnv` already produced
+        // the callee environment (into `env`) and `rest` holds the raw body
+        // forms, so the frame becomes a sequential-body frame and its resume
+        // below starts the first form. This is its own named kind so the two
+        // steps -- binding the parameters, then evaluating the body -- stay
+        // separately documented, as the plan requires.
+        frame->kind = FeFrameBody;
+        // fall through
+      case FeFrameCallArguments:
+      case FeFrameBody:
+        // An argument or body sub-expression above this frame completed and
+        // delivered its value into `callee`; the `&unbound` sentinel means
+        // the frame was just set up and no operand has completed in yet.
+        if (!ResumeCallStep(ctx, frame, &result)) {
+          // A next-argument or next-form frame was pushed; resume at the top
+          // of the loop.
+          continue;
+        }
+        CompletePairFrame(ctx, frame, result);
+        break;
+
+      case FeFrameMacro:
+        // A body-form sub-expression above this frame completed and
+        // delivered its value into `callee` (or the frame was just set up
+        // and `callee` is still the `&unbound` sentinel); the resume case
+        // either starts the next form or produces the expansion and pushes
+        // it, always pushing a frame.
+        ResumeMacroBody(ctx, frame);
+        continue;
+
+      case FeFrameMacroExpansion:
+        // The expansion above this frame completed and delivered the macro
+        // call's result into `callee`; the frame completes with it.
+        ResumeMacroExpansion(frame, &result);
+        CompletePairFrame(ctx, frame, result);
+        break;
+
+      case FeFrameNative:
+        // The argument frame just switched to this kind and moved the
+        // reordered argument list into `accumulator`. Invoke the native
+        // synchronously from the loop -- no per-native setjmp, the run's own
+        // barrier is the one in effect -- bounded by `native_reentry_depth`.
+        // A native that calls `FeCall`/`FeCallWithOptions` starts a nested
+        // run above this frame on a fresh C activation and counts as another
+        // active level until it returns, which is why the counter, not the
+        // pair-depth accounting, owns this seam.
+        //
+        // Both active-depth values are restored to their pre-call values on
+        // the ordinary return, before `CompletePairFrame`: an owning nested
+        // `FeCallWithOptions` (started when no control record is active,
+        // e.g. under a plain `FeEvaluateString`) runs `EndEvaluationControl`
+        // on its way out, which clears the whole control record --
+        // `native_reentry_depth` *and* `evaluation_depth` included -- while
+        // the enclosing frames are still live. Restoring both keeps the
+        // enclosing evaluation's logical max_depth accounting intact (a blind
+        // decrement would wrap `native_reentry_depth` to SIZE_MAX, and
+        // merely leaving `evaluation_depth` at 0 would under-count the live
+        // pair forms for every later form in this run). `CompletePairFrame`
+        // then performs its own unconditional decrement for the enclosing
+        // pair form. An error inside the native skips this restore entirely
+        // and is the enclosing run barrier's job, exactly as for
+        // `evaluator_catch`.
+        {
+          const size_t saved_depth = ctx->evaluation_depth;
+          const size_t saved_native_depth = ctx->native_reentry_depth;
+          EnterNativeDepth(ctx);
+          result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
+          ctx->native_reentry_depth = saved_native_depth;
+          ctx->evaluation_depth = saved_depth;
+          CompletePairFrame(ctx, frame, result);
+        }
+        break;
+
+      case FeFrameTemporaryRecursive:
+        // Completed synchronously by the case that set it; it never reaches
+        // the top of the loop again.
+        abort();
     }
-  } else if (FeGetType(obj) != FeTPair) {
-    EvaluationStep(ctx);
-    result = obj;
-  } else {
-    EvaluationStep(ctx);
-    CAR(&frame->trace_cell) = obj;
-    CDR(&frame->trace_cell) = ctx->call_list;
-    ctx->call_list = &frame->trace_cell;
-    EnterEvaluationDepth(ctx);
-    frame->gc_checkpoint = FeSaveGC(ctx);
-    frame->cleanup_checkpoint = ctx->cleanup_stack_index;
-    FeObject* fn = EvaluateHead(ctx, CAR(obj), env);
-    if (FeGetType(fn) == FeTPrimitive && PRIM(fn) == PQuote) {
-      FeObject* arguments = CDR(obj);
-      result = FeGetNextArgument(ctx, &arguments);
-    } else {
-      frame->kind = FeFrameTemporaryRecursive;
-      result = EvaluatePair(ctx, obj, env, bind, fn, frame);
+
+    ctx->frame_stack_index--;
+    if (ctx->frame_stack_index == base) {
+      break;
     }
-    RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
-    FeRestoreGC(ctx, frame->gc_checkpoint);
-    FePushGC(ctx, result);
-    ctx->call_list = CDR(&frame->trace_cell);
-    ctx->evaluation_depth--;
+    // Deliver the completed sub-expression's value to the frame below it: a
+    // computed-head frame waiting for its head expression's value, an
+    // argument frame waiting for an argument's value, a body frame waiting
+    // for a body form's value, or a macro frame waiting for a body form's or
+    // the expansion's value.
+    frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
+    assert(IsAwaitingDelivery(frame));
+    frame->callee = result;
   }
   ctx->frame_stack_index = base;
   ctx->evaluator_catch = saved_catch;
+  ctx->native_reentry_depth = saved_native_reentry_depth;
   return result;
 }
 

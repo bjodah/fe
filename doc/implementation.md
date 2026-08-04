@@ -6,7 +6,7 @@ The implementation uses a fixed-size region of memory supplied by the caller
 when creating the `FeContext`. The implementation stores the context at the
 start of this memory region, then an evaluator-frame region, then the
 `FeObject` region. The frame region has a 64-frame floor, a 32-frame cleanup
-reserve, and receives 8% of bytes beyond the minimum; the remaining bytes
+reserve, and receives 10% of bytes beyond the minimum; the remaining bytes
 become object slots. The arena must satisfy `alignof(FeContext)`; static
 assertions ensure that both following regions are aligned. Fe neither
 reallocates nor frees this storage; its address, size, and exclusive lifetime
@@ -130,13 +130,105 @@ is active. See `doc/c-api.md`'s "Bounding Recursion". `evaluation_depth` is
 reset to 0 by `FeHandleError()`, the same way `call_list` is, since a
 `longjmp` skips every pending decrement.
 
+Native re-entry is bounded separately at the native-call boundary by a
+private `native_reentry_depth` counter on `FeContext`. It counts currently
+active native invocations -- an ordinary native is one fixed C activation,
+and a native that synchronously calls `FeCall`/`FeCallWithOptions` starts a
+nested `RunEvaluation` and then another active native level, which is the
+one place a fresh C frame legitimately enters through the evaluator. Until
+03F it is capped by the same ambient legacy `evaluation_depth_limit`/
+`DefaultEvaluationDepth` and reports the same old
+`evaluation depth limit exceeded` text, so no public expectation moves
+mid-migration; 03F gives native re-entry its own public option, measured
+smaller default, statistic and error. Each `RunEvaluation` barrier saves and
+restores the counter beside `evaluator_catch` on both the normal and the
+`longjmp` path -- the counter is a plain `size_t`, never a copied `jmp_buf`
+-- and `FeHandleError()` resets it to 0 with the other live-depth state, so
+a recovered context starts fresh.
+
+For a zero-argument re-entering chain the two counters track the same
+nesting: each activation is one pair form and one native level, so with the
+shared legacy ceiling they reach the limit together. The legacy pair-depth
+check runs earlier in the loop and reports the old message first, at the
+same blocked activation; `native_reentry_depth` is live bookkeeping for
+03F -- incremented, restored, barrier-saved and error-reset, so its nesting
+level is honest even though it is not the independently observable bound
+today. 03F gives it its own smaller default and that is when it becomes the
+reported bound.
+
+The `FeFrameNative` resume saves both active-depth values -- this counter
+and `evaluation_depth` -- before calling the native and restores both on the
+ordinary return, before `CompletePairFrame` runs its own unconditional
+decrement for the enclosing pair form. An owning nested `FeCallWithOptions`
+-- started when no control record is active, e.g. under a plain
+`FeEvaluateString` -- runs `EndEvaluationControl` on its way out, which
+clears the whole control record (both counters included) while the enclosing
+frames are still live. Restoring both puts the enclosing evaluation's
+accounting back: a blind decrement would wrap `native_reentry_depth` to
+`SIZE_MAX` and spuriously block the next native, and merely leaving
+`evaluation_depth` at 0 would under-count the still-live pair forms for
+every later form in the same run, weakening the logical max_depth bound.
+Error paths skip the restore entirely: the enclosing barrier restores its
+saved counter, and `FeHandleError()` resets both to 0.
+
 Evaluation has one context-owned frame stack. The collector marks every live
 frame, including the temporary recursive-dispatch frame used while Phase 3 is
 being migrated. Self-evaluating objects, symbols, and primitive `quote` use
-the frame loop directly; other forms still take the temporary path. Embedded
-frame trace cells preserve the host error callback's semantic call trace
-without allocating after an error. Frame exhaustion keeps the existing
-`evaluation depth limit exceeded` text until the final public-bound slice.
+the frame loop directly, as does computed call-head resolution: a call whose
+head is not a symbol switches its frame to a call-head continuation, pushes
+the head expression on the frame stack, and resumes when the head's value is
+known, so a pure computed-head chain stops consuming C stack. Symbol heads
+resolve synchronously in the loop. Argument evaluation for an ordinary
+callable -- a native function or a lambda -- is also a frame transition, not
+a recursive `EvaluateList`: the call frame stores the callable and the
+remaining raw arguments, pushes each argument as a sub-expression frame, and
+accumulates the values (prepended, then reordered) as each one completes, so
+a call chain nested through argument positions stops consuming C stack too.
+The step charge `EvaluateList` made before each argument is preserved, as are
+the `FeGetNextArgument` list-shape errors, the call trace, and the GC
+checkpointing of the accumulating list. Lambda application is the next frame
+transition: once the argument list is complete and the callable is a lambda,
+`ArgsToEnv` still binds the arguments into the callee environment as an
+ordinary allocating, non-evaluating helper -- it deliberately does not become
+a frame kind -- and the frame then becomes a sequential-body frame that
+evaluates the body forms one at a time, charging the same one step before
+every body form and every parameter walk `DoList` and `ArgsToEnv` charged,
+and pushing each form as a sub-expression frame. The body frame owns its
+environment, and a body form's `let` is handed a pointer to it (the `bind`
+field of the pushed frame), so a `let` in a lambda body extends the
+environment the following body forms see exactly as the recursive `DoList`
+`&env` out-parameter did -- the one piece of `let`/`newenv` threading that
+works today; `let` itself stays on the temporary recursive path until 03E.
+A pure call chain through lambda bodies therefore stops consuming C stack
+too, with each level's nested call a sub-expression frame in the same
+evaluator run. A macro call is likewise two frame transitions: `ArgsToEnv`
+binds the raw, unevaluated arguments into the macro's closure environment
+(charging one step per parameter walk, exactly as it does for a lambda),
+the frame becomes a sequential body that evaluates the macro's forms one at
+a time with the same `let` threading as a lambda body, and once the last
+body form produces the expansion the frame restores the macro call's
+cleanup, GC and call-trace checkpoints and pushes the raw expansion as a
+sub-expression frame in the caller environment -- a genuine frame-machine
+tail call that holds the logical depth across the expansion. That makes the
+physical frame wall, not C recursion, what stops a macro whose expansion is
+another macro call, and it keeps the expansion off the call site and out of
+the macro's own backtrace frame, exactly as the recursive arm did.
+Primitives that evaluate their operands (`list`, `set`, `=`, and the
+arithmetic/comparison forms) keep using `EvaluateList` for this slice.
+`DoList` remains for the primitive/special-form bodies (`do`, `if`,
+`while`) and cleanup paths 03E still owns. A native call is the one
+remaining ordinary callable: once the argument frame has reordered the
+evaluated argument list, the frame switches to `FeFrameNative` and the run
+loop invokes the `FeNativeFn` synchronously from that explicit state -- the
+existing public signature unchanged, and no per-native `setjmp` (the
+enclosing `RunEvaluation` barrier is the only one in effect). The
+`native_reentry_depth` check wraps that invocation, so a native calling back
+into `FeCall*` is the one C-recursion route this slice deliberately keeps;
+every special form still takes the temporary recursive path.
+Embedded frame trace cells preserve the host error callback's semantic
+call trace without allocating after an error. Frame exhaustion keeps the
+existing `evaluation depth limit exceeded` text until the final public-bound
+slice.
 
 The context's three result/retention roots have separate lifetimes.
 `evaluation_result` holds the latest string or file evaluation result,

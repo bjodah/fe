@@ -40,6 +40,26 @@ typedef struct ErrorState {
   bool nested_with_options;
   bool called;
   bool stack_was_nil;
+  // 03D stage 5 native-re-entry bookkeeping: how many more nested
+  // `FeCallWithOptions` hops `ReentrantNative` may take before returning
+  // (so the test never needs the default 1000 nested C calls to prove an
+  // off-by-one), the legacy `max_depth` it re-enters under, the rooted
+  // self-callable for the re-entering native, the callable `OwningReenter`
+  // invokes through its owning nested call, whether a registered cleanup
+  // ran, and the nesting depth observed on the C side. `reentry_current` is
+  // the level of the currently running activation (incremented on entry,
+  // restored on the ordinary return) and `reentry_max_seen` the high-water
+  // mark; the deepest activation reports its own level as the result, so a
+  // success case's value *is* the nesting depth. Error paths longjmp past
+  // the decrements, so the test resets both fields before each run it
+  // asserts on.
+  size_t reentry_remaining;
+  size_t reentry_max_depth;
+  FeRoot* reentry_self;
+  FeRoot* reentry_owning_target;
+  bool reentry_cleanup_ran;
+  size_t reentry_current;
+  size_t reentry_max_seen;
 } ErrorState;
 
 // The frame partition must leave the existing 200-level C-stack probe below
@@ -204,31 +224,149 @@ static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
   return FeMakeDouble(context, x + y);
 }
 
+static void MarkReentryCleanup(FeContext* context, void* data) {
+  (void)context;
+  ErrorState* state = data;
+  state->reentry_cleanup_ran = true;
+}
+
+// 03D stage 5: a native that synchronously re-enters evaluation through
+// `FeCallWithOptions` on itself, bounded on the C side by
+// `reentry_remaining` (so the test drives a deliberately small `max_depth`
+// instead of the default 1000 nested C calls) and on the Fe side by the
+// ambient legacy `max_depth`. Registers a host cleanup on every entry, so
+// both the ordinary return and the error paths are observed to run it. The
+// deepest activation (the one that exhausted the budget) returns its own
+// nesting level, so a success case's result directly reports how many
+// activations were live at the deepest point.
+static FeObject* ReentrantNative(FeContext* context,
+                                 // cppcheck-suppress constParameterCallback
+                                 FeObject* arguments) {
+  FeRequireNoArguments(context, arguments);
+  ErrorState* state = FeGetUserData(context);
+  state->reentry_current++;
+  if (state->reentry_current > state->reentry_max_seen) {
+    state->reentry_max_seen = state->reentry_current;
+  }
+  FeProtectWithCleanup(context, MarkReentryCleanup, state);
+  if (state->reentry_remaining == 0) {
+    const double level = (double)state->reentry_current;
+    state->reentry_current--;
+    return FeMakeDouble(context, level);
+  }
+  state->reentry_remaining--;
+  const FeEvalOptions options = {.max_depth = state->reentry_max_depth};
+  FeObject* result = FeCallWithOptions(context, FeGetRoot(state->reentry_self),
+                                       nullptr, 0, &options);
+  state->reentry_current--;
+  return result;
+}
+
+// 03D stage 5 regression: an ordinary native with no re-entry, and a native
+// that performs one *owning* `FeCallWithOptions` (so the test drives it from
+// a plain, non-owning `FeEvaluateString`, where no control record is active
+// and the nested call takes ownership). The owning call's
+// `EndEvaluationControl` clears the whole control record -- including
+// `native_reentry_depth` -- before this native returns; the native frame
+// must restore its pre-call counter instead of decrementing the zeroed one,
+// or a later native in the same run sees SIZE_MAX and raises a spurious
+// depth error.
+static FeObject* OrdinaryNative(FeContext* context,
+                                // cppcheck-suppress constParameterCallback
+                                FeObject* arguments) {
+  FeRequireNoArguments(context, arguments);
+  return FeMakeDouble(context, 42);
+}
+
+static FeObject* OwningReenter(FeContext* context,
+                               // cppcheck-suppress constParameterCallback
+                               FeObject* arguments) {
+  FeRequireNoArguments(context, arguments);
+  const ErrorState* state = FeGetUserData(context);
+  const FeEvalOptions options = {.max_depth = state->reentry_max_depth};
+  return FeCallWithOptions(context, FeGetRoot(state->reentry_owning_target),
+                           nullptr, 0, &options);
+}
+
+// 03D stage 5: holds its one argument across a nested evaluation that
+// forces collections, then hands the same value through one nested
+// `FeCallWithOptions`, proving the native frame roots the evaluated
+// argument list (`accumulator`) while a native is active and while a nested
+// run it starts allocates over it.
+static FeObject* GCNative(FeContext* context, FeObject* arguments) {
+  ErrorState* state = FeGetUserData(context);
+  FeObject* value = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  if (state->reentry_remaining == 0) {
+    return value;
+  }
+  state->reentry_remaining--;
+  static const char collecting[] =
+      "(setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n";
+  (void)FeEvaluateString(context, "native-gc.fe", collecting,
+                         sizeof(collecting) - 1);
+  const FeEvalOptions options = {.max_depth = state->reentry_max_depth};
+  FeObject* callarg = value;
+  return FeCallWithOptions(context, FeGetRoot(state->reentry_self), &callarg, 1,
+                           &options);
+}
+
 // The C-stack high-water probe (03A of kg's Emacs-subset program). Records
 // its own C frame address, invoked from the deepest point of a Lisp
 // recursion, so `TestEvaluationStackProbe` can compare a "depth zero" call
 // against a "depth n" one and see whether Lisp-level nesting is costing C
 // stack. One process-wide slot is fine: `test_api` is single-threaded and
 // every caller reads the value immediately after the evaluation that set it.
+//
+// A single record is not enough for a recursion that fires the probe at
+// several depths (03D's computed-head chain probes on the way back out): the
+// *last* fire is the shallowest. `stack_probe_deepest_address` therefore
+// keeps the lowest address seen -- on the supported toolchains (the same
+// documented constraint that makes `__builtin_frame_address(0)` valid here)
+// the C stack grows downward, so the minimum address is the high-water mark.
 static uintptr_t stack_probe_last_address;
+static uintptr_t stack_probe_deepest_address;
+
+// Records the caller's C frame address. `__builtin_frame_address(0)`, never
+// a nonzero depth (unsupported and warns), and never the address of a
+// `volatile` local: AddressSanitizer may place an address-taken local on its
+// fake stack, which would turn the ASan row into a heap-layout measurement
+// rather than a C-stack one. The intermediate `void*` avoids casting a
+// function call's result straight to an integer type, which
+// `-Wbad-function-cast` rejects.
+static void RecordStackProbeAddress(void) {
+  void* const frame = __builtin_frame_address(0);
+  const uintptr_t address = (uintptr_t)frame;
+  stack_probe_last_address = address;
+  if (stack_probe_deepest_address == 0 ||
+      address < stack_probe_deepest_address) {
+    stack_probe_deepest_address = address;
+  }
+}
 
 static FeObject* StackProbe(FeContext* context,
                             // cppcheck-suppress constParameterCallback
                             FeObject* arguments) {
   FeRequireNoArguments(context, arguments);
-  // `__builtin_frame_address(0)`, never a nonzero depth (unsupported and
-  // warns), and never the address of a `volatile` local: AddressSanitizer
-  // may place an address-taken local on its fake stack, which would turn
-  // the ASan row into a heap-layout measurement rather than a C-stack one.
-  // The intermediate `void*` avoids casting a function call's result
-  // straight to an integer type, which `-Wbad-function-cast` rejects.
-  void* const frame = __builtin_frame_address(0);
-  stack_probe_last_address = (uintptr_t)frame;
+  RecordStackProbeAddress();
   // Zero is part of the fixture: `deep` sums 1 per level on the way back
   // out, so `(deep n)` returning anything but `n` means the probe ran at
   // the wrong point in the evaluation and the stack assertion below would
   // otherwise still look fine by accident.
   return FeMakeDouble(context, 0);
+}
+
+// Like `StackProbe`, but for argument-position recursion (03D stage 2): it
+// takes one argument and returns it, so a chain of native calls can be
+// generated as `(probe-id (probe-id ... (probe-id 0)))` with the probe
+// firing once, at the deepest C point.
+static FeObject* ProbeId(FeContext* context,
+                         // cppcheck-suppress constParameterCallback
+                         FeObject* arguments) {
+  FeObject* value = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  RecordStackProbeAddress();
+  return value;
 }
 
 static FeObject* CallRoot(FeContext* context,
@@ -2241,6 +2379,859 @@ static bool TestEvaluationStackProbe(void) {
   return true;
 }
 
+// Sub-plan 03D, stage 1: computed call-head resolution runs on the frame
+// stack. A computed head (a pair form in head position) used to recurse
+// through `EvaluateHead` into a nested `Evaluate`; now it is a frame
+// transition, so a pure computed-head chain must stop consuming C stack.
+//
+// `loop` is self-returning, so `(loop)` evaluates to `loop` again and the
+// generated chain `(((((...((loop))...))))` is callable at every depth: each
+// level's head is the previous level's call and resolves to the same
+// function. Lambda application is still the temporary recursive dispatch in
+// this stage, but the applications run one at a time as the frame stack
+// unwinds, so the probe fires at the same C depth at every level. In the old
+// code the nested head evaluations kept every level's frames open
+// simultaneously, so the *deepest* probe address (the high-water mark) grew
+// ~2 frames per level; this test asserts the high-water mark is flat, and
+// that property depends on the call-head frame alone -- not on the argument,
+// body, lambda, macro or native frames.
+static bool TestCallHeadProbe(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "stack-probe", StackProbe);
+
+  static const char loop_def[] = "(setq loop (fn () (do (stack-probe) loop)))";
+  CHECK(FeEvaluateString(context, "loop-def.fe", loop_def,
+                         sizeof(loop_def) - 1) != nullptr);
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  static const char baseline[] = "(loop)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "call-head.fe", baseline, sizeof(baseline) - 1),
+      "(lambda nil (do (stack-probe) loop))"));
+  CHECK(stack_probe_last_address != 0);
+  CHECK(stack_probe_deepest_address != 0);
+  const uintptr_t baseline_address = stack_probe_deepest_address;
+
+  // 150 levels, ~151 simultaneously open computed-head frames; the old code
+  // held ~300 head-resolution C activations open here. Well inside the 1 MiB
+  // arena's frame capacity (1100) and the default logical depth ceiling
+  // (peak ~153), so the chain succeeds and the flatness bound is the only
+  // assertion at risk.
+  enum { ChainDepth = 150, MaxFlatDelta = 2048 };
+  char source[2 * ChainDepth + 8];
+  size_t length = 0;
+  for (int i = 0; i < ChainDepth + 1; i++) {
+    source[length++] = '(';
+  }
+  source[length++] = 'l';
+  source[length++] = 'o';
+  source[length++] = 'o';
+  source[length++] = 'p';
+  for (int i = 0; i < ChainDepth + 1; i++) {
+    source[length++] = ')';
+  }
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "call-head.fe", source, length),
+                   "(lambda nil (do (stack-probe) loop))"));
+  CHECK(stack_probe_last_address != 0);
+  CHECK(stack_probe_deepest_address != 0);
+  const uintptr_t deepest = stack_probe_deepest_address;
+  const uintptr_t delta = baseline_address > deepest
+                              ? baseline_address - deepest
+                              : deepest - baseline_address;
+  printf("call-head probe: depth=%d frames~%d baseline=%#" PRIxPTR
+         " deepest=%#" PRIxPTR " delta=%" PRIuPTR " bytes\n",
+         ChainDepth, ChainDepth + 1, baseline_address, deepest, delta);
+  // One old-style head-resolution level cost ~2 C frames (~400 bytes in this
+  // build; 150 levels measured ~62 KB of probe growth on the pre-frame-loop
+  // code). A frame-loop regression puts the probe back on the C stack and
+  // fails this far past the 2 KiB budget.
+  CHECK(delta < MaxFlatDelta);
+
+  // A computed head that raises still unwinds through the new frame kind,
+  // and the context stays usable afterwards.
+  static const char bad_chain[] = "((((((car-thing))))))";
+  CHECK(ExpectEvaluationError(context, &state, "call-head.fe", bad_chain,
+                              sizeof(bad_chain) - 1,
+                              "call-head.fe: void-function car-thing"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D, stage 2: argument evaluation for ordinary callables (native
+// functions and lambdas) is a resumable frame transition, not a recursive
+// `EvaluateList`. `EvaluateList` charged exactly one evaluation step before
+// each argument; the argument frame must charge the same, so the exact step
+// budget for a call does not move, and a call with no arguments still runs
+// without raising `too few arguments`. Macros are unaffected: they receive
+// their arguments raw on the temporary dispatch and never evaluate them.
+static bool TestArgumentFrame(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "add-exactly", AddExactly);
+
+  // A native call costs one step for the pair form, one for the symbol
+  // head, and one per argument: `(add-exactly 1 2)` is exactly 6 steps,
+  // charged across two resumed argument frames.
+  const FeEvalOptions native_tight = {.step_limit = 5};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "arg-native.fe", "(add-exactly 1 2)",
+      sizeof("(add-exactly 1 2)") - 1, &native_tight,
+      "arg-native.fe: evaluation step limit exceeded"));
+  const FeEvalOptions native_ok = {.step_limit = 6};
+  CHECK(IsRendered(
+      context,
+      FeEvaluateStringWithOptions(context, "arg-native.fe", "(add-exactly 1 2)",
+                                  sizeof("(add-exactly 1 2)") - 1, &native_ok),
+      "3"));
+
+  // A lambda call adds its own steps on top: closure creation in the head
+  // frame, one step per parameter in `ArgsToEnv`, the body's own
+  // form/symbol steps, and `GetBound`'s charge for walking the body
+  // environment. `((fn (x) x) 1)` is exactly 9 steps -- the same count the
+  // recursive `EvaluateList` produced, with the argument step still charged
+  // once, at the same point.
+  const FeEvalOptions lambda_tight = {.step_limit = 8};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "arg-lambda.fe", "((fn (x) x) 1)",
+      sizeof("((fn (x) x) 1)") - 1, &lambda_tight,
+      "arg-lambda.fe: evaluation step limit exceeded"));
+  const FeEvalOptions lambda_ok = {.step_limit = 9};
+  CHECK(IsRendered(
+      context,
+      FeEvaluateStringWithOptions(context, "arg-lambda.fe", "((fn (x) x) 1)",
+                                  sizeof("((fn (x) x) 1)") - 1, &lambda_ok),
+      "1"));
+
+  // Zero arguments: `EvaluateList` charged nothing for an empty list, and
+  // the empty argument frame must skip `FeGetNextArgument` (which would
+  // raise "too few arguments") and apply the callable to an empty list.
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "arg-zero.fe", "((fn () 5))",
+                                    sizeof("((fn () 5))") - 1),
+                   "5"));
+
+  // Left-to-right evaluation with a side effect in an early argument: the
+  // later argument must still run, and the values must land in order.
+  static const char ordered[] =
+      "((fn (a b) (list a b)) (setq mark 1) (setq mark 2))";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "arg-order.fe", ordered, sizeof(ordered) - 1),
+      "(1 2)"));
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "arg-mark.fe", "mark", sizeof("mark") - 1),
+      "2"));
+
+  // A dotted argument list raises the same `FeGetNextArgument` error, at the
+  // same point in the walk -- after the earlier arguments were already
+  // evaluated.
+  static const char dotted[] = "((fn (a b) (list a b)) 1 2 . 3)";
+  CHECK(ExpectEvaluationError(context, &state, "arg-dotted.fe", dotted,
+                              sizeof(dotted) - 1,
+                              "arg-dotted.fe: dotted pair in argument list"));
+
+  // An error in an argument position unwinds through the argument frame and
+  // the context stays usable afterwards.
+  static const char bad_arg[] = "(add-exactly 1 (car 2))";
+  CHECK(ExpectEvaluationError(context, &state, "arg-error.fe", bad_arg,
+                              sizeof(bad_arg) - 1,
+                              "arg-error.fe: expected pair, got double"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+
+  // GC during the resumed accumulation (a collection in a later argument
+  // must not sweep the values already accumulated in the frame) is covered
+  // by the resumable-frame-state table's `argument` row.
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D, stage 2: argument evaluation runs on the frame stack. A
+// chain of native calls nested through argument positions used to recurse
+// through `EvaluateList` -> `Evaluate` -> `RunEvaluation` once per level,
+// so the innermost probe's C address grew by several activations per level.
+// Now the nested calls are frames in one run and the native invocations are
+// sequential, so the chain stops consuming C stack. `probe-id` records its
+// C frame address and returns its argument; the generated chain
+// `(probe-id (probe-id ... (probe-id 0)))` evaluates innermost-first, so
+// the probe fires at every level and the deepest fire is the innermost one.
+static bool TestArgumentProbe(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "probe-id", ProbeId);
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  static const char baseline[] = "(probe-id 0)";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "arg-baseline.fe", baseline,
+                                    sizeof(baseline) - 1),
+                   "0"));
+  CHECK(stack_probe_last_address != 0);
+  CHECK(stack_probe_deepest_address != 0);
+  const uintptr_t baseline_address = stack_probe_deepest_address;
+
+  // 150 levels: each `(probe-id X)` call holds an argument frame with the
+  // nested call as its child (~2 frames per level, ~300 frames total), well
+  // inside the 1 MiB arena's frame capacity (1100) and the default logical
+  // depth ceiling (peak ~151).
+  enum { ChainDepth = 150, MaxFlatDelta = 2048 };
+  char source[ChainDepth * 16 + 8];
+  static const char prefix[] = "(probe-id ";
+  size_t length = 0;
+  for (int i = 0; i < ChainDepth + 1; i++) {
+    memcpy(source + length, prefix, sizeof(prefix) - 1);
+    length += sizeof(prefix) - 1;
+  }
+  source[length++] = '0';
+  for (int i = 0; i < ChainDepth + 1; i++) {
+    source[length++] = ')';
+  }
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "arg-chain.fe", source, length), "0"));
+  CHECK(stack_probe_last_address != 0);
+  CHECK(stack_probe_deepest_address != 0);
+  const uintptr_t deepest = stack_probe_deepest_address;
+  const uintptr_t delta = baseline_address > deepest
+                              ? baseline_address - deepest
+                              : deepest - baseline_address;
+  printf("argument probe: depth=%d frames~%d baseline=%#" PRIxPTR
+         " deepest=%#" PRIxPTR " delta=%" PRIuPTR " bytes\n",
+         ChainDepth, ChainDepth * 2, baseline_address, deepest, delta);
+  // One old-style argument-evaluation level cost several C activations (a
+  // nested `RunEvaluation` with its setjmp, `Evaluate`, `EvaluateList`,
+  // `EvaluatePair` and the native call), so 150 levels measured tens of KB
+  // of probe growth on the pre-frame code. A regression puts the probe back
+  // on the C stack and fails far past the 2 KiB budget.
+  CHECK(delta < MaxFlatDelta);
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D, stage 3: the sequential-body frame keeps `DoList`'s exact
+// step charges, its `let`/`newenv` threading, its error unwinding and its
+// GC-rooting of the pending forms and environment, so the observable
+// behaviour of a lambda body does not move as its evaluation path changes.
+static bool TestLambdaBodyFrame(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Step budget: `((fn (x) (let y 1) (list x y)) 5)` costs the same number
+  // of steps the recursive `DoList` body produced -- one step before every
+  // body form, every parameter walk, and every environment walk (the `let`
+  // adds a level, so the later `list`/`x`/`y` lookups walk one deeper), with
+  // none for the lambda/body frame transitions themselves.
+  static const char body[] = "((fn (x) (let y 1) (list x y)) 5)";
+  const FeEvalOptions tight = {.step_limit = 22};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "body.fe", body, sizeof(body) - 1, &tight,
+      "body.fe: evaluation step limit exceeded"));
+  const FeEvalOptions ok = {.step_limit = 23};
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "body.fe", body,
+                                               sizeof(body) - 1, &ok),
+                   "(5 1)"));
+
+  // let threading through the body frame: a `let` in a body form extends the
+  // environment the following forms see, even when the lambda call itself is
+  // an argument to an outer call (so the body frame is not the run's base
+  // frame), and a nested lambda's body still sees the outer body's binding.
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "nested-let.fe",
+                       "((fn (g) (g)) (fn () (let y 1) y))",
+                       sizeof("((fn (g) (g)) (fn () (let y 1) y))") - 1),
+      "1"));
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(
+          context, "closure-let.fe",
+          "((fn () (let a 1) ((fn () (let b (+ a 1)) (list a b)))))",
+          sizeof("((fn () (let a 1) ((fn () (let b (+ a 1)) (list a b)))))") -
+              1),
+      "(1 2)"));
+
+  // A body-frame `let` is local: it shadows but does not leak past the
+  // lambda, so the global keeps its value and a fresh name stays unbound.
+  static const char shadow[] = "(setq y 7) ((fn () (let y 2) y))";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "shadow.fe", shadow, sizeof(shadow) - 1), "2"));
+  CHECK(
+      IsRendered(context, FeEvaluateString(context, "after.fe", "y", 1), "7"));
+  static const char local[] = "((fn () (let fresh 5) fresh))";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "local.fe", local, sizeof(local) - 1),
+      "5"));
+  CHECK(ExpectEvaluationError(context, &state, "leak.fe", "fresh", 5,
+                              "leak.fe: void-variable fresh"));
+
+  // An error in a body form unwinds through the body frame and the context
+  // stays usable afterwards.
+  static const char bad[] = "((fn () (car 2)))";
+  CHECK(ExpectEvaluationError(context, &state, "body-error.fe", bad,
+                              sizeof(bad) - 1,
+                              "body-error.fe: expected pair, got double"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+
+  // GC during body evaluation is covered by the resumable-frame-state table
+  // (`TestResumableFrameGC`), so the collection-point assertions stay in one
+  // place rather than being duplicated per test.
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D, stage 3: lambda application and sequential body evaluation
+// run on the frame stack. After `FeFrameCallArguments` has reordered the
+// evaluated arguments, `ArgsToEnv` still binds them into the callee
+// environment as an ordinary allocating helper, and the lambda's body forms
+// are then evaluated one at a time by a resumable `FeFrameBody` instead of a
+// recursive `DoList`. A chain of zero-argument lambdas
+// `f0 -> f1 -> ... -> stack-probe` therefore stops consuming C stack: each
+// body form `(fN)` is a sub-expression frame in the same evaluator run, so
+// the probe fires at the same C depth for any chain length.
+static bool TestLambdaBodyChain(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "stack-probe", StackProbe);
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  static const char baseline[] = "(stack-probe)";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "body-baseline.fe", baseline,
+                                    sizeof(baseline) - 1),
+                   "0"));
+  CHECK(stack_probe_last_address != 0);
+  CHECK(stack_probe_deepest_address != 0);
+  const uintptr_t baseline_address = stack_probe_deepest_address;
+
+  // 200 levels, each a call to a zero-argument lambda whose body is the call
+  // to the next one. The old code kept a nested `RunEvaluation` (with its
+  // setjmp) plus `Evaluate`, `EvaluateList`, `ArgsToEnv` and `DoList` open
+  // per level on the C stack; now every level is one body frame in one run.
+  // ~202 simultaneously open frames, well inside the 1 MiB arena's frame
+  // capacity (1100) and the default logical depth ceiling (peak ~202).
+  enum { ChainDepth = 200, MaxFlatDelta = 2048 };
+  char source[ChainDepth * 32 + 16];
+  size_t length = 0;
+  for (int i = 0; i < ChainDepth; i++) {
+    const int written = snprintf(source + length, sizeof(source) - length,
+                                 "(setq f%d (fn () (f%d))) ", i, i + 1);
+    CHECK(written > 0);
+    length += (size_t)written;
+    CHECK(length < sizeof(source));
+  }
+  {
+    const int written =
+        snprintf(source + length, sizeof(source) - length,
+                 "(setq f%d (fn () (stack-probe))) (f0)", ChainDepth);
+    CHECK(written > 0);
+    length += (size_t)written;
+    CHECK(length < sizeof(source));
+  }
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "lambda-chain.fe", source, length),
+                   "0"));
+  CHECK(stack_probe_last_address != 0);
+  CHECK(stack_probe_deepest_address != 0);
+  const uintptr_t deepest = stack_probe_deepest_address;
+  const uintptr_t delta = baseline_address > deepest
+                              ? baseline_address - deepest
+                              : deepest - baseline_address;
+  printf("lambda body probe: depth=%d frames~%d baseline=%#" PRIxPTR
+         " deepest=%#" PRIxPTR " delta=%" PRIuPTR " bytes\n",
+         ChainDepth, ChainDepth + 2, baseline_address, deepest, delta);
+  // One old-style lambda-body level cost a nested evaluator run (setjmp and
+  // all) on the C stack; a regression that sends the body back through
+  // `DoList` puts the probe back there and fails far past the 2 KiB budget.
+  CHECK(delta < MaxFlatDelta);
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D, stage 4: a macro call runs on the frame stack. The recursive
+// `FeTMacro` arm of `EvaluatePair` becomes two frame kinds: `FeFrameMacro`
+// evaluates the macro's body forms sequentially (the same step charges,
+// `let`/`newenv` threading and GC discipline the recursive `DoList` used,
+// over the raw, unevaluated arguments `ArgsToEnv` bound), and
+// `FeFrameMacroExpansion` evaluates the produced expansion in the caller
+// environment after restoring the macro call's cleanup, GC and call-trace
+// checkpoints, holding the logical depth across the expansion exactly as the
+// recursive arm held it. The physical frame wall, not the C stack, is what
+// stops self-expanding macros.
+static bool TestMacroFrame(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Macro arguments stay raw: `x` is bound to the unevaluated `(+ 1 2)`
+  // form, and the expansion `(quote (+ 1 2))` evaluates back to the form
+  // itself. If the argument had been evaluated at binding time the result
+  // would be the number 3.
+  static const char raw_args[] =
+      "(setq m (macro (x) (list 'quote x))) (m (+ 1 2))";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "raw.fe", raw_args, sizeof(raw_args) - 1),
+      "(+ 1 2)"));
+
+  // `let`/`newenv` threading through the macro body: a `let` in a body form
+  // extends the environment the following forms see, exactly as the
+  // recursive `DoList` `&env` out-parameter did, and it shadows without
+  // leaking past the macro call.
+  static const char body_let[] =
+      "(setq m (macro () (let y 1) (list 'list y y))) (m)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "body-let.fe", body_let, sizeof(body_let) - 1),
+      "(1 1)"));
+  static const char shadow[] = "(setq y 7) (setq m (macro () (let y 2) y)) (m)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "shadow.fe", shadow, sizeof(shadow) - 1), "2"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "after.fe", "y", sizeof("y") - 1),
+                   "7"));
+
+  // The expansion is evaluated in the caller environment, not the macro's:
+  // `x` here is the lambda's lexical binding, which the expansion's `x`
+  // must resolve.
+  static const char caller_env[] = "(setq m (macro () 'x)) ((fn (x) (m)) 42)";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "caller-env.fe", caller_env,
+                                    sizeof(caller_env) - 1),
+                   "42"));
+
+  // Step budget for the resumed macro frame: `(m)` with `(macro () 5)` is
+  // exactly five steps -- the pair form, the symbol head, the body-form
+  // charge, the body atom, and the expansion atom -- with no step for the
+  // frame transitions or the empty parameter walk, matching what the
+  // recursive arm charged.
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "m.fe", "(setq m (macro () 5))",
+                                    sizeof("(setq m (macro () 5))") - 1),
+                   "(macro nil 5)"));
+  const FeEvalOptions tight = {.step_limit = 4};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "m.step.fe", "(m)", sizeof("(m)") - 1, &tight,
+      "m.step.fe: evaluation step limit exceeded"));
+  const FeEvalOptions ok = {.step_limit = 5};
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "m.step.fe", "(m)",
+                                               sizeof("(m)") - 1, &ok),
+                   "5"));
+
+  // An error in a later body form, after an earlier form ran and a `let`
+  // extended the body environment, unwinds through the macro frame and the
+  // context stays usable; the earlier form's side effect stands.
+  static const char mid_body_error[] =
+      "(setq ran nil) (setq boom (macro () (setq ran t) (let x 1) (car 2))) "
+      "(boom)";
+  CHECK(ExpectEvaluationError(context, &state, "mid-body.fe", mid_body_error,
+                              sizeof(mid_body_error) - 1,
+                              "mid-body.fe: expected pair, got double"));
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "ran.fe", "ran", sizeof("ran") - 1),
+      "t"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+
+  // GC during the macro body (a collection in a later body form must not
+  // sweep the pending forms, a `let` binding, or the caller environment) is
+  // covered by the resumable-frame-state table's `macro-body` row.
+
+  // Recursively expanding macros are bounded by the physical frame wall,
+  // not by tail-looping forever on the C stack: each expansion level holds
+  // its macro frame -- the expansion child reuses the caller's slot and
+  // becomes the next level's macro frame -- while the body-form and quote
+  // sub-expressions run above it, so the stack grows one held frame per
+  // level until `PushEvaluationFrame` refuses. With the transitional logical
+  // `max_depth` put deliberately above the small arena's physical capacity
+  // -- as 03C's exhaustion test did -- the frame push check is what fires,
+  // with the old transitional text, the original macro-call trace, and a
+  // context still usable afterwards.
+  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  TestArena frame_arena;
+  FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
+  CHECK(frame_context != nullptr);
+  ErrorState frame_state = {.context = frame_context};
+  FeSetUserData(frame_context, &frame_state);
+  FeSetErrorFn(frame_context, HandleError);
+  static const char self_expanding[] = "(setq m (macro () (list 'm))) (m)";
+  const FeEvalOptions physical_only = {.max_depth = 10000};
+  CHECK(ExpectEvaluationOptionsError(
+      frame_context, &frame_state, "macro-frames.fe", self_expanding,
+      sizeof(self_expanding) - 1, &physical_only,
+      "macro-frames.fe: evaluation depth limit exceeded"));
+  CHECK(!frame_state.stack_was_nil);
+  CHECK(IsRendered(frame_context,
+                   FeEvaluateString(frame_context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+  FeCloseContext(frame_context);
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D, stage 5: the native-call boundary. After the argument frame
+// has reordered the evaluated arguments, a native callable switches to its
+// own `FeFrameNative` kind and the loop invokes it synchronously from that
+// explicit state -- one fixed C activation, no per-native setjmp, the
+// enclosing run's barrier the only one in effect. A native that calls back
+// into `FeCallWithOptions` starts a nested run on a fresh C frame, so the
+// private `native_reentry_depth` counter -- capped by the ambient legacy
+// `max_depth` and reporting the old `evaluation depth limit exceeded` text
+// until 03F -- bounds that C growth. This test drives a deliberately small
+// `max_depth` instead of the default 1000 nested C calls, exactly as the
+// sub-plan requires.
+//
+// Off-by-one, precisely: each zero-argument activation is one pair form and
+// one native level, so with the shared ceiling the two counters track the
+// same nesting and reach the limit together. With `max_depth` 8 exactly 8
+// native activations fit (the deepest one returns its own level, 8, as the
+// result); the 9th activation is the one that raises. The legacy pair-depth
+// check runs earlier in the loop, so it reports the old message first, at
+// the same blocked activation; `native_reentry_depth` is live bookkeeping
+// for 03F, not a bound independently observable while the limits are shared.
+static bool TestNativeReentry(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context, .reentry_max_depth = 8};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeObject* native = FeMakeNativeFn(context, ReentrantNative);
+  state.reentry_self = FeCreateRoot(context, native);
+  FeSet(context, FeMakeSymbol(context, "reentrant-native"), native);
+
+  // Success through the allowed bound: max_depth 8 admits 8 nested native
+  // activations (7 re-entries; the deepest returns its own level), the
+  // ordinary-return cleanups run, and the C-side high-water mark agrees.
+  state.reentry_remaining = 7;
+  const FeEvalOptions options = {.max_depth = 8};
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(
+                       context, "native-reentry.fe", "(reentrant-native)",
+                       sizeof("(reentrant-native)") - 1, &options),
+                   "8"));
+  CHECK(state.reentry_max_seen == 8);
+  CHECK(state.reentry_cleanup_ran);
+
+  // One beyond: the 9th activation raises the old transitional message. The
+  // host sees the original nested trace, the registered cleanups ran during
+  // the unwind, the C-side high-water mark shows the recursion really did
+  // reach 8 live activations before the block, and the context -- including
+  // a fresh re-entry through the same native boundary, which would fail at
+  // level one if `native_reentry_depth` had leaked past the barrier restore
+  // -- evaluates again afterwards.
+  // cppcheck-suppress redundantAssignment
+  state.reentry_remaining = 8;
+  state.reentry_cleanup_ran = false;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "native-reentry.fe", "(reentrant-native)",
+      sizeof("(reentrant-native)") - 1, &options,
+      "native-reentry.fe: evaluation depth limit exceeded"));
+  CHECK(!state.stack_was_nil);
+  CHECK(state.reentry_max_seen == 8);
+  CHECK(state.reentry_cleanup_ran);
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+  state.reentry_remaining = 7;
+  state.reentry_cleanup_ran = false;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(
+                       context, "native-reentry.fe", "(reentrant-native)",
+                       sizeof("(reentrant-native)") - 1, &options),
+                   "8"));
+  CHECK(state.reentry_max_seen == 8);
+  CHECK(state.reentry_cleanup_ran);
+
+  // The ceiling is what bounds re-entry, not a fixed internal cap: raising
+  // max_depth admits more activations, and one more again fails.
+  // cppcheck-suppress redundantAssignment
+  state.reentry_remaining = 15;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  const FeEvalOptions deeper = {.max_depth = 16};
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(
+                       context, "native-reentry.fe", "(reentrant-native)",
+                       sizeof("(reentrant-native)") - 1, &deeper),
+                   "16"));
+  CHECK(state.reentry_max_seen == 16);
+  // cppcheck-suppress redundantAssignment
+  state.reentry_remaining = 16;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "native-reentry.fe", "(reentrant-native)",
+      sizeof("(reentrant-native)") - 1, &deeper,
+      "native-reentry.fe: evaluation depth limit exceeded"));
+  CHECK(state.reentry_max_seen == 16);
+
+  FeCloseContext(context);
+
+  // GC during the native boundary (a collection in the nested evaluation a
+  // native starts must not sweep the evaluated argument list in the native
+  // frame's `accumulator`) is covered by the resumable-frame-state table's
+  // `native` row.
+
+  return true;
+}
+
+// Sub-plan 03D, stage 5 regression: an owning nested evaluation inside a
+// native must not corrupt the two active-depth counters. The outer call is a
+// plain, non-owning `FeEvaluateString` -- no evaluation-control record is
+// active -- so `OwningReenter`'s `FeCallWithOptions` takes ownership, and
+// its `EndEvaluationControl` clears the whole record, `native_reentry_depth`
+// and `evaluation_depth` both included, before the native returns. The
+// `FeFrameNative` resume therefore restores *both* saved pre-call values on
+// the ordinary return: if it decremented `native_reentry_depth` instead, the
+// counter would wrap to SIZE_MAX and the very next native in the same run --
+// the second ordinary native of the same lambda body -- would raise a
+// spurious `evaluation depth limit exceeded`; and if it left `evaluation_depth`
+// at 0, the still-live enclosing pair forms would be under-counted for every
+// later form in the run, weakening the logical max_depth bound. (The same
+// body written as `(do ...)` would not catch this: `DoList` evaluates each
+// form in its own nested `RunEvaluation`, whose barrier restores the native
+// counter before the next form.)
+static bool TestNativeOwningReentry(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context, .reentry_max_depth = 8};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeObject* ordinary = FeMakeNativeFn(context, OrdinaryNative);
+  state.reentry_owning_target = FeCreateRoot(context, ordinary);
+  FeSet(context, FeMakeSymbol(context, "ordinary-native"), ordinary);
+  FeDefineNative(context, "owning-reenter", OwningReenter);
+  FeObject* reentrant = FeMakeNativeFn(context, ReentrantNative);
+  state.reentry_self = FeCreateRoot(context, reentrant);
+  FeSet(context, FeMakeSymbol(context, "reentrant-native"), reentrant);
+
+  static const char body[] = "((fn () (owning-reenter) (ordinary-native)))";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "owning.fe", body, sizeof(body) - 1),
+      "42"));
+
+  // The same shape with the owning call removed succeeds identically, so the
+  // assertion above is about the owning call, not about the lambda body.
+  static const char plain[] = "((fn () (ordinary-native)))";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "owning.fe", plain, sizeof(plain) - 1),
+      "42"));
+
+  // The *enclosing* live depth must also survive the owning call, not just
+  // the native counter. This body runs the re-entering native right after
+  // the owning call; the re-entering native's own first `FeCallWithOptions`
+  // establishes a small ambient limit (8) for its nesting, and its depth is
+  // counted from the enclosing body's restored level. With the restore, the
+  // 8th re-entry needs depth 9 and raises; if the owning call had merely
+  // left `evaluation_depth` at 0, the 8th would fit and this would return
+  // "8" instead. The C-side high-water mark shows the re-entry really did
+  // reach 7 live activations before the block at the 8th.
+  state.reentry_remaining = 7;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  state.reentry_cleanup_ran = false;
+  static const char deep_body[] =
+      "((fn () (owning-reenter) (reentrant-native)))";
+  CHECK(ExpectEvaluationError(context, &state, "owning.fe", deep_body,
+                              sizeof(deep_body) - 1,
+                              "owning.fe: evaluation depth limit exceeded"));
+  CHECK(state.reentry_max_seen == 7);
+  CHECK(state.reentry_cleanup_ran);
+
+  // An ordinary native still succeeds after an owning call that raised: the
+  // error path is the enclosing barrier's job, and both counters are clean
+  // for the next evaluation.
+  state.reentry_remaining = 7;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  state.reentry_cleanup_ran = false;
+  static const char erroring[] =
+      "((fn () (owning-reenter) (car 1) (ordinary-native)))";
+  CHECK(ExpectEvaluationError(context, &state, "owning.fe", erroring,
+                              sizeof(erroring) - 1,
+                              "owning.fe: expected pair, got double"));
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "owning.fe", body, sizeof(body) - 1),
+      "42"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03D's "GC during every resumable frame state" requirement, as one
+// table of state/setup/expected-result cases rather than one bespoke GC block
+// per test. Each row names the frame kind whose suspension it isolates, the
+// form that suspends it (the setup), and the expected rendered result; the
+// shared runner opens a fresh small-arena context per row, runs the setup,
+// and asserts both that the result is right and that `collection_count`
+// moved -- a collection ran while the frame was suspended, and the resumed
+// evaluation still found the objects only that frame held. `prepare`, where
+// set, registers the natives a row needs before its setup runs.
+typedef struct FrameGCCase {
+  const char* state;     // the suspended frame kind under test
+  const char* setup;     // the form that suspends it and forces collections
+  const char* expected;  // the expected rendered result
+  bool (*prepare)(FeContext* context, ErrorState* state);
+} FrameGCCase;
+
+// The native row's setup calls `gc-native`, so it must be registered with
+// one nested-call hop left (`GCNative` returns its argument without
+// re-entering when the budget is exhausted, and the value crosses the one
+// nested `FeCallWithOptions` it does start while the collections run).
+static bool PrepareGCNative(FeContext* context, ErrorState* state) {
+  state->reentry_remaining = 1;
+  FeObject* native = FeMakeNativeFn(context, GCNative);
+  state->reentry_self = FeCreateRoot(context, native);
+  FeSet(context, FeMakeSymbol(context, "gc-native"), native);
+  return true;
+}
+
+static bool RunFrameGCCase(const FrameGCCase* c) {
+  TestArena arena;
+  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  FeContext* context = FeOpenContext(arena.bytes, gc_size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  bool prepared = c->prepare == nullptr || c->prepare(context, &state);
+  const size_t collections = FeGetArenaStats(context).collection_count;
+  const bool rendered =
+      prepared && IsRendered(context,
+                             FeEvaluateString(context, "frame-gc.fe", c->setup,
+                                              strlen(c->setup)),
+                             c->expected);
+  const bool collected =
+      FeGetArenaStats(context).collection_count > collections;
+  FeCloseContext(context);
+  if (!rendered) {
+    fprintf(stderr, "frame-gc %s: %s did not render %s\n", c->state, c->setup,
+            c->expected);
+    return false;
+  }
+  if (!collected) {
+    fprintf(stderr, "frame-gc %s: collection_count did not move\n", c->state);
+    return false;
+  }
+  return true;
+}
+
+static bool TestResumableFrameGC(void) {
+  static const FrameGCCase cases[] = {
+      // call-head: the computed head's `do` loop collects while the call-head
+      // frame below is suspended waiting for the head's value (the lambda);
+      // the whole call form, argument included, must survive to be resumed.
+      {"call-head",
+       "((do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) "
+       "(fn (x) x)) 42)",
+       "42", nullptr},
+      // argument: a collection inside the third argument must not sweep the
+      // first two arguments already accumulated in the argument frame.
+      {"argument",
+       "((fn (x y z) (list x y z)) 1 2 (do (setq n 0) "
+       "(while (< n 2000) (setq n (+ n 1)) (cons n n)) n))",
+       "(1 2 2000)", nullptr},
+      // lambda/body: a collection inside a body form must not sweep the
+      // pending forms or the bindings the resumed last form reads. The lambda
+      // application frame itself is a synchronous transition to the body
+      // frame, so the body is the resumable state this row isolates.
+      {"lambda/body",
+       "((fn () (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n))",
+       "2000", nullptr},
+      // macro-body: a collection inside a body form must not sweep the
+      // pending forms, a `let` binding, or the caller environment.
+      {"macro-body",
+       "(setq m (macro () (let v 7) (setq n 0) "
+       "(while (< n 2000) (setq n (+ n 1)) (cons n n)) v)) (m)",
+       "7", nullptr},
+      // macro-expansion: the macro body produces the collecting `do` form as
+      // its expansion with no collection of its own, so the collections run
+      // only while the macro-expansion frame below is suspended over the
+      // expansion sub-expression -- isolating the expansion state from the
+      // body state.
+      {"macro-expansion",
+       "(setq m (macro () (quote (do (setq n 0) "
+       "(while (< n 2000) (setq n (+ n 1)) (cons n n)) n)))) (m)",
+       "2000", nullptr},
+      // native: a collection in the nested evaluation a native starts must
+      // not sweep the evaluated argument list in the native frame's
+      // `accumulator`; the same value then crosses one nested native call.
+      {"native", "(gc-native (list 1 2 3))", "(1 2 3)", PrepareGCNative},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    if (!RunFrameGCCase(&cases[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -2252,7 +3243,12 @@ int main(void) {
                  TestNumericEqual() && TestUnwindHostAPI() &&
                  TestUnwindLisp() && TestUnwindCleanupBudget() &&
                  TestEvaluationDepth() && TestFrameSubstrate() &&
-                 TestArenaStats() && TestEvaluationStackProbe()
+                 TestArenaStats() && TestEvaluationStackProbe() &&
+                 TestCallHeadProbe() && TestArgumentFrame() &&
+                 TestArgumentProbe() && TestLambdaBodyFrame() &&
+                 TestLambdaBodyChain() && TestMacroFrame() &&
+                 TestNativeReentry() && TestNativeOwningReentry() &&
+                 TestResumableFrameGC()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
