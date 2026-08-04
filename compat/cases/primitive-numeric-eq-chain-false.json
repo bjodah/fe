@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-chain-false",
+ "setup": [],
+ "expr": "(= 1 1 2)",
+ "note": "02A: pins the chain rule's false case -- one unequal pair anywhere in the chain makes the whole comparison nil. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

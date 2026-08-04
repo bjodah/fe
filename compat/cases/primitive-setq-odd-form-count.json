@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-odd-form-count",
+ "setup": [],
+ "expr": "(setq a 1 b)",
+ "note": "02A: pins that `setq` processes complete pairs before diagnosing a dangling final symbol -- `a` is assigned 1 before Emacs signals wrong-number-of-arguments over the unpaired trailing `b`. The single-expression protocol here only records the signalled condition, not that `a`'s assignment survived; 02B's own tests are where that side effect gets checked directly. Fe has no `setq` binding yet -- standalone Fe reports void-function, a different condition, which is the expected gap this planned row records."
+}

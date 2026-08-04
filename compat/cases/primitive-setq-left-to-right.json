@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-left-to-right",
+ "setup": [],
+ "expr": "(setq a 1 b a)",
+ "note": "02A: pins that `setq` processes pairs left to right and returns the last pair's value -- `b`'s value form reads `a` after `a` was already assigned, so the result is 1. Fe has no `setq` binding yet -- standalone Fe reports void-function."
+}

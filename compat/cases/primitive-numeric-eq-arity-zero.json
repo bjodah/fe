@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-arity-zero",
+ "setup": [],
+ "expr": "(=)",
+ "note": "02A: pins numeric `=`'s minimum arity -- zero arguments signals wrong-number-of-arguments. Fe's `=` is still assignment today, so standalone Fe evaluates a different (and differently-erroring) shape; this is the expected gap the planned row records."
+}

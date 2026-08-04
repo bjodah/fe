@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-wrong-type-string",
+ "setup": [],
+ "expr": "(= 1 \"1\")",
+ "note": "02A: pins that a non-number argument to `=` signals wrong-type-argument, even one that prints identically to the numeric operand. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

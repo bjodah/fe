@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-value-error",
+ "setup": [],
+ "expr": "(setq a missing-value)",
+ "note": "02A: pins that an error while evaluating a `setq` value form propagates -- reading the unbound `missing-value` signals void-variable before any assignment happens. Fe has no `setq` binding yet -- standalone Fe reports void-function, a different condition, which is the expected gap this planned row records."
+}

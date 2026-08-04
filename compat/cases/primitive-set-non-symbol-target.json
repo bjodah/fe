@@ -1,0 +1,6 @@
+{
+ "id": "primitive-set-non-symbol-target",
+ "setup": [],
+ "expr": "(set 1 2)",
+ "note": "02A: pins that `set`'s first (evaluated) argument must be a symbol; Emacs signals wrong-type-argument for a literal. Fe has no `set` binding yet -- standalone Fe reports void-function, a different condition, which is the expected gap this planned row records."
+}

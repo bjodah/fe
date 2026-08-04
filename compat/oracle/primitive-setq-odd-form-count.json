@@ -1,0 +1,11 @@
+{
+ "schema": "fe-compat-oracle/1",
+ "case": "primitive-setq-odd-form-count",
+ "emacs_version": "GNU Emacs 31.0.90 (build 1, x86_64-pc-linux-gnu, GTK+ Version 3.24.49, cairo version 1.18.4)\n of 2026-07-09",
+ "record": {
+  "kind": "condition",
+  "condition": "wrong-number-of-arguments",
+  "data": "(setq 3)",
+  "condition_source": "structured"
+ }
+}

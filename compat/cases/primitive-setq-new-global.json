@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-new-global",
+ "setup": [],
+ "expr": "(setq fresh 7)",
+ "note": "02A: pins that `setq` on a symbol with no existing binding, lexical or global, creates a new global binding and returns the assigned value. Fe has no `setq` binding yet -- standalone Fe reports void-function."
+}

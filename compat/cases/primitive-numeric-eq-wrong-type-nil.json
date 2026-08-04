@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-wrong-type-nil",
+ "setup": [],
+ "expr": "(= 1 nil)",
+ "note": "02A: pins that `nil` is not a number and is rejected by `=` with wrong-type-argument, distinguishing numeric `=` from a boolean-shaped comparison. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

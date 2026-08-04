@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-zero-pairs",
+ "setup": [],
+ "expr": "(setq)",
+ "note": "02A (doc/plans/2026-08-03-elisp-subset-and-fe-evaluator-subplans/02a-pin-the-target-semantics.md): pins the zero-pairs case for the core `setq` special form 02B adds. Emacs's `(setq)` with no pairs returns nil rather than signalling an arity error. Fe has no `setq` binding yet -- standalone Fe reports void-function."
+}

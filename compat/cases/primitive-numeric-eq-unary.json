@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-unary",
+ "setup": [],
+ "expr": "(= 1)",
+ "note": "02A: pins numeric `=`'s minimum arity from the other side -- a single argument is arity-valid and returns t (trivially equal to itself). Fe's `=` is still assignment today and expects a symbol as its first argument, so standalone Fe diverges; this is the expected gap the planned row records."
+}

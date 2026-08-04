@@ -1,0 +1,6 @@
+{
+ "id": "primitive-set-returns-value",
+ "setup": [],
+ "expr": "(set (quote fresh) 7)",
+ "note": "02A: pins that `set`'s symbol argument is an ordinary evaluated form (here, quoted) and that `set` returns the assigned value. Fe has no `set` binding yet -- standalone Fe reports void-function."
+}

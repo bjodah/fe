@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-lexical-update",
+ "setup": [],
+ "expr": "((lambda () (setq x 9) (list ((lambda (x) (setq x 2) x) 1) x)))",
+ "note": "02A: pins the core rule 02B/02C must implement -- `setq` updates the innermost lexical binding when one exists, otherwise it writes the global value cell. The inner lambda's `(setq x 2)` rebinds only its own parameter `x`, so it returns 2; the outer `x`, set by the first `(setq x 9)` with no enclosing lexical binding, is untouched by the inner call and stays 9. Checked under lexical evaluation (the oracle shim's `(eval form t)`), which is what makes this case meaningful instead of accidentally dynamic. Fe has no `setq` binding yet -- standalone Fe reports void-function."
+}

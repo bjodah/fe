@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-operand-evaluation",
+ "setup": [],
+ "expr": "((lambda () (setq seen 0) (list (= 1 ((lambda () (setq seen 2) 2)) ((lambda () (setq seen 3) 3))) seen)))",
+ "note": "02A: pins that numeric `=` evaluates every argument form left to right, even after the comparison result is already known to be false, because it is an ordinary function rather than a short-circuiting special form. The second argument form sets the outer `seen` to 2 (making the running comparison already false against 1), and the third argument form still runs and sets `seen` to 3, so the overall result is `(nil 3)`, not `(nil 2)`. Depends on `setq` writing the global `seen` from inside each inner lambda's own lexical scope -- the same rule primitive-setq-lexical-update pins -- so this case is only meaningful once `setq` exists too. Uses only names standalone Fe has after 02B: `lambda`, `setq`, `list`, `=`; no kg prelude macro. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

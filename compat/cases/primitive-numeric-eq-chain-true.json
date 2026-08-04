@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-chain-true",
+ "setup": [],
+ "expr": "(= 1 1 1)",
+ "note": "02A: pins that two or more arguments to `=` are compared as one chain -- all three equal, so t. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

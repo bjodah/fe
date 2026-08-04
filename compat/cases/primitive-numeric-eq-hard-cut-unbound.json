@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-hard-cut-unbound",
+ "setup": [],
+ "expr": "(= never-bound 3)",
+ "note": "02A: documents the hard cut itself -- once `=` is numeric comparison, its first argument is an ordinary evaluated form, so an unbound symbol there signals void-variable rather than (as Fe's current assignment `=` would) silently creating a binding. This is the single clearest observable that distinguishes the two meanings of `=`. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

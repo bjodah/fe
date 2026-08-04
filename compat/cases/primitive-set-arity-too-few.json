@@ -1,0 +1,6 @@
+{
+ "id": "primitive-set-arity-too-few",
+ "setup": [],
+ "expr": "(set (quote x))",
+ "note": "02A: pins `set`'s exact two-argument arity -- one argument signals wrong-number-of-arguments. Unlike `setq`, `set` is an ordinary function whose fixed arity is rejected before any supplied argument form is evaluated. Fe has no `set` binding yet -- standalone Fe reports void-function, a different condition, which is the expected gap this planned row records."
+}

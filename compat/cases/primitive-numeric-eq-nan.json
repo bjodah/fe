@@ -1,0 +1,6 @@
+{
+ "id": "primitive-numeric-eq-nan",
+ "setup": [],
+ "expr": "(= (sqrt -1) (sqrt -1))",
+ "note": "02A: pins that numeric `=` follows IEEE 754 comparison, where NaN is never equal to anything, even another NaN -- so nil. Uses `(sqrt -1)` rather than a literal NaN token because Fe's reader does not accept Emacs' printed `0.0e+NaN` spelling and both runtimes already provide `sqrt`; testing the reader is a separate divergence (`reader-no-integers`'s neighbourhood), not this one. Fe's `=` is still assignment today, so standalone Fe evaluates a different shape; this is the expected gap the planned row records."
+}

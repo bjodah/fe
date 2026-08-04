@@ -573,6 +573,64 @@
    "kg_test": "fe/test_api.c:TestWriter",
    "rationale": "This is kg/fe's own deliberate policy, not an Emacs contract: the parent kg repository's CLAUDE.md already states the precedent for exactly this shape of decision (kg_regex_match_backward's backward-matching policy is kg's own, not Emacs', so an oracle for it would have to encode kg's policy rather than read Emacs'), and 00b-oracle-and-differential-corpus.md's own 'What this does not do' names cyclic-structure printing explicitly. Pinned by fe/test_api.c's TestWriter, which already asserts all three bounded forms (#<cycle>, #<deep>, #<truncated>).",
    "source_name": null
+  },
+  {
+   "id": "primitive-setq",
+   "category": "bindings",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-setq-zero-pairs",
+    "primitive-setq-left-to-right",
+    "primitive-setq-lexical-update",
+    "primitive-setq-new-global",
+    "primitive-setq-odd-form-count",
+    "primitive-setq-non-symbol-target",
+    "primitive-setq-value-error"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 2 (parent plan section 6, 'Hard-cut assignment and numeric =') replaces Fe's assignment `=` with a core `setq` special form: pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. 02A pins the Emacs answers from the oracle before 02B writes the implementation; until then Fe has no `setq` binding at all, so every case here is a known, expected gap rather than a regression.",
+   "source_name": null
+  },
+  {
+   "id": "primitive-set",
+   "category": "bindings",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-set-returns-value",
+    "primitive-set-ignores-lexical",
+    "primitive-set-non-symbol-target",
+    "primitive-set-arity-too-few",
+    "primitive-set-arity-too-many"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 2 (parent plan section 6) adds `set` as an ordinary, strict-arity function using the global setter -- it always writes the symbol's global value cell and never reads or changes a lexical binding of the same spelling, unlike `setq`. 02A pins the Emacs answers, including the lexical-ignoring case that is the regression a later cleanup must not reintroduce, before 02B writes the implementation; until then Fe has no `set` binding at all, so every case here is a known, expected gap rather than a regression.",
+   "source_name": null
+  },
+  {
+   "id": "primitive-numeric-eq",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-numeric-eq-arity-zero",
+    "primitive-numeric-eq-unary",
+    "primitive-numeric-eq-chain-true",
+    "primitive-numeric-eq-chain-false",
+    "primitive-numeric-eq-operand-evaluation",
+    "primitive-numeric-eq-signed-zero",
+    "primitive-numeric-eq-nan",
+    "primitive-numeric-eq-wrong-type-string",
+    "primitive-numeric-eq-wrong-type-nil",
+    "primitive-numeric-eq-hard-cut-unbound"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 2 (parent plan section 6) repurposes `=` as numeric equality over Fe's existing doubles once assignment `=` is deleted in 02C: a left-to-right chained comparison, at least one argument required, every argument form evaluated before any short-circuit (it is an ordinary function, not a special form). Phase 5 later extends this to integers/mixed types without redefining it, so these cases are written to leave room for that. 02A pins the Emacs answers before 02C writes the implementation; until then Fe's `=` is still assignment, so every case here is a known, expected gap rather than a regression.",
+   "source_name": null
   }
  ]
 }

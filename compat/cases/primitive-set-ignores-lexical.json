@@ -1,0 +1,6 @@
+{
+ "id": "primitive-set-ignores-lexical",
+ "setup": [],
+ "expr": "((lambda () (setq x 9) (list ((lambda (x) (list (set (quote x) 2) x)) 1) x)))",
+ "note": "02A: pins the regression that must fail if a later cleanup aliases `set` to `setq` or resolves its target through the lexical environment instead of the global value cell. `set` always writes the symbol's global value cell; a lexical binding of the same spelling is neither read nor changed. Inside the inner lambda, the lexical `x` is 1, `(set 'x 2)` returns 2 and leaves the lexical `x` at 1 (so the inner list is `(2 1)`), and the global `x` -- set to 9 by the outer `(setq x 9)`, which has no enclosing lexical binding -- becomes 2. Checked under lexical evaluation (the oracle shim's `(eval form t)`). Fe has no `set` binding yet -- standalone Fe reports void-function."
+}

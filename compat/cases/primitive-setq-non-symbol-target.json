@@ -1,0 +1,6 @@
+{
+ "id": "primitive-setq-non-symbol-target",
+ "setup": [],
+ "expr": "(setq 1 2)",
+ "note": "02A: pins that a `setq` target must be a symbol; Emacs signals wrong-type-argument for a literal target. Fe has no `setq` binding yet -- standalone Fe reports void-function, a different condition, which is the expected gap this planned row records."
+}
