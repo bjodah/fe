@@ -102,10 +102,13 @@ fe > a
 1
 ```
 
-The last example above shows both halves of the lexical/global rule in one
-call: the inner lambda's `setq x 2` updates its own parameter, and the
-outer `setq x 9` -- reached from a scope with no lexical `x` -- creates a
-global one that the inner assignment never touches.
+The nested-lambda example shows both halves of the lexical/global rule in
+one call: the outer `setq x 9` runs in a scope with no lexical `x`, so it
+writes the global cell, while the inner lambda's `setq x 2` finds its own
+parameter and updates that -- leaving the global `x` at 9, which is why the
+result is `(2 9)` and not `(2 2)`.  The last two lines show the other rule:
+`a` keeps the 1 that the complete first pair assigned, even though the call
+went on to signal.
 
 `setq` is the assignment spelling sub-plan 02C keeps; see `=` above.
 
@@ -470,9 +473,13 @@ fe > ((lambda () (setq x 9)
 ((2 1) 2)
 ```
 
-In the last example, the inner lambda's parameter `x` shadows the outer
-lexical `x`; `set` ignores it and writes straight through to the same
-global cell the outer `(setq x 9)` created.
+In the last example, `(setq x 9)` runs where no lexical `x` is in scope, so
+it writes the global cell; the inner lambda's parameter `x` then shadows
+that global binding.  `set` ignores the shadowing parameter entirely --
+`(set 'x 2)` returns 2 and the parameter is still 1, so the inner list is
+`(2 1)` -- and writes straight through to the global cell, which is why the
+outer `x` reads back as 2.  Compare the `setq` example above, where the
+same shape leaves the global at 9.
 
 #### `(setcar pair value)`
 
