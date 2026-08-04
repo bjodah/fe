@@ -6,9 +6,16 @@
 // cleanup registry, FeHandleError (moved here with the cleanup registry --
 // see doc/fe-upstream.md and sub-plan 03B of
 // doc/plans/2026-08-03-elisp-subset-and-fe-evaluator-subplans in kg), the
-// recursive evaluator itself, and its public entry points. Split out of
-// fe.c, which keeps the object model, garbage collector, reader and writer.
-// Both translation units share the private, self-contained fe_internal.h.
+// frame-driven evaluator, and its public entry points. Split out of fe.c,
+// which keeps the object model, garbage collector, reader and writer. Both
+// translation units share the private, self-contained fe_internal.h.
+//
+// Sub-plan 03E of the same set deleted the last recursive evaluation path:
+// every special form and primitive is now a frame kind driven by
+// `RunEvaluationLoop`, and `RunEvaluationBody` gives `unwind-protect`
+// cleanups (and `if`/`while`/`do`'s implicit bodies) a body-frame entry
+// point without a second evaluator. There is one evaluator, reached by one
+// path, per the parent plan's requirement.
 
 #include <assert.h>
 #include <setjmp.h>
@@ -41,8 +48,13 @@ void EndEvaluationControl(FeContext* ctx, bool owns_control) {
 
 // Forward-declared so `FeHandleError`, near the top of the file for
 // historical reasons, can drain pending `unwind-protect` forms; defined with
-// the rest of the evaluator below.
-static FeObject* DoList(FeContext* ctx, FeObject* lst, FeObject* env);
+// the rest of the evaluator below. A cleanup's forms are a nested
+// frame-machine run on the unused suffix of the same frame stack, above a
+// saved barrier -- see `RunEvaluationBody`'s own comment -- not a second
+// evaluator or a separate stack.
+static FeObject* RunEvaluationBody(FeContext* ctx,
+                                   FeObject* forms,
+                                   FeObject* env);
 
 static void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
   if (ctx->cleanup_stack_index == CleanupStackSize) {
@@ -87,7 +99,7 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
     if (entry->kind == FeCleanupNative) {
       entry->as.native.fn(ctx, entry->as.native.data);
     } else {
-      DoList(ctx, entry->as.lisp.forms, entry->as.lisp.env);
+      RunEvaluationBody(ctx, entry->as.lisp.forms, entry->as.lisp.env);
     }
   } else {
     fprintf(stderr, "fe: unwind-protect cleanup error: %s\n",
@@ -333,31 +345,6 @@ static FeObject* Evaluate(FeContext* ctx,
                           FeObject* env,
                           FeObject** bind);
 
-static FeObject* EvaluateList(FeContext* ctx, FeObject* lst, FeObject* env) {
-  FeObject* res = &nil;
-  FeObject** tail = &res;
-  while (!FeIsNil(lst)) {
-    EvaluationStep(ctx);
-    *tail = FeCons(ctx, Evaluate(ctx, FeGetNextArgument(ctx, &lst), env, NULL),
-                   &nil);
-    tail = &CDR(*tail);
-  }
-  return res;
-}
-
-static FeObject* DoList(FeContext* ctx, FeObject* lst, FeObject* env) {
-  FeObject* res = &nil;
-  const size_t save = FeSaveGC(ctx);
-  while (!FeIsNil(lst)) {
-    EvaluationStep(ctx);
-    FeRestoreGC(ctx, save);
-    FePushGC(ctx, lst);
-    FePushGC(ctx, env);
-    res = Evaluate(ctx, FeGetNextArgument(ctx, &lst), env, &env);
-  }
-  return res;
-}
-
 static FeObject* Bind(FeContext* ctx,
                       FeObject* env,
                       FeObject* name,
@@ -415,75 +402,6 @@ static FeObject* ArgsToEnv(FeContext* ctx,
   return env;
 }
 
-#define EVAL_ARG() Evaluate(ctx, FeGetNextArgument(ctx, &arg), env, NULL)
-
-#define ARITH_OP(op)                          \
-  {                                           \
-    FeDouble x = FeToDouble(ctx, EVAL_ARG()); \
-    while (!FeIsNil(arg)) {                   \
-      x = x op FeToDouble(ctx, EVAL_ARG());   \
-    }                                         \
-    res = FeMakeDouble(ctx, x);               \
-  }
-
-#define NUM_CMP_OP(op)                                     \
-  {                                                        \
-    va = CheckType(ctx, EVAL_ARG(), FeTDouble);            \
-    vb = CheckType(ctx, EVAL_ARG(), FeTDouble);            \
-    res = FeMakeBool(ctx, GetDouble(va) op GetDouble(vb)); \
-  }
-
-// `setq` special form: raw SYMBOL VALUE pairs, evaluated left to right. Each
-// target is checked to be a symbol before its value form is evaluated, so a
-// non-symbol target is diagnosed without evaluating anything; a dangling
-// final SYMBOL is diagnosed only once every earlier complete pair has
-// already assigned, so those assignments stand. Assignment goes through
-// `GetBound(ctx, target, env)`: an existing lexical binding wins over the
-// global cell. See doc/language.md.
-static FeObject* EvaluateSetq(FeContext* ctx, FeObject* arg, FeObject* env) {
-  FeObject* res = &nil;
-  while (!FeIsNil(arg)) {
-    if (FeGetType(arg) != FeTPair) {
-      FeHandleError(ctx, "wrong-number-of-arguments");
-    }
-    FeObject* target = CAR(arg);
-    if (FeGetType(target) != FeTSymbol) {
-      FeHandleError(ctx, "wrong-type-argument");
-    }
-    arg = CDR(arg);
-    if (FeGetType(arg) != FeTPair) {
-      FeHandleError(ctx, "wrong-number-of-arguments");
-    }
-    res = Evaluate(ctx, CAR(arg), env, NULL);
-    arg = CDR(arg);
-    CDR(GetBound(ctx, target, env)) = res;
-  }
-  return res;
-}
-
-// `set`: ordinary-function semantics, unlike `setq` above -- its symbol
-// argument is evaluated like any other. Exact two-argument arity is
-// rejected before either raw form is evaluated; the two forms are then
-// evaluated left to right via the same `EvaluateList()` path an ordinary
-// call uses, so a type error in the resulting first value never erases a
-// side effect the second form already had. `FeSet()` looks up with the
-// global environment (`&nil`), so a same-named lexical binding is neither
-// read nor written.
-static FeObject* EvaluateSet(FeContext* ctx, FeObject* arg, FeObject* env) {
-  if (FeGetType(arg) != FeTPair || FeGetType(CDR(arg)) != FeTPair ||
-      !FeIsNil(CDR(CDR(arg)))) {
-    FeHandleError(ctx, "wrong-number-of-arguments");
-  }
-  FeObject* evaluated = EvaluateList(ctx, arg, env);
-  FeObject* symbol = CAR(evaluated);
-  FeObject* value = CAR(CDR(evaluated));
-  if (FeGetType(symbol) != FeTSymbol) {
-    FeHandleError(ctx, "wrong-type-argument");
-  }
-  FeSet(ctx, symbol, value);
-  return value;
-}
-
 // Local to `=`: an honest `wrong-type-argument` message, rather than
 // `CheckType()`'s generic "expected double, got X" text, which the compat
 // oracle comparator does not recognise. See doc/language.md.
@@ -494,194 +412,19 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
   return obj;
 }
 
-// `=`: numeric equality over Fe's existing doubles, chained left to right.
-// Unlike `setq`/`set` above, `=` has ordinary-function semantics in Emacs:
-// the complete raw argument list is evaluated left to right via the
-// existing ordinary-call path `EvaluateList()` before any value is type-
-// checked, so a type error in an early operand never erases a side effect
-// a later operand's form already had. Every operand is then validated and
-// compared without short-circuiting, even once the chain is already known
-// unequal, so every operand form has both run and been checked by the time
-// `=` returns -- one argument is `t` without comparing anything. Plain C
-// `==` gives the pinned signed-zero (`0.0 = -0.0` is true) and NaN (never
-// `=` to itself) answers; -Wfloat-equal is suppressed for this intentional
-// exact comparison, the same way `Equal()`'s `IsNearlyEqual()` helper above
-// does for its own `a == b` infinity special case. See doc/language.md.
-static FeObject* EvaluateNumericEqual(FeContext* ctx,
-                                      FeObject* arg,
-                                      FeObject* env) {
-  if (FeIsNil(arg)) {
-    FeHandleError(ctx, "wrong-number-of-arguments");
-  }
-  FeObject* evaluated = EvaluateList(ctx, arg, env);
-  FeDouble first = GetDouble(CheckNumericEqualOperand(ctx, CAR(evaluated)));
-  bool equal = true;
-  FeObject* rest = CDR(evaluated);
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wfloat-equal"
-#endif
-  while (!FeIsNil(rest)) {
-    FeDouble next = GetDouble(CheckNumericEqualOperand(ctx, CAR(rest)));
-    equal = equal && first == next;
-    rest = CDR(rest);
-  }
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-  return FeMakeBool(ctx, equal);
-}
-
-static FeObject* EvaluatePrimitive(FeContext* ctx,
-                                   FeObject* obj,
-                                   FeObject* env,
-                                   FeObject** newenv,
-                                   const FeObject* fn) {
-  FeObject* res = &nil;
-  FeObject* arg = CDR(obj);
-  FeObject* va;
-  const FeObject* vb;
-  switch (PRIM(fn)) {
-    case PAssert:
-      va = EVAL_ARG();
-      if (FeIsNil(va)) {
-        FeHandleError(ctx, "assertion failure");
-      }
-      return res;
-    case PEnv:
-      return ctx->symbol_list;
-    case PLet:
-      va = CheckType(ctx, FeGetNextArgument(ctx, &arg), FeTSymbol);
-      if (newenv) {
-        *newenv = FeCons(ctx, FeCons(ctx, va, EVAL_ARG()), env);
-      }
-      return res;
-    case PNumericEqual:
-      return EvaluateNumericEqual(ctx, arg, env);
-    case PSetq:
-      return EvaluateSetq(ctx, arg, env);
-    case PSet:
-      return EvaluateSet(ctx, arg, env);
-    // `(if COND THEN ELSE...)`, as in Emacs Lisp: the trailing forms are an
-    // implicit `do`. (Fe used to read them as an `elif` chain.)
-    case PIf:
-      if (FeIsNil(arg)) {
-        return res;
-      }
-      va = EVAL_ARG();
-      if (FeIsNil(arg)) {
-        return res;
-      }
-      if (!FeIsNil(va)) {
-        return EVAL_ARG();
-      }
-      (void)FeGetNextArgument(ctx, &arg);
-      return DoList(ctx, arg, env);
-    case PFn:
-    case PMacro:
-      va = FeCons(ctx, env, arg);
-      (void)FeGetNextArgument(ctx, &arg);
-      res = MakeObject(ctx);
-      SetType(res, PRIM(fn) == PFn ? FeTFn : FeTMacro);
-      CDR(res) = va;
-      return res;
-    case PWhile: {
-      va = FeGetNextArgument(ctx, &arg);
-      const size_t n = FeSaveGC(ctx);
-      while (!FeIsNil(Evaluate(ctx, va, env, NULL))) {
-        EvaluationStep(ctx);
-        DoList(ctx, arg, env);
-        FeRestoreGC(ctx, n);
-      }
-      return res;
-    }
-    case PQuote:
-      return FeGetNextArgument(ctx, &arg);
-    case PBoundp:
-      va = CheckType(ctx, EVAL_ARG(), FeTSymbol);
-      FeRequireNoArguments(ctx, arg);
-      return FeMakeBool(ctx, CDR(GetBound(ctx, va, env)) != &unbound);
-    case PMakeUnbound:
-      va = CheckType(ctx, EVAL_ARG(), FeTSymbol);
-      FeRequireNoArguments(ctx, arg);
-      CDR(GetBound(ctx, va, env)) = &unbound;
-      return va;
-    case PAnd:
-      while (!FeIsNil(arg) && !FeIsNil(res = EVAL_ARG()))
-        ;
-      return res;
-    case POr:
-      while (!FeIsNil(arg) && FeIsNil(res = EVAL_ARG()))
-        ;
-      return res;
-    case PDo:
-      return DoList(ctx, arg, env);
-    // `(unwind-protect BODY CLEANUP...)`: evaluates BODY, and evaluates the
-    // CLEANUP forms as an implicit `do` on every exit -- normal return,
-    // error, interrupt, or budget exhaustion. This case only registers the
-    // cleanup and evaluates BODY; the enclosing `Evaluate` call for this
-    // whole form is what actually runs it, on whichever path it takes
-    // (see the `cleanup` checkpoint there, and `FeHandleError`).
-    case PUnwindProtect: {
-      FeObject* body = FeGetNextArgument(ctx, &arg);
-      PushCleanup(ctx, (FeCleanupEntry){.kind = FeCleanupLisp,
-                                        .as.lisp = {.forms = arg, .env = env}});
-      return Evaluate(ctx, body, env, NULL);
-    }
-    case PCons:
-      va = EVAL_ARG();
-      return FeCons(ctx, va, EVAL_ARG());
-    case PCar:
-      return FeCar(ctx, EVAL_ARG());
-    case PCdr:
-      return FeCdr(ctx, EVAL_ARG());
-    case PSetCar:
-      va = CheckType(ctx, EVAL_ARG(), FeTPair);
-      CAR(va) = EVAL_ARG();
-      return res;
-    case PSetCdr:
-      va = CheckType(ctx, EVAL_ARG(), FeTPair);
-      CDR(va) = EVAL_ARG();
-      return res;
-    case PList:
-      return EvaluateList(ctx, arg, env);
-    case PNot:
-      return FeMakeBool(ctx, FeIsNil(EVAL_ARG()));
-    case PIs:
-      va = EVAL_ARG();
-      return FeMakeBool(ctx, Equal(va, EVAL_ARG()));
-    case PAtom:
-      return FeMakeBool(ctx, FeGetType(EVAL_ARG()) != FeTPair);
-    case PPrint:
-      while (!FeIsNil(arg)) {
-        FeWriteFile(ctx, EVAL_ARG(), stdout);
-        if (!FeIsNil(arg)) {
-          printf(" ");
-        }
-      }
-      printf("\n");
-      return res;
-    case PLess:
-      NUM_CMP_OP(<)
-      return res;
-    case PLessEqual:
-      NUM_CMP_OP(<=)
-      return res;
-    case PAdd:
-      ARITH_OP(+)
-      return res;
-    case PSub:
-      ARITH_OP(-)
-      return res;
-    case PMul:
-      ARITH_OP(*)
-      return res;
-    case PDiv:
-      ARITH_OP(/)
-      return res;
-  }
-  abort();
-}
+// `=` (`PNumericEqual` in `ResumeEvalList`): numeric equality over Fe's
+// existing doubles, chained left to right, Emacs' ordinary-function
+// semantics -- the complete raw argument list is evaluated left to right
+// before any value is type-checked, so a type error in an early operand
+// never erases a side effect a later operand's form already had -- then
+// every operand is validated and compared without short-circuiting, even
+// once the chain is already known unequal, so every operand form has both
+// run and been checked by the time `=` returns -- one argument is `t`
+// without comparing anything. Plain C `==` gives the pinned signed-zero
+// (`0.0 = -0.0` is true) and NaN (never `=` to itself) answers;
+// -Wfloat-equal is suppressed for this intentional exact comparison, the
+// same way `Equal()`'s `IsNearlyEqual()` helper above does for its own
+// `a == b` infinity special case. See doc/language.md.
 
 [[noreturn]] static void HandleVoidSymbol(FeContext* ctx,
                                           FeObject* symbol,
@@ -709,43 +452,14 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
 // a computed head is pushed as a sub-expression and the frame resumes as
 // `FeFrameCallHead` once its value is known.
 
-static FeObject* EvaluatePair(FeContext* ctx,
-                              FeObject* obj,
-                              FeObject* env,
-                              FeObject** newenv,
-                              const FeObject* fn) {
-  FeObject* res = &nil;
-
-  switch (FeGetType(fn)) {
-    case FeTPrimitive:
-      res = EvaluatePrimitive(ctx, obj, env, newenv, fn);
-      break;
-
-    case FeTPair:
-    case FeTFree:
-    case FeTNil:
-    case FeTDouble:
-    case FeTSymbol:
-    case FeTString:
-    case FeTPtr:
-    case FeTFex0:
-    case FeTFex1:
-    case FeTFex2:
-      HandleNonCallable(ctx, CAR(obj));
-
-    // Ordinary callables and macros moved to frame kinds in
-    // `DispatchResolvedCall` -- a lambda proceeds through `FeFrameLambda`
-    // and `FeFrameBody`, a macro through `FeFrameMacro` and
-    // `FeFrameMacroExpansion` -- so none can reach this temporary dispatch.
-    case FeTFn:
-    case FeTNativeFn:
-    case FeTMacro:
-    case FeTSentinel:
-      abort();
-  }
-
-  return res;
-}
+// Forward-declared so `DispatchResolvedCall`, which every resolved-call path
+// (symbol head and computed head alike) funnels through, can reach it before
+// its own definition below `PushBodyFrame`, which it needs.
+static bool DispatchPrimitive(FeContext* ctx,
+                              FeEvalFrame* frame,
+                              FeObject* fn,
+                              FeObject** frame_bind,
+                              FeObject** result);
 
 // Dispatches a call whose head has already resolved to `fn`. `quote`
 // short-circuits on its first raw argument. An ordinary callable (native
@@ -754,20 +468,22 @@ static FeObject* EvaluatePair(FeContext* ctx,
 // frame rather than through a recursive `EvaluateList` -- and returns false.
 // A macro switches the frame to `FeFrameMacro` -- its arguments stay raw and
 // unevaluated, bound by `ArgsToEnv` the way the recursive arm bound them --
-// and returns false. Everything else (the remaining primitives, and the
-// non-callable values) keeps the temporary recursive dispatch and returns
-// true with `*result` holding the completed value. Every resolved-call path
-// funnels through here so the bookkeeping cannot drift between a symbol head
-// and a computed head.
+// and returns false. Every other primitive is set up by `DispatchPrimitive`,
+// below; a resolved value that is none of these is not callable at all.
+// Every resolved-call path funnels through here so the bookkeeping cannot
+// drift between a symbol head and a computed head.
 static bool DispatchResolvedCall(FeContext* ctx,
                                  FeEvalFrame* frame,
                                  FeObject* fn,
                                  FeObject** frame_bind,
                                  FeObject** result) {
-  if (FeGetType(fn) == FeTPrimitive && PRIM(fn) == PQuote) {
-    FeObject* arguments = CDR(frame->expr);
-    *result = FeGetNextArgument(ctx, &arguments);
-    return true;
+  if (FeGetType(fn) == FeTPrimitive) {
+    if (PRIM(fn) == PQuote) {
+      FeObject* arguments = CDR(frame->expr);
+      *result = FeGetNextArgument(ctx, &arguments);
+      return true;
+    }
+    return DispatchPrimitive(ctx, frame, fn, frame_bind, result);
   }
   if (FeGetType(fn) == FeTNativeFn || FeGetType(fn) == FeTFn) {
     frame->kind = FeFrameCallArguments;
@@ -804,21 +520,34 @@ static bool DispatchResolvedCall(FeContext* ctx,
     frame->fn = caller_env;
     return false;
   }
-  frame->kind = FeFrameTemporaryRecursive;
-  *result = EvaluatePair(ctx, frame->expr, frame->env, frame_bind, fn);
-  return true;
+  // `(void)frame_bind` -- not used here: a raw pair-form head that resolves
+  // to a non-callable value is an error regardless of whether the enclosing
+  // sequence was going to receive a `let`-style environment update.
+  (void)frame_bind;
+  HandleNonCallable(ctx, CAR(frame->expr));
+}
+
+// Allocates the next frame-stack slot, or raises the same transitional
+// "evaluation depth limit exceeded" text 03D's native boundary already uses
+// (03F gives the physical frame wall its own message). `CleanupFrameReserve`
+// extra slots are available only while a cleanup is draining
+// (`ctx->completion != FeCompletionNormal`, set by `FeHandleError` before
+// `RunCleanupsAfterError` runs), so a cleanup triggered by exhaustion is not
+// itself immediately refused by the same wall the body just hit.
+static FeEvalFrame* AllocateFrame(FeContext* ctx) {
+  const size_t reserve =
+      ctx->completion == FeCompletionNormal ? 0 : CleanupFrameReserve;
+  if (ctx->frame_stack_index == ctx->frame_stack_capacity + reserve) {
+    FeHandleError(ctx, "evaluation depth limit exceeded");
+  }
+  return &ctx->frame_stack[ctx->frame_stack_index++];
 }
 
 static void PushEvaluationFrame(FeContext* ctx,
                                 FeObject* obj,
                                 FeObject* env,
                                 FeObject** bind) {
-  const size_t reserve =
-      ctx->completion == FeCompletionNormal ? 0 : CleanupFrameReserve;
-  if (ctx->frame_stack_index == ctx->frame_stack_capacity + reserve) {
-    FeHandleError(ctx, "evaluation depth limit exceeded");
-  }
-  FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index++];
+  FeEvalFrame* frame = AllocateFrame(ctx);
   *frame = (FeEvalFrame){.kind = FeFrameExpression,
                          .expr = obj,
                          .env = env,
@@ -827,6 +556,254 @@ static void PushEvaluationFrame(FeContext* ctx,
                          .rest = &nil,
                          .accumulator = &nil,
                          .callee = &nil};
+}
+
+// Pushes a sequential-body frame directly -- bypassing the call path
+// (`FeFrameCallHead`/`FeFrameCallArguments`/`FeFrameLambda`) that normally
+// produces one -- for the places a raw form list is evaluated as an implicit
+// body with no call involved: `if`'s false branch, `while`'s body each
+// iteration, `do`, and a cleanup's unwind forms (`RunEvaluationBody`,
+// below). `env` is the environment the forms see (never a fresh callee
+// environment; nothing here binds parameters). `FeFrameImplicitBody`, not
+// `FeFrameBody`: this frame's push has no preceding `EnterEvaluationDepth`
+// or trace-cell link to balance the way a lambda-body frame's dispatch
+// already did, so it completes through a lighter path (see
+// `CompleteImplicitBodyFrame`) that does not touch `evaluation_depth` or
+// `call_list` -- see `FeFrameImplicitBody`'s own comment in fe_internal.h.
+// This frame gets its own fresh GC/cleanup checkpoints, exactly as the
+// recursive `DoList` took its own `FeSaveGC()` on every call, independent
+// of whatever checkpoint the enclosing form already holds; `.expr` is set
+// to the harmless `&nil` sentinel rather than left at its zero default
+// because `FeMarkEvaluatorRoots` marks it unconditionally for every live
+// frame.
+static void PushBodyFrame(FeContext* ctx, FeObject* env, FeObject* forms) {
+  FeEvalFrame* frame = AllocateFrame(ctx);
+  *frame = (FeEvalFrame){.kind = FeFrameImplicitBody,
+                         .expr = &nil,
+                         .env = env,
+                         .bind = NULL,
+                         .fn = &nil,
+                         .rest = forms,
+                         .accumulator = &nil,
+                         .callee = &unbound,
+                         .gc_checkpoint = FeSaveGC(ctx),
+                         .cleanup_checkpoint = ctx->cleanup_stack_index};
+}
+
+// The completion for a synthetic `FeFrameImplicitBody`: drains cleanups it
+// registered directly (ordinarily a no-op, since each inner pair-form
+// already drained its own on the way out) and restores its own GC
+// checkpoint, protecting the result -- but does not decrement
+// `evaluation_depth` or unlink `call_list`, because pushing this frame never
+// incremented or linked either. `CompletePairFrame`, by contrast, always
+// pairs with the `EnterEvaluationDepth`/trace-link a real pair-form dispatch
+// already did.
+static void CompleteImplicitBodyFrame(FeContext* ctx,
+                                      const FeEvalFrame* frame,
+                                      FeObject* result) {
+  RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+  FeRestoreGC(ctx, frame->gc_checkpoint);
+  FePushGC(ctx, result);
+}
+
+// Sets up the frame state for a resolved primitive call (`fn`'s `PRIM`,
+// anything but `PQuote`, which the caller already handled), or completes
+// synchronously for the primitives that evaluate nothing at all (`PEnv`,
+// `PFn`, `PMacro`) or whose raw-argument shape already decides the answer
+// before any evaluation (`PIf`'s empty form, `PLet`'s `frame_bind == NULL`
+// case -- see `FeFrameLet`'s own comment in fe_internal.h for why the value
+// form is then never even evaluated). Returns true with `*result` holding
+// the completed value, or false after switching `frame`'s kind to one of the
+// resumable continuation kinds `ResumeContinuation` drives below. This is
+// the frame-machine replacement for the old recursive `EvaluatePrimitive`;
+// see 03E's spec (`doc/plans/2026-08-03-elisp-subset-and-fe-evaluator-
+// subplans/03e-special-form-frames-and-unwind.md` in kg) for the table of
+// which primitives share which evaluation-order rules and why a single
+// generic "evaluate every argument first" policy is not an equivalent
+// replacement for most of them.
+static bool DispatchPrimitive(FeContext* ctx,
+                              FeEvalFrame* frame,
+                              FeObject* fn,
+                              FeObject** frame_bind,
+                              FeObject** result) {
+  FeObject* arguments = CDR(frame->expr);
+  switch (PRIM(fn)) {
+    case PEnv:
+      *result = ctx->symbol_list;
+      return true;
+    // `lambda`/`macro`: build the closure object directly from the raw,
+    // unevaluated `(params body...)` tail -- nothing here evaluates
+    // anything. The discarded `FeGetNextArgument` call is a validation-only
+    // arity check (there must be at least a parameter-list slot), exactly as
+    // the recursive arm's identical discard was.
+    case PFn:
+    case PMacro: {
+      FeObject* const closure = FeCons(ctx, frame->env, arguments);
+      (void)FeGetNextArgument(ctx, &arguments);
+      FeObject* const obj = MakeObject(ctx);
+      SetType(obj, PRIM(fn) == PFn ? FeTFn : FeTMacro);
+      CDR(obj) = closure;
+      *result = obj;
+      return true;
+    }
+    // `let`: the raw target check always runs; the value form is evaluated
+    // -- and only then bound into `*frame_bind` -- only when this form is
+    // extending an enclosing sequence's environment at all. A `NULL`
+    // `frame_bind` (e.g. `let` used as an ordinary argument or a lone `if`
+    // branch) means the value form is never evaluated, matching the
+    // recursive arm's `if (newenv) { ... EVAL_ARG() ... }`.
+    case PLet: {
+      FeObject* const target =
+          CheckType(ctx, FeGetNextArgument(ctx, &arguments), FeTSymbol);
+      if (frame_bind == NULL) {
+        *result = &nil;
+        return true;
+      }
+      frame->kind = FeFrameLet;
+      frame->accumulator = target;
+      frame->rest = arguments;
+      frame->callee = &unbound;
+      return false;
+    }
+    // `(if COND THEN ELSE...)`, as in Emacs Lisp: the trailing forms are an
+    // implicit body. A missing condition is nil without evaluating anything.
+    case PIf:
+      if (FeIsNil(arguments)) {
+        *result = &nil;
+        return true;
+      }
+      frame->kind = FeFrameIf;
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
+      frame->callee = &unbound;
+      return false;
+    // `while`: the condition form is fixed for the frame's whole lifetime
+    // (held in `fn`, unused for anything else by this kind); an absent
+    // condition raises the same "too few arguments" `FeGetNextArgument`
+    // always raises on an empty list.
+    case PWhile:
+      frame->kind = FeFrameWhile;
+      frame->fn = FeGetNextArgument(ctx, &arguments);
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
+      frame->callee = &unbound;
+      return false;
+    case PAnd:
+    case POr:
+      frame->kind = FeFrameAndOr;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->callee = &unbound;
+      return false;
+    // `do`: reuses the sequential-body machinery directly -- this frame
+    // becomes a relay for whatever the body frame above it delivers.
+    case PDo:
+      frame->kind = FeFrameRelay;
+      PushBodyFrame(ctx, frame->env, arguments);
+      return false;
+    // `(unwind-protect BODY CLEANUP...)`: registers the cleanup, then
+    // relays BODY's value. The cleanup itself runs later, when this pair
+    // form's `CompletePairFrame` (on every exit route -- see
+    // `RunCleanupsDownTo`/`RunCleanupsAfterError`) or an enclosing abnormal
+    // drain reaches it; this case only registers and starts BODY.
+    case PUnwindProtect: {
+      FeObject* const body = FeGetNextArgument(ctx, &arguments);
+      PushCleanup(ctx, (FeCleanupEntry){
+                           .kind = FeCleanupLisp,
+                           .as.lisp = {.forms = arguments, .env = frame->env}});
+      frame->kind = FeFrameRelay;
+      PushEvaluationFrame(ctx, body, frame->env, NULL);
+      return false;
+    }
+    case PSetq:
+      frame->kind = FeFrameSetq;
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
+      frame->callee = &unbound;
+      return false;
+    // `set`: exact two-argument raw arity is rejected before either side
+    // effect can run, matching the recursive arm; the two raw forms are
+    // then evaluated left to right by the shared `FeFrameEvalList` machinery
+    // an ordinary call's argument list also uses.
+    case PSet:
+      if (FeGetType(arguments) != FeTPair ||
+          FeGetType(CDR(arguments)) != FeTPair ||
+          !FeIsNil(CDR(CDR(arguments)))) {
+        FeHandleError(ctx, "wrong-number-of-arguments");
+      }
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
+    // `=`: zero raw arguments is rejected before anything evaluates; one or
+    // more are evaluated as a batch (`FeFrameEvalList`) before any operand
+    // is type-checked or compared.
+    case PNumericEqual:
+      if (FeIsNil(arguments)) {
+        FeHandleError(ctx, "wrong-number-of-arguments");
+      }
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
+    case PList:
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
+    case PAssert:
+    case PBoundp:
+    case PMakeUnbound:
+    case PNot:
+    case PAtom:
+    case PCar:
+    case PCdr:
+      frame->kind = FeFrameUnary;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->callee = &unbound;
+      return false;
+    case PCons:
+    case PSetCar:
+    case PSetCdr:
+    case PIs:
+    case PLess:
+    case PLessEqual:
+      frame->kind = FeFrameBinary;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
+      frame->callee = &unbound;
+      return false;
+    case PAdd:
+    case PSub:
+    case PMul:
+    case PDiv:
+      frame->kind = FeFrameArith;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
+      frame->callee = &unbound;
+      return false;
+    case PPrint:
+      frame->kind = FeFramePrint;
+      frame->rest = arguments;
+      frame->callee = &unbound;
+      return false;
+    case PQuote:
+    case PSentinel:
+    default:
+      // `PQuote` is handled by the caller before `DispatchPrimitive` is ever
+      // reached; `PSentinel` is not a real primitive tag. Neither can name a
+      // resolved `fn` here.
+      abort();
+  }
 }
 
 // One argument-frame step: append `callee` -- the just-delivered argument
@@ -983,6 +960,476 @@ static bool ResumeCallStep(FeContext* ctx,
   }
   return ResumeBody(ctx, frame, result);
 }
+
+// `if`: after the condition (`accumulator`, `&unbound` marking "not yet
+// known"), evaluates the chosen branch. A truthy condition evaluates
+// exactly the first then-form with `bind=NULL`, matching the recursive
+// arm's `EVAL_ARG()`; a falsy one discards that form and evaluates the
+// remaining forms as an implicit body via `PushBodyFrame`. The second
+// delivery, from either branch, is the form's result.
+static bool ResumeIf(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    if (frame->accumulator == &unbound) {
+      frame->accumulator = frame->callee;
+      frame->callee = &unbound;
+      if (FeIsNil(frame->rest)) {
+        *result = &nil;
+        return true;
+      }
+      if (!FeIsNil(frame->accumulator)) {
+        PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest),
+                            frame->env, NULL);
+        return false;
+      }
+      (void)FeGetNextArgument(ctx, &frame->rest);
+      if (FeIsNil(frame->rest)) {
+        *result = &nil;
+        return true;
+      }
+      if (FeIsNil(CDR(frame->rest))) {
+        // Exactly one else-form -- overwhelmingly the common shape, and the
+        // one the frame-storage Decision's "3 retained frames per `deep`
+        // level" derivation assumes (the call, `if`, and the arithmetic
+        // form waiting on its second operand -- no fourth). Push it
+        // directly instead of through `PushBodyFrame`'s generic
+        // implicit-body wrapper: a whole extra retained frame per level for
+        // a single form would make the physical frame wall bind before the
+        // logical one for the canonical `(deep N)` chain, which is exactly
+        // the regression this special case exists to avoid (measured
+        // during this slice's development: `(deep 274)` failed physically
+        // before the fix, `(deep 332)`/`(deep 333)` are the correct
+        // boundary after it). `bind = &frame->env`, exactly as the
+        // recursive `DoList`'s own `&env` out-parameter threaded even for
+        // a lone body form -- the result is simply never read again once
+        // `if` completes.
+        PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest),
+                            frame->env, &frame->env);
+        return false;
+      }
+      PushBodyFrame(ctx, frame->env, frame->rest);
+      return false;
+    }
+    *result = frame->callee;
+    return true;
+  }
+  PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                      NULL);
+  return false;
+}
+
+// `while`: `fn` holds the fixed condition form and `rest` the fixed body
+// forms, both consumed once by `DispatchPrimitive` and never advanced
+// again. `accumulator` distinguishes "awaiting the condition" (`&unbound`)
+// from "awaiting the body" (anything else -- `&nil` is used, unread).
+// Every pass restores this frame's own `gc_checkpoint` -- the same one
+// `CompletePairFrame` eventually restores from, taken once at form entry --
+// exactly as the recursive arm's per-call `FeRestoreGC(ctx, n)` did, since
+// nothing allocated between that entry and the recursive arm's own
+// `FeSaveGC()`.
+static bool ResumeWhile(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    if (frame->accumulator == &unbound) {
+      const FeObject* const condition = frame->callee;
+      frame->callee = &unbound;
+      if (FeIsNil(condition)) {
+        *result = &nil;
+        return true;
+      }
+      EvaluationStep(ctx);
+      frame->accumulator = &nil;
+      PushBodyFrame(ctx, frame->env, frame->rest);
+      return false;
+    }
+    frame->callee = &unbound;
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    frame->accumulator = &unbound;
+    PushEvaluationFrame(ctx, frame->fn, frame->env, NULL);
+    return false;
+  }
+  PushEvaluationFrame(ctx, frame->fn, frame->env, NULL);
+  return false;
+}
+
+// `and`/`or`: `fn` holds the resolved primitive object (to tell the two
+// apart) and `rest` the remaining raw forms. Each delivered value decides
+// whether to stop -- the first nil for `and`, the first non-nil for `or`,
+// or the raw form list running out either way -- and the last delivered
+// value is always the result, matching the recursive loop's shared `res`.
+// An empty raw form list is nil without evaluating anything.
+static bool ResumeAndOr(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    FeObject* const value = frame->callee;
+    frame->callee = &unbound;
+    const bool stop =
+        PRIM(frame->fn) == PAnd ? FeIsNil(value) : !FeIsNil(value);
+    if (stop || FeIsNil(frame->rest)) {
+      *result = value;
+      return true;
+    }
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  if (FeIsNil(frame->rest)) {
+    *result = &nil;
+    return true;
+  }
+  PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                      NULL);
+  return false;
+}
+
+// `let`: `frame->bind` is the `newenv` target this frame was pushed with
+// (never NULL here -- `DispatchPrimitive` completes the NULL case
+// synchronously without ever creating this frame kind), `accumulator` the
+// already-checked raw target symbol. The delivered value form's value
+// extends `*bind`, and the result is always nil.
+static bool ResumeLet(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    *frame->bind = Bind(ctx, frame->env, frame->accumulator, frame->callee);
+    frame->callee = &unbound;
+    *result = &nil;
+    return true;
+  }
+  PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                      NULL);
+  return false;
+}
+
+// `setq`: `rest` holds the remaining raw SYMBOL VALUE pairs; `accumulator`
+// holds the pending pair's raw target symbol between validating it and the
+// value form's delivery. Each target is checked to be a symbol before its
+// value form is evaluated, so a non-symbol target is diagnosed without
+// evaluating anything; a dangling final SYMBOL is diagnosed only once every
+// earlier complete pair has already assigned. Assignment goes through
+// `GetBound(ctx, target, env)`, exactly as the recursive arm's did.
+static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    CDR(GetBound(ctx, frame->accumulator, frame->env)) = frame->callee;
+    *result = frame->callee;
+    frame->callee = &unbound;
+    if (FeIsNil(frame->rest)) {
+      return true;
+    }
+  } else if (FeIsNil(frame->rest)) {
+    *result = &nil;
+    return true;
+  }
+  if (FeGetType(frame->rest) != FeTPair) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+  FeObject* const target = CAR(frame->rest);
+  if (FeGetType(target) != FeTSymbol) {
+    FeHandleError(ctx, "wrong-type-argument");
+  }
+  frame->rest = CDR(frame->rest);
+  if (FeGetType(frame->rest) != FeTPair) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+  frame->accumulator = target;
+  PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                      NULL);
+  return false;
+}
+
+// The primitives that evaluate exactly one operand and finish from it:
+// `assert`, `not`, `atom`, `car`, `cdr`, `boundp`, `makunbound`. Extra raw
+// forms are left unevaluated for every one of them except `boundp`/
+// `makunbound`, which reject a leftover one via `FeRequireNoArguments` --
+// `frame->rest` is what remains once the one operand has been consumed.
+static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee == &unbound) {
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  FeObject* const value = frame->callee;
+  frame->callee = &unbound;
+  switch (PRIM(frame->fn)) {
+    case PAssert:
+      if (FeIsNil(value)) {
+        FeHandleError(ctx, "assertion failure");
+      }
+      *result = &nil;
+      break;
+    case PNot:
+      *result = FeMakeBool(ctx, FeIsNil(value));
+      break;
+    case PAtom:
+      *result = FeMakeBool(ctx, FeGetType(value) != FeTPair);
+      break;
+    case PCar:
+      *result = FeCar(ctx, value);
+      break;
+    case PCdr:
+      *result = FeCdr(ctx, value);
+      break;
+    case PBoundp: {
+      FeObject* const sym = CheckType(ctx, value, FeTSymbol);
+      FeRequireNoArguments(ctx, frame->rest);
+      *result =
+          FeMakeBool(ctx, CDR(GetBound(ctx, sym, frame->env)) != &unbound);
+      break;
+    }
+    default: {  // PMakeUnbound
+      FeObject* const sym = CheckType(ctx, value, FeTSymbol);
+      FeRequireNoArguments(ctx, frame->rest);
+      CDR(GetBound(ctx, sym, frame->env)) = &unbound;
+      *result = sym;
+      break;
+    }
+  }
+  return true;
+}
+
+// The primitives that evaluate exactly two operands in sequence, with a
+// per-primitive check or side effect at each delivery: `cons`, `setcar`,
+// `setcdr`, `is`, `<`, `<=`. `accumulator` holds the (possibly checked)
+// first operand, `&unbound` marking "not yet delivered". `setcar`/`setcdr`
+// validate their first operand as a pair immediately on delivery, before
+// the second operand is even evaluated -- the ordering the recursive arm
+// required; `<`/`<=` validate both operands as doubles and ignore any
+// operands beyond the two, exactly as the recursive `NUM_CMP_OP` macro did.
+static bool ResumeBinary(FeContext* ctx,
+                         FeEvalFrame* frame,
+                         FeObject** result) {
+  if (frame->callee == &unbound) {
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  if (frame->accumulator == &unbound) {
+    FeObject* first = frame->callee;
+    switch (PRIM(frame->fn)) {
+      case PSetCar:
+      case PSetCdr:
+        first = CheckType(ctx, first, FeTPair);
+        break;
+      case PLess:
+      case PLessEqual:
+        first = CheckType(ctx, first, FeTDouble);
+        break;
+      default:
+        break;
+    }
+    frame->accumulator = first;
+    frame->callee = &unbound;
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  FeObject* const first = frame->accumulator;
+  FeObject* const second = frame->callee;
+  frame->callee = &unbound;
+  switch (PRIM(frame->fn)) {
+    case PCons:
+      *result = FeCons(ctx, first, second);
+      break;
+    case PSetCar:
+      CAR(first) = second;
+      *result = &nil;
+      break;
+    case PSetCdr:
+      CDR(first) = second;
+      *result = &nil;
+      break;
+    case PIs:
+      *result = FeMakeBool(ctx, Equal(first, second));
+      break;
+    default: {  // PLess, PLessEqual
+      const FeObject* const checked_second = CheckType(ctx, second, FeTDouble);
+      *result =
+          FeMakeBool(ctx, PRIM(frame->fn) == PLessEqual
+                              ? GetDouble(first) <= GetDouble(checked_second)
+                              : GetDouble(first) < GetDouble(checked_second));
+      break;
+    }
+  }
+  return true;
+}
+
+// `+`, `-`, `*`, `/`: streams every operand, validating and combining each
+// as it arrives, exactly as the recursive `ARITH_OP` macro's own loop did --
+// never batching the whole list first the way `FeFrameEvalList` does.
+// `accumulator` holds the running total, boxed (`FeMakeDouble`) so it stays
+// an ordinary marked field; `&unbound` marks "no operand combined yet".
+static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    const FeDouble delivered = FeToDouble(ctx, frame->callee);
+    frame->callee = &unbound;
+    if (frame->accumulator == &unbound) {
+      frame->accumulator = FeMakeDouble(ctx, delivered);
+    } else {
+      const FeDouble x = GetDouble(frame->accumulator);
+      FeDouble combined;
+      switch (PRIM(frame->fn)) {
+        case PAdd:
+          combined = x + delivered;
+          break;
+        case PSub:
+          combined = x - delivered;
+          break;
+        case PMul:
+          combined = x * delivered;
+          break;
+        default:  // PDiv
+          combined = x / delivered;
+          break;
+      }
+      frame->accumulator = FeMakeDouble(ctx, combined);
+    }
+  }
+  if (!FeIsNil(frame->rest)) {
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  *result = frame->accumulator;
+  return true;
+}
+
+// `print`: streams every operand, writing each as it arrives and printing a
+// separating space only when another operand remains, so evaluation, output
+// and separators stay interleaved exactly as the recursive arm's loop was.
+// The trailing newline is unconditional, including for zero operands.
+static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    FeWriteFile(ctx, frame->callee, stdout);
+    frame->callee = &unbound;
+    if (!FeIsNil(frame->rest)) {
+      printf(" ");
+    }
+  }
+  if (!FeIsNil(frame->rest)) {
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  printf("\n");
+  *result = &nil;
+  return true;
+}
+
+// `list`, `=`, `set`: evaluates the complete raw argument list first --
+// unlike every other primitive continuation above, whose ordering is what
+// makes them not this -- accumulating and reordering exactly as
+// `FeFrameCallArguments`'s own argument list does, then finishes per
+// primitive: `list` returns it as-is; `=` validates and compares every
+// element without short-circuiting, even once the chain is already known
+// unequal, so every operand form has both run and been checked by the time
+// it returns (one argument is `t` without comparing anything); `set`
+// (arity already validated by `DispatchPrimitive` before this frame was
+// even created) checks the first element is a symbol and assigns through
+// `FeSet`. Plain C `==` gives the pinned signed-zero and NaN answers for
+// `=`; -Wfloat-equal is suppressed for this intentional exact comparison.
+static bool ResumeEvalList(FeContext* ctx,
+                           FeEvalFrame* frame,
+                           FeObject** result) {
+  if (frame->callee != &unbound) {
+    frame->accumulator = FeCons(ctx, frame->callee, frame->accumulator);
+    frame->callee = &unbound;
+  }
+  if (!FeIsNil(frame->rest)) {
+    EvaluationStep(ctx);
+    PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                        NULL);
+    return false;
+  }
+  FeObject* list = &nil;
+  while (!FeIsNil(frame->accumulator)) {
+    FeObject* const next = CDR(frame->accumulator);
+    CDR(frame->accumulator) = list;
+    list = frame->accumulator;
+    frame->accumulator = next;
+  }
+  switch (PRIM(frame->fn)) {
+    case PList:
+      *result = list;
+      break;
+    case PSet: {
+      FeObject* const symbol = CAR(list);
+      FeObject* const value = CAR(CDR(list));
+      if (FeGetType(symbol) != FeTSymbol) {
+        FeHandleError(ctx, "wrong-type-argument");
+      }
+      FeSet(ctx, symbol, value);
+      *result = value;
+      break;
+    }
+    default: {  // PNumericEqual
+      FeDouble first = GetDouble(CheckNumericEqualOperand(ctx, CAR(list)));
+      bool equal = true;
+      FeObject* rest = CDR(list);
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfloat-equal"
+#endif
+      while (!FeIsNil(rest)) {
+        const FeDouble next =
+            GetDouble(CheckNumericEqualOperand(ctx, CAR(rest)));
+        equal = equal && first == next;
+        rest = CDR(rest);
+      }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+      *result = FeMakeBool(ctx, equal);
+      break;
+    }
+  }
+  return true;
+}
+
+// One resumable-step dispatch for every primitive continuation above,
+// mirroring `ResumeCallStep`'s role for the call continuations: one switch
+// here, rather than one `case`-and-`CompletePairFrame` block per kind
+// repeated in `RunEvaluationLoop`, is cheaper in aggregate complexity for
+// the same reason a single primitive dispatch switch was cheaper than many
+// small handlers (see `DispatchPrimitive`'s own comment). `FeFrameRelay`
+// has no dedicated `ResumeX`: the delivered value already is its result.
+static bool ResumeContinuation(FeContext* ctx,
+                               FeEvalFrame* frame,
+                               FeObject** result) {
+  switch (frame->kind) {
+    case FeFrameIf:
+      return ResumeIf(ctx, frame, result);
+    case FeFrameWhile:
+      return ResumeWhile(ctx, frame, result);
+    case FeFrameAndOr:
+      return ResumeAndOr(ctx, frame, result);
+    case FeFrameLet:
+      return ResumeLet(ctx, frame, result);
+    case FeFrameSetq:
+      return ResumeSetq(ctx, frame, result);
+    case FeFrameUnary:
+      return ResumeUnary(ctx, frame, result);
+    case FeFrameBinary:
+      return ResumeBinary(ctx, frame, result);
+    case FeFrameArith:
+      return ResumeArith(ctx, frame, result);
+    case FeFramePrint:
+      return ResumePrint(ctx, frame, result);
+    case FeFrameEvalList:
+      return ResumeEvalList(ctx, frame, result);
+    case FeFrameRelay:
+      *result = frame->callee;
+      return true;
+    // Every other kind is driven by its own dedicated case in
+    // `RunEvaluationLoop`'s switch and never reaches this dispatcher.
+    case FeFrameExpression:
+    case FeFrameCallHead:
+    case FeFrameCallArguments:
+    case FeFrameLambda:
+    case FeFrameBody:
+    case FeFrameImplicitBody:
+    case FeFrameMacro:
+    case FeFrameMacroExpansion:
+    case FeFrameNative:
+      break;
+  }
+  abort();
+}
+
 void FeMarkEvaluatorRoots(FeContext* ctx) {
   for (size_t i = 0; i < ctx->frame_stack_index; i++) {
     const FeEvalFrame* frame = &ctx->frame_stack[i];
@@ -995,7 +1442,18 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
       case FeFrameMacro:
       case FeFrameMacroExpansion:
       case FeFrameNative:
-      case FeFrameTemporaryRecursive:
+      case FeFrameImplicitBody:
+      case FeFrameIf:
+      case FeFrameWhile:
+      case FeFrameAndOr:
+      case FeFrameLet:
+      case FeFrameSetq:
+      case FeFrameRelay:
+      case FeFrameUnary:
+      case FeFrameBinary:
+      case FeFrameArith:
+      case FeFramePrint:
+      case FeFrameEvalList:
         FeMark(ctx, frame->expr);
         FeMark(ctx, frame->env);
         FeMark(ctx, frame->fn);
@@ -1008,20 +1466,44 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
 }
 
 // The frame kinds that wait for a delivered sub-expression value: a
-// computed-head frame, an argument frame, a body or macro-body frame, and a
-// macro frame waiting for its expansion's value. Anything else popping above
-// one of these is an internal error.
+// computed-head frame, an argument frame, a body or macro-body frame, a
+// macro frame waiting for its expansion's value, and every primitive
+// continuation kind above (each pushes at least one sub-expression or
+// implicit-body frame and resumes from what it delivers). Anything else
+// popping above one of these is an internal error.
 static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
-  return frame->kind == FeFrameCallHead ||
-         frame->kind == FeFrameCallArguments || frame->kind == FeFrameBody ||
-         frame->kind == FeFrameMacro || frame->kind == FeFrameMacroExpansion;
+  switch (frame->kind) {
+    case FeFrameCallHead:
+    case FeFrameCallArguments:
+    case FeFrameBody:
+    case FeFrameImplicitBody:
+    case FeFrameMacro:
+    case FeFrameMacroExpansion:
+    case FeFrameIf:
+    case FeFrameWhile:
+    case FeFrameAndOr:
+    case FeFrameLet:
+    case FeFrameSetq:
+    case FeFrameRelay:
+    case FeFrameUnary:
+    case FeFrameBinary:
+    case FeFrameArith:
+    case FeFramePrint:
+    case FeFrameEvalList:
+      return true;
+    case FeFrameExpression:
+    case FeFrameLambda:
+    case FeFrameNative:
+      break;
+  }
+  return false;
 }
 
 // The ordinary-return tail of a pair form: drain the cleanups pushed while
 // this form was being evaluated, restore its GC checkpoint, protect its
 // result, and unlink its call-trace cell. Every pair form completes through
-// here -- a symbol head, a resolved computed head, or a temporary recursive
-// dispatch -- so the evaluation_depth and call_list bookkeeping (and the
+// here -- a symbol head, a resolved computed head, a call, or a primitive
+// continuation -- so the evaluation_depth and call_list bookkeeping (and the
 // `macro` arm's own internal restore) cannot drift between the paths.
 static void CompletePairFrame(FeContext* ctx,
                               FeEvalFrame* frame,
@@ -1063,24 +1545,12 @@ static jmp_buf* BeginRunBarrier(FeContext* ctx, jmp_buf* jump) {
   return saved;
 }
 
-static FeObject* RunEvaluation(FeContext* ctx,
-                               FeObject* obj,
-                               FeObject* env,
-                               FeObject** bind) {
-  const size_t base = ctx->frame_stack_index;
-  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
-  jmp_buf jump;
-  jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
-
-  if (setjmp(jump) != 0) {
-    ctx->frame_stack_index = base;
-    ctx->call_list = &nil;
-    ctx->evaluator_catch = saved_catch;
-    ctx->native_reentry_depth = saved_native_reentry_depth;
-    TransferRunError(ctx, saved_catch);
-  }
-
-  PushEvaluationFrame(ctx, obj, env, bind);
+// Drives the frame stack from `base` (already holding this run's one base
+// frame -- `RunEvaluation` pushes an expression, `RunEvaluationBody` a
+// sequential body) down to `base` again, returning the base frame's result.
+// Shared by both entry points so there is exactly one loop implementing
+// evaluation, not two near-duplicates that could drift.
+static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   FeObject* result = &nil;
   while (ctx->frame_stack_index > base) {
     FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
@@ -1170,6 +1640,19 @@ static FeObject* RunEvaluation(FeContext* ctx,
         CompletePairFrame(ctx, frame, result);
         break;
 
+      case FeFrameImplicitBody:
+        // `ResumeBody`'s own logic is exactly right for this synthetic
+        // body -- append `callee`, push the next form or complete -- but
+        // this frame's own push had no `EnterEvaluationDepth`/trace-link to
+        // balance, so it completes through the lighter
+        // `CompleteImplicitBodyFrame` instead of `CompletePairFrame`. See
+        // `FeFrameImplicitBody`'s comment in fe_internal.h.
+        if (!ResumeBody(ctx, frame, &result)) {
+          continue;
+        }
+        CompleteImplicitBodyFrame(ctx, frame, result);
+        break;
+
       case FeFrameMacro:
         // A body-form sub-expression above this frame completed and
         // delivered its value into `callee` (or the frame was just set up
@@ -1222,10 +1705,28 @@ static FeObject* RunEvaluation(FeContext* ctx,
         }
         break;
 
-      case FeFrameTemporaryRecursive:
-        // Completed synchronously by the case that set it; it never reaches
-        // the top of the loop again.
-        abort();
+      case FeFrameIf:
+      case FeFrameWhile:
+      case FeFrameAndOr:
+      case FeFrameLet:
+      case FeFrameSetq:
+      case FeFrameRelay:
+      case FeFrameUnary:
+      case FeFrameBinary:
+      case FeFrameArith:
+      case FeFramePrint:
+      case FeFrameEvalList:
+        // A special-form or primitive continuation: an operand or implicit
+        // body sub-frame above this one delivered its value into `callee`
+        // (or, for a freshly set-up frame, `callee` is still the `&unbound`
+        // sentinel). `ResumeContinuation` either pushes the next
+        // sub-expression frame and the loop resumes at the top, or the form
+        // is complete.
+        if (!ResumeContinuation(ctx, frame, &result)) {
+          continue;
+        }
+        CompletePairFrame(ctx, frame, result);
+        break;
     }
 
     ctx->frame_stack_index--;
@@ -1242,6 +1743,71 @@ static FeObject* RunEvaluation(FeContext* ctx,
     frame->callee = result;
   }
   ctx->frame_stack_index = base;
+  return result;
+}
+
+// One evaluator run: installs the barrier, pushes `obj` as the base
+// expression frame, drives `RunEvaluationLoop`, and restores the enclosing
+// run's catch and native-reentry depth on every exit -- normal or by
+// `longjmp` on error. `bind` is the `newenv` target a `let` at the top of
+// `obj` writes into, exactly as the recursive `Evaluate`'s own parameter
+// was.
+static FeObject* RunEvaluation(FeContext* ctx,
+                               FeObject* obj,
+                               FeObject* env,
+                               FeObject** bind) {
+  const size_t base = ctx->frame_stack_index;
+  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
+  jmp_buf jump;
+  jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
+
+  if (setjmp(jump) != 0) {
+    ctx->frame_stack_index = base;
+    ctx->call_list = &nil;
+    ctx->evaluator_catch = saved_catch;
+    ctx->native_reentry_depth = saved_native_reentry_depth;
+    TransferRunError(ctx, saved_catch);
+  }
+
+  PushEvaluationFrame(ctx, obj, env, bind);
+  FeObject* const result = RunEvaluationLoop(ctx, base);
+  ctx->evaluator_catch = saved_catch;
+  ctx->native_reentry_depth = saved_native_reentry_depth;
+  return result;
+}
+
+// A cleanup's unwind forms (`unwind-protect`, `FeProtectWithCleanup`'s Lisp
+// counterpart), and nothing else, run through here: `RunOneCleanupEntry`
+// calls this once per cleanup entry instead of the old recursive `DoList`'s
+// one nested `Evaluate()` call per form. 03C's decision was a nested run on
+// the unused suffix of the *same* frame stack, above a saved barrier, not a
+// second stack -- `base` is exactly `ctx->frame_stack_index` at entry, the
+// same value `RunOneCleanupEntry` separately saves and restores around this
+// call, so a failing cleanup's `longjmp` past this function's own barrier
+// (see `RunOneCleanupEntry`'s `cleanup_catch` comment) leaves nothing of
+// this run behind for the caller to clean up beyond that restore. Otherwise
+// identical to `RunEvaluation`, except the base frame is a sequential body
+// (`PushBodyFrame`) rather than a single expression, so `let` threads
+// between the cleanup's own forms exactly as it did through the recursive
+// `DoList`'s `&env` out-parameter.
+static FeObject* RunEvaluationBody(FeContext* ctx,
+                                   FeObject* forms,
+                                   FeObject* env) {
+  const size_t base = ctx->frame_stack_index;
+  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
+  jmp_buf jump;
+  jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
+
+  if (setjmp(jump) != 0) {
+    ctx->frame_stack_index = base;
+    ctx->call_list = &nil;
+    ctx->evaluator_catch = saved_catch;
+    ctx->native_reentry_depth = saved_native_reentry_depth;
+    TransferRunError(ctx, saved_catch);
+  }
+
+  PushBodyFrame(ctx, env, forms);
+  FeObject* const result = RunEvaluationLoop(ctx, base);
   ctx->evaluator_catch = saved_catch;
   ctx->native_reentry_depth = saved_native_reentry_depth;
   return result;

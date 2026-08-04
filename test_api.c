@@ -3223,12 +3223,510 @@ static bool TestResumableFrameGC(void) {
       // not sweep the evaluated argument list in the native frame's
       // `accumulator`; the same value then crosses one nested native call.
       {"native", "(gc-native (list 1 2 3))", "(1 2 3)", PrepareGCNative},
+      // Sub-plan 03E's special-form/primitive continuations, added to the
+      // same table for the same reason: each row's setup forces a
+      // collection while that one frame kind is suspended, waiting on a
+      // delivered sub-expression.
+      // if: the taken branch's collecting loop must not disturb the
+      // suspended `if` frame's own `env`/`rest`.
+      {"if",
+       "(if t (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) "
+       "n) 0)",
+       "2000", nullptr},
+      // and/or: same property, for the short-circuit chain.
+      {"and-or",
+       "(and 1 (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n "
+       "n)) n))",
+       "2000", nullptr},
+      // while: the frame's own fixed condition/body forms (`fn`/`rest`) must
+      // survive collections forced by every iteration's own body.
+      {"while",
+       "(do (setq n 0) (setq i 0) (while (< i 3) (setq i (+ i 1)) (setq m "
+       "0) (while (< m 2000) (setq m (+ m 1)) (cons m m))) i)",
+       "3", nullptr},
+      // let: the raw target symbol in `accumulator` must survive collections
+      // forced by evaluating the value form.
+      {"let",
+       "(do (let x (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons "
+       "n n)) n)) x)",
+       "2000", nullptr},
+      // setq: the pending target symbol in `accumulator` must survive
+      // collections forced by evaluating the value form, and an earlier
+      // pair's binding must still be intact afterwards.
+      {"setq",
+       "(do (setq a 1) (setq b (do (setq n 0) (while (< n 2000) (setq n (+ "
+       "n 1)) (cons n n)) n)) (list a b))",
+       "(1 2000)", nullptr},
+      // unary (assert/not/atom/car/cdr/boundp/makunbound): no state is held
+      // across the single operand, but the frame itself must survive.
+      {"unary",
+       "(not (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) "
+       "nil))",
+       "t", nullptr},
+      // binary (cons/setcar/setcdr/is/</<=): the checked first operand in
+      // `accumulator` must survive collections forced by evaluating the
+      // second.
+      {"binary",
+       "(cons 1 (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n "
+       "n)) n))",
+       "(1 . 2000)", nullptr},
+      // arith (+/-/*//): the running boxed total in `accumulator` must
+      // survive collections forced by evaluating a later operand.
+      {"arith",
+       "(+ 1000 (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n "
+       "n)) 1000))",
+       "2000", nullptr},
+      // eval-list (list/=/set): the partially-built reversed list in
+      // `accumulator` must survive collections forced by evaluating a later
+      // element.
+      {"eval-list",
+       "(list 1 (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n "
+       "n)) n) 3)",
+       "(1 2000 3)", nullptr},
+      // relay (do/unwind-protect's body): the pending cleanup entry (03C's
+      // direct root over `.forms`/`.env`) must survive collections forced by
+      // the protected body.
+      {"relay",
+       "(unwind-protect"
+       "  (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n)"
+       "  (setq relay-cleanup-ran t))",
+       "2000", nullptr},
   };
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     if (!RunFrameGCCase(&cases[i])) {
       return false;
     }
   }
+  return true;
+}
+
+// Sub-plan 03E: GC during an actual cleanup *drain* -- `RunEvaluationBody`'s
+// synthetic base frame, entered only while a cleanup is running after an
+// error, not while `unwind-protect`'s own protected body runs (that is the
+// "relay" row of `TestResumableFrameGC`, above). The cleanup allocates
+// heavily enough to force collections, and a lexical binding from the
+// *body* (`x`, reachable only through the environment `unwind-protect`
+// captured, never through the global symbol table) must still resolve
+// correctly afterward -- the same root-survival property
+// `TestUnwindLisp`'s "Root survival" case already pins for the body itself,
+// now pinned for the cleanup's own nested run.
+static bool TestCleanupRunGC(void) {
+  TestArena arena;
+  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  FeContext* context = FeOpenContext(arena.bytes, gc_size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // 2000 iterations, the same scale `TestResumableFrameGC`'s ordinary-body
+  // rows use to force a collection in this small arena -- but this loop
+  // runs *inside* the cleanup, under `RunCleanupsAfterError`'s fresh
+  // per-entry budget, which defaults to only `DefaultCleanupStepLimit`
+  // (4096, far too little for 2000 iterations: measured empirically against
+  // this exact form, 150 iterations fit and 180 do not). An explicit,
+  // generous `cleanup_step_limit` -- the same option
+  // `TestUnwindCleanupBudget` uses for the opposite reason (to prove a
+  // *small* one terminates a runaway cleanup) -- avoids that ceiling here.
+  // This margin matters: a real regression during this slice's development
+  // used 2000 iterations with the *default* budget, silently truncating the
+  // cleanup and leaving `cleanup-result` unbound; the follow-up check below
+  // then raised `void-variable` into a `setjmp` whose enclosing
+  // `ExpectEvaluationError` call had already returned -- a `longjmp` into a
+  // dead stack frame, corrupting the C stack instead of failing loudly.
+  const size_t collections_before = FeGetArenaStats(context).collection_count;
+  static const char source[] =
+      "(do"
+      "  (let x (cons 111 222))"
+      "  (unwind-protect"
+      "    (car 1)"
+      "    (do (setq n 0)"
+      "        (while (< n 2000) (setq n (+ n 1)) (cons n n))"
+      "        (setq cleanup-result (list x n)))))";
+  const FeEvalOptions generous_cleanup_budget = {.cleanup_step_limit = 100000};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "cleanup-gc.fe", source, sizeof(source) - 1,
+      &generous_cleanup_budget, "cleanup-gc.fe: expected pair, got double"));
+  CHECK(FeGetArenaStats(context).collection_count > collections_before);
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "check.fe", "cleanup-result", 14),
+                   "((111 . 222) 2000)"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03E's required "primitive evaluation-order regressions" table:
+// the distinctions `doc/plans/.../03e-special-form-frames-and-unwind.md` in
+// kg names explicitly, that a generic "evaluate every operand first" policy
+// would erase. `TestSetqAndSet`, `TestNumericEqual` and `TestBinding`
+// already pin `setq`/`set`/`=`'s own order rules; this covers the
+// remaining distinctions those tests do not reach.
+static bool TestPrimitiveOrder(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                   \
+  CHECK(IsRendered(context,                                                   \
+                   FeEvaluateString(context, "order.fe", expr, strlen(expr)), \
+                   expected))
+#define ORDER_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "order.fe", expr, strlen(expr), \
+                              message))
+
+  // `setcar`/`setcdr` validate the first evaluated operand as a pair before
+  // the second is even evaluated: a type error on operand 1 means operand
+  // 2's side effect never runs.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcar-probe")));
+  ORDER_ERR("(setcar 1 (do (setq setcar-probe t) 2))",
+            "order.fe: expected pair, got double");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcar-probe")));
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcdr-probe")));
+  ORDER_ERR("(setcdr 1 (do (setq setcdr-probe t) 2))",
+            "order.fe: expected pair, got double");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcdr-probe")));
+
+  // Arithmetic validates as it walks, unlike `=`'s evaluate-the-whole-list-
+  // first policy (`TestNumericEqual`): a type error on an early operand
+  // stops evaluation before a later operand's form ever runs.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "arith-probe")));
+  ORDER_ERR("(+ 1 \"x\" (do (setq arith-probe t) 3))",
+            "order.fe: expected double, got string");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "arith-probe")));
+
+  // `<`/`<=` consume exactly two operands and never evaluate extras: if the
+  // third form here ran, it would itself raise a type error.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
+  CHK("(< 1 2 (do (setq less-probe t) (car 1)))", "t");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
+  CHK("(<= 2 2 (do (setq less-probe t) (car 1)))", "t");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
+
+  // `boundp`/`makunbound` reject a leftover extra argument, unlike the
+  // other primitives sharing their frame kind (`not`/`atom`/`car`/`cdr`/
+  // `assert`), which silently ignore extras.
+  ORDER_ERR("(boundp 'car 'extra)", "order.fe: too many arguments");
+  ORDER_ERR("(makunbound 'car 'extra)", "order.fe: too many arguments");
+
+  // `cons`'s two operands evaluate left to right.
+  CHK("(setq cons-order '())", "nil");
+  CHK("(cons (do (setq cons-order (cons 1 cons-order)) 1)"
+      "      (do (setq cons-order (cons 2 cons-order)) 2))",
+      "(1 . 2)");
+  CHK("cons-order", "(2 1)");
+
+  // `if`'s missing-form cases: no condition, a nil condition with no
+  // then-form, and a truthy condition with no then-form are all nil,
+  // without an error.
+  CHK("(if)", "nil");
+  CHK("(if nil)", "nil");
+  CHK("(if t)", "nil");
+
+  // `let`'s `newenv == NULL` case: used where the enclosing evaluation was
+  // never going to extend any sequence's environment -- here, `if`'s
+  // then-branch, pushed with `bind=NULL` exactly as the recursive arm's
+  // `EVAL_ARG()` was -- the value form is never even evaluated, however odd
+  // that looks; the raw target symbol is still never bound to anything.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "let-null-probe")));
+  CHK("(if t (let let-target (do (setq let-null-probe t) 99)))", "nil");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "let-null-probe")));
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "let-target")));
+
+#undef ORDER_ERR
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
+// One row per distinct primitive/special-form resumption strategy 03E
+// added, shared by the budget-exhaustion and cancellation tests below: each
+// form suspends that frame kind on an unbounded inner `(while t 1)`, so a
+// small step budget or a host interrupt fires while it is live.
+typedef struct ResumptionStressCase {
+  const char* state;
+  const char* form;
+} ResumptionStressCase;
+
+static const ResumptionStressCase kResumptionStressCases[] = {
+    {"if", "(if t (while t 1))"},       {"and-or", "(and t (while t 1))"},
+    {"while", "(while t (while t 1))"}, {"let", "(do (let x (while t 1)))"},
+    {"setq", "(setq x (while t 1))"},   {"unary", "(car (while t 1))"},
+    {"binary", "(cons 1 (while t 1))"}, {"arith", "(+ 1 (while t 1))"},
+    {"print", "(print (while t 1))"},   {"eval-list", "(list 1 (while t 1))"},
+    {"relay-do", "(do (while t 1))"},
+};
+
+// Sub-plan 03E's "budget exhaustion ... at every distinct resumption
+// strategy" requirement: a tiny step budget exhausted while each frame kind
+// above is live on the stack, asserting the existing external message and
+// that the context is fully reusable afterward -- not a claim about which
+// exact form ran when the budget hit zero, since that is an implementation
+// detail of how many steps each kind's own bookkeeping charges.
+static bool RunResumptionBudgetCase(const ResumptionStressCase* c) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  const FeEvalOptions tiny = {.step_limit = 10};
+  const bool raised = ExpectEvaluationOptionsError(
+      context, &state, "budget.fe", c->form, strlen(c->form), &tiny,
+      "budget.fe: evaluation step limit exceeded");
+  const bool recovered =
+      raised &&
+      IsRendered(context,
+                 FeEvaluateString(context, "recovered.fe", "(+ 1 2)", 7), "3");
+  FeCloseContext(context);
+  if (!raised) {
+    fprintf(stderr, "resumption-budget %s: did not raise step-limit error\n",
+            c->state);
+    return false;
+  }
+  if (!recovered) {
+    fprintf(stderr, "resumption-budget %s: context not reusable after\n",
+            c->state);
+    return false;
+  }
+  return true;
+}
+
+static bool TestResumableFrameBudget(void) {
+  for (size_t i = 0;
+       i < sizeof(kResumptionStressCases) / sizeof(kResumptionStressCases[0]);
+       i++) {
+    if (!RunResumptionBudgetCase(&kResumptionStressCases[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The same table, cancelled by a host interrupt instead of a step budget --
+// 03E's other required resumption axis. `EvaluationStep`'s interrupt check
+// and step-budget check are the same call site, so this mainly proves the
+// cancellation path (a distinct `FeHandleError` message, and
+// `RunCleanupsAfterError`'s same drain) also reaches every one of these
+// frame kinds and leaves the context reusable, not a new mechanism per kind.
+static bool RunResumptionCancelCase(const ResumptionStressCase* c) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  InterruptState interrupt = {
+      .context = context, .expected_userdata = &interrupt, .cancel_after = 3};
+  const FeEvalOptions options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  const bool cancelled = ExpectEvaluationOptionsError(
+      context, &state, "cancel.fe", c->form, strlen(c->form), &options,
+      "cancel.fe: evaluation cancelled");
+  const bool polled = cancelled && interrupt.polls == interrupt.cancel_after;
+  const bool recovered =
+      cancelled &&
+      IsRendered(context,
+                 FeEvaluateString(context, "recovered.fe", "(+ 1 2)", 7), "3");
+  FeCloseContext(context);
+  if (!cancelled || !polled || !recovered) {
+    fprintf(stderr,
+            "resumption-cancel %s: failed (cancelled=%d polled=%d "
+            "recovered=%d)\n",
+            c->state, cancelled, polled, recovered);
+    return false;
+  }
+  return true;
+}
+
+static bool TestResumableFrameCancel(void) {
+  for (size_t i = 0;
+       i < sizeof(kResumptionStressCases) / sizeof(kResumptionStressCases[0]);
+       i++) {
+    if (!RunResumptionCancelCase(&kResumptionStressCases[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// LIFO across cleanup kinds: the registry is one shared stack regardless of
+// whether an entry is a native (`FeProtectWithCleanup`, via `with-resource`)
+// or Lisp (`unwind-protect`) one, per `doc/unwind-design.md`. Both
+// nestings are checked, since only one direction was exercised by
+// `TestUnwindHostAPI` (native-only) and `TestUnwindLisp` (Lisp-only).
+static bool TestMixedCleanupLIFO(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "with-resource", WithResource);
+
+  // The native cleanup is registered first (by `with-resource`, before it
+  // calls the thunk); the thunk's own `unwind-protect` registers its Lisp
+  // cleanup second, from inside the call. Most recently pushed first means
+  // the Lisp cleanup runs before the native one closes the file.
+  ResetResourceState();
+  static const char native_then_lisp[] =
+      "(setq log '())"
+      "(with-resource (fn () (unwind-protect 42 (setq log (cons 'lisp "
+      "log)))))";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "mixed.fe", native_then_lisp,
+                                    sizeof(native_then_lisp) - 1),
+                   "42"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+  CHECK(IsRendered(context, FeEvaluateString(context, "log.fe", "log", 3),
+                   "(lisp)"));
+
+  // Reversed nesting: the Lisp `unwind-protect` now encloses the native
+  // resource, so the native cleanup (registered second, from inside the
+  // body) drains first.
+  ResetResourceState();
+  static const char lisp_then_native[] =
+      "(setq log2 '())"
+      "(unwind-protect"
+      "  (with-resource (fn () 43))"
+      "  (setq log2 (cons 'outer log2)))";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "reversed.fe", lisp_then_native,
+                                    sizeof(lisp_then_native) - 1),
+                   "43"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+  CHECK(IsRendered(context, FeEvaluateString(context, "log2.fe", "log2", 4),
+                   "(outer)"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 03E: the full `(deep N)` flatness result, for the largest N this
+// tree can actually run with `max_depth` raised above the legacy 1000-unit
+// default. Unlike 03D's pure call-chain probes, the canonical `(defun deep
+// (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))` also recurses through `if` and
+// arithmetic continuations, which stayed on the temporary recursive path
+// through 03D; this is the first slice where the C-stack high-water mark is
+// expected to stay flat across it -- the parent plan's own gate -- and it
+// does, all the way to the bound below.
+//
+// It is not `N = 100000`, and that is this slice's most important finding,
+// not a test-sizing detail. `GcStackSize` (4096, `fe_internal.h`) is a
+// fixed-size array field of `FeContext` itself -- never carved from the
+// arena, so raising the arena or `max_depth` does not grow it. The
+// lambda-body wrapper (03D, `ResumeBody`'s `FeRestoreGC`/
+// `FePushGC(env)`/`FePushGC(rest)` pattern) pushes two entries onto it per
+// still-open level that stay live -- not popped -- until the whole
+// enclosing activation unwinds. (`if`'s false branch would retain a second
+// such wrapper per level too, except that its single-form case -- the
+// common shape, and the one this canonical chain uses -- pushes the form
+// directly instead: see `ResumeIf`'s own comment. Skipping that special
+// case was tried during this slice's development and found first as a
+// *physical-frame* regression, not a GC-stack one -- kg's own
+// `test/test_perf.c` `(dc 300)` fixture started failing at N ~ 274, since
+// kg's 1 MiB arena's 1100-frame capacity assumes 3 simultaneously-open
+// frames per level, not 4 -- fixed there, which is what leaves only one
+// wrapper's entries here.) A `(deep N)` chain therefore retains roughly 4
+// GC-stack entries per simultaneously-open level (measured, not derived
+// from first principles: bisecting with `max_depth` raised well above each
+// candidate N's own `peak_depth`, `(deep 1021)` succeeds and `(deep 1022)`
+// raises `GC stack overflow`, 4096/1022 ~ 4.0). Under the *default*
+// `max_depth` (1000) this never fires -- `peak_depth(N) = 3N + 2` already
+// crosses 1000 at N = 333, hundreds of levels before the GC-stack bound at
+// ~1022, so every existing default-configured test (`TestEvaluationDepth`,
+// `TestRecursionDepth`-shaped kg cases) stays exactly where it already was.
+// It matters only once `max_depth` is deliberately raised past its
+// default, which is exactly what asking for `(deep 100000)` does. 03F,
+// which owns the two-bounds redesign, is where this should be revisited --
+// either a larger fixed `GcStackSize`, or (as the 03A/03D pattern of moving
+// state off the C stack into arena-resident frame fields already suggests)
+// retiring `FePushGC`/`FeRestoreGC` from the lambda-body wrapper entirely
+// in favor of a frame-owned root, which would make this bound disappear
+// along with the C-stack one.
+static bool TestFullDeepFlatness(void) {
+  // Bisected empirically against this exact chain with `max_depth` set to
+  // comfortably clear each candidate N's own physical/logical need: 1021
+  // succeeds, 1022 raises `GC stack overflow`. A third of that, not the
+  // boundary itself, so this assertion has margin against the exact ratio
+  // moving by one or two as unrelated code changes shift how many objects
+  // an ordinary evaluation step allocates.
+  enum { DeepN = 340 };
+  const size_t peak_frames = 3 * (size_t)DeepN + 2;
+  const size_t arena_size = 300ULL * 1024 * 1024;
+  unsigned char* arena = malloc(arena_size);
+  CHECK(arena != nullptr);
+  FeContext* context = FeOpenContext(arena, arena_size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "stack-probe", StackProbe);
+
+  static const char deep_def[] =
+      "(setq deep (fn (n) (if (<= n 0) (stack-probe) (+ 1 (deep (- n "
+      "1))))))";
+  CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
+                         sizeof(deep_def) - 1) != nullptr);
+
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  static const char bare_probe[] = "(stack-probe)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "bare.fe", bare_probe, sizeof(bare_probe) - 1),
+      "0"));
+  CHECK(stack_probe_last_address != 0);
+  const uintptr_t baseline = stack_probe_deepest_address;
+
+  char source[32];
+  const int written = snprintf(source, sizeof(source), "(deep %d)", DeepN);
+  CHECK(written > 0 && (size_t)written < sizeof(source));
+  char expected[16];
+  (void)snprintf(expected, sizeof(expected), "%d", DeepN);
+
+  // Twice the derived logical need -- well above the legacy default 1000,
+  // which N = 340's own peak_depth (1022) already exceeds -- so the
+  // *logical* ceiling is not what this test exercises; only the physical
+  // frame capacity (this arena's) and the GC-stack bound above are live.
+  const FeEvalOptions options = {.max_depth = peak_frames * 2};
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "deep-flat.fe", source,
+                                               (size_t)written, &options),
+                   expected));
+  CHECK(stack_probe_last_address != 0);
+  const uintptr_t deepest = stack_probe_deepest_address;
+  const uintptr_t delta =
+      deepest > baseline ? deepest - baseline : baseline - deepest;
+  const size_t peak_evaluation_depth =
+      FeGetArenaStats(context).peak_evaluation_depth;
+  printf("full deep(%d) probe: baseline=%#" PRIxPTR " deepest=%#" PRIxPTR
+         " delta=%" PRIuPTR
+         " bytes, peak_evaluation_depth=%zu (predicted "
+         "%zu)\n",
+         DeepN, baseline, deepest, delta, peak_evaluation_depth, peak_frames);
+  // Flat: the same < 2 KiB budget 03D's own probes used, for the same
+  // reason -- a regression that sent `if` or arithmetic back through a
+  // recursive C call would grow this by tens of kilobytes at this depth,
+  // not stay under a couple.
+  CHECK(delta < 2048);
+  // `+1`, not `peak_frames` exactly: this `deep` ends in a call to
+  // `stack-probe`, one more pair-form entry than the canonical
+  // `0`-returning definition 03A's Decision derives `peak_depth` against
+  // (the same offset `TestEvaluationStackProbe`'s own probe-carrying `deep`
+  // produces).
+  CHECK(peak_evaluation_depth == peak_frames + 1);
+
+  FeCloseContext(context);
+  free(arena);
   return true;
 }
 
@@ -3248,7 +3746,10 @@ int main(void) {
                  TestArgumentProbe() && TestLambdaBodyFrame() &&
                  TestLambdaBodyChain() && TestMacroFrame() &&
                  TestNativeReentry() && TestNativeOwningReentry() &&
-                 TestResumableFrameGC()
+                 TestResumableFrameGC() && TestCleanupRunGC() &&
+                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
+                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
+                 TestFullDeepFlatness()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

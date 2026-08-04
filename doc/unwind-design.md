@@ -153,6 +153,20 @@ change to "drain to the checkpoint of the frame that catches," exactly as
 this section already says, or a `catch` inside a re-entrant native call
 would incorrectly run cleanups that belong to a scope outside the `catch`.
 
+**A Lisp cleanup's own forms are themselves a nested evaluator run,** since
+sub-plan 03E's frame machine: `RunOneCleanupEntry` starts one via
+`RunEvaluationBody` in place of the old recursive `DoList`'s one nested
+`Evaluate()` call per unwind form. It is a nested run on the *unused suffix
+of the same frame stack*, above a saved barrier -- not a second stack, and
+not the "single global run everything" call this section argues against;
+it is exactly the checkpoint-scoped nesting described above, applied to the
+one case (a cleanup) that already existed before `catch` does. A cleanup's
+own error still bypasses this nested barrier directly via `cleanup_catch`'s
+`longjmp`, precisely as it bypassed the old recursive `DoList`'s implicit
+one, so `RunOneCleanupEntry`'s own manual restores (frame index, saved
+`evaluator_catch`, `native_reentry_depth`, `call_list`) are what an eventual
+`catch` inside a cleanup would also have to reconcile with.
+
 ## What reaches the host
 
 The error callback should receive the completion kind, the message, and the

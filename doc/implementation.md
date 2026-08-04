@@ -172,8 +172,12 @@ Error paths skip the restore entirely: the enclosing barrier restores its
 saved counter, and `FeHandleError()` resets both to 0.
 
 Evaluation has one context-owned frame stack. The collector marks every live
-frame, including the temporary recursive-dispatch frame used while Phase 3 is
-being migrated. Self-evaluating objects, symbols, and primitive `quote` use
+frame. There is no temporary recursive-dispatch frame kind any more: sub-plan
+03E converted the last special forms and primitives to frame continuations
+and deleted it, along with the recursive `EvaluatePrimitive`, `EvaluatePair`,
+`EvaluateList`, `DoList`, `EvaluateSetq`, `EvaluateSet` and
+`EvaluateNumericEqual` helpers it was the last caller of. Self-evaluating
+objects, symbols, and primitive `quote` use
 the frame loop directly, as does computed call-head resolution: a call whose
 head is not a symbol switches its frame to a call-head continuation, pushes
 the head expression on the frame stack, and resumes when the head's value is
@@ -192,13 +196,17 @@ transition: once the argument list is complete and the callable is a lambda,
 ordinary allocating, non-evaluating helper -- it deliberately does not become
 a frame kind -- and the frame then becomes a sequential-body frame that
 evaluates the body forms one at a time, charging the same one step before
-every body form and every parameter walk `DoList` and `ArgsToEnv` charged,
-and pushing each form as a sub-expression frame. The body frame owns its
-environment, and a body form's `let` is handed a pointer to it (the `bind`
-field of the pushed frame), so a `let` in a lambda body extends the
-environment the following body forms see exactly as the recursive `DoList`
-`&env` out-parameter did -- the one piece of `let`/`newenv` threading that
-works today; `let` itself stays on the temporary recursive path until 03E.
+every body form and every parameter walk the old recursive `DoList` and
+`ArgsToEnv` charged, and pushing each form as a sub-expression frame. The
+body frame owns its environment, and a body form's `let` is handed a
+pointer to it (the `bind` field of the pushed frame), so a `let` in a
+lambda body extends the environment the following body forms see exactly as
+the old recursive `DoList`'s `&env` out-parameter did -- now `FeFrameLet`'s
+own job (03E), which writes into `*frame->bind` once its value form's
+delivery arrives, or (when `bind` is `NULL` -- a `let` used somewhere with
+no enclosing sequence to extend, such as the untaken shape of an `if`'s
+`bind=NULL` branch) never evaluates the value form at all, exactly as the
+old recursive arm's `if (newenv) { ... }` did.
 A pure call chain through lambda bodies therefore stops consuming C stack
 too, with each level's nested call a sub-expression frame in the same
 evaluator run. A macro call is likewise two frame transitions: `ArgsToEnv`
@@ -213,22 +221,117 @@ tail call that holds the logical depth across the expansion. That makes the
 physical frame wall, not C recursion, what stops a macro whose expansion is
 another macro call, and it keeps the expansion off the call site and out of
 the macro's own backtrace frame, exactly as the recursive arm did.
-Primitives that evaluate their operands (`list`, `set`, `=`, and the
-arithmetic/comparison forms) keep using `EvaluateList` for this slice.
-`DoList` remains for the primitive/special-form bodies (`do`, `if`,
-`while`) and cleanup paths 03E still owns. A native call is the one
-remaining ordinary callable: once the argument frame has reordered the
+A native call is the one remaining ordinary callable that is not a Lisp
+special form or primitive: once the argument frame has reordered the
 evaluated argument list, the frame switches to `FeFrameNative` and the run
 loop invokes the `FeNativeFn` synchronously from that explicit state -- the
 existing public signature unchanged, and no per-native `setjmp` (the
 enclosing `RunEvaluation` barrier is the only one in effect). The
 `native_reentry_depth` check wraps that invocation, so a native calling back
-into `FeCall*` is the one C-recursion route this slice deliberately keeps;
-every special form still takes the temporary recursive path.
+into `FeCall*` is the one C-recursion route the frame machine deliberately
+keeps.
+
+Every remaining special form and primitive is a frame continuation, added by
+sub-plan 03E. `EvaluatePrimitive`'s old recursive switch is not one frame
+kind with a generic "evaluate every operand first" policy: the primitives
+disagree, deliberately, about when a raw argument is checked relative to
+when the next one is evaluated (`doc/language.md` and
+`fe/tests/*.err`/`.out` pin the exact answers), so the frame kinds are
+grouped by evaluation *shape*, not by primitive:
+
+- `FeFrameIf`, `FeFrameWhile`, `FeFrameAndOr`, `FeFrameLet`, `FeFrameSetq`
+  and `FeFrameRelay` (`do` and `unwind-protect`'s body) are each their own
+  kind, since each threads a distinct small state machine (`if`'s
+  condition-then-branch, `while`'s fixed condition/body forms and per-pass
+  GC reset, `and`/`or`'s short-circuit, `let`'s `newenv`-or-nothing case,
+  `setq`'s pair-at-a-time assignment, a plain relay of whatever a single
+  pushed sub-frame delivers).
+- `FeFrameUnary` (`assert`/`not`/`atom`/`car`/`cdr`/`boundp`/`makunbound`)
+  and `FeFrameBinary` (`cons`/`setcar`/`setcdr`/`is`/`<`/`<=`) share one kind
+  per arity, dispatching the specific check or side effect by the resolved
+  primitive object at each delivery -- `setcar`/`setcdr` validate their pair
+  operand immediately on the first delivery, before the second is even
+  evaluated, and `boundp`/`makunbound` reject a leftover argument the other
+  unary primitives silently ignore.
+- `FeFrameArith` (`+`/`-`/`*`//`) streams and validates every operand as it
+  arrives, exactly as the old `ARITH_OP` macro's loop did, never batching
+  the whole list first; `FeFramePrint` streams too, but interleaves output
+  and separators with evaluation instead of combining a running total.
+- `FeFrameEvalList` (`list`/`=`/`set`) is the one kind that *does* evaluate
+  its whole raw argument list first, exactly as the old `EvaluateList`-based
+  arms did, before validating or dispatching on any of it.
+
+`PushBodyFrame` pushes a sequential-body frame directly, bypassing the call
+path, for the places a raw form list is evaluated as an implicit body with
+no call involved: `if`'s false branch when it has more than one form,
+`while`'s body each pass, and `do`. It reuses `FeFrameBody`'s own resume
+logic (`ResumeBody`) but is its own kind, `FeFrameImplicitBody`, because it
+completes through a lighter path, `CompleteImplicitBodyFrame`, that does not
+touch `evaluation_depth` or `call_list`: a lambda-body frame's push already
+went through `EnterEvaluationDepth`/the trace-cell link when it was still
+the call form's own `FeFrameExpression`, but this frame's push has no such
+entry to balance. Conflating the two here caused `evaluation_depth` to be
+decremented once too many times per level during this slice's own
+development, unsigned-wrapping it to a huge value and turning the very next
+pair-form entry into a false "evaluation depth limit exceeded" -- worth
+recording because the fix generalizes: any new frame kind pushed by
+something other than `FeFrameExpression`'s own pair-form dispatch must not
+route through `CompletePairFrame`, or its unmatched decrement corrupts the
+counter the same way.
+
+`if`'s false branch is special-cased when it has exactly one form -- the
+common shape, and the one the canonical `(deep N)` chain uses -- to push
+that form directly (`bind = &frame->env`, exactly as the recursive
+`DoList`'s own `&env` out-parameter threaded even for a lone body form)
+rather than through `PushBodyFrame`. This is not an optimization for its
+own sake: 03A/03C/03D's frame-storage Decision derives kg's 1 MiB arena's
+1100-frame capacity from *3* simultaneously-open frames per `(deep N)`
+level (the call, `if`, and the arithmetic form waiting on its second
+operand). A whole extra retained `FeFrameImplicitBody` per level for a
+single form makes that 4, and 1100 physical frames divided by 4 is reached
+at N ~ 274 -- long before the intended logical ceiling at N = 333, the
+exact regression this special case exists to prevent (measured during this
+slice's own development: without it, `(dc 300)` in kg's own
+`test/test_perf.c` -- unaffected by the raised-`max_depth` probe, since it
+uses the ordinary 1 MiB arena and default `max_depth` -- failed with the
+physical-exhaustion route of the same transitional "evaluation depth limit
+exceeded" text). With the special case, `(deep 332)` succeeds and
+`(deep 333)` fails again, exactly the 03A/03C/03D boundary.
+
+`unwind-protect`'s cleanup forms run through a second entry point,
+`RunEvaluationBody`, sharing `RunEvaluation`'s own barrier/`setjmp`
+machinery and the same `RunEvaluationLoop` (factored out so there is exactly
+one loop implementing evaluation, not two that could drift) but pushing a
+body frame instead of an expression frame as its base. `RunOneCleanupEntry`
+calls it once per cleanup entry in place of the old recursive `DoList`'s one
+nested `Evaluate()` call per form -- fewer nested barriers for a
+multi-form cleanup, same `let`-threads-through-forms semantics. It is a
+nested run on the unused suffix of the *same* frame stack, above a saved
+barrier, per 03C's decision: not a second stack, and not a second
+evaluator. A cleanup's own error still bypasses this nested barrier
+entirely, via `cleanup_catch`'s direct `longjmp`, exactly as it bypassed the
+old recursive `DoList`'s implicit one; `RunOneCleanupEntry`'s own restores
+(frame index, `evaluator_catch`, `native_reentry_depth`, `call_list`) are
+what put the context back together afterward, unchanged by this slice.
+
 Embedded frame trace cells preserve the host error callback's semantic
 call trace without allocating after an error. Frame exhaustion keeps the
 existing `evaluation depth limit exceeded` text until the final public-bound
-slice.
+slice (03F).
+
+A raised `max_depth` reveals a second, previously non-binding bound:
+`GcStackSize` (4096) is a fixed-size array field of `FeContext`, never
+carved from the arena. With the single-form `if` special case above, the
+canonical `(deep N)` chain's only remaining GC-stack retention per level is
+the lambda-body wrapper's `FePushGC(env)`/`FePushGC(rest)` pair, not popped
+until the whole activation unwinds. Under the default `max_depth` (1000)
+this is never the binding constraint -- the logical ceiling already fires
+at N = 333, hundreds of levels before the GC-stack bound -- but raising
+`max_depth` far enough (as the full-flatness probe does) reaches it before
+either the physical frame wall or the C stack move at all: empirically,
+`(deep 1021)` succeeds and `(deep 1022)` raises `GC stack overflow`. See
+`fe/test_api.c`'s `TestFullDeepFlatness` for the measurement and 03F's own
+scope for where this should be resolved.
 
 The context's three result/retention roots have separate lifetimes.
 `evaluation_result` holds the latest string or file evaluation result,

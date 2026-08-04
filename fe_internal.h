@@ -209,7 +209,95 @@ typedef enum FeFrameKind {
   // `FeCall`/`FeCallWithOptions` starts a nested run on a fresh C frame and
   // counts as another active level until it returns.
   FeFrameNative,
-  FeFrameTemporaryRecursive,
+  // A sequential body pushed directly, with no preceding pair-form dispatch
+  // of its own: `if`'s false branch, `while`'s body each iteration, `do`,
+  // and a cleanup's unwind forms (`RunEvaluationBody`). Reuses `FeFrameBody`'s
+  // own resume logic (`env`/`rest`/`accumulator`/`callee` mean exactly the
+  // same thing) but completes through a lighter path that does not touch
+  // `evaluation_depth` or `call_list`: unlike a lambda body, whose wrapping
+  // frame *is* the call form's own frame (one `EnterEvaluationDepth` at
+  // entry, one matching decrement at completion, one trace-cell link and
+  // unlink), this frame is an extra child with no entry of its own to
+  // balance, and its `trace_cell` is never linked into `call_list` at all.
+  // Folding it into `FeFrameBody` and telling the two apart some other way
+  // was tried and rejected: the two need different completions, not just
+  // different data, and a frame-kind switch already exists to carry that.
+  FeFrameImplicitBody,
+  // `if`: after the condition (`accumulator` holds it, `&unbound` marking
+  // "not yet known"), evaluates the chosen branch -- the single then-form for
+  // a truthy condition (`bind=NULL`, exactly as the recursive arm's
+  // `EVAL_ARG()` did) or the remaining forms as an implicit body
+  // (`FeFrameBody`, pushed directly) for a falsy one. The second delivery,
+  // from either branch, is the form's result.
+  FeFrameIf,
+  // `while`: `fn` holds the fixed, never-consumed condition form and `rest`
+  // the fixed body forms; `accumulator` distinguishes "awaiting the
+  // condition" (`&unbound`) from "awaiting the body" (anything else). Each
+  // pass pushes the condition as an ordinary sub-expression, then -- if
+  // truthy -- an implicit-body sub-frame (`FeFrameBody`) restored to this
+  // frame's own `gc_checkpoint` between passes, exactly as the recursive
+  // arm's per-call `FeRestoreGC(ctx, n)` was.
+  FeFrameWhile,
+  // `and`/`or`: `fn` holds the resolved primitive object (to tell the two
+  // apart) and `rest` the remaining raw forms. Each delivered value decides
+  // whether to stop (short-circuit) or continue; the last delivered value is
+  // always the result, matching the recursive loop's shared `res` variable.
+  FeFrameAndOr,
+  // `let`: the frame's own `bind` is the `newenv` target the recursive arm
+  // received as an out-parameter (nullptr when `let` is not extending an
+  // enclosing body/base frame's environment, in which case the value form is
+  // never even evaluated -- see the primitive dispatch, which never creates
+  // this frame kind for a nullptr `bind`). `accumulator` holds the raw,
+  // already-checked target symbol; the delivered value form's value extends
+  // `*bind`.
+  FeFrameLet,
+  // `setq`: `rest` holds the remaining raw SYMBOL VALUE pairs, evaluated and
+  // assigned left to right; `accumulator` holds the pending pair's raw target
+  // symbol between validating it and the value form's delivery. Each
+  // assignment goes through `GetBound`, exactly as the recursive arm's did.
+  FeFrameSetq,
+  // A single delivered sub-expression's value is this frame's own result,
+  // with no other bookkeeping: `do`'s implicit body (`FeFrameBody`, pushed
+  // directly) and `unwind-protect`'s body (an ordinary sub-expression,
+  // pushed after the cleanup entry is registered). The two are unrelated in
+  // Lisp but share this one continuation shape.
+  FeFrameRelay,
+  // The primitives that evaluate exactly one operand and finish from it:
+  // `assert`, `not`, `atom`, `car`, `cdr`, `boundp`, `makunbound`. `fn` holds
+  // the resolved primitive object and `rest` the remaining raw forms (still
+  // needed by `boundp`/`makunbound`'s extra-argument check after the operand
+  // is consumed).
+  FeFrameUnary,
+  // The primitives that evaluate exactly two operands in sequence, with a
+  // per-primitive check or side effect at each delivery: `cons`, `setcar`,
+  // `setcdr`, `is`, `<`, `<=`. `fn` holds the resolved primitive object,
+  // `rest` the remaining raw forms, and `accumulator` the checked first
+  // operand (`&unbound` marks "not yet delivered") -- `setcar`/`setcdr`
+  // validate it as a pair immediately on delivery, before the second operand
+  // is even evaluated, exactly as the recursive arm's ordering required.
+  FeFrameBinary,
+  // `+`, `-`, `*`, `/`: streams every operand, validating and combining each
+  // as it arrives -- never batching the whole list first, since the
+  // recursive arm's `ARITH_OP` validated the same way. `fn` holds the
+  // resolved primitive object, `rest` the remaining raw forms, and
+  // `accumulator` the running boxed total (`&unbound` marks "no operand
+  // combined yet").
+  FeFrameArith,
+  // `print`: streams every operand, writing each as it arrives and printing
+  // a separating space only when another operand remains, exactly
+  // interleaved with evaluation as the recursive arm's loop was. `rest`
+  // holds the remaining raw forms.
+  FeFramePrint,
+  // `list`, `=`, `set`: evaluates the complete raw argument list first --
+  // unlike every other kind above, whose ordering is what makes them not
+  // this -- then finishes per primitive: `list` returns it, `=` validates
+  // and compares every element without short-circuiting, and `set` checks
+  // the (already arity-validated) two-element list and assigns through
+  // `FeSet`. `fn` holds the resolved primitive object, `rest` the remaining
+  // raw forms, and `accumulator` the list built so far (reversed into order
+  // once `rest` is exhausted, exactly as `FeFrameCallArguments` reorders its
+  // own).
+  FeFrameEvalList,
 } FeFrameKind;
 
 typedef enum FeCompletion {
@@ -224,18 +312,24 @@ typedef struct FeEvalFrame {
   FeFrameKind kind;
   FeObject* expr;
   FeObject* env;
-  // The `newenv`/`bind` target this frame passes to the temporary recursive
-  // dispatch: NULL for a computed head, an argument sub-frame, or a frame
-  // with no surrounding sequence, and `&env` of the enclosing `FeFrameBody`
-  // for a body form, so a `let` there extends the environment the following
-  // body forms see. It points at a frame's `env` field or at a caller's C
-  // local, never at an arena object, so it is not a GC root and the
-  // collector must not touch it.
+  // The `newenv`/`bind` target this frame's own `FeFrameLet` continuation
+  // (if this frame's raw form turns out to be a `let`) writes into: NULL for
+  // a computed head, an argument sub-frame, or a frame with no surrounding
+  // sequence -- in which case the primitive dispatch never even evaluates
+  // the value form -- and `&env` of the enclosing `FeFrameBody` for a body
+  // form, so a `let` there extends the environment the following body forms
+  // see. It points at a frame's `env` field or at a caller's C local, never
+  // at an arena object, so it is not a GC root and the collector must not
+  // touch it.
   FeObject** bind;
   // The callable an `FeFrameCallArguments` frame is dispatching to, and --
   // after `ArgsToEnv` has captured the closure environment into `env` -- the
   // caller environment a `FeFrameMacro` frame evaluates its expansion in.
-  // Either value must outlive the argument evaluations or the macro body (a
+  // Reused by several primitive-continuation kinds (see `FeFrameWhile`,
+  // `FeFrameAndOr`, `FeFrameUnary`, `FeFrameBinary`, `FeFrameArith`,
+  // `FeFrameEvalList` above) to hold the fixed form or resolved primitive
+  // object their own resumption needs across pushes. Either value must
+  // outlive the argument evaluations or the macro body (a
   // collection may run between them), and the collector marks it with the
   // other fields.
   FeObject* fn;
