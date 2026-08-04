@@ -104,6 +104,14 @@ reachable from an existing interpreter root. Accessors return existing objects
 without pushing them; their lifetime therefore depends on an existing root
 until the caller explicitly calls `FePushGC()`.
 
+`FeGetArenaStats()` (`doc/c-api.md`'s "Arena Statistics") exposes this
+freelist/live-object bookkeeping, the collection count, and the peaks
+described below (GC-stack depth, evaluation depth, cleanup-stack depth) as a
+read-only snapshot. It adds no new counters beyond what the sites already
+below track for their own bookkeeping -- `arena_live_count` is the one
+exception, a running total `MakeObject()`/`CollectGarbage()` maintain solely
+so the accessor can report `free_slots` without walking the freelist.
+
 The `gc_stack` is a fixed 4096-slot array inside `FeContext`, so it also caps
 recursion: a self-recursive Fe function costs several slots per frame, which
 allows roughly 450 frames before `GC stack overflow`. Because the array lives in

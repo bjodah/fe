@@ -59,6 +59,22 @@ calling thread. Distinct contexts have distinct core interpreter state. The
 legacy Fex custom-type names are process-global and are not suitable for
 independent kg-style contexts; see "Legacy Fex Custom Types" below.
 
+## Arena Statistics
+
+`FeGetArenaStats(ctx)` returns an `FeArenaStats` snapshot: total and
+currently-free object slots, the peak live-object count, the collection
+count, the peak GC-stack (root) depth, the peak live evaluation depth, the
+peak cleanup-stack depth, and the count of allocation failures (a
+`MakeObject()` call that still found no free slot after a collection). Every
+field is a counter Fe already maintains at the site that changes it; the call
+itself allocates no object, walks no list, and mutates nothing, so it is safe
+to call at any time, including from an error handler or between collections.
+
+This is a read-only accessor for baselining and margin questions -- "how
+close is the fixed arena to full" -- not a live diagnostic surface: there is
+no Lisp-visible primitive that exposes it, and a host that wants to surface
+it to users owns that decision and its own presentation.
+
 ## Context Userdata And Callbacks
 
 `FeSetUserData()` stores one host pointer in a context, and `FeGetUserData()`

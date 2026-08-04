@@ -296,6 +296,23 @@ struct FeContext {
   bool strict_arity;
   bool error_has_offset;
   char nextchr;
+
+  // Read-only arena/evaluator statistics, exposed by `FeGetArenaStats`.
+  // Every field here is maintained at the one or two existing sites that
+  // already change the value it tracks (`MakeObject`, `CollectGarbage`,
+  // `FePushGC`, `EnterEvaluationDepth`, `PushCleanup`); nothing here reads
+  // back its own state to compute anything, so querying it does not walk
+  // the arena or any list. `arena_live_count` is the only running total;
+  // the rest are high-water marks or event counts, and `free_slots` in
+  // `FeArenaStats` is `object_count - arena_live_count` computed at query
+  // time rather than stored.
+  size_t arena_live_count;
+  size_t arena_peak_live_count;
+  size_t arena_collection_count;
+  size_t arena_peak_gc_stack_depth;
+  size_t arena_peak_evaluation_depth;
+  size_t arena_peak_cleanup_stack_depth;
+  size_t arena_allocation_failures;
 };
 
 typedef struct FeArena {
@@ -389,6 +406,9 @@ static void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
     FeHandleError(ctx, "cleanup stack overflow");
   }
   ctx->cleanup_stack[ctx->cleanup_stack_index++] = entry;
+  if (ctx->cleanup_stack_index > ctx->arena_peak_cleanup_stack_depth) {
+    ctx->arena_peak_cleanup_stack_depth = ctx->cleanup_stack_index;
+  }
 }
 
 // Copies an error message raised while a cleanup entry was itself running
@@ -600,6 +620,9 @@ static void EvaluationStep(FeContext* ctx) {
 // `call_list` to `&nil` -- see the field's comment on `struct FeContext`.
 static void EnterEvaluationDepth(FeContext* ctx) {
   ctx->evaluation_depth++;
+  if (ctx->evaluation_depth > ctx->arena_peak_evaluation_depth) {
+    ctx->arena_peak_evaluation_depth = ctx->evaluation_depth;
+  }
   const size_t depth_limit = ctx->evaluation_depth_limit != 0
                                  ? ctx->evaluation_depth_limit
                                  : DefaultEvaluationDepth;
@@ -657,6 +680,9 @@ void FePushGC(FeContext* ctx, FeObject* obj) {
     FeHandleError(ctx, "GC stack overflow");
   }
   ctx->gc_stack[ctx->gc_stack_index++] = obj;
+  if (ctx->gc_stack_index > ctx->arena_peak_gc_stack_depth) {
+    ctx->arena_peak_gc_stack_depth = ctx->gc_stack_index;
+  }
 }
 
 void FeRestoreGC(FeContext* ctx, size_t index) {
@@ -710,6 +736,7 @@ begin:
 }
 
 static void CollectGarbage(FeContext* ctx) {
+  ctx->arena_collection_count++;
   // Mark:
   for (size_t i = 0; i < ctx->gc_stack_index; i++) {
     FeMark(ctx, ctx->gc_stack[i]);
@@ -732,6 +759,7 @@ static void CollectGarbage(FeContext* ctx) {
       SetType(obj, FeTFree);
       CDR(obj) = ctx->free_list;
       ctx->free_list = obj;
+      ctx->arena_live_count--;
     } else {
       TAG(obj) &= ~GcMarkBit;
     }
@@ -808,12 +836,17 @@ static FeObject* MakeObject(FeContext* ctx) {
   if (FeIsNil(ctx->free_list)) {
     CollectGarbage(ctx);
     if (FeIsNil(ctx->free_list)) {
+      ctx->arena_allocation_failures++;
       FeHandleError(ctx, "out of memory");
     }
   }
   // Get object from free_list and push it onto the GC stack:
   FeObject* obj = ctx->free_list;
   ctx->free_list = CDR(obj);
+  ctx->arena_live_count++;
+  if (ctx->arena_live_count > ctx->arena_peak_live_count) {
+    ctx->arena_peak_live_count = ctx->arena_live_count;
+  }
   FePushGC(ctx, obj);
   return obj;
 }
@@ -2212,6 +2245,19 @@ size_t FeMinimumArenaSize(void) {
 
 size_t FeArenaAlignment(void) {
   return alignof(FeArena);
+}
+
+FeArenaStats FeGetArenaStats(const FeContext* ctx) {
+  return (FeArenaStats){
+      .total_slots = ctx->object_count,
+      .free_slots = ctx->object_count - ctx->arena_live_count,
+      .peak_live_objects = ctx->arena_peak_live_count,
+      .collection_count = ctx->arena_collection_count,
+      .peak_gc_stack_depth = ctx->arena_peak_gc_stack_depth,
+      .peak_evaluation_depth = ctx->arena_peak_evaluation_depth,
+      .peak_cleanup_stack_depth = ctx->arena_peak_cleanup_stack_depth,
+      .allocation_failures = ctx->arena_allocation_failures,
+  };
 }
 
 FeContext* FeOpenContext(void* arena, size_t size) {

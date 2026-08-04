@@ -92,6 +92,35 @@ extern FeObject nil;
 
 [[nodiscard]] size_t FeMinimumArenaSize(void);
 [[nodiscard]] size_t FeArenaAlignment(void);
+
+// Read-only counters over state Fe already tracks at the sites that change
+// it (`MakeObject`, `CollectGarbage`, `FePushGC`, the evaluation-depth and
+// cleanup-stack pushes) -- not a live diagnostic surface, and not one this
+// call itself grows: `FeGetArenaStats` allocates no Fe object, walks no
+// list, and does not mutate `ctx`. It exists to answer "how close is the
+// arena to full" questions before and during embedding changes that add to
+// every allocation path.
+typedef struct FeArenaStats {
+  size_t
+      total_slots;    // `ctx`'s fixed object capacity (see FeMinimumArenaSize).
+  size_t free_slots;  // total_slots minus objects currently live.
+  size_t peak_live_objects;      // high-water mark of live objects since
+                                 // FeOpenContext.
+  size_t collection_count;       // CollectGarbage() calls so far.
+  size_t peak_gc_stack_depth;    // high-water mark of the FePushGC root stack
+                                 // (bound: GcStackSize, 4096).
+  size_t peak_evaluation_depth;  // high-water mark of live Evaluate() recursion
+                                 // (bound: FeEvalOptions.max_depth, default
+                                 // DefaultEvaluationDepth).
+  size_t peak_cleanup_stack_depth;  // high-water mark of the
+                                    // unwind-protect/FeProtectWithCleanup
+                                    // registry (bound: CleanupStackSize).
+  size_t allocation_failures;  // MakeObject() calls that still found no free
+                               // slot after a collection.
+} FeArenaStats;
+
+[[nodiscard]] FeArenaStats FeGetArenaStats(const FeContext* ctx);
+
 [[nodiscard]] FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);
 void FeSetUserData(FeContext* ctx, void* userdata);

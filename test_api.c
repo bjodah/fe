@@ -1759,6 +1759,103 @@ static bool TestEvaluationDepth(void) {
   return true;
 }
 
+// `FeGetArenaStats` (sub-plan 00D of kg's Emacs-subset program): a
+// read-only accessor over counters `MakeObject`, `CollectGarbage`,
+// `FePushGC`, `EnterEvaluationDepth` and `PushCleanup` already maintain.
+// This exercises that querying it neither allocates nor mutates state,
+// that each peak moves off zero the first time its own event happens, and
+// that arena exhaustion is directly observable through it.
+static bool TestArenaStats(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // `FeOpenContext` already registered `t`, every primitive and the math
+  // natives through the same `MakeObject` any other allocation uses, so
+  // the baseline is not zero.
+  const FeArenaStats initial = FeGetArenaStats(context);
+  CHECK(initial.total_slots > 0);
+  CHECK(initial.free_slots > 0);
+  CHECK(initial.free_slots < initial.total_slots);
+  CHECK(initial.peak_live_objects > 0);
+  CHECK(initial.allocation_failures == 0);
+
+  // Querying twice with nothing evaluated in between changes nothing: the
+  // accessor allocates no Fe object, walks no list, and mutates no
+  // counter.
+  const FeArenaStats requeried = FeGetArenaStats(context);
+  CHECK(requeried.total_slots == initial.total_slots);
+  CHECK(requeried.free_slots == initial.free_slots);
+  CHECK(requeried.peak_live_objects == initial.peak_live_objects);
+  CHECK(requeried.collection_count == initial.collection_count);
+  CHECK(requeried.peak_gc_stack_depth == initial.peak_gc_stack_depth);
+  CHECK(requeried.peak_evaluation_depth == initial.peak_evaluation_depth);
+  CHECK(requeried.peak_cleanup_stack_depth == initial.peak_cleanup_stack_depth);
+
+  // Every allocation pushes onto the GC stack (`FePushGC`), and every pair
+  // form runs through `EnterEvaluationDepth`, so evaluating anything moves
+  // both peaks off zero.
+  static const char one_cons[] = "(cons 1 2)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "cons.fe", one_cons, sizeof(one_cons) - 1),
+      "(1 . 2)"));
+  const FeArenaStats after_cons = FeGetArenaStats(context);
+  CHECK(after_cons.peak_gc_stack_depth > 0);
+  CHECK(after_cons.peak_evaluation_depth > 0);
+  CHECK(after_cons.peak_live_objects >= initial.peak_live_objects);
+  CHECK(after_cons.total_slots == initial.total_slots);
+
+  // `unwind-protect` registers a cleanup, moving the cleanup-stack peak
+  // off zero the same way.
+  static const char cleanup[] = "(unwind-protect 1 2)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "cleanup.fe", cleanup, sizeof(cleanup) - 1),
+      "1"));
+  CHECK(FeGetArenaStats(context).peak_cleanup_stack_depth > 0);
+
+  FeCloseContext(context);
+
+  // A deliberately exact-fit arena -- no slots spare once the core
+  // primitives are registered -- turns the very first user allocation
+  // into an out-of-memory failure, so `allocation_failures` and
+  // `collection_count` (MakeObject always tries a collection before
+  // giving up, even with nothing collectible) are both directly
+  // observable, and the context is confirmed still queryable afterward.
+  TestArena tight_storage;
+  const size_t tight_size = FeMinimumArenaSize();
+  CHECK(tight_size <= sizeof(tight_storage.bytes));
+  FeContext* tight = FeOpenContext(tight_storage.bytes, tight_size);
+  CHECK(tight != nullptr);
+  // `HandleError` unconditionally compares against `expected_message`, so
+  // this needs a non-null placeholder even though this test does not
+  // check `tight_state.called`: what it looks for is that the jump was
+  // taken and the counters moved, not the exact message text.
+  ErrorState tight_state = {.context = tight,
+                            .expected_message = "oom.fe: out of memory"};
+  FeSetUserData(tight, &tight_state);
+  FeSetErrorFn(tight, HandleError);
+  CHECK(FeGetArenaStats(tight).free_slots == 0);
+  CHECK(FeGetArenaStats(tight).allocation_failures == 0);
+
+  static const char over_budget[] = "(cons 1 2)";
+  if (setjmp(tight_state.jump) == 0) {
+    (void)FeEvaluateString(tight, "oom.fe", over_budget,
+                           sizeof(over_budget) - 1);
+    CHECK(false);
+  }
+  const FeArenaStats after_oom = FeGetArenaStats(tight);
+  CHECK(after_oom.allocation_failures == 1);
+  CHECK(after_oom.collection_count >= 1);
+  FeCloseContext(tight);
+
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -1768,7 +1865,7 @@ int main(void) {
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestUnwindHostAPI() &&
                  TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestEvaluationDepth()
+                 TestEvaluationDepth() && TestArenaStats()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
