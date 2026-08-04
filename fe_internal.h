@@ -146,6 +146,43 @@ typedef struct FeCleanupEntry {
   } as;
 } FeCleanupEntry;
 
+// The evaluator owns this stack, but the storage is carved out of the host
+// arena by fe.c.  Keep the frame deliberately plain: every pointer is an
+// explicit GC-rooting decision in FeMarkEvaluatorRoots().
+typedef enum FeFrameKind {
+  FeFrameExpression,
+  FeFrameTemporaryRecursive,
+} FeFrameKind;
+
+typedef enum FeCompletion {
+  FeCompletionNormal,
+  FeCompletionError,
+  FeCompletionThrow,
+  FeCompletionQuit,
+  FeCompletionBudget,
+} FeCompletion;
+
+typedef struct FeEvalFrame {
+  FeFrameKind kind;
+  FeObject* expr;
+  FeObject* env;
+  FeObject* rest;
+  FeObject* accumulator;
+  FeObject* callee;
+  size_t gc_checkpoint;
+  size_t cleanup_checkpoint;
+  FeObject trace_cell;
+} FeEvalFrame;
+
+enum {
+  MinFrameCapacity = 64,
+  CleanupFrameReserve = 32,
+  FrameArenaPercent = 8,
+};
+
+static_assert(sizeof(FeEvalFrame) == 80);
+static_assert(alignof(FeEvalFrame) == alignof(FeObject));
+
 // The value of a symbol that has never been assigned. Like `nil` it is a
 // static object outside the arena, so the collector neither sweeps it nor has
 // to mark it, and `FeMark` treats it as a leaf. It is never returned to Lisp or
@@ -196,6 +233,9 @@ struct FeContext {
   FeObject* call_result;
   FeObject* root_list;
   FeObject* t;
+  FeEvalFrame* frame_stack;
+  size_t frame_stack_capacity;
+  size_t frame_stack_index;
   FeInterruptFn* evaluation_interrupt;
   void* evaluation_userdata;
   size_t evaluation_steps;
@@ -230,6 +270,13 @@ struct FeContext {
   // cleanup stack.
   jmp_buf* cleanup_catch;
   char cleanup_error_message[256];
+  // An evaluator barrier owns the automatic jmp_buf it points at. It is
+  // installed only for the duration of RunEvaluation(), and errors copy
+  // their text and trace below before jumping to it.
+  jmp_buf* evaluator_catch;
+  FeObject* evaluator_error_trace;
+  FeCompletion completion;
+  char evaluator_error_message[1024];
   bool evaluation_active;
   bool evaluation_limited;
   bool strict_arity;
@@ -263,5 +310,6 @@ struct FeContext {
 bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options);
 void EndEvaluationControl(FeContext* ctx, bool owns_control);
 void EvaluationStep(FeContext* ctx);
+void FeMarkEvaluatorRoots(FeContext* ctx);
 
 #endif

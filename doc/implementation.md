@@ -4,11 +4,13 @@
 
 The implementation uses a fixed-size region of memory supplied by the caller
 when creating the `FeContext`. The implementation stores the context at the
-start of this memory region and uses the rest of the region to store
-`FeObject`s. The arena must satisfy `alignof(FeContext)`; static assertions
-ensure that the object region is then also aligned. Fe neither reallocates nor
-frees this storage; its address, size, and exclusive lifetime are controlled by
-the caller through `FeCloseContext()`.
+start of this memory region, then an evaluator-frame region, then the
+`FeObject` region. The frame region has a 64-frame floor, a 32-frame cleanup
+reserve, and receives 8% of bytes beyond the minimum; the remaining bytes
+become object slots. The arena must satisfy `alignof(FeContext)`; static
+assertions ensure that both following regions are aligned. Fe neither
+reallocates nor frees this storage; its address, size, and exclusive lifetime
+are controlled by the caller through `FeCloseContext()`.
 
 `FeMinimumArenaSize()` derives its result from the private context and object
 layouts and from the objects required to intern and bind every core primitive.
@@ -127,6 +129,14 @@ every pair-form evaluation regardless of whether any `*WithOptions()` control
 is active. See `doc/c-api.md`'s "Bounding Recursion". `evaluation_depth` is
 reset to 0 by `FeHandleError()`, the same way `call_list` is, since a
 `longjmp` skips every pending decrement.
+
+Evaluation has one context-owned frame stack. The collector marks every live
+frame, including the temporary recursive-dispatch frame used while Phase 3 is
+being migrated. Self-evaluating objects, symbols, and primitive `quote` use
+the frame loop directly; other forms still take the temporary path. Embedded
+frame trace cells preserve the host error callback's semantic call trace
+without allocating after an error. Frame exhaustion keeps the existing
+`evaluation depth limit exceeded` text until the final public-bound slice.
 
 The context's three result/retention roots have separate lifetimes.
 `evaluation_result` holds the latest string or file evaluation result,

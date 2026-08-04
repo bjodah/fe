@@ -42,9 +42,10 @@ typedef struct ErrorState {
   bool stack_was_nil;
 } ErrorState;
 
-// Must stay above `FeMinimumArenaSize()`, which is dominated by the
-// context's 4096-slot GC stack.
-enum { TestArenaSize = 64 * 1024 };
+// The frame partition must leave the existing 200-level C-stack probe below
+// its physical frame wall while retaining TestWriter's 400-cell list.
+// TestContextCreation still checks every byte around the true minimum.
+enum { TestArenaSize = 1024 * 1024 };
 
 typedef struct TestArena {
   alignas(max_align_t) unsigned char bytes[TestArenaSize];
@@ -1978,6 +1979,80 @@ static bool TestEvaluationDepth(void) {
   return true;
 }
 
+// Sub-plan 03C's frame substrate keeps the old evaluator's observable
+// language behaviour while making live frames explicit GC roots. These cases
+// exercise the converted leaves, a collection through a temporary frame, and
+// the arena-derived physical frame bound independently of max_depth.
+static bool TestFrameSubstrate(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // quote is a value in Fe's one namespace, not reader syntax: rebinding it
+  // makes its argument evaluate. Its primitive value still takes exactly one
+  // raw argument and deliberately ignores extras.
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "quote.fe", "(quote 1 2)",
+                                    sizeof("(quote 1 2)") - 1),
+                   "1"));
+  static const char quote_rebound[] = "(setq quote (fn (x) x)) (quote (+ 1 2))";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "quote.fe", quote_rebound,
+                                    sizeof(quote_rebound) - 1),
+                   "3"));
+
+  // The outer `do` frame is the only reference to its pending forms while
+  // the loop repeatedly allocates and collects. A resumed final lookup proves
+  // the temporary-dispatch frame was marked, rather than merely surviving by
+  // accident on the GC stack.
+  TestArena gc_arena;
+  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  FeContext* gc_context = FeOpenContext(gc_arena.bytes, gc_size);
+  CHECK(gc_context != nullptr);
+  ErrorState gc_state = {.context = gc_context};
+  FeSetUserData(gc_context, &gc_state);
+  FeSetErrorFn(gc_context, HandleError);
+  const size_t collections = FeGetArenaStats(gc_context).collection_count;
+  static const char collecting[] =
+      "(do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n)";
+  CHECK(IsRendered(gc_context,
+                   FeEvaluateString(gc_context, "frame-gc.fe", collecting,
+                                    sizeof(collecting) - 1),
+                   "2000"));
+  CHECK(FeGetArenaStats(gc_context).collection_count > collections);
+  FeCloseContext(gc_context);
+
+  // With max_depth deliberately above the small arena's physical capacity,
+  // this is the frame-push wall, not the compatibility depth counter. The
+  // old public text remains intentional until 03F, and the same context must
+  // remain usable after the barrier handles it.
+  TestArena frame_arena;
+  FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
+  CHECK(frame_context != nullptr);
+  ErrorState frame_state = {.context = frame_context};
+  FeSetUserData(frame_context, &frame_state);
+  FeSetErrorFn(frame_context, HandleError);
+  static const char recurse[] =
+      "(setq recurse (fn (x) (if (<= x 0) 0 (recurse (- x 1))))) "
+      "(recurse 100)";
+  const FeEvalOptions physical_only = {.max_depth = 10000};
+  CHECK(ExpectEvaluationOptionsError(
+      frame_context, &frame_state, "frames.fe", recurse, sizeof(recurse) - 1,
+      &physical_only, "frames.fe: evaluation depth limit exceeded"));
+  CHECK(!frame_state.stack_was_nil);
+  CHECK(IsRendered(frame_context,
+                   FeEvaluateString(frame_context, "recovered.fe", "(+ 1 2)",
+                                    sizeof("(+ 1 2)") - 1),
+                   "3"));
+  FeCloseContext(frame_context);
+
+  FeCloseContext(context);
+  return true;
+}
+
 // `FeGetArenaStats` (sub-plan 00D of kg's Emacs-subset program): a
 // read-only accessor over counters `MakeObject`, `CollectGarbage`,
 // `FePushGC`, `EnterEvaluationDepth` and `PushCleanup` already maintain.
@@ -2176,8 +2251,8 @@ int main(void) {
                  TestParameterLists() && TestBinding() && TestSetqAndSet() &&
                  TestNumericEqual() && TestUnwindHostAPI() &&
                  TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestEvaluationDepth() && TestArenaStats() &&
-                 TestEvaluationStackProbe()
+                 TestEvaluationDepth() && TestFrameSubstrate() &&
+                 TestArenaStats() && TestEvaluationStackProbe()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

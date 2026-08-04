@@ -10,6 +10,7 @@
 // fe.c, which keeps the object model, garbage collector, reader and writer.
 // Both translation units share the private, self-contained fe_internal.h.
 
+#include <assert.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +77,9 @@ static void SaveCleanupErrorMessage(FeContext* ctx, const char* msg) {
 static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
   jmp_buf local_jump;
   jmp_buf* const saved_catch = ctx->cleanup_catch;
+  jmp_buf* const saved_evaluator_catch = ctx->evaluator_catch;
+  const size_t saved_frame_stack_index = ctx->frame_stack_index;
+  FeObject* const saved_call_list = ctx->call_list;
   ctx->cleanup_catch = &local_jump;
   if (setjmp(local_jump) == 0) {
     if (entry->kind == FeCleanupNative) {
@@ -88,6 +92,12 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
             ctx->cleanup_error_message);
   }
   ctx->cleanup_catch = saved_catch;
+  // A cleanup error longjmps directly here, bypassing the nested
+  // RunEvaluation() that installed its own barrier. Do not leave that
+  // automatic jmp_buf, its frames, or its trace link live in the context.
+  ctx->evaluator_catch = saved_evaluator_catch;
+  ctx->frame_stack_index = saved_frame_stack_index;
+  ctx->call_list = saved_call_list;
 }
 
 // Drains cleanup entries down to (but not including) `target`, most recently
@@ -155,6 +165,22 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
                                     .as.native = {.fn = fn, .data = data}});
 }
 
+[[noreturn]] static void TransferEvaluationError(FeContext* ctx,
+                                                 const char* msg,
+                                                 FeObject* trace) {
+  if (ctx->evaluator_catch == nullptr) {
+    if (ctx->error_fn != nullptr) {
+      ctx->error_fn(ctx, msg, trace);
+    }
+    abort();
+  }
+  const size_t length = strlen(msg);
+  assert(length < sizeof(ctx->evaluator_error_message));
+  memcpy(ctx->evaluator_error_message, msg, length + 1);
+  ctx->evaluator_error_trace = trace;
+  longjmp(*ctx->evaluator_catch, 1);
+}
+
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
   FeObject* cl = ctx->call_list;
   const char* label = ctx->error_label;
@@ -170,7 +196,8 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
       .step_limit = ctx->cleanup_step_limit,
   };
   char message[1024];
-  // reset context state:
+  // Reset ambient reader/evaluation state before either sort of cleanup runs.
+  // The old trace stays in `cl`; a cleanup starts with a fresh visible trace.
   ctx->call_list = &nil;
   ctx->error_label = nullptr;
   ctx->error_has_offset = false;
@@ -203,14 +230,15 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     longjmp(*ctx->cleanup_catch, 1);
   }
 
+  if (ctx->evaluator_catch != nullptr) {
+    ctx->completion = FeCompletionError;
+  }
+
   // A fresh, bounded budget, not the exhausted or cancelled one the body
   // was running under and not no budget at all: see `RunCleanupsAfterError`.
   RunCleanupsAfterError(ctx, &cleanup_budget);
 
-  if (ctx->error_fn) {
-    ctx->error_fn(ctx, msg, cl);
-  }
-  abort();
+  TransferEvaluationError(ctx, msg, cl);
 }
 
 bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
@@ -660,39 +688,12 @@ static FeObject* EvaluateHead(FeContext* ctx, FeObject* head, FeObject* env) {
   return value;
 }
 
-static FeObject* Evaluate(FeContext* ctx,
-                          FeObject* obj,
-                          FeObject* env,
-                          FeObject** newenv) {
-  EvaluationStep(ctx);
-  if (FeGetType(obj) == FeTSymbol) {
-    FeObject* value = CDR(GetBound(ctx, obj, env));
-    if (value == &unbound) {
-      HandleVoidSymbol(ctx, obj, "void-variable");
-    }
-    return value;
-  }
-  if (FeGetType(obj) != FeTPair) {
-    return obj;
-  }
-
-  FeObject cl;
-  CAR(&cl) = obj;
-  CDR(&cl) = ctx->call_list;
-  // This stack link is restored below or reset by FeHandleError before longjmp.
-  // cppcheck-suppress autoVariables
-  ctx->call_list = &cl;
-  EnterEvaluationDepth(ctx);
-
-  const size_t gc = FeSaveGC(ctx);
-  // Every cleanup entry pushed while this call form is being evaluated --
-  // by a nested `unwind-protect`, or by a native calling
-  // `FeProtectWithCleanup` -- is drained back to this checkpoint below on an
-  // ordinary return, the same way `gc` bounds the GC stack. An error drains
-  // the whole registry instead, from `FeHandleError`, since nothing between
-  // here and there runs on that path.
-  const size_t cleanup = ctx->cleanup_stack_index;
-  FeObject* fn = EvaluateHead(ctx, CAR(obj), env);
+static FeObject* EvaluatePair(FeContext* ctx,
+                              FeObject* obj,
+                              FeObject* env,
+                              FeObject** newenv,
+                              FeObject* fn,
+                              FeEvalFrame* frame) {
   FeObject* arg = CDR(obj);
   FeObject* res = &nil;
   FeObject* va;
@@ -722,10 +723,10 @@ static FeObject* Evaluate(FeContext* ctx,
       // atom the macro returned, and `nil` and interned symbols are compared by
       // address.
       vb = DoList(ctx, CDR(vb), ArgsToEnv(ctx, CAR(vb), arg, CAR(va)));
-      RunCleanupsDownTo(ctx, cleanup);
-      FeRestoreGC(ctx, gc);
+      RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+      FeRestoreGC(ctx, frame->gc_checkpoint);
       FePushGC(ctx, vb);  // Nothing else refers to the expansion now.
-      ctx->call_list = CDR(&cl);
+      ctx->call_list = CDR(&frame->trace_cell);
       // Evaluating the expansion is a tail call in Fe but not in C: the
       // sanitizer lanes build with `-fno-optimize-sibling-calls`, and those
       // are exactly the builds where the C stack is the binding constraint,
@@ -735,7 +736,6 @@ static FeObject* Evaluate(FeContext* ctx,
       // stack without the counter ever moving, and it crashed with a
       // MemorySanitizer stack-overflow instead of raising.
       res = Evaluate(ctx, vb, env, NULL);
-      ctx->evaluation_depth--;
       return res;
 
     case FeTPair:
@@ -754,12 +754,110 @@ static FeObject* Evaluate(FeContext* ctx,
       abort();
   }
 
-  RunCleanupsDownTo(ctx, cleanup);
-  FeRestoreGC(ctx, gc);
-  FePushGC(ctx, res);
-  ctx->call_list = CDR(&cl);
-  ctx->evaluation_depth--;
   return res;
+}
+
+static void PushEvaluationFrame(FeContext* ctx, FeObject* obj, FeObject* env) {
+  const size_t reserve =
+      ctx->completion == FeCompletionNormal ? 0 : CleanupFrameReserve;
+  if (ctx->frame_stack_index == ctx->frame_stack_capacity + reserve) {
+    FeHandleError(ctx, "evaluation depth limit exceeded");
+  }
+  FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index++];
+  *frame = (FeEvalFrame){.kind = FeFrameExpression,
+                         .expr = obj,
+                         .env = env,
+                         .rest = &nil,
+                         .accumulator = &nil,
+                         .callee = &nil};
+}
+
+void FeMarkEvaluatorRoots(FeContext* ctx) {
+  for (size_t i = 0; i < ctx->frame_stack_index; i++) {
+    const FeEvalFrame* frame = &ctx->frame_stack[i];
+    switch (frame->kind) {
+      case FeFrameExpression:
+      case FeFrameTemporaryRecursive:
+        FeMark(ctx, frame->expr);
+        FeMark(ctx, frame->env);
+        FeMark(ctx, frame->rest);
+        FeMark(ctx, frame->accumulator);
+        FeMark(ctx, frame->callee);
+        break;
+    }
+  }
+}
+
+static FeObject* RunEvaluation(FeContext* ctx,
+                               FeObject* obj,
+                               FeObject* env,
+                               FeObject** bind) {
+  const size_t base = ctx->frame_stack_index;
+  jmp_buf jump;
+  jmp_buf* const saved_catch = ctx->evaluator_catch;
+  ctx->evaluator_catch = &jump;
+  if (saved_catch == nullptr) {
+    ctx->completion = FeCompletionNormal;
+  }
+
+  if (setjmp(jump) != 0) {
+    ctx->frame_stack_index = base;
+    ctx->call_list = &nil;
+    ctx->evaluator_catch = saved_catch;
+    if (saved_catch != nullptr) {
+      longjmp(*saved_catch, 1);
+    }
+    if (ctx->error_fn != nullptr) {
+      ctx->error_fn(ctx, ctx->evaluator_error_message,
+                    ctx->evaluator_error_trace);
+    }
+    abort();
+  }
+
+  PushEvaluationFrame(ctx, obj, env);
+  FeEvalFrame* frame = &ctx->frame_stack[base];
+  FeObject* result;
+  if (FeGetType(obj) == FeTSymbol) {
+    EvaluationStep(ctx);
+    result = CDR(GetBound(ctx, obj, env));
+    if (result == &unbound) {
+      HandleVoidSymbol(ctx, obj, "void-variable");
+    }
+  } else if (FeGetType(obj) != FeTPair) {
+    EvaluationStep(ctx);
+    result = obj;
+  } else {
+    EvaluationStep(ctx);
+    CAR(&frame->trace_cell) = obj;
+    CDR(&frame->trace_cell) = ctx->call_list;
+    ctx->call_list = &frame->trace_cell;
+    EnterEvaluationDepth(ctx);
+    frame->gc_checkpoint = FeSaveGC(ctx);
+    frame->cleanup_checkpoint = ctx->cleanup_stack_index;
+    FeObject* fn = EvaluateHead(ctx, CAR(obj), env);
+    if (FeGetType(fn) == FeTPrimitive && PRIM(fn) == PQuote) {
+      FeObject* arguments = CDR(obj);
+      result = FeGetNextArgument(ctx, &arguments);
+    } else {
+      frame->kind = FeFrameTemporaryRecursive;
+      result = EvaluatePair(ctx, obj, env, bind, fn, frame);
+    }
+    RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    FePushGC(ctx, result);
+    ctx->call_list = CDR(&frame->trace_cell);
+    ctx->evaluation_depth--;
+  }
+  ctx->frame_stack_index = base;
+  ctx->evaluator_catch = saved_catch;
+  return result;
+}
+
+static FeObject* Evaluate(FeContext* ctx,
+                          FeObject* obj,
+                          FeObject* env,
+                          FeObject** bind) {
+  return RunEvaluation(ctx, obj, env, bind);
 }
 
 FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {

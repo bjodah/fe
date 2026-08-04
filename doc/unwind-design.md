@@ -3,7 +3,12 @@
 Status: **`unwind-protect` and its C-side counterpart are implemented**
 (`FeProtectWithCleanup()`, `doc/c-api.md`'s "Unwinding And Cleanup",
 `doc/implementation.md`'s section of the same name, `doc/language.md`'s
-`(unwind-protect ...)`). `condition-case`, `catch`/`throw`, distinct
+`(unwind-protect ...)`). The evaluator has private normal/error/throw/quit/
+budget completion kinds and a context-owned frame stack; only normal and
+ordinary error are reachable today. An error under an evaluator barrier is
+copied into context storage, drains the current cleanup registry, then reaches
+the outer public boundary exactly once. `condition-case`, `catch`/`throw`,
+distinct
 completion kinds, and the token-based rollback-on-error registry sketched
 below for `MakeFile()`-shaped problems are still design only. The rest of
 this document is the original design; where the shipped implementation took

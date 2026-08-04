@@ -125,7 +125,10 @@ static size_t ReadEvaluatePrint(FeContext* context, FILE* input, size_t gc) {
 
 int main(int count, char* arguments[]) {
   // Parse command line options:
-  size_t arena_size = 64 * 1024;
+  // The evaluator's frame region shares this arena with objects. Keep the
+  // standalone interpreter comfortably above the minimal embedding arena so
+  // its shipped recursive examples do not hit the transitional frame wall.
+  size_t arena_size = 1024 * 1024;
   bool debugging = false;
   bool program_literal = false;
   bool interactive = false;

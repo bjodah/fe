@@ -114,11 +114,11 @@ void SetType(FeObject* o, FeType type) {
 
 typedef struct FeArena {
   FeContext context;
-  FeObject objects[];
 } FeArena;
 
-static_assert(offsetof(FeArena, objects) == sizeof(FeContext));
+static_assert(sizeof(FeArena) == sizeof(FeContext));
 static_assert(alignof(FeArena) >= alignof(FeContext));
+static_assert(alignof(FeArena) >= alignof(FeEvalFrame));
 static_assert(alignof(FeArena) >= alignof(FeObject));
 static_assert(FeTFex0 > FeTPtr, "FeTFex* must be > FeTPtr");
 
@@ -278,6 +278,16 @@ begin:
   }
 }
 
+static void MarkCleanupRoots(FeContext* ctx) {
+  for (size_t i = 0; i < ctx->cleanup_stack_index; i++) {
+    const FeCleanupEntry* entry = &ctx->cleanup_stack[i];
+    if (entry->kind == FeCleanupLisp) {
+      FeMark(ctx, entry->as.lisp.forms);
+      FeMark(ctx, entry->as.lisp.env);
+    }
+  }
+}
+
 static void CollectGarbage(FeContext* ctx) {
   ctx->arena_collection_count++;
   // Mark:
@@ -288,6 +298,8 @@ static void CollectGarbage(FeContext* ctx) {
   FeMark(ctx, ctx->evaluation_result);
   FeMark(ctx, ctx->call_result);
   FeMark(ctx, ctx->root_list);
+  FeMarkEvaluatorRoots(ctx);
+  MarkCleanupRoots(ctx);
 
   // Sweep and unmark:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -1343,8 +1355,22 @@ static size_t GetCoreObjectCount(void) {
   return count;
 }
 
+static size_t GetMinimumArenaSize(void) {
+  size_t frames = 0;
+  size_t objects = 0;
+  size_t minimum = 0;
+  const bool overflow =
+      ckd_add(&frames, MinFrameCapacity, CleanupFrameReserve) ||
+      ckd_mul(&frames, frames, sizeof(FeEvalFrame)) ||
+      ckd_mul(&objects, GetCoreObjectCount(), sizeof(FeObject)) ||
+      ckd_add(&minimum, sizeof(FeArena), frames) ||
+      ckd_add(&minimum, minimum, objects);
+  assert(!overflow);
+  return minimum;
+}
+
 size_t FeMinimumArenaSize(void) {
-  return sizeof(FeArena) + GetCoreObjectCount() * sizeof(FeObject);
+  return GetMinimumArenaSize();
 }
 
 size_t FeArenaAlignment(void) {
@@ -1364,7 +1390,40 @@ FeArenaStats FeGetArenaStats(const FeContext* ctx) {
   };
 }
 
-FeContext* FeOpenContext(void* arena, size_t size) {
+static bool InitializeArenaLayout(FeContext* ctx, void* arena, size_t size) {
+  const size_t minimum = GetMinimumArenaSize();
+  const size_t remainder = size - minimum;
+  const size_t frame_bonus_bytes = (remainder / 100) * FrameArenaPercent +
+                                   (remainder % 100) * FrameArenaPercent / 100;
+  size_t frame_capacity = 0;
+  size_t frame_storage_capacity = 0;
+  size_t frame_bytes = 0;
+  size_t object_count = 0;
+  bool layout_overflow =
+      ckd_add(&frame_capacity, MinFrameCapacity,
+              frame_bonus_bytes / sizeof(FeEvalFrame)) ||
+      ckd_add(&frame_storage_capacity, frame_capacity, CleanupFrameReserve) ||
+      ckd_mul(&frame_bytes, frame_storage_capacity, sizeof(FeEvalFrame)) ||
+      ckd_add(&object_count, GetCoreObjectCount(),
+              (remainder - frame_bonus_bytes) / sizeof(FeObject));
+  if (layout_overflow) {
+    return false;
+  }
+
+  // Initialize the context and its two arena-resident regions. Frames precede
+  // objects; both types have the same alignment and each region's element size
+  // is a multiple of it, so no implicit padding is needed at this seam.
+  memset(ctx, 0, sizeof(FeContext));
+  void* const frame_region = (unsigned char*)arena + sizeof(FeArena);
+  void* const object_region = (unsigned char*)frame_region + frame_bytes;
+  ctx->frame_stack = frame_region;
+  ctx->frame_stack_capacity = frame_capacity;
+  ctx->objects = object_region;
+  ctx->object_count = object_count;
+  return true;
+}
+
+static FeContext* OpenContext(void* arena, size_t size) {
   uintptr_t arena_end;
   const uintptr_t arena_address = (uintptr_t)arena;
   bool invalid = arena == nullptr;
@@ -1375,14 +1434,11 @@ FeContext* FeOpenContext(void* arena, size_t size) {
     return nullptr;
   }
 
-  // Initialize the context:
   FeArena* storage = arena;
   FeContext* ctx = &storage->context;
-  memset(ctx, 0, sizeof(FeContext));
-
-  // Initialize the objects memory region:
-  ctx->objects = storage->objects;
-  ctx->object_count = (size - sizeof(FeArena)) / sizeof(FeObject);
+  if (!InitializeArenaLayout(ctx, arena, size)) {
+    return nullptr;
+  }
 
   // Initialize the lists:
   ctx->call_list = &nil;
@@ -1441,6 +1497,10 @@ FeContext* FeOpenContext(void* arena, size_t size) {
   return ctx;
 }
 
+FeContext* FeOpenContext(void* arena, size_t size) {
+  return OpenContext(arena, size);
+}
+
 void FeCloseContext(FeContext* ctx) {
   // Clear the GC stack and symbol list: this makes all objects unreachable:
   ctx->gc_stack_index = 0;
@@ -1448,5 +1508,6 @@ void FeCloseContext(FeContext* ctx) {
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;
   ctx->root_list = &nil;
+  ctx->frame_stack_index = 0;
   CollectGarbage(ctx);
 }
