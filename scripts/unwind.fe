@@ -5,26 +5,26 @@
 
 (assert-equals 42 (unwind-protect 42 (assert t)))
 
-(= ran nil)
-(assert-equals 42 (unwind-protect 42 (= ran t)))
+(setq ran nil)
+(assert-equals 42 (unwind-protect 42 (setq ran t)))
 (assert ran)
 
-(= steps '())
+(setq steps '())
 (unwind-protect
   1
-  (= steps (cons 'a steps))
-  (= steps (cons 'b steps)))
+  (setq steps (cons 'a steps))
+  (setq steps (cons 'b steps)))
 (assert-equals '(b a) steps)
 
-(= order '())
+(setq order '())
 (unwind-protect
   (unwind-protect
     1
-    (= order (cons 'inner order)))
-  (= order (cons 'outer order)))
+    (setq order (cons 'inner order)))
+  (setq order (cons 'outer order)))
 (assert-equals '(outer inner) order)
 
-(= f (open-file "scripts/unwind.fe" "r"))
+(setq f (open-file "scripts/unwind.fe" "r"))
 (assert-equals
   ";; `unwind-protect` on the normal-return path: the cleanup runs, the body's\n"
   (unwind-protect

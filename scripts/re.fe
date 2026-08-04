@@ -1,7 +1,7 @@
-(= re (compile-re "goats?"))
+(setq re (compile-re "goats?"))
 
 ;; Verify compile error behavior
-(= bad-re (compile-re "\\"))
+(setq bad-re (compile-re "\\"))
 (assert-equals 'error (car bad-re))
 (assert-equals 'bad-pattern (car (cdr bad-re)))
 
@@ -15,14 +15,14 @@
 (assert-nil (match-re re "pumpkins abound! beware"))
 
 ;; Verify flags, offsets, captures, and row-local dot semantics.
-(= folded-re (compile-re "goat" '(icase)))
+(setq folded-re (compile-re "goat" '(icase)))
 (assert-equals '((0 4)) (match-re folded-re "GOAT"))
 (assert-equals '((5 9)) (match-re re "goat goat" 1))
 
-(= optional-re (compile-re "a\\(b\\)?c"))
+(setq optional-re (compile-re "a\\(b\\)?c"))
 (assert-equals '((0 2) nil) (match-re optional-re "ac"))
 (assert-equals '((0 3) (1 2)) (match-re optional-re "abc"))
 
-(= dot-re (compile-re "a.b"))
+(setq dot-re (compile-re "a.b"))
 (assert-nil (match-re dot-re "a
 b"))

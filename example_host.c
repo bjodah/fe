@@ -72,7 +72,7 @@ int main(void) {
   FeDefineNative(host->context, "increment", Increment);
   host->gc_checkpoint = FeSaveGC(host->context);
   static const char definitions[] =
-      "(= answer 41)\n"
+      "(setq answer 41)\n"
       "(fn (value) (increment value))";
   const FeEvalOptions options = {.step_limit = 100};
   FeObject* function = FeEvaluateStringWithOptions(

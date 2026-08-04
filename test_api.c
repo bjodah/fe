@@ -347,7 +347,7 @@ static bool TestStringInput(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
-  const char forms[] = "(= x 1) (= x (+ x 2)) x";
+  const char forms[] = "(setq x 1) (setq x (+ x 2)) x";
   CHECK(IsRendered(
       context, FeEvaluateString(context, "forms.fe", forms, sizeof(forms) - 1),
       "3"));
@@ -450,14 +450,14 @@ static bool TestEvaluationControl(void) {
                    "5"));
 
   static const char recursion[] =
-      "(= recurse (fn (x) (recurse x))) (recurse 1)";
+      "(setq recurse (fn (x) (recurse x))) (recurse 1)";
   const FeEvalOptions recursion_options = {.step_limit = 64};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "recursion.fe", recursion, sizeof(recursion) - 1,
       &recursion_options, "recursion.fe: evaluation step limit exceeded"));
 
   static const char macros[] =
-      "(= expand (macro (x) x)) (expand (expand (expand (expand (expand "
+      "(setq expand (macro (x) x)) (expand (expand (expand (expand (expand "
       "(expand (expand (expand 1))))))))";
   const FeEvalOptions macro_options = {.step_limit = 20};
   CHECK(ExpectEvaluationOptionsError(
@@ -889,16 +889,16 @@ static bool TestWriter(void) {
 
   // Cycles through the cdr spine terminate, with the two-pointer walk finding
   // both a self-loop and a longer one.
-  CHECK(Renders(context, "(do (= a (cons 1 nil)) (setcdr a a) a)", nullptr,
+  CHECK(Renders(context, "(do (setq a (cons 1 nil)) (setcdr a a) a)", nullptr,
                 "(1 . #<cycle>)", false));
   CHECK(Renders(context,
-                "(do (= b (cons 1 (cons 2 nil))) (setcdr (cdr b) b) b)",
+                "(do (setq b (cons 1 (cons 2 nil))) (setcdr (cdr b) b) b)",
                 nullptr, "(1 2 1 . #<cycle>)", false));
 
   // A cycle through a car is bounded by depth instead, and depth is spent only
   // on nesting: a long flat list is not deep.
   const FeWriteOptions shallow = {.max_depth = 4};
-  CHECK(Renders(context, "(do (= c (cons 1 nil)) (setcar c c) c)", &shallow,
+  CHECK(Renders(context, "(do (setq c (cons 1 nil)) (setcar c c) c)", &shallow,
                 "((((#<deep>))))", false));
   CHECK(Renders(context, "'(1 2 3 4 5 6 7 8)", &shallow, "(1 2 3 4 5 6 7 8)",
                 true));
@@ -907,7 +907,7 @@ static bool TestWriter(void) {
   CHECK(Renders(context, "'(((1)))", &shallower, "(((#<deep>)))", false));
 
   // Shared but acyclic structure is printed in full, every time it appears.
-  CHECK(Renders(context, "(do (= s '(1 2)) (list s s s))", nullptr,
+  CHECK(Renders(context, "(do (setq s '(1 2)) (list s s s))", nullptr,
                 "((1 2) (1 2) (1 2))", true));
 
   // Byte and node budgets, at the boundary and one below it.
@@ -931,9 +931,9 @@ static bool TestWriter(void) {
   // under an interrupt that cancels well after evaluation has finished.
   FeDefineNative(context, "render", RenderNative);
   static const char build[] =
-      "(= long nil)"
-      "(= n 0)"
-      "(while (< n 400) (= long (cons n long)) (= n (+ n 1)))";
+      "(setq long nil)"
+      "(setq n 0)"
+      "(while (< n 400) (setq long (cons n long)) (setq n (+ n 1)))";
   (void)FeEvaluateString(context, "build.fe", build, sizeof(build) - 1);
   InterruptState interrupt = {.context = context,
                               .expected_userdata = &interrupt,
@@ -1073,14 +1073,15 @@ static bool TestBinding(void) {
       expected))
 
   CHK("(boundp 'absent)", "nil");
-  CHK("(= absent 7)", "nil");
+  // `setq` returns the assigned value, unlike old assignment `=`.
+  CHK("(setq absent 7)", "7");
   CHK("(boundp 'absent)", "t");
   CHK("absent", "7");
   CHK("(makunbound 'absent)", "absent");
   CHK("(boundp 'absent)", "nil");
 
   // nil is an ordinary value, not an absence.
-  CHK("(= holds-nil nil)", "nil");
+  CHK("(setq holds-nil nil)", "nil");
   CHK("(boundp 'holds-nil)", "t");
   CHK("holds-nil", "nil");
 
@@ -1238,10 +1239,10 @@ static bool TestMacroExpansion(void) {
   FeSetErrorFn(context, HandleError);
 
   static const char loop[] =
-      "(= make (macro (a b) (list 'list a b)))"
-      "(= n 0)"
-      "(= acc nil)"
-      "(while (< n 200) (= acc (make n n)) (= n (+ n 1)))"
+      "(setq make (macro (a b) (list 'list a b)))"
+      "(setq n 0)"
+      "(setq acc nil)"
+      "(while (< n 200) (setq acc (make n n)) (setq n (+ n 1)))"
       "acc";
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "gc.fe", loop, sizeof(loop) - 1),
@@ -1250,12 +1251,12 @@ static bool TestMacroExpansion(void) {
   // An error raised by the expansion, and one raised while expanding, both
   // leave the context usable.
   CHECK(ExpectEvaluationError(context, &state, "expansion.fe",
-                              "(= bad (macro () '(car 1))) (bad)",
-                              strlen("(= bad (macro () '(car 1))) (bad)"),
+                              "(setq bad (macro () '(car 1))) (bad)",
+                              strlen("(setq bad (macro () '(car 1))) (bad)"),
                               "expansion.fe: expected pair, got double"));
   CHECK(ExpectEvaluationError(context, &state, "expander.fe",
-                              "(= worse (macro () (car 1))) (worse)",
-                              strlen("(= worse (macro () (car 1))) (worse)"),
+                              "(setq worse (macro () (car 1))) (worse)",
+                              strlen("(setq worse (macro () (car 1))) (worse)"),
                               "expander.fe: expected pair, got double"));
   CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
                    "3"));
@@ -1592,24 +1593,25 @@ static bool TestUnwindLisp(void) {
 
   // Normal return: the cleanup runs, exactly once, and the body's value
   // still comes back.
-  CHK("(= run-count 0) (unwind-protect 42 (= run-count (+ run-count 1)))",
+  CHK("(setq run-count 0) (unwind-protect 42 (setq run-count (+ run-count 1)))",
       "42");
   CHK("run-count", "1");
 
   // Error: the body raises, the cleanup still runs exactly once, and the
   // error still propagates to the host with its own message intact.
-  CHK("(= run-count 0)", "nil");
+  // `setq` returns the assigned value, unlike old assignment `=`.
+  CHK("(setq run-count 0)", "0");
   static const char erroring[] =
-      "(unwind-protect (car 1) (= run-count (+ run-count 1)))";
+      "(unwind-protect (car 1) (setq run-count (+ run-count 1)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", erroring,
                               sizeof(erroring) - 1,
                               "unwind.fe: expected pair, got double"));
   CHK("run-count", "1");
 
   // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
-  CHK("(= run-count 0)", "nil");
+  CHK("(setq run-count 0)", "0");
   static const char looping[] =
-      "(unwind-protect (while t 1) (= run-count (+ run-count 1)))";
+      "(unwind-protect (while t 1) (setq run-count (+ run-count 1)))";
   InterruptState interrupt = {.context = context,
                               .expected_userdata = &interrupt,
                               .polls = 0,
@@ -1626,11 +1628,11 @@ static bool TestUnwindLisp(void) {
   // tiny budget the body exhausted, which would fail immediately if it were
   // still charged against that budget instead of running unbounded, as
   // `doc/unwind-design.md` and the sub-plan both require.
-  CHK("(= run-count 0) (= spin-count 0)", "nil");
+  CHK("(setq run-count 0) (setq spin-count 0)", "0");
   static const char budget_cleanup[] =
       "(unwind-protect (while t 1) "
-      "  (do (while (< spin-count 200) (= spin-count (+ spin-count 1))) "
-      "      (= run-count (+ run-count 1))))";
+      "  (do (while (< spin-count 200) (setq spin-count (+ spin-count 1))) "
+      "      (setq run-count (+ run-count 1))))";
   const FeEvalOptions tiny_budget = {.step_limit = 8};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "unwind.fe", budget_cleanup, sizeof(budget_cleanup) - 1,
@@ -1640,15 +1642,15 @@ static bool TestUnwindLisp(void) {
 
   // Three levels of nesting, inner error: cleanups run innermost first
   // (LIFO), and the nesting is visible in the order they append to `log`.
-  CHK("(= log '())", "nil");
+  CHK("(setq log '())", "nil");
   static const char nested[] =
       "(unwind-protect"
       "  (unwind-protect"
       "    (unwind-protect"
       "      (assert nil)"
-      "      (= log (cons 'inner log)))"
-      "    (= log (cons 'middle log)))"
-      "  (= log (cons 'outer log)))";
+      "      (setq log (cons 'inner log)))"
+      "    (setq log (cons 'middle log)))"
+      "  (setq log (cons 'outer log)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", nested,
                               sizeof(nested) - 1,
                               "unwind.fe: assertion failure"));
@@ -1657,13 +1659,13 @@ static bool TestUnwindLisp(void) {
   // A cleanup that itself errors: a diagnostic is printed rather than
   // swallowed, the original error ("assertion failure") is still what
   // reaches the host, and the outer cleanup still runs.
-  CHK("(= outer-ran nil)", "nil");
+  CHK("(setq outer-ran nil)", "nil");
   static const char failing_cleanup[] =
       "(unwind-protect"
       "  (unwind-protect"
       "    (assert nil)"
       "    (car 1))"
-      "  (= outer-ran t))";
+      "  (setq outer-ran t))";
   EvalCall failing_cleanup_call = {.context = context,
                                    .state = &state,
                                    .label = "unwind.fe",
@@ -1684,18 +1686,18 @@ static bool TestUnwindLisp(void) {
   // global symbol table -- must still resolve to the right object in the
   // cleanup after the body allocates heavily enough to force repeated
   // collections.
-  CHK("(= survivor nil)", "nil");
+  CHK("(setq survivor nil)", "nil");
   static const char root_survival[] =
       "(do"
       "  (let x (cons 111 222))"
       "  (unwind-protect"
       "    (do"
-      "      (= gc-pressure-i 0)"
+      "      (setq gc-pressure-i 0)"
       "      (while (< gc-pressure-i 4000)"
       "        (cons gc-pressure-i gc-pressure-i)"
-      "        (= gc-pressure-i (+ gc-pressure-i 1)))"
+      "        (setq gc-pressure-i (+ gc-pressure-i 1)))"
       "      (assert nil))"
-      "    (= survivor x)))";
+      "    (setq survivor x)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", root_survival,
                               sizeof(root_survival) - 1,
                               "unwind.fe: assertion failure"));
@@ -1751,9 +1753,9 @@ static bool TestUnwindCleanupBudget(void) {
   // exhausted a tiny budget of its own still gets a cleanup that runs to
   // completion, because the fresh budget above is a *replacement*, not a
   // further restriction stacked on top of what the body already spent.
-  CHK("(= tiny-budget-ran nil)", "nil");
+  CHK("(setq tiny-budget-ran nil)", "nil");
   static const char tiny_body_budget[] =
-      "(unwind-protect (while t 1) (= tiny-budget-ran t))";
+      "(unwind-protect (while t 1) (setq tiny-budget-ran t))";
   const FeEvalOptions tiny_budget = {.step_limit = 8};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "budget.fe", tiny_body_budget,
@@ -1767,11 +1769,11 @@ static bool TestUnwindCleanupBudget(void) {
   // because of it. That one cleanup entry aborts (a printed diagnostic,
   // like any other cleanup failure), and the drain still continues to the
   // outer entry.
-  CHK("(= outer-ran nil)", "nil");
+  CHK("(setq outer-ran nil)", "nil");
   static const char runaway_interrupted_cleanup[] =
       "(unwind-protect"
       "  (unwind-protect (while t 1) (while t 1))"
-      "  (= outer-ran t))";
+      "  (setq outer-ran t))";
   InterruptState interrupt = {.context = context,
                               .expected_userdata = &interrupt,
                               .polls = 0,
@@ -1826,7 +1828,7 @@ static bool TestEvaluationDepth(void) {
   // not depend on exactly how many `evaluation_depth` units one Lisp
   // recursion level costs.
   static const char recursion[] =
-      "(= recurse (fn (x) (recurse x))) (recurse 1)";
+      "(setq recurse (fn (x) (recurse x))) (recurse 1)";
   const FeEvalOptions tight_depth = {.max_depth = 5};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "depth.fe", recursion, sizeof(recursion) - 1,
@@ -1835,7 +1837,7 @@ static bool TestEvaluationDepth(void) {
   // The reset: a bounded, legal recursion right after the overflow must not
   // see the exhausted counter the call above left behind.
   static const char deep[] =
-      "(= deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep 40)";
+      "(setq deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep 40)";
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "recovered.fe", deep, sizeof(deep) - 1), "40"));
@@ -1843,14 +1845,14 @@ static bool TestEvaluationDepth(void) {
   // An unwind-protect cleanup still runs after a depth overflow: the
   // overflow unwinds through `RunCleanupsAfterError` the same way a step-
   // budget exhaustion or an ordinary error does.
-  static const char reset_flag[] = "(= cleanup-ran nil)";
+  static const char reset_flag[] = "(setq cleanup-ran nil)";
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "reset.fe", reset_flag, sizeof(reset_flag) - 1),
       "nil"));
   static const char overflow_with_cleanup[] =
-      "(= loop (fn (x) (loop x))) "
-      "(unwind-protect (loop 1) (= cleanup-ran t))";
+      "(setq loop (fn (x) (loop x))) "
+      "(unwind-protect (loop 1) (setq cleanup-ran t))";
   const FeEvalOptions tight_depth_cleanup = {.max_depth = 5};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "cleanup-depth.fe", overflow_with_cleanup,
@@ -1868,7 +1870,8 @@ static bool TestEvaluationDepth(void) {
   // rather than dropped before it: released early, this recursed on the C
   // stack with `evaluation_depth` never moving, and crashed under MSan
   // instead of raising. Function recursion above does not cover this arm.
-  static const char macro_recursion[] = "(= m (macro () (list (quote m)))) (m)";
+  static const char macro_recursion[] =
+      "(setq m (macro () (list (quote m)))) (m)";
   const FeEvalOptions tight_macro_depth = {.max_depth = 5};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "macro-depth.fe", macro_recursion,

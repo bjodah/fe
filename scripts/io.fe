@@ -1,4 +1,4 @@
-(= f (open-file "fe.c" "r"))
+(setq f (open-file "fe.c" "r"))
 (assert-not-nil f)
 (assert-is "// Copyright 2020 rxi, https://github.com/rxi/fe\n" (read-file f "\n"))
 (assert-nil (close-file f))
@@ -6,7 +6,7 @@
 ;; TODO: Death tests will have to go in their own files, since we don't ignore
 ;; exceptions in non-interactive mode.
 ;;
-;; (= g (fn (name) (open-file name "r")))
+;; (setq g (fn (name) (open-file name "r")))
 ;; (g "goat")
 ;; (close-file 2)
 
@@ -14,19 +14,19 @@
 ;; This path is longer than the 8-byte buffer the mode used to be copied into
 ;; and shorter than nothing else in particular; the point is that it round
 ;; trips.
-(= scratch "fe-io-scratch.tmp")
-(= w (open-file scratch "w"))
+(setq scratch "fe-io-scratch.tmp")
+(setq w (open-file scratch "w"))
 (assert-not-nil w)
 (assert-is 12 (write-file w "hello, file\n"))
 (assert-nil (close-file w))
 
-(= r (open-file scratch "r"))
+(setq r (open-file scratch "r"))
 (assert-is "hello, file\n" (read-file r "\n"))
 (assert-nil (close-file r))
 (assert-nil (remove-file scratch))
 
 ;; A symbol is accepted where a string is, and its name is what is written.
-(= w (open-file scratch "w"))
+(setq w (open-file scratch "w"))
 (assert-is 3 (write-file w 'abc))
 (assert-nil (close-file w))
 (assert-nil (remove-file scratch))

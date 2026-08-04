@@ -96,7 +96,7 @@ static void AppendValue(Source* source, FuzzInput* input, unsigned count) {
 
 static void BuildSource(Source* source, FuzzInput* input, unsigned count) {
   for (unsigned i = 0; i < count; i++) {
-    AppendText(source, "(= ");
+    AppendText(source, "(setq ");
     AppendNode(source, i);
     AppendText(source, " (cons nil nil))\n");
   }

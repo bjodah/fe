@@ -270,7 +270,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   if (setjmp(FuzzErrorJump) == 0) {
     // The grammar uses `x` as its one free variable, and an unassigned symbol
     // is now an error rather than nil.
-    static const char preamble[] = "(= x nil)";
+    static const char preamble[] = "(setq x nil)";
     (void)FeEvaluateString(ctx, "preamble", preamble, sizeof(preamble) - 1);
     FuzzInput input = {.data = data, .size = size, .offset = 0};
     while (input.offset < input.size) {

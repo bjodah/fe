@@ -1,11 +1,11 @@
-(= # (lambda (a b)
+(setq # (lambda (a b)
     (if (atom a)
         (cons a b)
       (if (not (cdr a))
           (cons (car a) b)
         (let aa a)
         (while (cdr (cdr a))
-            (= a (cdr a)))
+            (setq a (cdr a)))
         (setcdr a (cons (car (cdr a))
                         (if (atom b) (cons b nil) b)))
         aa))))
@@ -16,11 +16,11 @@
 (assert-equals '(1 2 3 4 5 6) (# '(1) '(2 3 4 5 6)))
 (assert-equals '(1 2 3 4 5 6) (# 1 '(2 3 4 5 6)))
 
-(= count (fn (xs)
+(setq count (fn (xs)
     (let n 0)
     (while xs
-        (= n (+ n 1))
-        (= xs (cdr xs)))
+        (setq n (+ n 1))
+        (setq xs (cdr xs)))
     n))
 
 (assert-is 6 (count '(1 2 3 4 5 6)))

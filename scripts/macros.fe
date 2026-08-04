@@ -1,31 +1,31 @@
-(= ++
+(setq ++
   (macro (sym)
-    (list '= sym (list '+ sym 1))))
+    (list 'setq sym (list '+ sym 1))))
 
-(= i 0)
+(setq i 0)
 (while (< i 10)
   (print i)
   (++ i))
 
 
-(= push (macro (val lst)
-  (list '= lst (list 'cons val lst))
+(setq push (macro (val lst)
+  (list 'setq lst (list 'cons val lst))
 ))
 
 
-(= for (macro (item lst . body)
+(setq for (macro (item lst . body)
   (list 'do
     (list 'let 'for-iter lst)
     (list 'while 'for-iter
       (list 'let item '(car for-iter))
-      '(= for-iter (cdr for-iter))
+      '(setq for-iter (cdr for-iter))
       (cons 'do body)
     )
   )
 ))
 
 
-(= items (list "cat" "dog" "fox"))
+(setq items (list "cat" "dog" "fox"))
 
 (push "owl" items)
 (push "cow" items)
@@ -39,14 +39,14 @@
 ;; stands: it is never copied over the call site. Copying used to clone the
 ;; returned atom, and both `nil` and interned symbols are compared by address.
 
-(= expands-to-nil (macro () nil))
+(setq expands-to-nil (macro () nil))
 (assert-nil (expands-to-nil))
 (assert (not (expands-to-nil)))
 (assert-is 'else (if (expands-to-nil) 'then 'else))
 
-(= expands-to-t (macro () t))
-(= expands-to-number (macro () 42))
-(= expands-to-string (macro () "wow"))
+(setq expands-to-t (macro () t))
+(setq expands-to-number (macro () 42))
+(setq expands-to-string (macro () "wow"))
 (assert-is t (expands-to-t))
 (assert-is 42 (expands-to-number))
 (assert-is "wow" (expands-to-string))
@@ -54,30 +54,30 @@
 ;; The expansion is a symbol, and the call site is inside a lambda that binds
 ;; that same name. A cloned symbol misses the lexical binding and reads the
 ;; global value instead.
-(= shadowed 42)
-(= expands-to-symbol (macro () 'shadowed))
+(setq shadowed 42)
+(setq expands-to-symbol (macro () 'shadowed))
 (assert-is 7 ((fn (shadowed) (expands-to-symbol)) 7))
 (assert-is 42 (expands-to-symbol))
 
 ;; A quoted list handed out by a macro stays intact for the next caller.
-(= shared-expansion '(+ 1 2))
-(= expands-to-shared (macro () shared-expansion))
+(setq shared-expansion '(+ 1 2))
+(setq expands-to-shared (macro () shared-expansion))
 (assert-is 3 (expands-to-shared))
 (assert-equals '(+ 1 2) shared-expansion)
 (assert-is 3 (expands-to-shared))
 
 ;; Redefining a macro changes what an existing call site does.
-(= versioned (macro () 1))
-(= call-versioned (fn () (versioned)))
+(setq versioned (macro () 1))
+(setq call-versioned (fn () (versioned)))
 (assert-is 1 (call-versioned))
-(= versioned (macro () 2))
+(setq versioned (macro () 2))
 (assert-is 2 (call-versioned))
 
 ;; Repeated invocation from a loop body.
-(= bump-count 0)
-(= bump (macro () '(= bump-count (+ bump-count 1))))
-(= bump-i 0)
+(setq bump-count 0)
+(setq bump (macro () '(setq bump-count (+ bump-count 1))))
+(setq bump-i 0)
 (while (< bump-i 3)
   (bump)
-  (= bump-i (+ bump-i 1)))
+  (setq bump-i (+ bump-i 1)))
 (assert-is 3 bump-count)

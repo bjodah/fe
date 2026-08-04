@@ -1,13 +1,13 @@
-(= reverse (fn (lst)
+(setq reverse (fn (lst)
   (let res nil)
   (while lst
-    (= res (cons (car lst) res))
-    (= lst (cdr lst))
+    (setq res (cons (car lst) res))
+    (setq lst (cdr lst))
   )
   res
 ))
 
-(= animals '("cat" "dog" "fox"))
+(setq animals '("cat" "dog" "fox"))
 
 (print (reverse animals)) ; => ("fox" "dog" "cat")
 (assert-equals '("fox" "dog" "cat") (reverse animals))

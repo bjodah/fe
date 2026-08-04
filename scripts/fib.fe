@@ -1,4 +1,4 @@
-(= fib (fn (n)
+(setq fib (fn (n)
   (if (<= 2 n)
     (+ (fib (- n 1)) (fib (- n 2)))
     n

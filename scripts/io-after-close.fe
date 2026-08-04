@@ -1,5 +1,5 @@
 ;; A death test: a closed file is not handed back to stdio.
-(= f (open-file "fe.c" "r"))
+(setq f (open-file "fe.c" "r"))
 (assert-nil (close-file f))
 (read-file f "\n")
 (print "not reached")

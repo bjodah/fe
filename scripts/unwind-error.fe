@@ -1,7 +1,7 @@
 ;; A death test: unwind-protect cleanups still run on the way out through a
 ;; real error, most deeply nested first, and a resource opened in the body is
 ;; closed by its own cleanup even though the body never returns normally.
-(= f (open-file "scripts/unwind-error.fe" "r"))
+(setq f (open-file "scripts/unwind-error.fe" "r"))
 (unwind-protect
   (unwind-protect
     (unwind-protect
