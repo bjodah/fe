@@ -8,7 +8,17 @@
 #include <stddef.h>  // IWYU pragma: keep
 #include <stdio.h>
 
+// The embedding contract: the C functions, types, and callback signatures
+// below. Nothing here has broken since 1; a Lisp-only change such as
+// FE_LANGUAGE_VERSION 2's assignment/numeric-equality cut does not move it.
 #define FE_API_VERSION 1
+
+// The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
+// non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
+// 02C of the Emacs-subset hard cut) is the first explicit contract: `setq`
+// and `set` are assignment, and `=` is chained numeric equality, matching
+// Emacs Lisp. See doc/language.md and doc/c-api.md.
+#define FE_LANGUAGE_VERSION 2
 
 extern const char* FeVersion;
 

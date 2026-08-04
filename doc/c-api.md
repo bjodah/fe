@@ -6,16 +6,29 @@ described below.
 
 ## API Compatibility
 
-`FE_API_VERSION` identifies the public embedding interface. A host that vendors
-or pins Fe should assert the version it was written against at compile time:
+Fe has two independent version numbers, because a change to the C embedding
+contract and a change to the Lisp language it evaluates are different kinds of
+break; a host should assert both.
+
+`FE_API_VERSION` identifies the public embedding interface -- the C functions,
+types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
+identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+version 2 is the first explicit contract, following sub-plan 02C of the
+Emacs-subset hard cut, which made `setq`/`set` assignment and repurposed `=`
+as numeric equality (see `doc/language.md`). A host that vendors or pins Fe
+should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 1);
+static_assert(FE_LANGUAGE_VERSION == 2);
 ```
 
-The macro is bumped for every breaking public API change. Compatible additions
-do not require a bump, so downstreams should still pin an exact released commit
-or tag rather than using the macro as a substitute for source control.
+Each macro is bumped for every breaking change in its own axis: a C ABI/API
+break bumps `FE_API_VERSION` without necessarily touching the language, and a
+language break such as the `=` cut bumps `FE_LANGUAGE_VERSION` without
+advertising a C embedding break it did not make. Compatible additions do not
+require a bump, so downstreams should still pin an exact released commit or
+tag rather than using either macro as a substitute for source control.
 
 ## Initializing A Context
 

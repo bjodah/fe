@@ -1213,14 +1213,82 @@ static bool TestSetqAndSet(void) {
 #undef SET_ERR
 #undef SET_CHK
 
-  // Regression: assignment `=` still assigns and still returns its old nil
-  // result. Sub-plan 02C deletes this meaning of `=`.
-  CHECK(!FeIsBound(context, FeMakeSymbol(context, "old-name")));
-  CHECK(IsRendered(context,
-                   FeEvaluateString(context, "assign.fe", "(= old-name 7)", 14),
-                   "nil"));
-  CHECK(IsRendered(context,
-                   FeEvaluateString(context, "assign.fe", "old-name", 8), "7"));
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 02C: numeric `=`, replacing the old assignment primitive this
+// same slice deletes (formerly pinned here as a regression: `(= old-name
+// 7)` used to assign and return nil; `(= never-bound 3)` below now raises
+// void-variable instead, proving the old meaning is gone). The compatibility
+// corpus (fe/compat/) proves agreement with Emacs on the same properties;
+// these are the implementation-focused assertions a process-per-case
+// protocol cannot observe, e.g. that argument evaluation truly precedes
+// type validation and that comparison never short-circuits.
+static bool TestNumericEqual(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                    \
+  CHECK(IsRendered(context,                                                    \
+                   FeEvaluateString(context, "eq.fe", expr, sizeof(expr) - 1), \
+                   expected))
+#define EQ_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "eq.fe", expr, strlen(expr), \
+                              message))
+
+  // Zero arguments is an error; one argument is true without comparing
+  // anything; two or more are a left-to-right chain.
+  EQ_ERR("(=)", "eq.fe: wrong-number-of-arguments");
+  CHK("(= 1)", "t");
+  CHK("(= 1 1)", "t");
+  CHK("(= 1 1 1)", "t");
+  CHK("(= 1 1 2)", "nil");
+  CHK("(= 1 2 1)", "nil");
+
+  // Ordinary-function semantics: every argument form runs, left to right,
+  // even once the chain is already known unequal -- no short-circuit. A
+  // later operand's side effect (mutating a counter) is always visible.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "eq-side-effects")));
+  CHK("(setq eq-side-effects 0)", "0");
+  CHK("(= 1 2 (do (setq eq-side-effects (+ eq-side-effects 1)) 3) "
+      "     (do (setq eq-side-effects (+ eq-side-effects 1)) 4))",
+      "nil");
+  CHK("eq-side-effects", "2");
+
+  // 0.0 and -0.0 compare equal; NaN is never equal to itself. Plain C `==`,
+  // not special-cased.
+  CHK("(= 0.0 -0.0)", "t");
+  CHK("(= (sqrt -1) (sqrt -1))", "nil");
+
+  // A type error in an early operand never erases a side effect a later
+  // operand's form already had: argument evaluation precedes type
+  // validation for the whole list, not just the failing one.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "eq-probe")));
+  EQ_ERR("(= 1 \"1\")", "eq.fe: wrong-type-argument");
+  EQ_ERR("(= 1 nil)", "eq.fe: wrong-type-argument");
+  EQ_ERR("(= \"1\" (do (setq eq-probe t) 2))", "eq.fe: wrong-type-argument");
+  CHK("eq-probe", "t");
+
+  // The hard cut, proven directly: `=` no longer assigns, so an unbound
+  // symbol is void-variable, and it stays unbound afterwards.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "never-bound")));
+  EQ_ERR("(= never-bound 3)", "eq.fe: void-variable never-bound");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "never-bound")));
+
+  // `setq` and `set` still work after the old assignment arm they replaced
+  // is gone.
+  CHK("(setq still-works 5)", "5");
+  CHK("still-works", "5");
+  CHK("(set 'set-still-works 6)", "6");
+  CHK("set-still-works", "6");
+
+#undef EQ_ERR
+#undef CHK
 
   FeCloseContext(context);
   return true;
@@ -1987,9 +2055,9 @@ int main(void) {
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestSetqAndSet() &&
-                 TestUnwindHostAPI() && TestUnwindLisp() &&
-                 TestUnwindCleanupBudget() && TestEvaluationDepth() &&
-                 TestArenaStats()
+                 TestNumericEqual() && TestUnwindHostAPI() &&
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestEvaluationDepth() && TestArenaStats()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

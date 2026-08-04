@@ -21,7 +21,7 @@
 
 #include "fe.h"
 
-const char* FeVersion = "1.1";
+const char* FeVersion = "2.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -29,10 +29,11 @@ typedef enum Primitive {
   PAssert,
   PEnv,
   PLet,
-  // Fe's historical, non-Emacs assignment primitive. `=` keeps this meaning
-  // only until sub-plan 02C of the Emacs-subset hard cut deletes it and
-  // repurposes `=` as numeric equality; see doc/language.md.
-  PAssign,
+  // Numeric equality, chained left to right over Fe's existing doubles.
+  // `=` was Fe's historical, non-Emacs assignment primitive until sub-plan
+  // 02C of the Emacs-subset hard cut repurposed it as numeric equality and
+  // moved assignment to `setq`/`set` below; see doc/language.md.
+  PNumericEqual,
   PSetq,
   PSet,
   PIf,
@@ -69,7 +70,7 @@ typedef enum Primitive {
 static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PEnv] = "env",
                                         [PLet] = "let",
-                                        [PAssign] = "=",
+                                        [PNumericEqual] = "=",
                                         [PSetq] = "setq",
                                         [PSet] = "set",
                                         [PIf] = "if",
@@ -1668,8 +1669,8 @@ static FeObject* ArgsToEnv(FeContext* ctx,
 // non-symbol target is diagnosed without evaluating anything; a dangling
 // final SYMBOL is diagnosed only once every earlier complete pair has
 // already assigned, so those assignments stand. Assignment goes through
-// `GetBound(ctx, target, env)`, exactly like `PAssign` below: an existing
-// lexical binding wins over the global cell. See doc/language.md.
+// `GetBound(ctx, target, env)`: an existing lexical binding wins over the
+// global cell. See doc/language.md.
 static FeObject* EvaluateSetq(FeContext* ctx, FeObject* arg, FeObject* env) {
   FeObject* res = &nil;
   while (!FeIsNil(arg)) {
@@ -1714,6 +1715,54 @@ static FeObject* EvaluateSet(FeContext* ctx, FeObject* arg, FeObject* env) {
   return value;
 }
 
+// Local to `=`: an honest `wrong-type-argument` message, rather than
+// `CheckType()`'s generic "expected double, got X" text, which the compat
+// oracle comparator does not recognise. See doc/language.md.
+static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
+  if (FeGetType(obj) != FeTDouble) {
+    FeHandleError(ctx, "wrong-type-argument");
+  }
+  return obj;
+}
+
+// `=`: numeric equality over Fe's existing doubles, chained left to right.
+// Unlike `setq`/`set` above, `=` has ordinary-function semantics in Emacs:
+// the complete raw argument list is evaluated left to right via the
+// existing ordinary-call path `EvaluateList()` before any value is type-
+// checked, so a type error in an early operand never erases a side effect
+// a later operand's form already had. Every operand is then validated and
+// compared without short-circuiting, even once the chain is already known
+// unequal, so every operand form has both run and been checked by the time
+// `=` returns -- one argument is `t` without comparing anything. Plain C
+// `==` gives the pinned signed-zero (`0.0 = -0.0` is true) and NaN (never
+// `=` to itself) answers; -Wfloat-equal is suppressed for this intentional
+// exact comparison, the same way `Equal()`'s `IsNearlyEqual()` helper above
+// does for its own `a == b` infinity special case. See doc/language.md.
+static FeObject* EvaluateNumericEqual(FeContext* ctx,
+                                      FeObject* arg,
+                                      FeObject* env) {
+  if (FeIsNil(arg)) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+  FeObject* evaluated = EvaluateList(ctx, arg, env);
+  FeDouble first = GetDouble(CheckNumericEqualOperand(ctx, CAR(evaluated)));
+  bool equal = true;
+  FeObject* rest = CDR(evaluated);
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfloat-equal"
+#endif
+  while (!FeIsNil(rest)) {
+    FeDouble next = GetDouble(CheckNumericEqualOperand(ctx, CAR(rest)));
+    equal = equal && first == next;
+    rest = CDR(rest);
+  }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+  return FeMakeBool(ctx, equal);
+}
+
 static FeObject* EvaluatePrimitive(FeContext* ctx,
                                    FeObject* obj,
                                    FeObject* env,
@@ -1738,10 +1787,8 @@ static FeObject* EvaluatePrimitive(FeContext* ctx,
         *newenv = FeCons(ctx, FeCons(ctx, va, EVAL_ARG()), env);
       }
       return res;
-    case PAssign:
-      va = CheckType(ctx, FeGetNextArgument(ctx, &arg), FeTSymbol);
-      CDR(GetBound(ctx, va, env)) = EVAL_ARG();
-      return res;
+    case PNumericEqual:
+      return EvaluateNumericEqual(ctx, arg, env);
     case PSetq:
       return EvaluateSetq(ctx, arg, env);
     case PSet:

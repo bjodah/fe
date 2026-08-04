@@ -46,42 +46,18 @@ number: `'.` is the symbol `.` and `.5` is `0.5`.
 
 Creates a new binding of `symbol` to the value `value` in the current environment.
 
-#### `(= symbol value)`
-
-**Transitional.** This is Fe's historical, non-Emacs assignment primitive.
-Sub-plan 02B of the Emacs-subset hard cut adds `setq` and `set` below
-alongside it; `=` keeps its assignment meaning only until sub-plan 02C
-deletes it and repurposes `=` as numeric equality, matching Emacs Lisp. Do
-not read the coexistence of `=` and `setq` here as a compatibility promise
-that both will remain -- prefer `setq` for anything new.
-
-Sets the existing binding of `symbol` to the value `value` in the current
-environment. If there is no such binding in the current environment, creates or
-updates a binding in the global environment.
-
-Assignment is the only thing that creates a global binding. Naming a symbol
-that has never been assigned is `void-variable`, not `nil`:
-
-```clojure
-fe > typo
-error: void-variable typo
-fe > (= typo nil)
-nil
-fe > typo
-nil
-```
-
-`nil` is a value like any other, so a variable assigned `nil` is bound.
-
 #### `(setq symbol value ...)`
 
-The Emacs Lisp assignment special form. Takes any number of `symbol value`
-pairs and processes them left to right: each `value` form is evaluated --
-already seeing every earlier pair's new value, since they run in order --
-and then bound the same way `=` above binds its one pair: to the innermost
+The Emacs Lisp assignment special form, and the one assignment spelling Fe
+has. Takes any number of `symbol value` pairs and processes them left to
+right: each `value` form is evaluated -- already seeing every earlier pair's
+new value, since they run in order -- and then bound to the innermost
 lexical binding of `symbol` if one exists in the current environment, else
-to the global value cell. `(setq)`, with no pairs, is `nil`; otherwise
-`setq` returns the value of the last pair.
+to the global value cell. Assignment is the only thing that creates a global
+binding: naming a symbol that has never been assigned is `void-variable`,
+not `nil` (`nil` is a value like any other, so a variable assigned `nil` is
+bound). `(setq)`, with no pairs, is `nil`; otherwise `setq` returns the
+value of the last pair.
 
 Each `symbol` is checked to be a symbol before its paired `value` form is
 evaluated: a non-symbol target is `wrong-type-argument`. A dangling final
@@ -110,7 +86,9 @@ result is `(2 9)` and not `(2 2)`.  The last two lines show the other rule:
 `a` keeps the 1 that the complete first pair assigned, even though the call
 went on to signal.
 
-`setq` is the assignment spelling sub-plan 02C keeps; see `=` above.
+See `(set symbol value)` below for the other assignment primitive -- an
+ordinary function that always writes the global cell -- and `(= number ...)`
+for the numeric comparator sub-plan 02C repurposed `=` as.
 
 #### `(if condition then else ...)`
 
@@ -120,8 +98,8 @@ does. `(if condition)` and `(if condition then)` with a false condition are
 `nil`.
 
 ```clojure
-fe > (= x 2)
-nil
+fe > (setq x 2)
+2
 fe > (if (is x 1) "one"
          "bleep")
 bleep
@@ -151,8 +129,8 @@ spelling; both names are bound to the same primitive, and functions print as
 `(lambda ...)`.
 
 ```clojure
-fe > (= square (lambda (n) (* n n)))
-nil
+fe > (setq square (lambda (n) (* n n)))
+(lambda (n) (* n n))
 fe > (square 4)
 16
 ```
@@ -208,15 +186,15 @@ For example, we could define a macro named `++` to increment a numeric value by
 1:
 
 ```clojure
-(= ++
+(setq ++
   (macro (sym)
-  (list '= sym (list '+ sym 1))))
+  (list 'setq sym (list '+ sym 1))))
 ```
 
 Then we could use it in the following `while` loop:
 
 ```clojure
-(= i 0)
+(setq i 0)
 (while (< i 10)
   (print i)
   (++ i))
@@ -226,10 +204,10 @@ Each iteration expands `(++ i)` afresh, so the loop body behaves as if it had
 been written
 
 ```clojure
-(= i 0)
+(setq i 0)
 (while (< i 10)
   (print i)
-  (= i (+ i 1)))
+  (setq i (+ i 1)))
 ```
 
 Earlier versions of Fe expanded once and then overwrote the call site with the
@@ -250,11 +228,11 @@ If `condition` evaluates to true, evaluates the rest of its arguments. Repeats
 this process until `condition` evaluates to `nil`.
 
 ```clojure
-fe > (= i 0)
-nil
+fe > (setq i 0)
+0
 fe > (while (< i 3)
        (print i)
-       (= i (+ i 1)))
+       (setq i (+ i 1)))
 0
 1
 2
@@ -315,7 +293,7 @@ is bound.
 ```clojure
 fe > (boundp 'typo)
 nil
-fe > (= typo nil)
+fe > (setq typo nil)
 nil
 fe > (boundp 'typo)
 t
@@ -414,8 +392,8 @@ garbage collection before it exits.
 Creates a new pair with the given `car` and `cdr` values.
 
 ```clojure
-fe > (= p (cons 1 2))
-nil
+fe > (setq p (cons 1 2))
+(1 . 2)
 fe > p
 (1 . 2)
 ```
@@ -486,8 +464,8 @@ same shape leaves the global at 9.
 Sets the first element of `pair` to `value`.
 
 ```clojure
-fe > (= p (cons 1 2))
-nil
+fe > (setq p (cons 1 2))
+(1 . 2)
 fe > p
 (1 . 2)
 fe > (setcar p 3)
@@ -501,8 +479,8 @@ fe > p
 Sets the second element of `pair` to `value`.
 
 ```clojure
-fe > (= p (cons 1 2))
-nil
+fe > (setq p (cons 1 2))
+(1 . 2)
 fe > p
 (1 . 2)
 fe > (setcdr p 4)
@@ -545,6 +523,50 @@ Returns true if `x` is not a pair, otherwise `nil`.
 
 Prints all its arguments to `stdout`, each separated by a space and followed by
 a newline.
+
+#### `(= number ...)`
+
+Numeric equality, matching Emacs Lisp: `(= a b c ...)` is true only if every
+argument is numerically equal to every other. Until sub-plan 02C of the
+Emacs-subset hard cut, `=` was instead Fe's historical, non-Emacs assignment
+primitive -- see `(setq symbol value ...)` above for its replacement.
+
+At least one argument is required: `(=)` is `wrong-number-of-arguments`.
+One argument is `t` without comparing anything; two or more are compared as
+one chain, left to right.
+
+Ordinary-function semantics, like every other function here and unlike
+`setq`/`set` above: every argument form is evaluated, left to right, before
+any value is type-checked, so a type error in an early operand never erases
+a side effect a later operand's form already had. Every operand is then
+checked to be a number and compared without short-circuiting, even once the
+chain is already known unequal -- a later operand's form has always run and
+been checked by the time `=` returns. A non-number argument is
+`wrong-type-argument`.
+
+```clojure
+fe > (= 1 1 1)
+t
+fe > (= 1 1 2)
+nil
+fe > (= 1)
+t
+fe > (=)
+error: wrong-number-of-arguments
+fe > (= 1 "1")
+error: wrong-type-argument
+```
+
+Fe has only doubles today, so equality is ordinary IEEE 754 `==`, not
+special-cased: `0.0` and `-0.0` compare equal, and `NaN` never compares
+equal to itself.
+
+```clojure
+fe > (= 0.0 -0.0)
+t
+fe > (= (sqrt -1) (sqrt -1))
+nil
+```
 
 #### `(< a b)`
 

@@ -41,12 +41,13 @@ Bug reports, pull requests, and questions are welcome.
 
 Downstreams such as kg should include Fe as a git submodule pinned to an exact
 released tag and commit; they should not track the moving `analyzers-etc`
-development branch. Assert `FE_API_VERSION` at compile time, run `make core`
-with both GCC and Clang when updating the pin, and review the API-version policy
-in `doc/c-api.md`. Preserve `LICENSE` and the copyright/SPDX notices in vendored
-source. An update consists of selecting the new released commit, reviewing any
-API-version change, advancing the submodule pin, and rerunning the downstream
-build and tests.
+development branch. Assert both `FE_API_VERSION` (the C embedding contract)
+and `FE_LANGUAGE_VERSION` (the Lisp language evaluated) at compile time, run
+`make core` with both GCC and Clang when updating the pin, and review the
+version policy in `doc/c-api.md`. Preserve `LICENSE` and the copyright/SPDX
+notices in vendored source. An update consists of selecting the new released
+commit, reviewing any API- or language-version change, advancing the
+submodule pin, and rerunning the downstream build and tests.
 
 ## Regular Expression Extension
 

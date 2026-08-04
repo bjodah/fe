@@ -107,19 +107,6 @@
    "source_name": "let"
   },
   {
-   "id": "primitive-assign-eq",
-   "category": "bindings",
-   "status": "divergent",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "primitive-assign-eq"
-   ],
-   "kg_test": null,
-   "rationale": "This is the reason the whole Elisp-subset program exists (parent plan section 6, 'Hard-cut assignment and numeric =`): Fe's `=` performs `CDR(GetBound(ctx, va, env)) = EVAL_ARG()` (fe.c's PSet arm) -- assignment, not comparison -- and currently returns nil rather than the assigned value. Phase 2 replaces this with a core `setq` special form and repurposes `=` as numeric equality; until then, this entry records the live divergence with a real oracle snapshot rather than only in prose.",
-   "source_name": "="
-  },
-  {
    "id": "primitive-if",
    "category": "control-flow",
    "status": "supported",
@@ -613,7 +600,7 @@
   {
    "id": "primitive-numeric-eq",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -629,8 +616,8 @@
     "primitive-numeric-eq-hard-cut-unbound"
    ],
    "kg_test": null,
-   "rationale": "Phase 2 (parent plan section 6) repurposes `=` as numeric equality over Fe's existing doubles once assignment `=` is deleted in 02C: a left-to-right chained comparison, at least one argument required, every argument form evaluated before any short-circuit (it is an ordinary function, not a special form). Phase 5 later extends this to integers/mixed types without redefining it, so these cases are written to leave room for that. 02A pins the Emacs answers before 02C writes the implementation; until then Fe's `=` is still assignment, so every case here is a known, expected gap rather than a regression.",
-   "source_name": null
+   "rationale": "Sub-plan 02C repurposes `=` as numeric equality over Fe's existing doubles (fe.c's EvaluateNumericEqual, reached from EvaluatePrimitive's PNumericEqual arm, formerly the assignment primitive PAssign/primitive-assign-eq, now deleted): a left-to-right chained comparison, at least one argument required, every argument form evaluated left to right before any value is type-checked, and every operand validated and compared without short-circuiting once the result is already known. Phase 5 later extends this to integers/mixed types without redefining it, so these cases are written to leave room for that.",
+   "source_name": "="
   }
  ]
 }
