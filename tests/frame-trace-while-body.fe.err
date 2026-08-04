@@ -1,0 +1,4 @@
+error: void-function missing-head
+(missing-head)
+(if (= i 3) (missing-head) (print i))
+(while (< i 3) (setq i (+ i 1)) (if (= i 3) (missing-head) (print i)))

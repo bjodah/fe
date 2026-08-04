@@ -1,0 +1,7 @@
+;; An error partway through a `while` body, after earlier iterations ran
+;; cleanly.
+(setq i 0)
+(while (< i 3)
+  (setq i (+ i 1))
+  (if (= i 3) (missing-head) (print i)))
+(print "not reached")

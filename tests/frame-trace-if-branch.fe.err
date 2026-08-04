@@ -1,0 +1,4 @@
+error: void-function missing-head
+(missing-head)
+(if t (missing-head) (print "not this branch"))
+(wrapper)

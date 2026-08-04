@@ -1,0 +1,4 @@
+error: void-function missing-head
+(missing-head)
+(unwind-protect (missing-head) (print "inner"))
+(unwind-protect (unwind-protect (missing-head) (print "inner")) (print "outer"))

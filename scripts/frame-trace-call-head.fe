@@ -1,0 +1,7 @@
+;; An error resolving the callable in call-head position: `missing-head` is
+;; an unbound symbol, so `EvaluateHead` raises `void-function` before any
+;; argument is evaluated. Nested one level inside `wrapper` so the trace
+;; shows both the call form and its caller.
+(setq wrapper (fn () (missing-head 1 2)))
+(wrapper)
+(print "not reached")

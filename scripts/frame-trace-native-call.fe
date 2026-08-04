@@ -1,0 +1,7 @@
+;; An error raised directly by an existing Fex native, not by Lisp
+;; recognizing an unbound symbol -- the call form on the trace still names
+;; the native call, since `Evaluate`'s enclosing frame is on the stack when
+;; a native's own `FeHandleError` fires.
+(setq wrapper (fn () (close-file)))
+(wrapper)
+(print "not reached")

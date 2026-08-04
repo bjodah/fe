@@ -1,0 +1,5 @@
+;; An error evaluating a later (non-head) argument: `+`'s own head
+;; resolves fine, but its second argument is a call to an unbound symbol.
+(setq wrapper (fn () (+ 1 (missing-head 2))))
+(wrapper)
+(print "not reached")

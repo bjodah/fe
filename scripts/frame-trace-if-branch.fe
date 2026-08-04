@@ -1,0 +1,5 @@
+;; An error in the chosen `if` branch. Only the taken branch is ever part
+;; of the trace; the other one is never evaluated.
+(setq wrapper (fn () (if t (missing-head) (print "not this branch"))))
+(wrapper)
+(print "not reached")

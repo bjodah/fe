@@ -1,0 +1,6 @@
+;; An error in a lambda's body, after an earlier body form runs cleanly --
+;; the body-list walk is what is live on the stack when this raises, not
+;; argument evaluation or head resolution.
+(setq body-error (fn (x) (print x) (missing-head)))
+(body-error 1)
+(print "not reached")

@@ -1,0 +1,9 @@
+;; Nested unwind-protect: each form is still its own entry in the trace,
+;; the same property tests/unwind-error.fe already pins for a different
+;; shape.
+(unwind-protect
+  (unwind-protect
+    (missing-head)
+    (print "inner"))
+  (print "outer"))
+(print "not reached")

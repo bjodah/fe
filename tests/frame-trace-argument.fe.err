@@ -1,0 +1,4 @@
+error: void-function missing-head
+(missing-head 2)
+(+ 1 (missing-head 2))
+(wrapper)

@@ -1,0 +1,8 @@
+;; An error while evaluating what a macro expanded to, after the macro's
+;; own call-trace frame was already popped -- contrast with
+;; frame-trace-macro-body.fe, where the macro's own frame is still live.
+;; `wrapper`'s frame survives because it is the caller, not the macro.
+(setq good-macro (macro (x) (list (quote missing-head) x)))
+(setq wrapper (fn () (good-macro 1)))
+(wrapper)
+(print "not reached")
