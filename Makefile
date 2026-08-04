@@ -45,13 +45,17 @@ $(shell [ "$$(cat $(BUILD_STAMP) 2>/dev/null)" = '$(BUILD_ID)' ] || \
 
 PROG = fe
 TARGET = $(PROG)
-SRCS = main.c auto.c fe.c fex.c fex_io.c fex_math.c fex_process.c fex_re.c \
-	fex_time.c
+SRCS = main.c auto.c fe.c fe_eval.c fex.c fex_io.c fex_math.c fex_process.c \
+	fex_re.c fex_time.c
+# The evaluator's own object list, shared by every link rule that used to
+# name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split): a list
+# so every consumer below stays a one-line change.
+FE_CORE_OBJS = fe.o fe_eval.o
 HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
-TEST_SRCS = test_api.c test_header.c
+TEST_SRCS = test_api.c test_header.c test_internal_header.c
 EXAMPLE_HOST = example_host
 EXAMPLE_SRCS = example_host.c
 EXAMPLE_RUNNER ?=
@@ -60,7 +64,8 @@ EXAMPLE_RUNNER ?=
 CORE_GCC ?= gcc
 CORE_CLANG ?= clang
 CORE_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x
-CORE_OBJS = fe-core-gcc.o fe-core-clang.o
+CORE_OBJS = fe-core-gcc.o fe-core-clang.o fe-eval-core-gcc.o \
+	fe-eval-core-clang.o
 
 # Fuzzing
 FUZZ_DIR ?= fuzz
@@ -228,21 +233,29 @@ fuzz-write-smoke: $(FUZZ_WRITE_BIN)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(TEST_API): test_api.o fe.o
+$(TEST_API): test_api.o $(FE_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(EXAMPLE_HOST): example_host.o fe.o
+$(EXAMPLE_HOST): example_host.o $(FE_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-test-header: test_header.c fe.h
+test-header: test_header.c test_internal_header.c fe.h fe_internal.h
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
+	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_internal_header.c
+	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_internal_header.c
 
-fe-core-gcc.o: fe.c fe.h $(BUILD_STAMP)
+fe-core-gcc.o: fe.c fe.h fe_internal.h $(BUILD_STAMP)
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -c fe.c -o $@
 
-fe-core-clang.o: fe.c fe.h $(BUILD_STAMP)
+fe-core-clang.o: fe.c fe.h fe_internal.h $(BUILD_STAMP)
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe.c -o $@
+
+fe-eval-core-gcc.o: fe_eval.c fe.h fe_internal.h $(BUILD_STAMP)
+	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_eval.c -o $@
+
+fe-eval-core-clang.o: fe_eval.c fe.h fe_internal.h $(BUILD_STAMP)
+	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_eval.c -o $@
 
 %.o: %.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -251,19 +264,22 @@ tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(RE_CFLAGS) -c $< -o $@
 
 $(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h $(BUILD_STAMP)
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe.h fe_internal.h \
+		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c fe_eval.c $(LDLIBS)
 
 $(FUZZ_EVAL_BIN): $(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h $(BUILD_STAMP)
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe.h fe_internal.h \
+		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c fe_eval.c $(LDLIBS)
 
 $(FUZZ_WRITE_BIN): $(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe.h $(BUILD_STAMP)
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe.h fe_internal.h \
+		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c fe_eval.c $(LDLIBS)
 
 sizes:
 	wc *.[ch]
