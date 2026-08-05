@@ -676,8 +676,11 @@ static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
 // `dtoastr`), so a short value like `0.1` prints `0.1` while a long one like
 // `(log 8)` prints all its digits. The post-pass Emacs' `float_to_string`
 // runs is then reproduced exactly: the result must always contain a decimal
-// point or an exponent, so a bare integer text gets `.0` appended and a
-// trailing `100.` gets a `0` -- the old integral-double shortcut (a double
+// point or an exponent, so a bare integer text like `100` gets `.0`
+// appended, while `0.1` already carries a point and `1e+20` already carries
+// an exponent and neither is touched. That single appended `.0` is the whole
+// fixup -- `%g` never emits a trailing `.` with nothing after it, so there
+// is no `100.` case to repair. The old integral-double shortcut (a double
 // that happened to be integral printing bare) dies with the cut, because a
 // bare `42` is an integer now and `42.0` must print `42.0`.
 static void EmitDouble(Writer* w, const FeObject* obj) {

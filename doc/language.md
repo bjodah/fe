@@ -577,7 +577,7 @@ cleanup
 42
 fe > (unwind-protect (car 1) (print "cleanup ran anyway"))
 cleanup ran anyway
-error: expected pair, got double
+error: expected pair, got integer
 ```
 
 Nested `unwind-protect` forms run their cleanups innermost first (LIFO),

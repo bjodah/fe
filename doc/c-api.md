@@ -15,7 +15,9 @@ types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
 version 4 is the numeric contract of the Emacs-subset cut: the reader
 classifies `42` as an integer and `42.0` as a float (05A Decision 3), floats
-print shortest-round-trip with an explicit `.0`, integer division truncates
+print shortest-round-trip with a `.` or an exponent always present (`42.0`,
+`1e+20` -- an appended `.0` only when neither is there already), integer
+division truncates
 with `arith-error` on overflow and divide-by-zero, and `eq`/`eql` are core
 primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
@@ -189,9 +191,12 @@ the legacy public `nil` global.
 
 `FeMakeInteger(ctx, value)` creates an `FeTInteger` with an exact `int64_t`
 payload, and `FeToInteger(ctx, object)` returns that payload or raises an
-`expected integer` type error. Integers are currently a host-only API value:
-the reader and built-in primitives still produce doubles, so no Lisp program
-can create one. `FeToDouble()` also accepts an integer and converts it to an
+`expected integer` type error. Integers are an ordinary Lisp value since
+05D's cut -- the reader classifies `42` as one and the arithmetic tower
+returns them -- so a host-made integer and a read one are the same thing;
+the sentence that once stood here, that no Lisp program could create one,
+described 05B's dormant object and stopped being true two sub-plans later.
+`FeToDouble()` also accepts an integer and converts it to an
 `FeDouble`; as with any integer-to-floating conversion, large values may not
 be represented exactly.
 

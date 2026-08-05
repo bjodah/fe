@@ -12,7 +12,8 @@ The language offers the following features:
 * Numbers — integers (signed 64-bit) and floats (IEEE 754 doubles), plus
   symbols, strings, pairs, lambdas, and macros
 * Emacs-style numeric literals: `42` is an integer, `42.0`, `.5` and `1e3`
-  are floats, and floats print shortest-round-trip with an explicit `.0`
+  are floats, and floats print shortest-round-trip, always carrying a `.` or
+  an exponent so they never read back as integers (`42.0`, `0.1`, `1e+20`)
 * Lexically scoped variables
 * Closures
 * Variadic functions
