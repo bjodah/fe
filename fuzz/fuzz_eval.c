@@ -46,8 +46,15 @@ static FeObject* MakeBinary(FeContext* ctx,
 static FeObject* BuildNumber(FeContext* ctx, FuzzInput* input) {
   const int16_t value = (int16_t)((uint16_t)FuzzTakeByte(input) |
                                   (uint16_t)FuzzTakeByte(input) << 8);
-  // 05B reach-ahead: odd tag bytes make an integer, so the grammar already
-  // mixes both numeric types before the reader can produce integers.
+  // The host integer mix: the reader still produces only doubles (05C's whole
+  // premise -- FeRead's atom path builds an FeTDouble, so no source text can
+  // spell an integer before 05D's cut), which means this grammar and the host
+  // API are the only producers of FeTInteger values the tower sees. 05B's
+  // reach-ahead landed the odd-tag-byte integer arm so the grammar already
+  // mixed both numeric types before the reader could; 05C now makes every
+  // arithmetic, comparison, equality and predicate path dispatch on both
+  // tags, so this tag byte is what decides which side of the promotion rule a
+  // generated operand lands on.
   return FuzzTakeByte(input) & 1 ? FeMakeInteger(ctx, value)
                                  : FeMakeDouble(ctx, (double)value);
 }
@@ -78,7 +85,7 @@ static FeObject* BuildAtom(FeContext* ctx, FuzzInput* input) {
 }
 
 static FeObject* BuildDatum(FeContext* ctx, FuzzInput* input, unsigned depth) {
-  if (depth == MaxDepth || FuzzTakeByte(input) % 3 != 0) {
+  if (depth >= MaxDepth || FuzzTakeByte(input) % 3 != 0) {
     return BuildAtom(ctx, input);
   }
 
@@ -100,11 +107,48 @@ static FeObject* BuildNumericExpression(FeContext* ctx,
                                         FuzzInput* input,
                                         unsigned depth) {
   static const char* operators[] = {"+", "-", "*", "/"};
-  if (depth == MaxDepth || FuzzTakeByte(input) % 2 == 0) {
+  if (depth >= MaxDepth || FuzzTakeByte(input) % 2 == 0) {
     return BuildNumber(ctx, input);
   }
+  // 05C: the tower makes the arithmetic variadic, so 0..3 operands reach the
+  // identity elements ((+), (*)), the unary seeds ((- x) is negation, (/ x)
+  // the truncated reciprocal), and the reductions whose integer arms can
+  // overflow (arith-error) or divide by zero -- the class of change this fuzz
+  // lane exists to chase, per the 05C gate.
   const char* op = operators[FuzzTakeByte(input) % 4];
-  return MakeBinary(ctx, op, BuildNumber(ctx, input), BuildNumber(ctx, input));
+  FeObject* arguments[3];
+  const size_t count = FuzzTakeByte(input) % 4;
+  for (size_t i = 0; i < count; i++) {
+    arguments[i] = BuildNumber(ctx, input);
+  }
+  return MakeForm(ctx, op, arguments, count);
+}
+
+// 05C's comparison family: `<`/`<=`/`>`/`>=` and `=` chain left to right
+// through one shared loop, so 0..3 operands reach the up-front zero-arity
+// rejection and the vacuous unary `t` as well as the chain. `/=` is strictly
+// binary in Emacs, so its arity stays 1..3 to reach the third-operand
+// wrong-number-of-arguments on purpose rather than by accident.
+static FeObject* BuildComparisonForm(FeContext* ctx, FuzzInput* input) {
+  static const char* operators[] = {"<", "<=", ">", ">=", "=", "/="};
+  const size_t op_index = FuzzTakeByte(input) % 6;
+  FeObject* arguments[3];
+  const size_t count =
+      op_index == 5 ? 1 + FuzzTakeByte(input) % 3 : FuzzTakeByte(input) % 4;
+  for (size_t i = 0; i < count; i++) {
+    arguments[i] = BuildNumber(ctx, input);
+  }
+  return MakeForm(ctx, operators[op_index], arguments, count);
+}
+
+// 05C's numeric predicates: leaves that answer t or nil by tag, fed from the
+// grammar's host-made integer/double mix -- the only way to reach an integer
+// without the reader.
+static FeObject* BuildPredicateForm(FeContext* ctx,
+                                    FuzzInput* input,
+                                    unsigned depth) {
+  const char* name = FuzzTakeByte(input) % 2 == 0 ? "integerp" : "floatp";
+  return MakeUnary(ctx, name, BuildExpression(ctx, input, depth + 1));
 }
 
 static FeObject* BuildListForm(FeContext* ctx,
@@ -353,12 +397,11 @@ static FeObject* BuildFmakunboundForm(FeContext* ctx,
 static FeObject* BuildExpression(FeContext* ctx,
                                  FuzzInput* input,
                                  unsigned depth) {
-  static const char* arithmetic[] = {"+", "-", "*", "/"};
-  if (depth == MaxDepth) {
+  if (depth >= MaxDepth) {
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 26) {
+  switch (FuzzTakeByte(input) % 30) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -385,16 +428,10 @@ static FeObject* BuildExpression(FeContext* ctx,
     case 8:
       return MakeBinary(ctx, "is", BuildExpression(ctx, input, depth + 1),
                         BuildExpression(ctx, input, depth + 1));
-    case 9: {
-      const char* op = arithmetic[FuzzTakeByte(input) % 4];
-      return MakeBinary(ctx, op, BuildNumericExpression(ctx, input, depth + 1),
-                        BuildNumericExpression(ctx, input, depth + 1));
-    }
-    case 10: {
-      const char* op = FuzzTakeByte(input) % 2 == 0 ? "<" : "<=";
-      return MakeBinary(ctx, op, BuildNumber(ctx, input),
-                        BuildNumber(ctx, input));
-    }
+    case 9:
+      return BuildNumericExpression(ctx, input, depth + 1);
+    case 10:
+      return BuildComparisonForm(ctx, input);
     case 11:
       return MakeForm(ctx, "if",
                       (FeObject*[]){BuildExpression(ctx, input, depth + 1),
@@ -412,7 +449,10 @@ static FeObject* BuildExpression(FeContext* ctx,
     case 14:
       return BuildBindingForm(ctx, input, depth, "let");
     case 15:
-      return BuildBindingForm(ctx, input, depth, "=");
+      // `setq` since 02C: `=` is numeric equality, so the grammar's binding
+      // arm uses the real assignment special form rather than the always-
+      // wrong-type-argument `(= x value)` the pre-cut grammar generated.
+      return BuildBindingForm(ctx, input, depth, "setq");
     case 16:
       return BuildFunctionCall(ctx, input, depth);
     case 17:
@@ -431,6 +471,14 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildFunctionForm(ctx, input, depth);
     case 24:
       return BuildFmakunboundForm(ctx, input, depth);
+    case 25:
+      return BuildPredicateForm(ctx, input, depth + 1);
+    case 26:
+      return BuildComparisonForm(ctx, input);
+    case 27:
+      return BuildPredicateForm(ctx, input, depth + 1);
+    case 28:
+      return BuildComparisonForm(ctx, input);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

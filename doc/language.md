@@ -714,9 +714,13 @@ t
 
 #### `(is a b)`
 
-Returns true if the values `a` and `b` are equal in value. Numbers and strings
-are equal if equivalent, all other values are equal only if they are the same
-underlying object.
+Returns true if the values `a` and `b` are equal in value. Numbers compare
+by mathematical value across the two numeric types, so `(is 3 3.0)` is `t`:
+integers compare exactly, float-vs-float pairs keep Fe's historical epsilon
+tolerance (`IsNearlyEqual`), and a mixed pair compares after the integer
+converts to double. Strings are equal if equivalent, and all other values are
+equal only if they are the same underlying object. `is` is Fe's own broad
+comparator — recorded as such by 05A's Decision 2 — not an Emacs Lisp form.
 
 #### `(atom x)`
 
@@ -727,12 +731,38 @@ Returns true if `x` is not a pair, otherwise `nil`.
 Prints all its arguments to `stdout`, each separated by a space and followed by
 a newline.
 
+### Numbers
+
+Fe has two numeric types, like Emacs Lisp: **integers** (signed 64-bit,
+printed bare) and **floats** (IEEE 754 doubles). The numeric functions below
+are the full tower: both types flow through every arithmetic, comparison,
+equality and math-native path, and each operator preserves integers where
+Emacs preserves them and promotes to float where Emacs promotes.
+
+The reader still produces only floats: `42` reads as the double `42.0`
+(printed `42` by the integral-double shortcut), and no source text can spell
+an integer before the 05D cut. Integers reach the interpreter only from the
+host C API (`FeMakeInteger`), from the tower's integer identities
+(`(+)`/`(-)` are the integer `0`, `(*)` the integer `1`), and from the
+integer-returning math natives (`floor` etc.). Everything a script writes
+with ordinary literals therefore still computes in doubles end to end:
+`(+ 1 2)` is the double `5.0`, printed `5`. Host-made integers flow through
+the tower exactly as if a future reader had spelled them: all-integer
+operands stay integer, and a float operand promotes the rest of the
+computation.
+
+Integer overflow (in any direction, on any operator) and integer division by
+zero are `arith-error`, never a silent wrap and never a promotion to float.
+The numeric family's type errors are `wrong-type-argument`, the Emacs
+condition name.
+
 #### `(= number ...)`
 
 Numeric equality, matching Emacs Lisp: `(= a b c ...)` is true only if every
-argument is numerically equal to every other. Until sub-plan 02C of the
-Emacs-subset hard cut, `=` was instead Fe's historical, non-Emacs assignment
-primitive -- see `(setq symbol value ...)` above for its replacement.
+argument is numerically equal to every other, by *mathematical value across
+types* — `(= 3 3.0)` is `t`. Until sub-plan 02C of the Emacs-subset hard cut,
+`=` was instead Fe's historical, non-Emacs assignment primitive -- see
+`(setq symbol value ...)` above for its replacement.
 
 At least one argument is required: `(=)` is `wrong-number-of-arguments`.
 One argument is `t` without comparing anything; two or more are compared as
@@ -760,9 +790,11 @@ fe > (= 1 "1")
 error: wrong-type-argument
 ```
 
-Fe has only doubles today, so equality is ordinary IEEE 754 `==`, not
-special-cased: `0.0` and `-0.0` compare equal, and `NaN` never compares
-equal to itself.
+Integers compare exactly, by value. Floats compare with ordinary IEEE 754
+`==`, and a mixed pair compares by the mathematical value of both after the
+integer converts exactly to double (exact up to 2^53, like any 64-bit to
+double conversion). So `0.0` and `-0.0` compare equal, and `NaN` never
+compares equal to itself:
 
 ```clojure
 fe > (= 0.0 -0.0)
@@ -771,31 +803,98 @@ fe > (= (sqrt -1) (sqrt -1))
 nil
 ```
 
-#### `(< a b)`
+#### `(< a b ...)`
 
-Returns true if the numerical value `a` is less than `b`.
+Returns true if its arguments are in strictly increasing numerical order:
+`(< a b c)` is `t` if and only if `a < b` and `b < c`. One argument is `t`;
+no arguments is `wrong-number-of-arguments`. Comparisons use the same
+mathematical-value-across-types rule as `=`, and the same no-short-circuit
+checking: every adjacent pair is compared, so a type error anywhere in the
+chain is still reported.
 
-#### `(<= a b)`
+#### `(<= a b ...)`
 
-Returns true if the numerical value `a` is less than or equal to `b`.
+Like `<`, with non-strict comparisons: `(<= a b c)` is `a <= b` and
+`b <= c`. Same arity rules.
+
+#### `(> a b ...)`
+
+Like `<`, in strictly decreasing order: `(> a b c)` is `t` if and only if
+`a > b` and `b > c`.
+
+#### `(>= a b ...)`
+
+Like `>`, with non-strict comparisons: `(>= a b c)` is `a >= b` and
+`b >= c`. Same arity rules.
+
+#### `(/= a b)`
+
+Numerical inequality: true if `a` and `b` are *not* numerically equal, by
+the same mathematical-value rule as `=`. Unlike the chained comparisons,
+`/=` is strictly binary -- a third argument is `wrong-number-of-arguments`,
+exactly as in Emacs Lisp, not a chain.
 
 #### `(+ ...)`
 
-Adds all its arguments together. With no arguments the answer is the identity
-element, `0`, as in Emacs.
+Adds all its arguments, left to right, integer-preserving: all-integer
+operands stay integer, and any float operand promotes the whole addition to
+float. Integer overflow is `arith-error`. With no arguments the answer is
+the identity element, the integer `0`, as in Emacs.
 
 #### `(- ...)`
 
-Subtracts all its arguments, left to right. With no arguments the answer is
-`0`.
+Subtracts all its arguments, left to right, with the same preservation and
+promotion as `+`. With no arguments the answer is the integer `0`. With one
+argument the answer is its negation: `(- 5)` is `-5` (negating `INT64_MIN`
+is `arith-error`).
 
 #### `(* ...)`
 
-Multiplies all its arguments. With no arguments the answer is the identity
-element, `1`.
+Multiplies all its arguments, with the same preservation and promotion.
+Integer overflow is `arith-error`. With no arguments the answer is the
+identity element, the integer `1`.
 
 #### `(/ ...)`
 
 Divides all its arguments, left to right. Unlike the three above it has no
 identity element to return, so no arguments at all is
-`wrong-number-of-arguments`.
+`wrong-number-of-arguments`. All-integer division stays integer and
+truncates toward zero -- integer `7` by integer `2` is `3`, `-7` by `2` is
+`-3` -- and a float operand promotes to float (`(/ 7 2.0)` is `3.5`). With
+one integer argument the answer is the reciprocal, truncated: `(/ 5)` on an
+integer operand is the integer `0`. Integer division by zero is
+`arith-error`. (The integer examples are the tower's rule for integer
+operands; written literals still read as doubles before the 05D cut, so
+`(/ 7 2)` computes `3.5` today.)
+
+#### `(integerp x)`
+
+Returns `t` if `x` is an integer, else `nil` -- a float, a string, a list,
+anything else is `nil`. Exactly one argument; a leftover argument is
+`wrong-number-of-arguments`. While the reader produces only doubles, the
+integers `integerp` can answer `t` for come from the host API, the tower's
+integer identities, and the integer-returning math natives.
+
+#### `(floatp x)`
+
+Returns `t` if `x` is a float, else `nil`. Exactly one argument; a leftover
+argument is `wrong-number-of-arguments`.
+
+#### Math functions
+
+The math natives follow per-function return types, as in Emacs Lisp:
+`floor`, `ceiling`, `round` (round-half-even) and `truncate` return
+integers, either one-argument (`(floor 7.5)` is `7`) or two-argument (divide
+first, then round: `(ceiling -7 2)` is `-3`); a result outside int64's range
+is `arith-error`. `expt` returns an integer for two integer arguments with a
+non-negative exponent (`(expt 2 8)` is `256`), and promotes to float for a
+negative exponent or any float argument (`(expt 2 -1)` is `0.5`,
+`(expt 2.0 8)` is `256.0`). The transcendentals — `sqrt`, `sin`, `cos`,
+`tan`, `asin`, `acos`, `atan`, `exp`, `log` — return floats always
+(`(sqrt 16)` is the float `4.0`).
+
+In the standalone `fe` binary the Fex extensions shadow `floor`, `ceiling`,
+`log`, `round` and `truncate` with their own one-argument versions (see
+`doc/implementation.md`); the core natives described here are what a host
+embedding of `fe.c` gets, and what `scripts/math.fe`'s golden exercises is
+the Fex side of that split.

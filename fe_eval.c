@@ -19,6 +19,7 @@
 
 #include <assert.h>
 #include <setjmp.h>
+#include <stdckdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -387,29 +388,54 @@ static FeObject* ArgsToEnv(FeContext* ctx,
   return env;
 }
 
-// Local to `=`: an honest `wrong-type-argument` message, rather than
-// `CheckType()`'s generic "expected double, got X" text, which the compat
-// oracle comparator does not recognise. See doc/language.md.
-static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
-  if (FeGetType(obj) != FeTDouble) {
-    FeHandleError(ctx, "wrong-type-argument");
+// The numeric tower's one promotion rule (sub-plan 05C of kg's Emacs-subset
+// program, "A numeric-pair helper, once"): two numeric operands become both
+// int64_t when they are both integers, both double otherwise -- integer
+// arithmetic stays integer, and any double promotes the rest of the
+// reduction. Every binary arithmetic and comparison site dispatches through
+// here, so the rule is written once and cannot rot. A non-number is the
+// Emacs `wrong-type-argument` (05A Decision 5, row C5), which retires the
+// old "expected double, got X" texts on the numeric family only; `CheckType`'s
+// generic message survives everywhere else.
+typedef struct NumericPair {
+  bool is_integer;
+  int64_t a_i, b_i;
+  double a_d, b_d;
+} NumericPair;
+
+static NumericPair GetNumericPair(FeContext* ctx, FeObject* a, FeObject* b) {
+  const FeType a_type = FeGetType(a);
+  const FeType b_type = FeGetType(b);
+  if (a_type == FeTInteger && b_type == FeTInteger) {
+    return (NumericPair){
+        .is_integer = true, .a_i = INTEGER(a), .b_i = INTEGER(b)};
   }
-  return obj;
+  if ((a_type == FeTInteger || a_type == FeTDouble) &&
+      (b_type == FeTInteger || b_type == FeTDouble)) {
+    // `FeToDouble` widens an integer to a double, so the mixed promotion
+    // loses no code path of its own.
+    return (NumericPair){.is_integer = false,
+                         .a_d = FeToDouble(ctx, a),
+                         .b_d = FeToDouble(ctx, b)};
+  }
+  FeHandleError(ctx, "wrong-type-argument");
 }
 
-// `=` (`PNumericEqual` in `ResumeEvalList`): numeric equality over Fe's
-// existing doubles, chained left to right, Emacs' ordinary-function
+// `=` (`PNumericEqual` in `ResumeEvalList`): numeric equality over both
+// numeric types, chained left to right, Emacs' ordinary-function
 // semantics -- the complete raw argument list is evaluated left to right
 // before any value is type-checked, so a type error in an early operand
 // never erases a side effect a later operand's form already had -- then
 // every operand is validated and compared without short-circuiting, even
 // once the chain is already known unequal, so every operand form has both
 // run and been checked by the time `=` returns -- one argument is `t`
-// without comparing anything. Plain C `==` gives the pinned signed-zero
-// (`0.0 = -0.0` is true) and NaN (never `=` to itself) answers;
-// -Wfloat-equal is suppressed for this intentional exact comparison, the
-// same way `Equal()`'s `IsNearlyEqual()` helper above does for its own
-// `a == b` infinity special case. See doc/language.md.
+// without comparing anything. The comparison itself is 05C's tower: exact
+// within integers, mathematical value across int/float through
+// `GetNumericPair`, and -- for double/double -- plain C `==`, which gives
+// the pinned signed-zero (`0.0 = -0.0` is true) and NaN (never `=` to
+// itself) answers; -Wfloat-equal is suppressed for this intentional exact
+// comparison, the same way `Equal()`'s `IsNearlyEqual()` helper above does
+// for its own `a == b` infinity special case. See doc/language.md.
 
 // An error that names the object the program wrote: `void-variable x`,
 // `void-function x`, `invalid-function x`. `kind` is the Emacs condition name
@@ -844,11 +870,35 @@ static bool DispatchPrimitive(FeContext* ctx,
       frame->accumulator = &nil;
       frame->callee = &unbound;
       return false;
-    // `=`: zero raw arguments is rejected before anything evaluates; one or
-    // more are evaluated as a batch (`FeFrameEvalList`) before any operand
-    // is type-checked or compared.
+    // `=` and the chained comparators `<`/`<=`/`>`/`>=` (05C): zero raw
+    // arguments is rejected before anything evaluates; one or more are
+    // evaluated as a batch (`FeFrameEvalList`) before any operand is
+    // type-checked or compared. `/=` is strictly binary (05A row C3), so its
+    // raw arity is also checked before anything evaluates -- a third operand
+    // is `wrong-number-of-arguments`, not a chain.
     case PNumericEqual:
+    case PLess:
+    case PLessEqual:
+    case PGreater:
+    case PGreaterEqual:
       if (FeIsNil(arguments)) {
+        FeHandleError(ctx, "wrong-number-of-arguments");
+      }
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
+    case PNotEqual:
+      // `(/= a b)` is strictly binary (05A row C3, confirmed by the pinned
+      // Emacs: `(/= 5)` is `wrong-number-of-arguments` too), so the raw
+      // arity -- exactly two operands -- is checked before anything
+      // evaluates. A third operand is `wrong-number-of-arguments`, not a
+      // chain.
+      if (FeGetType(arguments) != FeTPair ||
+          FeGetType(CDR(arguments)) != FeTPair ||
+          !FeIsNil(CDR(CDR(arguments)))) {
         FeHandleError(ctx, "wrong-number-of-arguments");
       }
       frame->kind = FeFrameEvalList;
@@ -897,6 +947,8 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PSymbolValue:
     case PFboundp:
     case PFmakunbound:
+    case PIntegerp:
+    case PFloatp:
       frame->kind = FeFrameUnary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -906,8 +958,6 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PSetCar:
     case PSetCdr:
     case PIs:
-    case PLess:
-    case PLessEqual:
     case PFset:
     case PDefalias:
       frame->kind = FeFrameBinary;
@@ -1338,6 +1388,17 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       *result = FeMakeBool(ctx, SymbolFunction(sym) != &unbound);
       break;
     }
+    case PIntegerp:
+      // 05C's numeric predicates are arity-exact like `boundp`/`makunbound`
+      // above, and answer from the tag alone -- an integer is a distinct
+      // object, not a double in disguise.
+      FeRequireNoArguments(ctx, frame->rest);
+      *result = FeMakeBool(ctx, FeGetType(value) == FeTInteger);
+      break;
+    case PFloatp:
+      FeRequireNoArguments(ctx, frame->rest);
+      *result = FeMakeBool(ctx, FeGetType(value) == FeTDouble);
+      break;
     case PFmakunbound: {
       FeObject* const sym = CheckType(ctx, value, FeTSymbol);
       FeRequireNoArguments(ctx, frame->rest);
@@ -1358,12 +1419,13 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 
 // The primitives that evaluate exactly two operands in sequence, with a
 // per-primitive check or side effect at each delivery: `cons`, `setcar`,
-// `setcdr`, `is`, `<`, `<=`. `accumulator` holds the (possibly checked)
+// `setcdr`, `is`. `accumulator` holds the (possibly checked)
 // first operand, `&unbound` marking "not yet delivered". `setcar`/`setcdr`
 // validate their first operand as a pair immediately on delivery, before
 // the second operand is even evaluated -- the ordering the recursive arm
-// required; `<`/`<=` validate both operands as doubles and ignore any
-// operands beyond the two, exactly as the recursive `NUM_CMP_OP` macro did.
+// required. The comparisons `<`/`<=` shared this frame until 05C made them
+// chained and variadic (`FeFrameEvalList`); their binary arm died with the
+// move.
 static bool ResumeBinary(FeContext* ctx,
                          FeEvalFrame* frame,
                          FeObject** result) {
@@ -1378,10 +1440,6 @@ static bool ResumeBinary(FeContext* ctx,
       case PSetCar:
       case PSetCdr:
         first = CheckType(ctx, first, FeTPair);
-        break;
-      case PLess:
-      case PLessEqual:
-        first = CheckType(ctx, first, FeTDouble);
         break;
       // `fset`/`defalias` (04C): the target is a symbol, checked before the
       // function form is evaluated, matching the other binary primitives'
@@ -1441,14 +1499,8 @@ static bool ResumeBinary(FeContext* ctx,
       SetSymbolFunction(first, second);
       *result = first;
       break;
-    default: {  // PLess, PLessEqual
-      const FeObject* const checked_second = CheckType(ctx, second, FeTDouble);
-      *result =
-          FeMakeBool(ctx, PRIM(frame->fn) == PLessEqual
-                              ? GetDouble(first) <= GetDouble(checked_second)
-                              : GetDouble(first) < GetDouble(checked_second));
-      break;
-    }
+    default:
+      abort();
   }
   frame->callee = &unbound;
   return true;
@@ -1456,7 +1508,10 @@ static bool ResumeBinary(FeContext* ctx,
 
 // The value an arithmetic frame completes with: the running total, or -- when
 // no operand was combined at all -- Emacs' identity element for the operator,
-// `(+)` and `(-)` being 0 and `(*)` 1. `(/)` has no identity to return and is
+// `(+)` and `(-)` being 0 and `(*)` 1. Since 05C these identities are
+// *integers* (`FeTInteger`), the type Emacs gives them; the double-only
+// reader cannot see the difference until the 05D cut, and the printer renders
+// integer and integral double alike. `(/)` has no identity to return and is
 // `wrong-number-of-arguments`, as in Emacs; nothing has evaluated by then, so
 // raising here rather than at dispatch is the same observable order.
 // Without this the frame completed with the `&unbound` sentinel its
@@ -1475,39 +1530,123 @@ static FeObject* ArithResult(FeContext* ctx, const FeEvalFrame* frame) {
   if (primitive == PDiv) {
     FeHandleError(ctx, "wrong-number-of-arguments");
   }
-  return FeMakeDouble(ctx, primitive == PMul ? 1 : 0);
+  return FeMakeInteger(ctx, primitive == PMul ? 1 : 0);
+}
+
+// The first operand of an arithmetic reduction seeds the accumulator (05C).
+// `+` and `*` use it as-is; `-` and `/` apply their unary semantics -- `(- 5)`
+// is negation, `(/ 5)` the reciprocal (05A rows A1/A2) -- but only when the
+// operand is also the *last* one, i.e. the reduction is unary. A multi-
+// operand `(- 7 2)` is ordinary subtraction from 7, not a negated 7, so the
+// seed's unary behaviour is conditional on `only_operand` (which `ResumeArith`
+// reads from `frame->rest` at seed time). The old behaviour -- "the first
+// operand is the running total" -- made `(- 5)` answer 5 and `(/ 5)` answer
+// 5, neither of them Emacs'. A negated `INT64_MIN` overflows and is
+// `arith-error`, and the reciprocal of an integer truncates toward zero over
+// the integers, so `(/ 5)` is 0 and `(/ 1)` is 1, with `(/ 0)` the same
+// integer division by zero as `(/ 1 0)`. A non-number seeds with
+// `wrong-type-argument`, the numeric family's name.
+static FeObject* SeedArith(FeContext* ctx,
+                           Primitive primitive,
+                           FeObject* operand,
+                           bool only_operand) {
+  const FeType type = FeGetType(operand);
+  if (type == FeTInteger) {
+    if (primitive == PSub && only_operand) {
+      int64_t negated;
+      if (ckd_sub(&negated, 0, INTEGER(operand))) {
+        FeHandleError(ctx, "arith-error");
+      }
+      return FeMakeInteger(ctx, negated);
+    }
+    if (primitive == PDiv && only_operand) {
+      if (INTEGER(operand) == 0) {
+        FeHandleError(ctx, "arith-error");
+      }
+      return FeMakeInteger(ctx, 1 / INTEGER(operand));
+    }
+    return operand;
+  }
+  if (type == FeTDouble) {
+    if (primitive == PSub && only_operand) {
+      return FeMakeDouble(ctx, -GetDouble(operand));
+    }
+    if (primitive == PDiv && only_operand) {
+      return FeMakeDouble(ctx, 1.0 / GetDouble(operand));
+    }
+    return operand;
+  }
+  FeHandleError(ctx, "wrong-type-argument");
+}
+
+// Combines the accumulated value with a just-delivered operand through
+// `GetNumericPair`, the tower's single promotion rule: integer+integer stays
+// integer with the int64 overflow detection `ckd_add`/`ckd_sub`/`ckd_mul`
+// provide -- overflow is `arith-error`, never undefined behaviour (05A
+// Decision 5, row A8) -- integer division truncates toward zero and errors on
+// a zero divisor, with `INT64_MIN / -1` an `arith-error` too (it would
+// overflow), and any double promotes the whole reduction. The operands' raw
+// values are extracted before the result is allocated, so the C locals need
+// no collector root of their own across `FeMakeInteger`/`FeMakeDouble`.
+static FeObject* CombineNumeric(FeContext* ctx,
+                                Primitive primitive,
+                                FeObject* accumulator,
+                                FeObject* delivered) {
+  const NumericPair p = GetNumericPair(ctx, accumulator, delivered);
+  if (p.is_integer) {
+    int64_t result;
+    switch ((char)primitive) {
+      case PAdd:
+        if (ckd_add(&result, p.a_i, p.b_i)) {
+          FeHandleError(ctx, "arith-error");
+        }
+        return FeMakeInteger(ctx, result);
+      case PSub:
+        if (ckd_sub(&result, p.a_i, p.b_i)) {
+          FeHandleError(ctx, "arith-error");
+        }
+        return FeMakeInteger(ctx, result);
+      case PMul:
+        if (ckd_mul(&result, p.a_i, p.b_i)) {
+          FeHandleError(ctx, "arith-error");
+        }
+        return FeMakeInteger(ctx, result);
+      default:  // PDiv
+        if (p.b_i == 0 || (p.a_i == INT64_MIN && p.b_i == -1)) {
+          FeHandleError(ctx, "arith-error");
+        }
+        return FeMakeInteger(ctx, p.a_i / p.b_i);
+    }
+  }
+  const double combined = primitive == PAdd   ? p.a_d + p.b_d
+                          : primitive == PSub ? p.a_d - p.b_d
+                          : primitive == PMul ? p.a_d * p.b_d
+                                              : p.a_d / p.b_d;
+  return FeMakeDouble(ctx, combined);
 }
 
 // `+`, `-`, `*`, `/`: streams every operand, validating and combining each
 // as it arrives, exactly as the recursive `ARITH_OP` macro's own loop did --
 // never batching the whole list first the way `FeFrameEvalList` does.
-// `accumulator` holds the running total, boxed (`FeMakeDouble`) so it stays
-// an ordinary marked field; `&unbound` marks "no operand combined yet".
+// `accumulator` holds the running total, boxed either as an integer or a
+// double (05C) so it stays an ordinary marked field; `&unbound` marks "no
+// operand combined yet". The combine and seed paths extract their operands'
+// values before allocating, and `accumulator` is a frame field (a collector
+// root) throughout, so no operand is ever live only in a C local across a
+// possible collection.
 static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (frame->callee != &unbound) {
-    const FeDouble delivered = FeToDouble(ctx, frame->callee);
+    FeObject* const delivered = frame->callee;
     frame->callee = &unbound;
     const size_t gc = FeSaveGC(ctx);
     if (frame->accumulator == &unbound) {
-      frame->accumulator = FeMakeDouble(ctx, delivered);
+      // `only_operand` is whether the just-delivered first operand is also
+      // the last: `frame->rest` still holds every not-yet-evaluated operand.
+      frame->accumulator = SeedArith(ctx, (Primitive)PRIM(frame->fn), delivered,
+                                     FeIsNil(frame->rest));
     } else {
-      const FeDouble x = GetDouble(frame->accumulator);
-      FeDouble combined;
-      switch (PRIM(frame->fn)) {
-        case PAdd:
-          combined = x + delivered;
-          break;
-        case PSub:
-          combined = x - delivered;
-          break;
-        case PMul:
-          combined = x * delivered;
-          break;
-        default:  // PDiv
-          combined = x / delivered;
-          break;
-      }
-      frame->accumulator = FeMakeDouble(ctx, combined);
+      frame->accumulator = CombineNumeric(ctx, (Primitive)PRIM(frame->fn),
+                                          frame->accumulator, delivered);
     }
     FeRestoreGC(ctx, gc);
   }
@@ -1518,6 +1657,73 @@ static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   }
   *result = ArithResult(ctx, frame);
   return true;
+}
+
+// A one-operand numeric check: the chained comparators' and `=`'s single-
+// operand form still validates its one operand (`(= "a")` is
+// `wrong-type-argument`, not `t`, as in Emacs), and the first element of a
+// longer chain is validated up front even though `GetNumericPair` would only
+// reach it paired with a second. The two-operand `GetNumericPair` remains the
+// tower's one promotion rule; this is only its single-operand arity edge.
+static FeObject* CheckNumeric(FeContext* ctx, FeObject* obj) {
+  const FeType type = FeGetType(obj);
+  if (type != FeTInteger && type != FeTDouble) {
+    FeHandleError(ctx, "wrong-type-argument");
+  }
+  return obj;
+}
+
+// One adjacent-pair comparison for the chained comparators and `=` (05C).
+// Both operands go through `GetNumericPair`, so the promotion rule and the
+// `wrong-type-argument` check are shared with arithmetic; the primitive
+// selects the comparison. Doubles compare with plain C operators -- for `=`/
+// `/=`, `==`/`!=`, preserving the pinned signed-zero (`0.0 = -0.0` is t) and
+// NaN (`=` is never t with NaN) answers; `-Wfloat-equal` is suppressed for
+// the intentional exact equality, the same way `Equal()`'s helper does.
+static bool NumericSatisfies(FeContext* ctx,
+                             Primitive primitive,
+                             FeObject* a,
+                             FeObject* b) {
+  const NumericPair p = GetNumericPair(ctx, a, b);
+  if (p.is_integer) {
+    switch ((char)primitive) {
+      case PNumericEqual:
+        return p.a_i == p.b_i;
+      case PNotEqual:
+        return p.a_i != p.b_i;
+      case PLess:
+        return p.a_i < p.b_i;
+      case PLessEqual:
+        return p.a_i <= p.b_i;
+      case PGreater:
+        return p.a_i > p.b_i;
+      default:  // PGreaterEqual
+        return p.a_i >= p.b_i;
+    }
+  }
+  switch ((char)primitive) {
+    case PNumericEqual:
+    case PNotEqual: {
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfloat-equal"
+#endif
+      const bool equal =
+          primitive == PNumericEqual ? p.a_d == p.b_d : p.a_d != p.b_d;
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+      return equal;
+    }
+    case PLess:
+      return p.a_d < p.b_d;
+    case PLessEqual:
+      return p.a_d <= p.b_d;
+    case PGreater:
+      return p.a_d > p.b_d;
+    default:  // PGreaterEqual
+      return p.a_d >= p.b_d;
+  }
 }
 
 // `print`: streams every operand, writing each as it arrives and printing a
@@ -1558,36 +1764,18 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // would otherwise hand quote-wrapped operands to an arm that never evaluates
 // them.
 static const bool primitive_is_function[PSentinel] = {
-    [PAssert] = true,
-    [PEnv] = true,
-    [PNumericEqual] = true,
-    [PSet] = true,
-    [PBoundp] = true,
-    [PMakeUnbound] = true,
-    [PCons] = true,
-    [PCar] = true,
-    [PCdr] = true,
-    [PSetCar] = true,
-    [PSetCdr] = true,
-    [PList] = true,
-    [PNot] = true,
-    [PIs] = true,
-    [PAtom] = true,
-    [PPrint] = true,
-    [PLess] = true,
-    [PLessEqual] = true,
-    [PAdd] = true,
-    [PSub] = true,
-    [PMul] = true,
-    [PDiv] = true,
-    [PFset] = true,
-    [PDefalias] = true,
-    [PSymbolFunction] = true,
-    [PSymbolValue] = true,
-    [PFboundp] = true,
-    [PFmakunbound] = true,
-    [PFuncall] = true,
-    [PApply] = true,
+    [PAssert] = true,      [PEnv] = true,          [PNumericEqual] = true,
+    [PSet] = true,         [PBoundp] = true,       [PMakeUnbound] = true,
+    [PCons] = true,        [PCar] = true,          [PCdr] = true,
+    [PSetCar] = true,      [PSetCdr] = true,       [PList] = true,
+    [PNot] = true,         [PIs] = true,           [PAtom] = true,
+    [PPrint] = true,       [PLess] = true,         [PLessEqual] = true,
+    [PGreater] = true,     [PGreaterEqual] = true, [PNotEqual] = true,
+    [PIntegerp] = true,    [PFloatp] = true,       [PAdd] = true,
+    [PSub] = true,         [PMul] = true,          [PDiv] = true,
+    [PFset] = true,        [PDefalias] = true,     [PSymbolFunction] = true,
+    [PSymbolValue] = true, [PFboundp] = true,      [PFmakunbound] = true,
+    [PFuncall] = true,     [PApply] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`.
 };
@@ -1790,15 +1978,18 @@ static bool DispatchFuncallApply(FeContext* ctx,
   return false;
 }
 
-// `list`, `=`, `set`, `funcall`, `apply`: evaluates the complete raw
+// `list`, `=`, the chained comparators, `/=`, `set`, `funcall`, `apply`:
+// evaluates the complete raw
 // argument list first --
 // unlike every other primitive continuation above, whose ordering is what
 // makes them not this -- accumulating and reordering exactly as
 // `FeFrameCallArguments`'s own argument list does, then finishes per
-// primitive: `list` returns it as-is; `=` validates and compares every
-// element without short-circuiting, even once the chain is already known
-// unequal, so every operand form has both run and been checked by the time
-// it returns (one argument is `t` without comparing anything); `set`
+// primitive: `list` returns it as-is; `=`/`<`/`<=`/`>`/`>=` validate and
+// compare every adjacent pair without short-circuiting, even once the chain
+// is already known unequal, so every operand form has both run and been
+// checked by the time it returns (one argument is `t` without comparing
+// anything); `/=` is the same shape over its arity-checked two, exact
+// inequality across types; `set`
 // (arity already validated by `DispatchPrimitive` before this frame was
 // even created) checks the first element is a symbol and assigns through
 // `FeSet`. `funcall`/`apply` (04C) resolve the first result through the
@@ -1842,24 +2033,28 @@ static bool ResumeEvalList(FeContext* ctx,
     case PFuncall:
     case PApply:
       return DispatchFuncallApply(ctx, frame, list);
-    default: {  // PNumericEqual
-      FeDouble first = GetDouble(CheckNumericEqualOperand(ctx, CAR(list)));
-      bool equal = true;
+    default: {  // PNumericEqual, PNotEqual, PLess, PLessEqual, PGreater,
+                // PGreaterEqual
+      // The chained comparators and `=`/`/=` (05C): every adjacent pair is
+      // validated and compared left to right, without short-circuiting --
+      // once the chain is known to fail, the remaining operands still get
+      // type-checked, exactly as the pre-tower `=` arm's comment required --
+      // and one operand is `t` without comparing anything. The first element
+      // is checked up front so a lone non-number is still
+      // `wrong-type-argument`.
+      FeObject* prev = CAR(list);
+      (void)CheckNumeric(ctx, prev);
       FeObject* rest = CDR(list);
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wfloat-equal"
-#endif
+      const Primitive op = (Primitive)PRIM(frame->fn);
+      bool ok = true;
       while (!FeIsNil(rest)) {
-        const FeDouble next =
-            GetDouble(CheckNumericEqualOperand(ctx, CAR(rest)));
-        equal = equal && first == next;
+        if (!NumericSatisfies(ctx, op, prev, CAR(rest))) {
+          ok = false;
+        }
+        prev = CAR(rest);
         rest = CDR(rest);
       }
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-      *result = FeMakeBool(ctx, equal);
+      *result = FeMakeBool(ctx, ok);
       break;
     }
   }

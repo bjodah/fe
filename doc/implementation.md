@@ -66,17 +66,53 @@ smaller in size than an `FeObject` pointer. If a different type of value is
 used, `FeRead` and `FeWrite` must also be updated to handle the new type
 correctly.
 
-Sub-plan 05B of kg's Emacs-subset program added the dormant integer object:
+Sub-plan 05B of kg's Emacs-subset program added the integer object:
 `FeTInteger`, an `int64_t` payload in the `cdr` (the `Value` union, which
-`static_assert`s pointer-size on both CI compilers). It is constructible and
-readable through the host API (`FeMakeInteger`/`FeToInteger`) and `FeToDouble`
-accepts it, but the reader is untouched and no primitive returns one, so no
-Lisp program can produce an integer yet and the writer's integer arm
-(`%PRId64`) is reachable only from the host. An integer marks and collects
-exactly as a double does: a leaf. The doubles-only arithmetic paths are
-unchanged; a host-made integer reaching them goes through the widened
-`FeToDouble` (arithmetic) or fails the existing `FeTDouble` checks (`<`, `=`).
-Both behaviours are dormant-state artifacts the numeric tower (05C) replaces.
+`static_assert`s pointer-size on both CI compilers), constructed and read
+through the host API (`FeMakeInteger`/`FeToInteger`). 05C's numeric tower made
+it live rather than dormant: arithmetic, the chained comparators, `=`, `/=`,
+`integerp`/`floatp`, `Equal()`/`is`, and the math natives all dispatch on both
+numeric tags, and the arithmetic primitives and the rounding family return
+integers. The reader is still untouched, so no source text can produce an
+integer before 05D's cut: integers reach a program only through the host API
+(and, inside the fuzz harness, the grammar's own `FeMakeInteger` calls), the
+tower's zero-operand identities, and the integer-returning math natives, so a
+written `(+ 2 3)` still computes the double `5.0` end to end. An
+integer marks and collects exactly as a double does: a leaf.
+
+### The numeric tower
+
+Sub-plan 05C extended every numeric path to both tags behind the unchanged
+reader. The promotion rule lives once, in `GetNumericPair` (fe_eval.c): two
+numeric operands become two `int64_t`s when both are integers, two `double`s
+otherwise — integer arithmetic stays integer, and any double promotes the
+rest of the reduction. Every binary arithmetic combine, chained-comparison
+step and `=`/`/=` comparison goes through it, and a non-number operand is
+`wrong-type-argument` there, the numeric family's name (05A Decision 5)
+replacing the old "expected double" texts. `ResumeArith`'s accumulator is
+either-type: the first delivered operand seeds it (`SeedArith`, giving unary
+`-` its negation and unary `/` its truncated reciprocal), and every later
+delivery combines through `GetNumericPair`. Integer overflow on
+`+`/`-`/`*` (via `ckd_add`/`ckd_sub`/`ckd_mul`), integer division by zero,
+and `INT64_MIN / -1` are all `arith-error` — never UB and never a promotion
+to float — matching 05A's Decision 5 and the recorded divergence from Emacs'
+bignums (row A8). The chained comparators `<`/`<=`/`>`/`>=` and `=` are
+variadic in the `FeFrameEvalList` frame, sharing one comparator loop whose
+direction is the primitive (`NumericSatisfies` over adjacent pairs, no
+short-circuiting); `/=` is strictly binary, its arity rejected at dispatch
+before the frame exists. `integerp`/`floatp` are `FeFrameUnary` leaves
+answering from the tag alone. `Equal()`/`is` gained Decision 2's integer arm:
+exact within integers, mathematical value across int/float (the integer
+converts to double), the epsilon comparison retained for double/double. The
+math natives return per-function types: `floor`/`ceiling`/`round`/`truncate`
+return integers (two-argument forms divide first; an out-of-range result, NaN
+or ±Infinity included, is `arith-error`), `expt` stays integer for an integer
+base and non-negative integer exponent under the same overflow policy, and
+the transcendentals stay floats. In the standalone `fe` binary the Fex
+extensions (`fex_math.c`) still shadow `floor`/`ceiling`/`log`/`round`/
+`truncate` with their one-argument versions; that is a recorded fact 05C's
+tests work around (`scripts/math.fe` pins the Fex side, `TestMathNatives` the
+core build), not something this slice changed.
 
 ### Primitives
 
@@ -380,15 +416,19 @@ grouped by evaluation *shape*, not by primitive:
   `setq`'s pair-at-a-time assignment, a plain relay of whatever a single
   pushed sub-frame delivers).
 - `FeFrameUnary`
-  (`assert`/`not`/`atom`/`car`/`cdr`/`boundp`/`makunbound` and 04C's
-  `symbol-function`/`symbol-value`/`fboundp`/`fmakunbound`)
-  and `FeFrameBinary` (`cons`/`setcar`/`setcdr`/`is`/`<`/`<=` and 04C's
+  (`assert`/`not`/`atom`/`car`/`cdr`/`boundp`/`makunbound`, 04C's
+  `symbol-function`/`symbol-value`/`fboundp`/`fmakunbound`, and 05C's
+  `integerp`/`floatp`)
+  and `FeFrameBinary` (`cons`/`setcar`/`setcdr`/`is` and 04C's
   `fset`/`defalias`) share one kind
   per arity, dispatching the specific check or side effect by the resolved
   primitive object at each delivery -- `setcar`/`setcdr` validate their pair
   operand immediately on the first delivery, before the second is even
-  evaluated, and `boundp`/`makunbound` reject a leftover argument the other
-  unary primitives silently ignore.
+  evaluated, and `boundp`/`makunbound`/`integerp`/`floatp` reject a leftover
+  argument the other unary primitives silently ignore. The comparisons
+  `<`/`<=` shared `FeFrameBinary` until 05C made them chained and variadic;
+  they now live in `FeFrameEvalList` beside `=`, and their binary arm died
+  with the move.
 - `FeFrameArith` (`+`/`-`/`*`//`) streams and validates every operand as it
   arrives, exactly as the old `ARITH_OP` macro's loop did, never batching
   the whole list first; `FeFramePrint` streams too, but interleaves output
@@ -398,13 +438,22 @@ grouped by evaluation *shape*, not by primitive:
   (`(+)` and `(-)` 0, `(*)` 1, `(/)` `wrong-number-of-arguments`) rather than
   with the accumulator: "no expression evaluates to `&unbound`" is an
   invariant of the whole evaluator, and the resume arms that read a delivery
-  of `&unbound` as "nothing delivered yet" break when it is violated.
-- `FeFrameEvalList` (`list`/`=`/`set`, and 04C's `funcall`/`apply`) is the
+  of `&unbound` as "nothing delivered yet" break when it is violated. Since
+  05C the identities are *integers* (the type Emacs gives them), the
+  accumulator is either-type, and each delivery combines through the tower's
+  single promotion rule (`GetNumericPair`/`CombineNumeric`, see "The numeric
+  tower" above) after the first operand seeds it.
+- `FeFrameEvalList` (`list`/`=`, 05C's chained comparators
+  `<`/`<=`/`>`/`>=` and the strictly-binary `/=`, `set`, and 04C's
+  `funcall`/`apply`) is the
   one kind that *does* evaluate
   its whole raw argument list first, exactly as the old `EvaluateList`-based
   arms did, before validating or dispatching on any of it — which is what
   makes `funcall`/`apply`'s evaluate-then-redispatch shape fit it with no new
-  frame kind (see "Sub-plan 04C" above).
+  frame kind (see "Sub-plan 04C" above). The chained comparators and `=`
+  validate and compare every adjacent pair without short-circuiting;
+  `/=`'s binary arity is rejected at dispatch before this frame is even
+  created.
 
 `PushBodyFrame` pushes a sequential-body frame directly, bypassing the call
 path, for the places a raw form list is evaluated as an implicit body with

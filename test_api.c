@@ -2012,6 +2012,382 @@ static bool TestNumericEqual(void) {
   return true;
 }
 
+// Sub-plan 05C: the numeric tower, driven entirely through the host API. The
+// reader cannot yet spell an integer (05D's cut), so every integer here is a
+// host-made `FeMakeInteger` placed directly in a constructed form -- an
+// atomic, non-symbol operand evaluates to itself, so `(+ int int)` needs no
+// reader -- and the operator is a symbol resolved through the function
+// namespace exactly as an evaluated call would be. The assertions are the
+// 05A-pinned Emacs semantics for both numeric types: integer-preserving
+// arithmetic with promotion when a double joins, truncating division,
+// `arith-error` at the int64 edges (add/sub/mul overflow, division by zero,
+// the INT64_MIN/-1 division edge), the unary seeds, variadic chained
+// comparators in both directions, strictly-binary `/=`, cross-type `=`, the
+// `integerp`/`floatp` predicates, per-function math native return types,
+// context reuse after every error, and forced GC across the tower's resume
+// states (the either-type arith accumulator, the chained-comparator list,
+// the `=` chain, a unary predicate leaf, a math native). Every check here is
+// the slice's contract; the pre-05C core satisfies only the double-shaped
+// subset, so the rest are the measured blockers this suite's failing lines
+// record.
+
+typedef enum OperandKind {
+  OperandInteger,
+  OperandDouble,
+  OperandValue,
+} OperandKind;
+
+typedef struct Operand {
+  OperandKind kind;
+  union {
+    int64_t i;
+    double d;
+    FeObject* object;
+  } value;
+} Operand;
+
+static Operand IntOperand(int64_t i) {
+  return (Operand){.kind = OperandInteger, .value.i = i};
+}
+
+static Operand DoubleOperand(double d) {
+  return (Operand){.kind = OperandDouble, .value.d = d};
+}
+
+static Operand NilOperand(void) {
+  return (Operand){.kind = OperandValue, .value.object = &nil};
+}
+
+static FeObject* MakeOperand(FeContext* context, const Operand* operand) {
+  switch (operand->kind) {
+    case OperandInteger:
+      return FeMakeInteger(context, operand->value.i);
+    case OperandDouble:
+      return FeMakeDouble(context, operand->value.d);
+    case OperandValue:
+      return operand->value.object;
+  }
+  return nullptr;
+}
+
+// `(name op1 op2 ...)`: one fresh cons spine, every node and operand rooted
+// on the GC stack for the caller's whole save/restore scope.
+static FeObject* MakeCallForm(FeContext* context,
+                              const char* name,
+                              FeObject* const* operands,
+                              size_t count) {
+  FeObject* form = &nil;
+  for (size_t i = count; i > 0; i--) {
+    form = FeCons(context, operands[i - 1], form);
+  }
+  return FeCons(context, FeMakeSymbol(context, name), form);
+}
+
+// Evaluates `(name ops...)`, asserting the result's exact type and rendering.
+static bool CheckNumericForm(FeContext* context,
+                             const char* name,
+                             const Operand* operands,
+                             size_t count,
+                             FeType result_type,
+                             const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  FeObject* ops[8];
+  CHECK(count <= sizeof(ops) / sizeof(ops[0]));
+  for (size_t i = 0; i < count; i++) {
+    ops[i] = MakeOperand(context, &operands[i]);
+  }
+  FeObject* form = MakeCallForm(context, name, ops, count);
+  FeObject* result = FeEvaluate(context, form);
+  const bool ok =
+      FeGetType(result) == result_type && IsRendered(context, result, expected);
+  FeRestoreGC(context, gc);
+  return ok;
+}
+
+// Evaluates `(name ops...)`, expecting it to raise `expected`; the context
+// must stay reusable afterwards.
+static bool CheckNumericError(FeContext* context,
+                              ErrorState* state,
+                              const char* name,
+                              const Operand* operands,
+                              size_t count,
+                              const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  FeObject* ops[8];
+  CHECK(count <= sizeof(ops) / sizeof(ops[0]));
+  for (size_t i = 0; i < count; i++) {
+    ops[i] = MakeOperand(context, &operands[i]);
+  }
+  FeObject* form = MakeCallForm(context, name, ops, count);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    (void)FeEvaluate(context, form);
+    FeRestoreGC(context, gc);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  CHECK(!FeIsNil(FeMakeBool(context, true)));
+  return true;
+}
+
+// `(name int0 (do (setq n 0) (while (< n 2000) (setq n (+ n 1))
+// (cons n n))) int1) int2 ...)`: operand `churn_index` is a collecting `do`
+// that returns `integers[churn_index]`, so a collection happens while the
+// `name` frame is suspended after an earlier operand, and the host integers
+// in the frame's fields must survive to be combined or compared afterwards.
+// The churn returns an integer only because the last body form *is* the host
+// integer -- the reader still spells nothing but doubles.
+static bool GCSurvivesResume(FeContext* context,
+                             const char* name,
+                             const int64_t* integers,
+                             size_t count,
+                             size_t churn_index,
+                             const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  static const char churn[] =
+      "(do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)))";
+  size_t offset = 0;
+  FeObject* churn_form =
+      FeReadString(context, churn, sizeof(churn) - 1, &offset);
+  CHECK(offset == sizeof(churn) - 1);
+  FeObject* ops[8];
+  CHECK(count <= sizeof(ops) / sizeof(ops[0]));
+  for (size_t i = 0; i < count; i++) {
+    ops[i] = FeMakeInteger(context, integers[i]);
+  }
+  FeObject* tail = churn_form;
+  while (!FeIsNil(CDR(tail))) {
+    tail = CDR(tail);
+  }
+  CDR(tail) = FeCons(context, ops[churn_index], &nil);
+  ops[churn_index] = churn_form;
+  FeObject* form = MakeCallForm(context, name, ops, count);
+  const size_t before = FeGetArenaStats(context).collection_count;
+  FeObject* result = FeEvaluate(context, form);
+  const bool ok = FeGetArenaStats(context).collection_count > before &&
+                  IsRendered(context, result, expected);
+  FeRestoreGC(context, gc);
+  return ok;
+}
+
+static bool TestNumericTower(void) {
+  TestArena arena;
+  const size_t tower_size = FeMinimumArenaSize() + 8 * 1024;
+  CHECK(tower_size <= sizeof(arena.bytes));
+  FeContext* context = FeOpenContext(arena.bytes, tower_size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHECK_NUM(name, result_type, expected, ...)                \
+  do {                                                             \
+    const Operand operands[] = {__VA_ARGS__};                      \
+    CHECK(CheckNumericForm(context, name, operands,                \
+                           sizeof(operands) / sizeof(operands[0]), \
+                           result_type, expected));                \
+  } while (false)
+#define CHECK_NUM_ERR(name, expected, ...)                          \
+  do {                                                              \
+    const Operand operands[] = {__VA_ARGS__};                       \
+    CHECK(CheckNumericError(context, &state, name, operands,        \
+                            sizeof(operands) / sizeof(operands[0]), \
+                            expected));                             \
+  } while (false)
+
+  // int/int preservation: an all-integer reduction never leaves the integer
+  // tag, stays exact past 2^53, and the zero-operand identities become
+  // integers (invisible through the old printer, pinned by 05A's snapshots
+  // after the cut).
+  CHECK_NUM("+", FeTInteger, "3", IntOperand(1), IntOperand(2));
+  CHECK_NUM("-", FeTInteger, "2", IntOperand(5), IntOperand(3));
+  CHECK_NUM("*", FeTInteger, "6", IntOperand(2), IntOperand(3));
+  CHECK_NUM("/", FeTInteger, "3", IntOperand(6), IntOperand(2));
+  CHECK_NUM("+", FeTInteger, "9007199254740993", IntOperand(9007199254740993LL),
+            IntOperand(0));
+  CHECK_NUM("+", FeTInteger, "4611686018427387903",
+            IntOperand(4611686018427387903LL), IntOperand(0));
+  CHECK(CheckNumericForm(context, "+", nullptr, 0, FeTInteger, "0"));
+  CHECK(CheckNumericForm(context, "*", nullptr, 0, FeTInteger, "1"));
+  CHECK(CheckNumericForm(context, "-", nullptr, 0, FeTInteger, "0"));
+
+  // FeCall itself: integers flow through the quote-wrapped argument path a
+  // host call constructs, and the lambda's `+` stays integer end to end.
+  {
+    static const char add_function[] = "(fn (x y) (+ x y))";
+    FeRoot* root = FeCreateRoot(
+        context, FeEvaluateString(context, "tower.fe", add_function,
+                                  sizeof(add_function) - 1));
+    FeObject* arguments[] = {FeMakeInteger(context, 1),
+                             FeMakeInteger(context, 2)};
+    const size_t gc = FeSaveGC(context);
+    FeObject* result = FeCall(context, FeGetRoot(root), arguments, 2);
+    CHECK(FeGetType(result) == FeTInteger);
+    CHECK(FeToInteger(context, result) == 3);
+    FeRestoreGC(context, gc);
+    FeReleaseRoot(context, root);
+  }
+
+  // Mixed promotion: once a double joins, the whole reduction is double.
+  CHECK_NUM("+", FeTDouble, "3.5", IntOperand(1), DoubleOperand(2.5));
+  CHECK_NUM("+", FeTDouble, "3", IntOperand(1), DoubleOperand(2.0));
+  CHECK_NUM("*", FeTDouble, "6", IntOperand(2), DoubleOperand(3.0));
+  CHECK_NUM("/", FeTDouble, "3.5", IntOperand(7), DoubleOperand(2.0));
+  CHECK_NUM("/", FeTDouble, "3.5", DoubleOperand(7.0), IntOperand(2));
+  CHECK_NUM("+", FeTDouble, "6", IntOperand(1), DoubleOperand(2.0),
+            IntOperand(3));
+
+  // Truncating division, toward zero for both signs; the unary seeds flip to
+  // negation and reciprocal (05A A1/A2).
+  CHECK_NUM("/", FeTInteger, "3", IntOperand(7), IntOperand(2));
+  CHECK_NUM("/", FeTInteger, "-3", IntOperand(-7), IntOperand(2));
+  CHECK_NUM("/", FeTInteger, "-3", IntOperand(7), IntOperand(-2));
+  CHECK_NUM("/", FeTInteger, "3", IntOperand(-7), IntOperand(-2));
+  CHECK_NUM("-", FeTInteger, "-5", IntOperand(5));
+  CHECK_NUM("-", FeTDouble, "-5.5", DoubleOperand(5.5));
+  CHECK_NUM("/", FeTInteger, "0", IntOperand(5));
+  CHECK_NUM("/", FeTDouble, "0.5", DoubleOperand(2.0));
+
+  // Zero and overflow errors: integer division by zero is `arith-error`, a
+  // double divisor still yields a nonfinite float (05A A5, the printer is
+  // 05D's), and every overflow operator refuses at the int64 edges --
+  // `__builtin_*_overflow`, never UB, including the unary-negation and
+  // INT64_MIN/-1 division edges C would leave undefined.
+  CHECK_NUM_ERR("/", "arith-error", IntOperand(1), IntOperand(0));
+  CHECK_NUM_ERR("/", "arith-error", IntOperand(-1), IntOperand(0));
+  CHECK_NUM_ERR("/", "arith-error", IntOperand(0), IntOperand(0));
+  CHECK_NUM("/", FeTDouble, "inf", IntOperand(1), DoubleOperand(0.0));
+  CHECK_NUM_ERR("+", "arith-error", IntOperand(INT64_MAX), IntOperand(1));
+  CHECK_NUM_ERR("-", "arith-error", IntOperand(INT64_MIN), IntOperand(1));
+  CHECK_NUM_ERR("*", "arith-error", IntOperand(INT64_MAX), IntOperand(2));
+  CHECK_NUM_ERR("*", "arith-error", IntOperand(4611686018427387904LL),
+                IntOperand(4));
+  CHECK_NUM_ERR("-", "arith-error", IntOperand(INT64_MIN));
+  CHECK_NUM_ERR("/", "arith-error", IntOperand(INT64_MIN), IntOperand(-1));
+
+  // Chained comparisons, variadic in both directions; a double in the chain
+  // promotes the comparison.
+  CHECK_NUM("<", FeTSymbol, "t", IntOperand(1), IntOperand(2), IntOperand(3));
+  CHECK_NUM("<", FeTNil, "nil", IntOperand(1), IntOperand(3), IntOperand(2));
+  CHECK_NUM(">", FeTSymbol, "t", IntOperand(3), IntOperand(2), IntOperand(1));
+  CHECK_NUM(">", FeTNil, "nil", IntOperand(1), IntOperand(2), IntOperand(3));
+  CHECK_NUM(">=", FeTSymbol, "t", IntOperand(2), IntOperand(2), IntOperand(1));
+  CHECK_NUM(">=", FeTNil, "nil", IntOperand(1), IntOperand(2), IntOperand(2));
+  CHECK_NUM("<=", FeTSymbol, "t", IntOperand(1), IntOperand(2), IntOperand(2));
+  CHECK_NUM("<=", FeTNil, "nil", IntOperand(2), IntOperand(1), IntOperand(2));
+  CHECK_NUM("<", FeTSymbol, "t", IntOperand(2), IntOperand(3));
+  CHECK_NUM(">", FeTSymbol, "t", IntOperand(3), IntOperand(2));
+  CHECK_NUM("<", FeTSymbol, "t", IntOperand(1), DoubleOperand(2.5),
+            IntOperand(3));
+  CHECK_NUM("<", FeTNil, "nil", IntOperand(2), DoubleOperand(2.0),
+            IntOperand(3));
+  CHECK_NUM(">", FeTSymbol, "t", IntOperand(3), DoubleOperand(2.0),
+            IntOperand(1));
+
+  // `/=` is strictly binary: a third operand and zero operands are both
+  // `wrong-number-of-arguments`, and it compares mathematical value across
+  // the types.
+  CHECK_NUM("/=", FeTSymbol, "t", IntOperand(1), IntOperand(2));
+  CHECK_NUM("/=", FeTNil, "nil", IntOperand(2), IntOperand(2));
+  CHECK_NUM("/=", FeTNil, "nil", IntOperand(3), DoubleOperand(3.0));
+  CHECK_NUM("/=", FeTSymbol, "t", IntOperand(3), DoubleOperand(3.5));
+  CHECK_NUM_ERR("/=", "wrong-number-of-arguments", IntOperand(5));
+  CHECK_NUM_ERR("/=", "wrong-number-of-arguments", IntOperand(1), IntOperand(2),
+                IntOperand(3));
+  CHECK(CheckNumericError(context, &state, "/=", nullptr, 0,
+                          "wrong-number-of-arguments"));
+
+  // `=` across types: exact within integers, mathematical value across
+  // int/float, and the pinned signed-zero/NaN answers survive the extension.
+  CHECK_NUM("=", FeTSymbol, "t", IntOperand(3), IntOperand(3));
+  CHECK_NUM("=", FeTSymbol, "t", IntOperand(3), DoubleOperand(3.0));
+  CHECK_NUM("=", FeTSymbol, "t", DoubleOperand(3.0), IntOperand(3));
+  CHECK_NUM("=", FeTSymbol, "t", IntOperand(1), IntOperand(1),
+            DoubleOperand(1.0));
+  CHECK_NUM("=", FeTNil, "nil", IntOperand(1), IntOperand(2),
+            DoubleOperand(2.0));
+  CHECK_NUM("=", FeTSymbol, "t", DoubleOperand(0.0), DoubleOperand(-0.0));
+  {
+    const size_t gc = FeSaveGC(context);
+    FeObject* left_operands[] = {FeMakeInteger(context, -1)};
+    FeObject* right_operands[] = {FeMakeInteger(context, -1)};
+    FeObject* left = MakeCallForm(context, "sqrt", left_operands, 1);
+    FeObject* right = MakeCallForm(context, "sqrt", right_operands, 1);
+    FeObject* operands[] = {left, right};
+    FeObject* result =
+        FeEvaluate(context, MakeCallForm(context, "=", operands, 2));
+    CHECK(FeGetType(result) == FeTNil);
+    FeRestoreGC(context, gc);
+  }
+
+  // `is`'s integer arm (05A Decision 2): mathematical value across int/float,
+  // exact within integers, epsilon behaviour kept for double/double.
+  CHECK_NUM("is", FeTSymbol, "t", IntOperand(3), IntOperand(3));
+  CHECK_NUM("is", FeTSymbol, "t", IntOperand(3), DoubleOperand(3.0));
+  CHECK_NUM("is", FeTNil, "nil", IntOperand(3), IntOperand(4));
+  CHECK_NUM("is", FeTSymbol, "t", DoubleOperand(0.0), DoubleOperand(0.0));
+
+  // The predicates answer by tag and never raise on a non-number.
+  CHECK_NUM("integerp", FeTSymbol, "t", IntOperand(3));
+  CHECK_NUM("integerp", FeTNil, "nil", DoubleOperand(3.0));
+  CHECK_NUM("integerp", FeTNil, "nil", NilOperand());
+  CHECK_NUM("floatp", FeTSymbol, "t", DoubleOperand(3.0));
+  CHECK_NUM("floatp", FeTNil, "nil", IntOperand(3));
+  CHECK_NUM("floatp", FeTNil, "nil", NilOperand());
+
+  // Math native return types, per 05A's M rows: the rounding family returns
+  // integers (round half-even), `expt` follows its per-signature rule, the
+  // transcendentals stay float.
+  CHECK_NUM("floor", FeTInteger, "7", DoubleOperand(7.5));
+  CHECK_NUM("floor", FeTInteger, "3", IntOperand(7), IntOperand(2));
+  CHECK_NUM("floor", FeTInteger, "-4", DoubleOperand(-7.5), IntOperand(2));
+  CHECK_NUM("truncate", FeTInteger, "-7", DoubleOperand(-7.5));
+  CHECK_NUM("ceiling", FeTInteger, "8", DoubleOperand(7.5));
+  CHECK_NUM("ceiling", FeTInteger, "-3", IntOperand(-7), IntOperand(2));
+  CHECK_NUM("round", FeTInteger, "2", DoubleOperand(2.5));
+  CHECK_NUM("round", FeTInteger, "4", DoubleOperand(3.5));
+  CHECK_NUM("round", FeTInteger, "-2", DoubleOperand(-2.5));
+  CHECK_NUM("round", FeTInteger, "-4", DoubleOperand(-3.5));
+  CHECK_NUM("expt", FeTInteger, "256", IntOperand(2), IntOperand(8));
+  CHECK_NUM("expt", FeTDouble, "0.5", IntOperand(2), IntOperand(-1));
+  CHECK_NUM("expt", FeTDouble, "256", DoubleOperand(2.0), IntOperand(8));
+  CHECK_NUM("expt", FeTDouble, "256", IntOperand(2), DoubleOperand(8.0));
+  CHECK_NUM("sqrt", FeTDouble, "4", IntOperand(16));
+  CHECK_NUM("sqrt", FeTDouble, "4", DoubleOperand(16.0));
+  CHECK_NUM("sin", FeTDouble, "0", IntOperand(0));
+  CHECK_NUM("sin", FeTDouble, "1", DoubleOperand(1.5707963));
+
+  // Context reuse after every error: each `arith-error`/arity path above
+  // already re-ran the context check; a fresh reduction still answers.
+  CHECK(CheckNumericForm(context, "+",
+                         (const Operand[]){IntOperand(1), IntOperand(2)}, 2,
+                         FeTInteger, "3"));
+
+  // GC across the tower's resume states: a collecting `do` as an operand
+  // forces collections while the frame below is suspended, and the host
+  // integers held in the frame's fields must survive to be combined after.
+  {
+    const int64_t arith[] = {1000, 1000};
+    CHECK(GCSurvivesResume(context, "+", arith, 2, 1, "2000"));
+    const int64_t less[] = {1, 2, 3};
+    CHECK(GCSurvivesResume(context, "<", less, 3, 1, "t"));
+    const int64_t equal[] = {1, 1, 1};
+    CHECK(GCSurvivesResume(context, "=", equal, 3, 1, "t"));
+    const int64_t unary[] = {5};
+    CHECK(GCSurvivesResume(context, "integerp", unary, 1, 0, "t"));
+    const int64_t native[] = {5};
+    CHECK(GCSurvivesResume(context, "floor", native, 1, 0, "5"));
+  }
+
+#undef CHECK_NUM_ERR
+#undef CHECK_NUM
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestMacroExpansion(void) {
   // Deliberately tight: the expansion has to survive the collections that
   // evaluating it provokes, and nothing but Fe's GC stack refers to it.
@@ -4117,16 +4493,21 @@ static bool TestPrimitiveOrder(void) {
   // stops evaluation before a later operand's form ever runs.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "arith-probe")));
   ORDER_ERR("(+ 1 \"x\" (do (setq arith-probe t) 3))",
-            "order.fe: expected double, got string");
+            "order.fe: wrong-type-argument");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "arith-probe")));
 
-  // `<`/`<=` consume exactly two operands and never evaluate extras: if the
-  // third form here ran, it would itself raise a type error.
+  // Chained comparators evaluate their whole operand list before checking any
+  // numeric type, matching `=`'s EvalList semantics. The third form runs, then
+  // its own error is reported during comparison.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
-  CHK("(< 1 2 (do (setq less-probe t) (car 1)))", "t");
-  CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
-  CHK("(<= 2 2 (do (setq less-probe t) (car 1)))", "t");
-  CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
+  ORDER_ERR("(< 1 2 (do (setq less-probe t) (car 1)))",
+            "order.fe: expected pair, got double");
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
+  CHK("(makunbound 'less-probe)", "less-probe");
+  ORDER_ERR("(<= 2 2 (do (setq less-probe t) (car 1)))",
+            "order.fe: expected pair, got double");
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
+  CHK("(makunbound 'less-probe)", "less-probe");
 
   // `boundp`/`makunbound` reject a leftover extra argument, unlike the
   // other primitives sharing their frame kind (`not`/`atom`/`car`/`cdr`/
@@ -4414,7 +4795,7 @@ int main(void) {
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestSymbolCells() &&
                  TestInteger() && TestFunctionCells() && TestNamespaceCut() &&
-                 TestSetqAndSet() && TestNumericEqual() &&
+                 TestSetqAndSet() && TestNumericEqual() && TestNumericTower() &&
                  TestUnwindHostAPI() && TestUnwindLisp() &&
                  TestUnwindCleanupBudget() && TestFrameLimits() &&
                  TestFrameSubstrate() && TestArenaStats() &&

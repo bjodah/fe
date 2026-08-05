@@ -54,6 +54,11 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PPrint] = "print",
                                         [PLess] = "<",
                                         [PLessEqual] = "<=",
+                                        [PGreater] = ">",
+                                        [PGreaterEqual] = ">=",
+                                        [PNotEqual] = "/=",
+                                        [PIntegerp] = "integerp",
+                                        [PFloatp] = "floatp",
                                         [PAdd] = "+",
                                         [PSub] = "-",
                                         [PMul] = "*",
@@ -364,16 +369,47 @@ static bool IsNearlyEqual(double a, double b, double epsilon) {
   return diff / fmin((absA + absB), DBL_MAX) < epsilon;
 }
 
+// `is`'s cross-type number arm (05A Decision 2, 05C): mathematical value
+// across an integer and a double, preserving `(is 1 1.0)` -> t. The int64
+// converts exactly to double up to 2^53; beyond that the comparison is the
+// value the two numbers share in doubles, the same approximation the
+// arithmetic tower's mixed promotion uses. `-Wfloat-equal` is suppressed for
+// this intentional exact comparison, the way `IsNearlyEqual`'s own `a == b`
+// infinity special case is below.
+static bool IntegerAndDoubleEqual(int64_t i, double d) {
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfloat-equal"
+#endif
+  const bool equal = (FeDouble)i == d;
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+  return equal;
+}
+
 bool Equal(FeObject* a, FeObject* b) {
   if (a == b) {
     return true;
   }
-  if (FeGetType(a) != FeGetType(b)) {
+  const FeType a_type = FeGetType(a);
+  const FeType b_type = FeGetType(b);
+  if (a_type == FeTInteger && b_type == FeTInteger) {
+    // 05A Decision 2 (05C): exact within integers.
+    return INTEGER(a) == INTEGER(b);
+  }
+  if (a_type == FeTInteger && b_type == FeTDouble) {
+    return IntegerAndDoubleEqual(INTEGER(a), GetDouble(b));
+  }
+  if (a_type == FeTDouble && b_type == FeTInteger) {
+    return IntegerAndDoubleEqual(INTEGER(b), GetDouble(a));
+  }
+  if (a_type != b_type) {
     return false;
   }
-  if (FeGetType(a) == FeTDouble) {
+  if (a_type == FeTDouble) {
     return IsNearlyEqual(GetDouble(a), GetDouble(b), DBL_EPSILON);
-  } else if (FeGetType(a) == FeTString) {
+  } else if (a_type == FeTString) {
     for (; !FeIsNil(a); a = CDR(a), b = CDR(b)) {
       if (CAR(a) != CAR(b)) {
         return false;
@@ -1366,11 +1402,43 @@ static FeObject* native_atan(FeContext* ctx, FeObject* arg) {
   return FeMakeDouble(ctx, atan2(y, x));
 }
 
+// `expt`'s all-integer arm (05A row M2, 05C): fast exponentiation over
+// int64 with the tower's overflow policy -- a power that outgrows the type
+// is `arith-error`, never a truncated or undefined result.
+static int64_t IntegerPower(FeContext* ctx, int64_t base, int64_t exponent) {
+  int64_t result = 1;
+  int64_t factor = base;
+  int64_t e = exponent;
+  while (e > 0) {
+    if (e & 1) {
+      if (ckd_mul(&result, result, factor)) {
+        FeHandleError(ctx, "arith-error");
+      }
+    }
+    e >>= 1;
+    if (e > 0 && ckd_mul(&factor, factor, factor)) {
+      FeHandleError(ctx, "arith-error");
+    }
+  }
+  return result;
+}
+
 static FeObject* native_expt(FeContext* ctx, FeObject* arg) {
-  double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
-  double y = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
+  FeObject* const base = FeGetNextArgument(ctx, &arg);
+  FeObject* const exponent = FeGetNextArgument(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
-  return FeMakeDouble(ctx, pow(x, y));
+  // 05A row M2's per-signature rule (05C): two integers with a non-negative
+  // exponent stay integer -- `(expt 2 8)` is 256 -- with the tower's int64
+  // overflow policy, `arith-error`, when the power outgrows the type. Any
+  // double (a float base or exponent, or a negative exponent) promotes the
+  // whole call to the double `pow`.
+  if (FeGetType(base) == FeTInteger && FeGetType(exponent) == FeTInteger &&
+      INTEGER(exponent) >= 0) {
+    return FeMakeInteger(ctx,
+                         IntegerPower(ctx, INTEGER(base), INTEGER(exponent)));
+  }
+  return FeMakeDouble(ctx,
+                      pow(FeToDouble(ctx, base), FeToDouble(ctx, exponent)));
 }
 
 static FeObject* native_sqrt(FeContext* ctx, FeObject* arg) {
@@ -1395,44 +1463,59 @@ static FeObject* native_log(FeContext* ctx, FeObject* arg) {
   return FeMakeDouble(ctx, log(x) / log(base));
 }
 
+// The rounding family's integer conversion (05A rows M3/M4, 05C): the double
+// is already rounded per the function (`floor`, `ceil`, `nearbyint`,
+// `trunc`) and the answer is the int64 that rounded value names -- Emacs'
+// integer return type for `floor`/`ceiling`/`round`/`truncate`. A value
+// outside int64's range has no integer answer in a no-bignums program, the
+// same refusal as int64 overflow (05A Decision 5), so it is `arith-error`
+// rather than a cast whose behaviour is undefined; NaN and ±Infinity are out
+// of range too.
+static int64_t IntegerRound(FeContext* ctx, double x) {
+  if (!(x >= -0x1p63 && x < 0x1p63)) {
+    FeHandleError(ctx, "arith-error");
+  }
+  return (int64_t)x;
+}
+
 static FeObject* native_floor(FeContext* ctx, FeObject* arg) {
   double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   if (FeIsNil(arg)) {
-    return FeMakeDouble(ctx, floor(x));
+    return FeMakeInteger(ctx, IntegerRound(ctx, floor(x)));
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeDouble(ctx, floor(x / d));
+  return FeMakeInteger(ctx, IntegerRound(ctx, floor(x / d)));
 }
 
 static FeObject* native_ceiling(FeContext* ctx, FeObject* arg) {
   double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   if (FeIsNil(arg)) {
-    return FeMakeDouble(ctx, ceil(x));
+    return FeMakeInteger(ctx, IntegerRound(ctx, ceil(x)));
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeDouble(ctx, ceil(x / d));
+  return FeMakeInteger(ctx, IntegerRound(ctx, ceil(x / d)));
 }
 
 static FeObject* native_round(FeContext* ctx, FeObject* arg) {
   double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   if (FeIsNil(arg)) {
-    return FeMakeDouble(ctx, nearbyint(x));
+    return FeMakeInteger(ctx, IntegerRound(ctx, nearbyint(x)));
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeDouble(ctx, nearbyint(x / d));
+  return FeMakeInteger(ctx, IntegerRound(ctx, nearbyint(x / d)));
 }
 
 static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
   double x = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   if (FeIsNil(arg)) {
-    return FeMakeDouble(ctx, trunc(x));
+    return FeMakeInteger(ctx, IntegerRound(ctx, trunc(x)));
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeDouble(ctx, trunc(x / d));
+  return FeMakeInteger(ctx, IntegerRound(ctx, trunc(x / d)));
 }
 
 static size_t GetCoreObjectCount(void) {

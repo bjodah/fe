@@ -52,7 +52,15 @@ typedef enum Primitive {
   PPrint,
   PLess,
   PLessEqual,
-  // TODO: Add > and >=, and document them.
+  // Sub-plan 05C of kg's Emacs-subset program (the numeric tower): `>`/`>=`
+  // join `<`/`<=` as chained comparators, `/=` is the exact binary
+  // inequality, and `integerp`/`floatp` are the numeric predicates. The old
+  // "Add > and >=" TODO above was resolved here.
+  PGreater,
+  PGreaterEqual,
+  PNotEqual,
+  PIntegerp,
+  PFloatp,
   PAdd,
   PSub,
   PMul,
@@ -309,35 +317,41 @@ typedef enum FeFrameKind {
   // Lisp but share this one continuation shape.
   FeFrameRelay,
   // The primitives that evaluate exactly one operand and finish from it:
-  // `assert`, `not`, `atom`, `car`, `cdr`, `boundp`, `makunbound`. `fn` holds
+  // `assert`, `not`, `atom`, `car`, `cdr`, `boundp`, `makunbound`, and --
+  // since 05C -- the numeric predicates `integerp`/`floatp`. `fn` holds
   // the resolved primitive object and `rest` the remaining raw forms (still
-  // needed by `boundp`/`makunbound`'s extra-argument check after the operand
-  // is consumed).
+  // needed by `boundp`/`makunbound`/`integerp`/`floatp`'s extra-argument
+  // check after the operand is consumed).
   FeFrameUnary,
   // The primitives that evaluate exactly two operands in sequence, with a
   // per-primitive check or side effect at each delivery: `cons`, `setcar`,
-  // `setcdr`, `is`, `<`, `<=`. `fn` holds the resolved primitive object,
+  // `setcdr`, `is`. `fn` holds the resolved primitive object,
   // `rest` the remaining raw forms, and `accumulator` the checked first
   // operand (`&unbound` marks "not yet delivered") -- `setcar`/`setcdr`
   // validate it as a pair immediately on delivery, before the second operand
   // is even evaluated, exactly as the recursive arm's ordering required.
+  // The comparisons `<`/`<=` shared this kind until 05C made them chained
+  // and variadic; they now live in `FeFrameEvalList` beside `=`.
   FeFrameBinary,
   // `+`, `-`, `*`, `/`: streams every operand, validating and combining each
   // as it arrives -- never batching the whole list first, since the
   // recursive arm's `ARITH_OP` validated the same way. `fn` holds the
   // resolved primitive object, `rest` the remaining raw forms, and
-  // `accumulator` the running boxed total (`&unbound` marks "no operand
-  // combined yet").
+  // `accumulator` the running boxed total, which since 05C is either a
+  // `FeTInteger` or a `FeTDouble` (`&unbound` marks "no operand combined
+  // yet").
   FeFrameArith,
   // `print`: streams every operand, writing each as it arrives and printing
   // a separating space only when another operand remains, exactly
   // interleaved with evaluation as the recursive arm's loop was. `rest`
   // holds the remaining raw forms.
   FeFramePrint,
-  // `list`, `=`, `set`: evaluates the complete raw argument list first --
+  // `list`, `=`, the chained comparators `<`/`<=`/`>`/`>=`, the binary `/=`,
+  // `set`: evaluates the complete raw argument list first --
   // unlike every other kind above, whose ordering is what makes them not
-  // this -- then finishes per primitive: `list` returns it, `=` validates
-  // and compares every element without short-circuiting, and `set` checks
+  // this -- then finishes per primitive: `list` returns it, `=`/`<`/`<=`/
+  // `>`/`>=` validate and compare every element without short-circuiting
+  // (`/=` is the same shape over its arity-checked two), and `set` checks
   // the (already arity-validated) two-element list and assigns through
   // `FeSet`. `fn` holds the resolved primitive object, `rest` the remaining
   // raw forms, and `accumulator` the list built so far (reversed into order
