@@ -126,8 +126,26 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # authoritative aggregate for the core from this Decision on; scc's total
 # and file caps remain secondary ratchets -- they still catch an unbudgeted
 # new file or complexity in the `fex_*` files, where no desync applies.
-SCC_COMPLEXITY_MAX ?= 420
-SCC_FILE_COMPLEXITY_MAX ?= 240
+#
+# Raised a fourth time, 420->480 / 240->300, by sub-plan 04A of the same
+# program's Phase 4 Decision (set README, dated 2026-08-05). This funds
+# Lisp-2 namespaces, 04B-04D by name, priced against the shape of the real
+# tree rather than the price table's original guess: ~9 new primitives
+# (`function`, `fset`, `symbol-function`, `symbol-value`, `fboundp`,
+# `fmakunbound`, `defalias`, `funcall`, `apply`) landing in
+# `DispatchPrimitive` and the resume arms, the head-resolution fork in
+# `RunEvaluationLoop` (already at 14 of the per-function cap; budget for
+# extracting a helper rather than growing the switch), designator-chain
+# resolution, and 04B's accessor layer, which is near-free in pmccabe but
+# not zero. The estimate is +40 to +60; both gates had exactly 29 points of
+# measured headroom (391/420 scc, 601/630 pmccabe) against a phase priced
+# at +40 to +60, so the caps move by the top of that range, funding the
+# whole phase at once per the 00A/03A precedent. pmccabe remains the
+# authoritative unit for the core from 03A's Decision; both units are
+# priced and reported anyway. kg needs no raise for the same phase -- its
+# +15 to +25 estimate sits inside 56 points of measured headroom (5444/5500).
+SCC_COMPLEXITY_MAX ?= 480
+SCC_FILE_COMPLEXITY_MAX ?= 300
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
@@ -153,7 +171,20 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # evaluator weight (104 across 29 symbols in the spike) is +100 to +140,
 # landing the total at 600-640; funded at 630, near the top of that range
 # with a small margin, not the program's full uncertainty range.
-PMCCABE_TOTAL_MAX ?= 630
+#
+# Raised again, 630->690, by sub-plan 04A's Phase 4 Decision (set README,
+# dated 2026-08-05), funding Lisp-2 namespaces 04B-04D by name: the phase
+# is priced +40 to +60 pmccabe against the real tree (9 new primitives in
+# `DispatchPrimitive`/the resume arms, `funcall`/`apply` priced against
+# `ResumeEvalList`'s weight roughly doubled, a head-resolution helper
+# extracted out of `RunEvaluationLoop`, designator-chain resolution, and
+# 04B's accessor layer), and the measured starting total is 601/630 -- 29
+# points of headroom against a +40 to +60 phase, so the cap moves by the
+# top of that range and funds the whole phase at once, the 00A/03A
+# precedent. Both scc gates move with it (420->480 / 240->300, same
+# estimate); the per-symbol manifest is unchanged and is re-banked only if
+# 04B-04D land improvements.
+PMCCABE_TOTAL_MAX ?= 690
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-funcall-lexical-value",
+ "setup": [],
+ "expr": "(let ((g (lambda (x) (+ x 1)))) (funcall g 3))",
+ "note": "04A: `funcall` takes a *value* -- here the closure bound by `let` to g -- and calls it, so the function cell of g is irrelevant and the answer is 4. Fe has no `funcall` and no Emacs-shaped `let` bindings list today."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-apply-spread",
+ "setup": [],
+ "expr": "(apply (quote +) 1 2 (list 3 4))",
+ "note": "04A: `apply` spreads the final list argument, so `+` is called with 1 2 3 4 and returns 10. Fe has no `apply` today."
+}

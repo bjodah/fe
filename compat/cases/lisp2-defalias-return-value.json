@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-defalias-return-value",
+ "setup": [],
+ "expr": "(defalias (quote first) (quote car))",
+ "note": "04A: records `defalias`'s own return value (the aliased symbol, `first`) so a later slice has the whole contract as data, not just the call-site behaviour pinned by lisp2-defalias-symbol."
+}

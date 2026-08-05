@@ -1,0 +1,9 @@
+{
+ "id": "lisp2-defalias-late-binding",
+ "setup": [
+  "(defalias (quote a) (quote b))",
+  "(fset (quote b) (lambda () 1))"
+ ],
+ "expr": "(a)",
+ "note": "04A: function-cell symbol indirection is resolved at *call* time, not at `defalias` time: `a` is aliased to `b` before `b` gets a function, and calling `(a)` afterwards still returns 1."
+}

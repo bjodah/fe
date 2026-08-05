@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-let-no-function-shadow",
+ "setup": [],
+ "expr": "(let ((car 5)) (car (list 1 2)))",
+ "note": "04A: `let` binds only the value namespace, so the lexical value 5 for `car` does not shadow the primitive in call position -- `(car (list 1 2))` still resolves the function cell and returns 1. Fe's `let` is the one-binding primitive that takes a bare symbol (primitive-let), so this Emacs-shaped bindings list is not even readable as a `let` for fe ('expected symbol, got pair')."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-functionp-symbol",
+ "setup": [],
+ "expr": "(functionp (quote car))",
+ "note": "04A: `functionp` accepts a symbol designator whose function cell holds a function, so this is t. kg's native `functionp` must learn designators when the split lands (04E); the negative arm is pinned by lisp2-functionp-symbol-missing."
+}

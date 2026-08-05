@@ -1,0 +1,8 @@
+{
+ "id": "lisp2-defalias-symbol",
+ "setup": [
+  "(defalias (quote first) (quote car))"
+ ],
+ "expr": "(first (list 1 2))",
+ "note": "04A: `defalias` points one symbol's function cell at another symbol, and call-position resolution follows the designator chain, so `(first (list 1 2))` behaves like `car` and returns 1. Fe has no `defalias` today; the alias's own return value is pinned by lisp2-defalias-return-value."
+}

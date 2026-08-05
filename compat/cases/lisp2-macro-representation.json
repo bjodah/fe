@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-macro-representation",
+ "setup": [],
+ "expr": "(macro (x) (+ x 1))",
+ "note": "04A data question, macro representation: Emacs stores a macro as a (macro . FUNCTION) cons in the function cell, observable only through `(symbol-function 'NAME)`; fe has a distinct FeTMacro type whose value prints `(macro (x) (+ x 1))`. Recorded kg-policy because Emacs has no anonymous macro object to snapshot -- this pins fe's own representation so the Phase 4 function-cell work (04C) does not have to imitate the cons to pass a case nobody wrote yet."
+}

@@ -1,0 +1,8 @@
+{
+ "id": "lisp2-symbol-function-roundtrip",
+ "setup": [
+  "(fset (quote h) (lambda (x) x))"
+ ],
+ "expr": "(funcall (symbol-function (quote h)) 5)",
+ "note": "04A: the printed-closure question -- batch Emacs prints an interpreted closure as (closure (t) ...) or a bytecode object fe cannot reproduce, so this case deliberately compares *behaviour*: `symbol-function` returns the function cell's object and `funcall` calls it, yielding 5. Fe has neither primitive today."
+}

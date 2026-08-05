@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-symbol-value-primitive",
+ "setup": [],
+ "expr": "(symbol-value (quote car))",
+ "note": "04A: the value cell of the primitive `car` is empty, so `symbol-value` signals void-variable car -- the explicit-value-namespace mirror of one-namespace-boundp's nil. Fe today has no `symbol-value`, and its one-namespace design makes every primitive name a bound value."
+}

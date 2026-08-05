@@ -198,6 +198,14 @@ Classification is structural:
   field makes that mechanically decidable instead of a matter of whoever
   is reading the CI log that day.
 
+A `planned` entry whose case has a checked-in Emacs snapshot is a **phase
+contract**, 02A's precedent: the snapshot freezes the target semantics
+before the implementation slice that will land them (Phase 4's Lisp-2
+namespaces are the current one, recorded ahead by sub-plan 04A), and the
+landing slice flips the entry to `supported` with the behaviour change as
+its evidence. The snapshot is the oracle's answer, not a promise about Fe
+-- Fe keeps reporting its current known gap until the flip.
+
 ## Running it
 
 ```sh

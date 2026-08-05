@@ -1,0 +1,9 @@
+{
+ "id": "lisp2-funcall-designator",
+ "setup": [
+  "(setq g 7)",
+  "(fset (quote g) (lambda () 9))"
+ ],
+ "expr": "(funcall (quote g))",
+ "note": "04A: a *symbol* passed to `funcall` is a designator resolved through the function cell, so this calls the lambda and returns 9 -- not the value 7, and not a void-function error. Fe has no `funcall` today."
+}

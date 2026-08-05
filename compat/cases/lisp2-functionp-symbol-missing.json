@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-functionp-symbol-missing",
+ "setup": [],
+ "expr": "(functionp (quote no-such))",
+ "note": "04A: the designator rule's negative arm -- an unbound name's function cell is empty, so `functionp` is nil, not an error. Pinned alongside lisp2-functionp-symbol so the pair records both sides of the symbol-designator rule."
+}

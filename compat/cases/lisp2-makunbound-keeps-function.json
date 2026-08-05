@@ -1,0 +1,10 @@
+{
+ "id": "lisp2-makunbound-keeps-function",
+ "setup": [
+  "(setq m 1)",
+  "(fset (quote m) (lambda () 2))",
+  "(makunbound (quote m))"
+ ],
+ "expr": "(m)",
+ "note": "04A: `makunbound` empties only the value cell; the function cell survives, so calling `(m)` still returns 2. Fe's `makunbound` (primitive-makunbound) acts on its single namespace today."
+}

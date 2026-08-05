@@ -1,0 +1,10 @@
+{
+ "id": "lisp2-fmakunbound-keeps-value",
+ "setup": [
+  "(setq m 1)",
+  "(fset (quote m) (lambda () 2))",
+  "(fmakunbound (quote m))"
+ ],
+ "expr": "m",
+ "note": "04A: the mirror of lisp2-makunbound-keeps-function -- `fmakunbound` leaves the value cell alone, so the bare symbol evaluates to 1. The pair records that the two unbound operations are disjoint."
+}
