@@ -1316,7 +1316,7 @@
    ],
    "kg_test": null,
    "rationale": "Phase 5, rows E1-E3, landed at 05D's cut: fe-core `eq` is pointer identity or both-integers-equal -- `(eq 3 3)` t, `(eq 3.0 3.0)` nil (boxed floats), `(eq \"a\" \"a\")` nil. 05E deletes kg's prelude alias of `is` in the pin commit.",
-   "source_name": null
+   "source_name": "eq"
   },
   {
    "id": "num-eql",
@@ -1330,7 +1330,7 @@
    ],
    "kg_test": null,
    "rationale": "Phase 5, rows E4-E5, landed at 05D's cut: fe-core `eql` is `eq` or same-type numbers equal by bits -- `(eql 3 3.0)` nil (type-strict), `(eql 0.0 -0.0)` nil (the sign bit differs).",
-   "source_name": null
+   "source_name": "eql"
   },
   {
    "id": "num-equal",
