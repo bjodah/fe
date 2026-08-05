@@ -410,6 +410,8 @@ FeNativeFn* GetNativeFn(const FeObject* o);
 void SetType(FeObject* o, FeType type);
 FeObject* CheckType(FeContext* ctx, FeObject* obj, FeType type);
 FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
+FeObject* SymbolName(const FeObject* sym);  // the name string chain
+FeObject* SymbolBindingCell(FeObject* sym);
 FeObject* MakeObject(FeContext* ctx);
 bool Equal(FeObject* a, FeObject* b);
 bool IsNamedSymbol(const FeObject* v, const char* name);

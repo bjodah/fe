@@ -451,7 +451,7 @@ FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
   FeObject* obj;
   // Try to find in symbol_list:
   for (obj = ctx->symbol_list; !FeIsNil(obj); obj = CDR(obj)) {
-    if (IsStringEqual(CAR(CDR(CAR(obj))), name)) {
+    if (IsStringEqual(SymbolName(CAR(obj)), name)) {
       return CAR(obj);
     }
   }
@@ -674,7 +674,7 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
       break;
 
     case FeTSymbol:
-      EmitStoredString(w, CAR(CDR(obj)), 0);
+      EmitStoredString(w, SymbolName(obj), 0);
       break;
 
     case FeTString:
@@ -771,7 +771,7 @@ size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size) {
 static const FeObject* GetStringObject(FeContext* ctx, const FeObject* obj) {
   const FeType type = FeGetType(obj);
   if (type == FeTSymbol) {
-    return CAR(CDR(obj));
+    return SymbolName(obj);
   }
   if (type != FeTString) {
     char message[64];
@@ -838,7 +838,7 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env) {
     }
   }
   // Otherwise, return a global value:
-  return CDR(sym);
+  return SymbolBindingCell(sym);
 }
 
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
@@ -847,6 +847,15 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
 
 bool FeIsBound(FeContext* ctx, FeObject* sym) {
   return CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil)) != &unbound;
+}
+
+// Symbol accessors keep symbol representation knowledge out of the evaluator.
+FeObject* SymbolName(const FeObject* sym) {
+  return CAR(CDR(sym));
+}
+
+FeObject* SymbolBindingCell(FeObject* sym) {
+  return CDR(sym);
 }
 
 static FeObject rparen;
@@ -896,7 +905,7 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata);
 
 bool IsNamedSymbol(const FeObject* v, const char* name) {
-  return FeGetType(v) == FeTSymbol && IsStringEqual(CAR(CDR(v)), name);
+  return FeGetType(v) == FeTSymbol && IsStringEqual(SymbolName(v), name);
 }
 
 static bool IsDot(const FeObject* v) {
@@ -1475,7 +1484,7 @@ static FeContext* OpenContext(void* arena, size_t size) {
     const Primitive p = primitive_aliases[i].primitive;
     FeObject* canonical = FeMakeSymbol(ctx, primitive_names[p]);
     FeSet(ctx, FeMakeSymbol(ctx, primitive_aliases[i].name),
-          CDR(CDR(canonical)));
+          CDR(SymbolBindingCell(canonical)));
     FeRestoreGC(ctx, save);
   }
 
