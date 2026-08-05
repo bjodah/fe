@@ -1,0 +1,6 @@
+{
+ "id": "lisp2-funcall-special-form",
+ "setup": [],
+ "expr": "(funcall 'quote 'a)",
+ "note": "A special form is not a funcall target: Emacs signals invalid-function. Fe's evaluate-then-redispatch shape would otherwise hand `quote` the `(quote v)` wrappers it builds and answer `(quote a)`, and the same mis-execution reached `if`, `and` and every macro."
+}

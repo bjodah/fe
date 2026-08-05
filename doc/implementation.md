@@ -124,7 +124,16 @@ resolve through the function cell like any other callable, and
 `FeDefineNative` itself writes the same cell. The one upfront `EvaluationStep`
 in `ResolveCallHead` is the charge the pre-04C head resolution made, so an
 unbound cell costs exactly what `CDR(GetBound(head, env))` used to and the
-step pins hold.
+step pins hold. That upfront charge is call position's alone, and the step
+accounting is deliberately non-uniform because of it: `funcall`/`apply` and
+`FeGetFunction` reach the resolver directly and pay only the per-hop charges,
+so resolving the same designator chain costs one step less through them than
+through a symbol head.
+
+An empty function cell is reported as plain `&unbound`, and each caller raises
+`void-function` at the name *it* was given rather than at the last link the
+chain reached -- `(fset 'a 'b) (a)` and `(funcall 'a)` are both
+`void-function a`, which is what Emacs reports.
 
 `funcall`/`apply` are implemented with the evaluate-then-redispatch shape,
 chosen over a dedicated apply frame kind: both are function-shaped special
@@ -145,7 +154,27 @@ lesson applies to both boundaries: the evaluated operand buffer is rooted in
 the EvalList frame's `accumulator` and, across the redispatch, the relay
 frame's fields, so a collection forced by the *called body* finds every value
 still live (`test_api.c`'s resumable-frame GC table drives collections across
-`funcall` and `apply` calls).
+`funcall` and `apply` calls). Both helpers cost a fixed number of GC-stack
+slots rather than one per element: because the frame field is already a
+mark-phase root, each pass restores the checkpoint the helper itself took and
+`MakeCallForm` re-pushes only its chain's head, the idiom `ReadList` uses.
+Leaving every cons `MakeObject` pushes on the GC stack until the caller's own
+restore made a wide `apply` die on "GC stack overflow" where the same call
+written out directly ran.
+
+That synthetic form is visible: a backtrace taken inside a `funcall` or an
+`apply` shows the rebuilt `(callable (quote v) ...)` frame, not the
+`(funcall ...)` form the program wrote, because the trace is a stack of the
+pair forms actually being evaluated. This is documented rather than hidden --
+suppressing it would mean a second, parallel notion of what a frame is.
+
+Only a *function* may be redispatched. A macro and the special-form primitives
+consume their operands raw, so handing them the quote wrappers would execute
+something else entirely (`(funcall 'quote 'a)` answering `(quote a)`); both are
+`invalid-function`, as in Emacs. The function-shaped/special-form split is a
+table read off `DispatchPrimitive`'s own routing, and the C API exposes it as
+`FeIsFunction()` so a host's `functionp` and the interpreter's rejection cannot
+drift apart.
 
 ### The reader and writer at the cut
 
@@ -347,6 +376,12 @@ grouped by evaluation *shape*, not by primitive:
   arrives, exactly as the old `ARITH_OP` macro's loop did, never batching
   the whole list first; `FeFramePrint` streams too, but interleaves output
   and separators with evaluation instead of combining a running total.
+  The arithmetic accumulator starts at the `&unbound` sentinel, so an
+  operandless frame has to complete with the operator's identity element
+  (`(+)` and `(-)` 0, `(*)` 1, `(/)` `wrong-number-of-arguments`) rather than
+  with the accumulator: "no expression evaluates to `&unbound`" is an
+  invariant of the whole evaluator, and the resume arms that read a delivery
+  of `&unbound` as "nothing delivered yet" break when it is violated.
 - `FeFrameEvalList` (`list`/`=`/`set`, and 04C's `funcall`/`apply`) is the
   one kind that *does* evaluate
   its whole raw argument list first, exactly as the old `EvaluateList`-based

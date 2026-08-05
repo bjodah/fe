@@ -412,10 +412,11 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "primitive-add"
+    "primitive-add",
+    "primitive-add-arity-zero"
    ],
    "kg_test": null,
-   "rationale": null,
+   "rationale": "Zero operands is the identity element, 0, as in Emacs -- and `(-)` is 0 too, while `(/)` has no identity and stays wrong-number-of-arguments (primitive-div). Fe's arithmetic frame used to complete with the evaluator's internal `&unbound` sentinel when no operand had been combined, which escaped into Lisp and crashed `funcall`.",
    "source_name": "+"
   },
   {
@@ -438,10 +439,11 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "primitive-mul"
+    "primitive-mul",
+    "primitive-mul-arity-zero"
    ],
    "kg_test": null,
-   "rationale": null,
+   "rationale": "Zero operands is the identity element, 1, the sibling of primitive-add's own zero-operand case.",
    "source_name": "*"
   },
   {
@@ -683,6 +685,32 @@
     "kg_test": null,
     "rationale": "Sub-plan 04C: `apply` spreads its final list argument into the call, so `+` is called with 1 2 3 4 and returns 10. Implemented as an evaluate-then-redispatch on the frame stack (the plan's chosen shape, see doc/implementation.md); a non-list final operand is `apply: last argument must be a proper list`.",
     "source_name": "apply"
+   },
+   {
+    "id": "lisp2-funcall-callable-kind",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-funcall-special-form"
+    ],
+    "kg_test": null,
+    "rationale": "What `funcall`/`apply` may be handed: a function, never a macro or a special form, which Emacs signals invalid-function for. Fe's evaluate-then-redispatch shape makes this a correctness requirement rather than a nicety -- the redispatched `(callable (quote v) ...)` form reaches a raw-form callable as the wrappers themselves, so `(funcall 'quote 'a)` answered `(quote a)` and `(funcall 'if 1 2 3)` chose a branch of quoted forms. The classification is read off the evaluator's own primitive routing and is exposed to hosts as the C API's FeIsFunction().",
+    "source_name": "funcall"
+   },
+   {
+    "id": "lisp2-funcall-void-designator-name",
+    "category": "errors-and-non-local-exits",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-funcall-void-alias-chain"
+    ],
+    "kg_test": null,
+    "rationale": "Which name a dead designator chain is reported at: the one the program wrote, not the last link the resolver reached. Emacs answers `void-function chain-head` for both `(chain-head)` and `(funcall 'chain-head)`; fe's call position always did, and its funcall arm named the tail until the resolver stopped reporting a `dead` link at all.",
+    "source_name": null
    },
    {
     "id": "lisp2-fboundp-primitive",

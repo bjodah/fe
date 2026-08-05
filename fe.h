@@ -297,6 +297,16 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn);
 [[nodiscard]] FeObject* FeGetFunction(FeContext* ctx, FeObject* sym);
 [[nodiscard]] bool FeIsFBound(FeContext* ctx, FeObject* sym);
+// `functionp`'s question: is `obj` something the evaluator will call as an
+// ordinary function -- a lambda, a host native, or a function-shaped
+// primitive? A symbol is resolved through the same function-cell designator
+// chain `FeGetFunction` follows (so this asks about the symbol's binding, not
+// about the symbol), an unbound name is false, and a cycle raises
+// `cyclic-function-indirection`. A macro, a special form (`if`, `quote`,
+// `lambda`, ...) and any non-callable value are false, which is what Emacs'
+// `functionp` answers for them and what `funcall`/`apply` reject as
+// `invalid-function`.
+[[nodiscard]] bool FeIsFunction(FeContext* ctx, FeObject* obj);
 // Registers `fn` under `name` so that call position resolves it. Since
 // sub-plan 04D's cut (FE_API_VERSION 3) this writes the symbol's *function*
 // cell, the same cell `FeSetFunction`/`FeGetFunction` address and the one

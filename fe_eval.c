@@ -411,9 +411,13 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
 // same way `Equal()`'s `IsNearlyEqual()` helper above does for its own
 // `a == b` infinity special case. See doc/language.md.
 
-[[noreturn]] static void HandleVoidSymbol(FeContext* ctx,
-                                          FeObject* symbol,
-                                          const char* kind) {
+// An error that names the object the program wrote: `void-variable x`,
+// `void-function x`, `invalid-function x`. `kind` is the Emacs condition name
+// the compat comparator looks for in the message; `symbol` is normally a
+// symbol, and is rendered by the writer either way.
+[[noreturn]] static void HandleSymbolError(FeContext* ctx,
+                                           FeObject* symbol,
+                                           const char* kind) {
   char name[48];
   char message[64];
   (void)FeToString(ctx, symbol, name, sizeof(name));
@@ -425,7 +429,7 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
 // Emacs Lisp's `void-function` does; anything else is anonymous.
 [[noreturn]] static void HandleNonCallable(FeContext* ctx, FeObject* callee) {
   if (FeGetType(callee) == FeTSymbol) {
-    HandleVoidSymbol(ctx, callee, "void-function");
+    HandleSymbolError(ctx, callee, "void-function");
   }
   FeHandleError(ctx, "tried to call non-callable value");
 }
@@ -440,19 +444,17 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
 // canonical case). Since 04D's cut the chain dies in an empty function cell
 // with `&unbound` -- the transitional value-cell fallback is gone, so a
 // callable stored only in the value namespace is *not* reachable in call
-// position. `dead` receives the last link symbol on that empty-cell path, so
-// a caller can raise `void-function NAME` at the right name. A non-symbol
-// value is already resolved and is returned unchanged.
-static FeObject* ResolveFunctionCallable(FeContext* ctx,
-                                         FeObject* fn,
-                                         FeObject** dead) {
+// position. An empty cell anywhere along the chain is reported as plain
+// `&unbound`, and every caller names the symbol *it* was given rather than
+// the last link reached: `(fset 'a 'b) (a)` and `(funcall 'a)` are both
+// `void-function a` in Emacs, the name the program wrote. A non-symbol value
+// is already resolved and is returned unchanged.
+static FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn) {
   FeObject* slow = fn;
   FeObject* fast = fn;
-  *dead = &nil;
   while (FeGetType(slow) == FeTSymbol) {
     FeObject* const cell = SymbolFunction(slow);
     if (cell == &unbound) {
-      *dead = slow;
       return &unbound;
     }
     if (FeGetType(cell) != FeTSymbol) {
@@ -486,8 +488,7 @@ static FeObject* ResolveFunctionCallable(FeContext* ctx,
 // resolves `car`'s function cell, per the pinned 04A snapshot.
 static FeObject* ResolveCallHead(FeContext* ctx, FeObject* head) {
   EvaluationStep(ctx);
-  FeObject* dead;
-  return ResolveFunctionCallable(ctx, head, &dead);
+  return ResolveFunctionCallable(ctx, head);
 }
 
 // The head of a call is resolved on the frame stack rather than through
@@ -1296,7 +1297,7 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       FeRequireNoArguments(ctx, frame->rest);
       FeObject* const cell = SymbolFunction(sym);
       if (cell == &unbound) {
-        HandleVoidSymbol(ctx, sym, "void-function");
+        HandleSymbolError(ctx, sym, "void-function");
       }
       *result = cell;
       break;
@@ -1306,7 +1307,7 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       FeRequireNoArguments(ctx, frame->rest);
       FeObject* const cell = CDR(GetBound(ctx, sym, &nil));
       if (cell == &unbound) {
-        HandleVoidSymbol(ctx, sym, "void-variable");
+        HandleSymbolError(ctx, sym, "void-variable");
       }
       *result = cell;
       break;
@@ -1433,6 +1434,30 @@ static bool ResumeBinary(FeContext* ctx,
   return true;
 }
 
+// The value an arithmetic frame completes with: the running total, or -- when
+// no operand was combined at all -- Emacs' identity element for the operator,
+// `(+)` and `(-)` being 0 and `(*)` 1. `(/)` has no identity to return and is
+// `wrong-number-of-arguments`, as in Emacs; nothing has evaluated by then, so
+// raising here rather than at dispatch is the same observable order.
+// Without this the frame completed with the `&unbound` sentinel its
+// accumulator still held, and the sentinel escaped into Lisp: `(print (+))`
+// reached the writer, which is meant to abort on `FeTFree`, and
+// `(funcall (+))` reached the funcall arm with an *empty* evaluated operand
+// list, because `ResumeEvalList` reads an `&unbound` delivery as "no operand
+// delivered yet" and drops it -- so `CAR(&nil)` walked off a static object.
+// "No expression can evaluate to `&unbound`" (see `DispatchResolvedCall`) is
+// an invariant of the whole evaluator, not just of the argument frames.
+static FeObject* ArithResult(FeContext* ctx, const FeEvalFrame* frame) {
+  if (frame->accumulator != &unbound) {
+    return frame->accumulator;
+  }
+  const Primitive primitive = (Primitive)PRIM(frame->fn);
+  if (primitive == PDiv) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+  return FeMakeDouble(ctx, primitive == PMul ? 1 : 0);
+}
+
 // `+`, `-`, `*`, `/`: streams every operand, validating and combining each
 // as it arrives, exactly as the recursive `ARITH_OP` macro's own loop did --
 // never batching the whole list first the way `FeFrameEvalList` does.
@@ -1471,7 +1496,7 @@ static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
                         NULL);
     return false;
   }
-  *result = frame->accumulator;
+  *result = ArithResult(ctx, frame);
   return true;
 }
 
@@ -1497,6 +1522,73 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   return true;
 }
 
+// Which primitives are *function-shaped* -- every operand evaluated before
+// the primitive itself acts, exactly as an ordinary call's argument list is --
+// and which are special forms, whose operands reach them raw. The split is
+// read off `DispatchPrimitive`'s routing and nothing else: a row is true when
+// that primitive's arm evaluates every operand (the unary, binary, arith,
+// print and eval-list frame kinds), false when its arm consumes a raw form.
+// `env` is true because it consumes no operand at all, so handing it
+// evaluated ones changes nothing. `funcall`/`apply` are themselves
+// function-shaped, which is why `(funcall 'funcall '+ 1 2)` works, as it does
+// in Emacs.
+//
+// A primitive with no row here reads as false -- not callable through
+// `funcall`/`apply` -- which is the safe side of the mistake: the redispatch
+// would otherwise hand quote-wrapped operands to an arm that never evaluates
+// them.
+static const bool primitive_is_function[PSentinel] = {
+    [PAssert] = true,
+    [PEnv] = true,
+    [PNumericEqual] = true,
+    [PSet] = true,
+    [PBoundp] = true,
+    [PMakeUnbound] = true,
+    [PCons] = true,
+    [PCar] = true,
+    [PCdr] = true,
+    [PSetCar] = true,
+    [PSetCdr] = true,
+    [PList] = true,
+    [PNot] = true,
+    [PIs] = true,
+    [PAtom] = true,
+    [PPrint] = true,
+    [PLess] = true,
+    [PLessEqual] = true,
+    [PAdd] = true,
+    [PSub] = true,
+    [PMul] = true,
+    [PDiv] = true,
+    [PFset] = true,
+    [PDefalias] = true,
+    [PSymbolFunction] = true,
+    [PSymbolValue] = true,
+    [PFboundp] = true,
+    [PFmakunbound] = true,
+    [PFuncall] = true,
+    [PApply] = true,
+    // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
+    // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`.
+};
+
+// Whether `fn` is a callable whose operands stay raw -- a macro, or one of
+// the special-form primitives above. `funcall`/`apply` reject these: their
+// evaluate-then-redispatch shape hands the callable a `(callable (quote v)
+// ...)` form, and a raw-form callable sees the wrappers rather than the
+// values, so `(funcall 'quote 'a)` used to answer `(quote a)` and
+// `(funcall 'if 1 2 3)` used to take a branch of the *quoted* forms. Emacs
+// signals `invalid-function` for both. Every other non-callable value keeps
+// the `tried to call non-callable value` the redispatched call already
+// raises for it.
+static bool IsRawFormCallable(const FeObject* fn) {
+  const FeType type = FeGetType(fn);
+  if (type == FeTMacro) {
+    return true;
+  }
+  return type == FeTPrimitive && !primitive_is_function[(Primitive)PRIM(fn)];
+}
+
 // Builds `(callable (quote v) ...)` from a list of already-evaluated values
 // -- the same quoted-argument construction `FeCall`'s host path uses -- so a
 // resume arm can hand evaluated operands to the ordinary call machinery by
@@ -1507,9 +1599,20 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // builds per call. The caller keeps `args` rooted in a frame field across
 // this construction (the 03F lesson: these conses can trigger a collection,
 // and the values being wrapped are live only through that field).
+//
+// The GC stack cost is one slot, not three per argument. Every `FeCons` here
+// pushes its result (`MakeObject` does), so leaving them pushed until the
+// caller's own restore made a wide `apply` die on "GC stack overflow" where
+// the equivalent direct call did not. Instead each pass restores the
+// checkpoint this function took -- *its own*, above the caller's
+// `FePushGC(list)`, which stays -- and re-pushes the chain's head, which
+// roots every pair built so far; the same idiom `ReadList` uses. `quote` is
+// an interned symbol reachable from `ctx->symbol_list`, a mark-phase root,
+// so it needs no slot of its own after the first restore.
 static FeObject* MakeCallForm(FeContext* ctx,
                               FeObject* callable,
                               FeObject* args) {
+  const size_t gc = FeSaveGC(ctx);
   FeObject* const quote = FeMakeSymbol(ctx, "quote");
   FeObject* forms = &nil;
   while (!FeIsNil(args)) {
@@ -1517,6 +1620,8 @@ static FeObject* MakeCallForm(FeContext* ctx,
     FeObject* const quoted = FeCons(ctx, quote, wrapped);
     forms = FeCons(ctx, quoted, forms);
     args = CDR(args);
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, forms);
   }
   // `forms` was built by prepending, so it holds the quote-wrapped arguments
   // reversed; reorder it into argument order (`FeCall`'s host construction
@@ -1529,6 +1634,10 @@ static FeObject* MakeCallForm(FeContext* ctx,
     ordered = forms;
     forms = next;
   }
+  // The reversal left the *last* pair on the GC stack, which roots nothing
+  // ahead of it; re-root the head before the final allocation.
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, ordered);
   return FeCons(ctx, callable, ordered);
 }
 
@@ -1539,18 +1648,29 @@ static FeObject* MakeCallForm(FeContext* ctx,
 // validated proper by the caller. The frame's `accumulator` is the
 // mark-phase root the buffer is built in (and returned through), so every
 // `FeCons` below -- each of which may trigger a collection -- finds the
-// partially built list still rooted, the 03F rule.
+// partially built list still rooted, the 03F rule. That is also what makes
+// the GC stack cost one slot rather than one per spread element: because
+// `accumulator` is a root already, each pass can restore the checkpoint
+// taken here -- above the caller's `FePushGC(list)`, which stays, and which
+// is what keeps the *source* elements alive -- instead of leaving every
+// pair `MakeObject` pushed there until the caller's own restore.
+// `list` and `last` are walked, never written, but their elements are handed
+// to `FeCons`, which takes them mutably: the `const` is on the traversal,
+// the same way `SymbolName`'s is (fe.c).
 static FeObject* SpreadApplyArgs(FeContext* ctx,
                                  FeEvalFrame* frame,
                                  const FeObject* list,
                                  const FeObject* last,
                                  FeObject* spread) {
+  const size_t gc = FeSaveGC(ctx);
   frame->accumulator = &nil;
   for (const FeObject* p = CDR(list); p != last; p = CDR(p)) {
     frame->accumulator = FeCons(ctx, CAR(p), frame->accumulator);
+    FeRestoreGC(ctx, gc);
   }
   for (FeObject* p = spread; !FeIsNil(p); p = CDR(p)) {
     frame->accumulator = FeCons(ctx, CAR(p), frame->accumulator);
+    FeRestoreGC(ctx, gc);
   }
   FeObject* ordered = &nil;
   FeObject* acc = frame->accumulator;
@@ -1562,6 +1682,92 @@ static FeObject* SpreadApplyArgs(FeContext* ctx,
   }
   frame->accumulator = ordered;
   return ordered;
+}
+
+// `apply`'s final operand. Walks to the last pair of the evaluated operands
+// after the callable -- the operand list an EvalList frame builds is always
+// proper, so this finds the final operand's pair -- and returns the spread
+// value that pair holds, reporting the pair itself through `last`. There must
+// *be* such a pair: a callable-only `(apply 'f)` has no final operand and is
+// the malformed-tail error, not an empty spread. The spread value must then
+// be a proper list in its own right, which the operand list being proper does
+// not imply (`(apply '+ 1 '(2 . 3))`).
+static FeObject* ApplySpread(FeContext* ctx, FeObject* args, FeObject** last) {
+  FeObject* pair = args;
+  while (FeGetType(pair) == FeTPair && FeGetType(CDR(pair)) == FeTPair) {
+    pair = CDR(pair);
+  }
+  if (FeGetType(pair) != FeTPair) {
+    FeHandleError(ctx, "apply: last argument must be a proper list");
+  }
+  *last = pair;
+  FeObject* const spread = CAR(pair);
+  FeObject* walk = spread;
+  while (FeGetType(walk) == FeTPair) {
+    walk = CDR(walk);
+  }
+  if (walk != &nil) {
+    FeHandleError(ctx, "apply: last argument must be a proper list");
+  }
+  return spread;
+}
+
+// `funcall`/`apply`'s tail, once every operand has been evaluated into
+// `list`: resolve the first value through the designator chain and redispatch
+// the rest through the ordinary call path (04C's evaluate-then-redispatch
+// shape). `list` always holds at least the callable -- `DispatchPrimitive`
+// rejects zero raw operands before anything evaluates -- but the emptiness is
+// checked rather than assumed: an operand that evaluated to the `&unbound`
+// sentinel used to be dropped silently here (`ResumeEvalList` reads such a
+// delivery as "nothing delivered yet"), which is how `(funcall (+))` reached
+// this arm with nothing to call and dereferenced `&nil`.
+static bool DispatchFuncallApply(FeContext* ctx,
+                                 FeEvalFrame* frame,
+                                 FeObject* list) {
+  if (FeIsNil(list)) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+  // Root the operand list -- and the callable it starts with -- across the
+  // resolution below (the 03F lesson: an evaluated operand buffer is live
+  // across every later allocation, and `ResolveFunctionCallable` follows
+  // symbol cells while only this frame field keeps the values alive).
+  frame->accumulator = list;
+  FeObject* const operand = CAR(list);
+  FeObject* const callable = ResolveFunctionCallable(ctx, operand);
+  // Both errors name the operand the program wrote, not the last link of a
+  // designator chain: `(fset 'a 'b) (funcall 'a)` is `void-function a`, as in
+  // Emacs, the same name call position already reports.
+  if (callable == &unbound) {
+    HandleSymbolError(ctx, operand, "void-function");
+  }
+  if (IsRawFormCallable(callable)) {
+    HandleSymbolError(ctx, operand, "invalid-function");
+  }
+  FeObject* args = CDR(list);
+  FeObject* last = &nil;
+  FeObject* spread = &nil;
+  if (PRIM(frame->fn) == PApply) {
+    spread = ApplySpread(ctx, args, &last);
+  }
+  // `list` roots the callable when it is a direct operand value and the
+  // operand buffer while it is rebuilt; keep it on the GC stack across every
+  // allocation below. `MakeCallForm`'s conses and the rebuild's conses can
+  // trigger a collection, and once `frame->accumulator` becomes the (rebuilt)
+  // argument list, the callable -- which is not an element of it -- has no
+  // other root until the call form is pushed.
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, list);
+  if (PRIM(frame->fn) == PApply) {
+    args = SpreadApplyArgs(ctx, frame, list, last, spread);
+  }
+  // Root the (possibly rebuilt) argument list, then hand the evaluated values
+  // to the ordinary call path: this frame becomes a relay for the call form
+  // pushed above it.
+  frame->accumulator = args;
+  frame->kind = FeFrameRelay;
+  PushEvaluationFrame(ctx, MakeCallForm(ctx, callable, args), frame->env, NULL);
+  FeRestoreGC(ctx, gc);
+  return false;
 }
 
 // `list`, `=`, `set`, `funcall`, `apply`: evaluates the complete raw
@@ -1614,67 +1820,8 @@ static bool ResumeEvalList(FeContext* ctx,
       break;
     }
     case PFuncall:
-    case PApply: {
-      // Root the operand list -- and the callable it starts with -- across
-      // the resolution below (the 03F lesson: an evaluated operand buffer is
-      // live across every later allocation, and `ResolveFunctionCallable`
-      // follows symbol cells while only this frame field keeps the values
-      // alive).
-      frame->accumulator = list;
-      FeObject* dead = &nil;
-      FeObject* const callable = ResolveFunctionCallable(ctx, CAR(list), &dead);
-      if (callable == &unbound) {
-        HandleVoidSymbol(ctx, dead, "void-function");
-      }
-      FeObject* args = CDR(list);
-      FeObject* last = &nil;
-      FeObject* spread = &nil;
-      if (PRIM(frame->fn) == PApply) {
-        // Walk to the last pair *after* the callable: the operand list an
-        // EvalList frame builds is always proper, so this finds the final
-        // operand's pair (or nil for a callable-only `(apply 'f)`).
-        last = args;
-        while (FeGetType(last) == FeTPair && FeGetType(CDR(last)) == FeTPair) {
-          last = CDR(last);
-        }
-        if (FeGetType(last) != FeTPair) {
-          FeHandleError(ctx, "apply: last argument must be a proper list");
-        }
-        // The spread value itself must be a proper list -- the operand list
-        // being proper does not stop the final operand from being a dotted
-        // pair (`(apply '+ 1 '(2 . 3))`).
-        spread = CAR(last);
-        FeObject* walk = spread;
-        while (FeGetType(walk) == FeTPair) {
-          walk = CDR(walk);
-        }
-        if (walk != &nil) {
-          FeHandleError(ctx, "apply: last argument must be a proper list");
-        }
-      }
-      // `list` roots the callable when it is a direct operand value and the
-      // operand buffer while it is rebuilt; keep it on the GC stack across
-      // every allocation below. `MakeCallForm`'s conses and the rebuild's
-      // conses can trigger a collection, and once `frame->accumulator`
-      // becomes the (rebuilt) argument list, the callable -- which is not an
-      // element of it -- has no other root until the call form is pushed.
-      const size_t gc = FeSaveGC(ctx);
-      FePushGC(ctx, list);
-      if (PRIM(frame->fn) == PApply) {
-        args = SpreadApplyArgs(ctx, frame, list, last, spread);
-      } else {
-        args = CDR(list);
-      }
-      // Root the (possibly rebuilt) argument list, then hand the evaluated
-      // values to the ordinary call path: this frame becomes a relay for the
-      // call form pushed above it.
-      frame->accumulator = args;
-      frame->kind = FeFrameRelay;
-      PushEvaluationFrame(ctx, MakeCallForm(ctx, callable, args), frame->env,
-                          NULL);
-      FeRestoreGC(ctx, gc);
-      return false;
-    }
+    case PApply:
+      return DispatchFuncallApply(ctx, frame, list);
     default: {  // PNumericEqual
       FeDouble first = GetDouble(CheckNumericEqualOperand(ctx, CAR(list)));
       bool equal = true;
@@ -1909,7 +2056,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
           EvaluationStep(ctx);
           result = CDR(GetBound(ctx, expr, frame_env));
           if (result == &unbound) {
-            HandleVoidSymbol(ctx, expr, "void-variable");
+            HandleSymbolError(ctx, expr, "void-variable");
           }
         } else {
           EvaluationStep(ctx);
@@ -2148,9 +2295,24 @@ FeObject* FeGetFunction(FeContext* ctx, FeObject* sym) {
   // `nil`, since 04D deleted the transitional value-cell fallback; a cycle
   // raises `cyclic-function-indirection`. Outside an active evaluation the
   // per-hop `EvaluationStep` charges are no-ops.
-  FeObject* dead;
-  FeObject* const fn = ResolveFunctionCallable(ctx, sym, &dead);
+  FeObject* const fn = ResolveFunctionCallable(ctx, sym);
   return fn == &unbound ? FeNil(ctx) : fn;
+}
+
+bool FeIsFunction(FeContext* ctx, FeObject* obj) {
+  // `functionp`'s question, asked of a resolved callable rather than of a
+  // name: a symbol is followed through the same designator chain call
+  // position uses, so an unbound name is false and a cycle raises
+  // `cyclic-function-indirection` exactly as `FeGetFunction` does. Macros and
+  // special forms are false -- the answer Emacs' own `functionp` gives for
+  // `if`, `quote` and `lambda` -- and so is every value that is not callable
+  // at all.
+  const FeObject* const fn = ResolveFunctionCallable(ctx, obj);
+  const FeType type = FeGetType(fn);
+  if (type == FeTFn || type == FeTNativeFn) {
+    return true;
+  }
+  return type == FeTPrimitive && !IsRawFormCallable(fn);
 }
 
 FeObject* FeCall(FeContext* ctx,

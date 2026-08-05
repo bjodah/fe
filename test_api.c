@@ -1428,6 +1428,64 @@ static bool TestFunctionCells(void) {
             "proper list");
   CHK("(apply '+ 1 2 (list 3 4))", "10");
 
+  // Zero-operand arithmetic is Emacs' identity element -- and, before that,
+  // is *a value at all*: an operandless arithmetic frame used to complete
+  // with the `&unbound` sentinel, which `ResumeEvalList` then dropped as a
+  // non-delivery, so `(funcall (+))` reached the funcall arm with an empty
+  // operand list and dereferenced it. Every one of these crashed or escaped
+  // the sentinel into Lisp.
+  CHK("(+)", "0");
+  CHK("(*)", "1");
+  CHK("(-)", "0");
+  CHK("(funcall '+)", "0");
+  CHK("(apply '+ '())", "0");
+  CHK("(apply '* '())", "1");
+  CHK("(= (+))", "t");
+  CHK("(set 'zero-operand (+))", "0");
+  CHK("zero-operand", "0");
+  LISP2_ERR("(funcall (+))", "lisp2.fe: tried to call non-callable value");
+  // `/` has no identity to return; nothing has evaluated by then, so this is
+  // the same wrong-number-of-arguments Emacs signals. The context stays
+  // reusable.
+  LISP2_ERR("(/)", "lisp2.fe: wrong-number-of-arguments");
+  CHK("(/ 8 2)", "4");
+  CHK("(+ 1 2)", "3");
+
+  // A macro or a special form is not a funcall/apply target: the redispatch
+  // would hand it the `(quote v)` wrappers rather than the values, so
+  // `(funcall 'quote 'a)` answered `(quote a)` and `(funcall 'if 1 2 3)`
+  // took a branch of the *quoted* forms. Emacs signals invalid-function for
+  // all of these, naming the operand the program wrote.
+  LISP2_ERR("(funcall 'quote 'a)", "lisp2.fe: invalid-function quote");
+  LISP2_ERR("(funcall 'if 1 2 3)", "lisp2.fe: invalid-function if");
+  LISP2_ERR("(funcall 'let 'z 1)", "lisp2.fe: invalid-function let");
+  LISP2_ERR("(apply 'and '(1 2))", "lisp2.fe: invalid-function and");
+  CHK("(fset 'inc-macro (macro (x) (list '+ x 1)))",
+      "(macro (x) (list (quote +) x 1))");
+  LISP2_ERR("(funcall 'inc-macro 5)", "lisp2.fe: invalid-function inc-macro");
+  LISP2_ERR("(apply 'inc-macro '(5))", "lisp2.fe: invalid-function inc-macro");
+  // A designator chain ending in a macro is rejected at the name the caller
+  // used, and the context is reusable after every one of these.
+  CHK("(defalias 'macro-alias 'inc-macro)", "macro-alias");
+  LISP2_ERR("(funcall 'macro-alias 5)",
+            "lisp2.fe: invalid-function macro-alias");
+  CHK("(inc-macro 5)", "6");
+  // `funcall`/`apply` are function-shaped themselves, so they *are* legal
+  // targets -- Emacs answers 3 here too.
+  CHK("(funcall 'funcall '+ 1 2)", "3");
+  CHK("(funcall 'apply '+ 1 '(2))", "3");
+
+  // A dead designator chain is `void-function` at the name the program
+  // wrote, not at the last link the resolver reached: Emacs reports
+  // `void-function dead-head` for both the call and the funcall.
+  CHK("(fset 'dead-head 'dead-middle)", "dead-middle");
+  CHK("(fset 'dead-middle 'dead-tail)", "dead-tail");
+  LISP2_ERR("(dead-head)", "lisp2.fe: void-function dead-head");
+  LISP2_ERR("(funcall 'dead-head)", "lisp2.fe: void-function dead-head");
+  LISP2_ERR("(apply 'dead-head '())", "lisp2.fe: void-function dead-head");
+  CHK("(fset 'dead-tail (lambda () 5))", "(lambda nil 5)");
+  CHK("(funcall 'dead-head)", "5");
+
   // `symbol-function` returns the raw cell -- a defalias designator stays a
   // symbol -- and an empty cell is void-function NAME.
   CHK("(fset 'h (lambda (x) x))", "(lambda (x) x)");
@@ -1522,6 +1580,30 @@ static bool TestFunctionCells(void) {
   FeObject* const alias = FeMakeSymbol(context, "api-alias");
   FeSetFunction(context, alias, api_fn);
   CHECK(FeGetFunction(context, alias) == closure);
+  // `FeIsFunction` is `functionp`'s question over the same designator chain:
+  // a closure, a native and a function-shaped primitive are functions; a
+  // macro, a special form, an unbound name and a plain value are not. The
+  // answers match Emacs' own `functionp` name for name.
+  CHECK(FeIsFunction(context, closure));
+  CHECK(FeIsFunction(context, api_fn));
+  CHECK(FeIsFunction(context, alias));
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "car")));
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "funcall")));
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "apply")));
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "sqrt")));
+  CHECK(!FeIsFunction(context, FeMakeSymbol(context, "if")));
+  CHECK(!FeIsFunction(context, FeMakeSymbol(context, "quote")));
+  CHECK(!FeIsFunction(context, FeMakeSymbol(context, "lambda")));
+  CHECK(!FeIsFunction(context, FeMakeSymbol(context, "function")));
+  CHECK(!FeIsFunction(context, FeMakeSymbol(context, "api-not-a-function")));
+  CHECK(!FeIsFunction(context, FeMakeDouble(context, 5)));
+  CHECK(!FeIsFunction(context, FeNil(context)));
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "api.fe", "(fset 'api-macro (macro (x) x))",
+                       sizeof("(fset 'api-macro (macro (x) x))") - 1),
+      "(macro (x) x)"));
+  CHECK(!FeIsFunction(context, FeMakeSymbol(context, "api-macro")));
   CHECK(
       IsRendered(context,
                  FeEvaluateString(context, "api.fe", "(funcall 'api-alias 10)",
@@ -3819,6 +3901,16 @@ static bool TestResumableFrameGC(void) {
        "(apply (fn (x y) (setq n 0) (while (< n 2000) (setq n (+ n 1)) "
        "(cons n n)) (list x y)) (list 1 2))",
        "(1 2)", nullptr},
+      // apply's own rebuild: `SpreadApplyArgs` and `MakeCallForm` are
+      // allocation loops that hold their partial results in the frame's
+      // `accumulator` and one GC checkpoint apiece -- the shape that keeps
+      // their GC-stack cost fixed instead of four slots per element. A spread
+      // wide enough to collect *inside* those loops is what pins that
+      // rooting: every element has to survive to the sum.
+      {"apply-spread-rebuild",
+       "(do (setq n 0) (setq xs nil) (while (< n 60) (setq n (+ n 1)) "
+       "(setq xs (cons n xs))) (apply '+ 1 2 xs))",
+       "1833", nullptr},
   };
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     if (!RunFrameGCCase(&cases[i])) {

@@ -211,6 +211,20 @@ are no-ops. The Lisp-level spellings are `(fboundp 'name)`, `(fset 'name ...)`,
 the same cell (see below), which is the meaning change 04D's `FE_API_VERSION`
 3 bump names.
 
+`FeIsFunction()` answers Emacs' `functionp` question about the resolved
+callable: true for a lambda, a host native, and a *function-shaped* primitive
+-- one whose operands the evaluator evaluates before the primitive itself acts
+(`car`, `+`, `set`, `funcall`, `apply`, ...) -- and false for a macro, for a
+special form whose operands stay raw (`if`, `quote`, `let`, `lambda`,
+`function`, ...), and for a value that is not callable at all. A symbol
+argument is resolved through the same designator chain `FeGetFunction()`
+follows, so this asks about the symbol's binding rather than about the symbol:
+an unbound name is false, and a self-referential chain raises
+`cyclic-function-indirection` here as it does there. The predicate is the same
+classification `funcall`/`apply` reject an `invalid-function` operand by, so a
+host `functionp` built on it and the interpreter cannot disagree. It is an
+additive C entry point: no version bump, per the policy above.
+
 ## Reading And Running Source
 
 `FeReadString()` reads one form from an explicitly sized byte sequence. The

@@ -1,0 +1,6 @@
+{
+ "id": "primitive-add-arity-zero",
+ "setup": [],
+ "expr": "(+)",
+ "note": "Zero-operand `+` is the identity element 0, not an error and not an escaped sentinel. Fe's arithmetic frame used to complete with the internal `&unbound` marker its accumulator still held, which then escaped into Lisp."
+}

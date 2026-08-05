@@ -1,0 +1,34 @@
+;; The funcall/apply edges an ordinary script can state as values rather than
+;; as errors (the error spellings live in test_api.c, which can catch them).
+;; Nothing here prints: the golden output is empty, and an assertion failure
+;; is what a regression looks like.
+
+;; Zero-operand arithmetic is Emacs' identity element, not the evaluator's
+;; "no operand combined yet" sentinel. Before this the sentinel escaped into
+;; Lisp, where it crashed funcall and reached the writer.
+(assert-is 0 (+))
+(assert-is 1 (*))
+(assert-is 0 (-))
+(assert-is 0 (apply '+ '()))
+(assert-is 1 (apply '* '()))
+(assert-is 0 (funcall '+))
+
+;; `funcall` and `apply` are themselves function-shaped, so they are legal
+;; funcall targets -- Emacs answers 3 here too.
+(assert-is 3 (funcall 'funcall '+ 1 2))
+(assert-is 3 (funcall 'apply '+ 1 '(2)))
+
+;; A wide spread costs a fixed number of GC-stack slots, not four per
+;; element: `apply` rebuilds the argument list and wraps every value in a
+;; `(quote v)` form, and leaving each of those conses on the GC stack until
+;; the call returned made this "GC stack overflow" at a few hundred elements
+;; while the equivalent direct call ran fine.
+(setq big nil)
+(setq i 0)
+(while (< i 3000)
+  (setq big (cons i big))
+  (setq i (+ i 1)))
+(assert-is 4498500 (apply '+ big))
+(assert-is 4498510 (apply '+ 4 6 big))
+;; The caller's list is untouched by the rebuild.
+(assert-is 2999 (car big))

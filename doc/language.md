@@ -387,6 +387,15 @@ closure value, a native, or a symbol designator. A resolved value that is not
 callable is `tried to call non-callable value`, and `(funcall)` with no
 operands is `wrong-number-of-arguments`.
 
+What it may *not* be is a macro or a special form. `funcall` hands the callable
+already-evaluated values, and a callable whose operands stay raw would receive
+the wrappers rather than the values, so `(funcall 'quote 'a)` and
+`(funcall 'if 1 2 3)` are `invalid-function`, named after the operand the
+program wrote, as Emacs names it. `funcall` and `apply` are themselves
+function-shaped, so `(funcall 'funcall '+ 1 2)` is an ordinary 3. A designator
+chain that dies in an empty function cell is `void-function` at the name the
+program wrote too, not at the last link the chain reached.
+
 ```clojure
 fe > (funcall (lambda (x) (+ x 1)) 2)
 3
@@ -428,7 +437,9 @@ fe > lst
 The spread does not mutate the caller's list -- `lst` still holds `(9 8)`
 after `apply` rebuilt it -- and a final operand that is not a proper list is
 `apply: last argument must be a proper list`, raised only after every operand
-form has run. `(apply)` with no operands is `wrong-number-of-arguments`.
+form has run. A callable-only `(apply 'f)` has no final operand at all and is
+that same error. `(apply)` with no operands is `wrong-number-of-arguments`,
+and `apply` rejects a macro or a special form exactly as `funcall` does.
 
 #### `(fset symbol function)`
 
@@ -770,16 +781,21 @@ Returns true if the numerical value `a` is less than or equal to `b`.
 
 #### `(+ ...)`
 
-Adds all its arguments together.
+Adds all its arguments together. With no arguments the answer is the identity
+element, `0`, as in Emacs.
 
 #### `(- ...)`
 
-Subtracts all its arguments, left to right.
+Subtracts all its arguments, left to right. With no arguments the answer is
+`0`.
 
 #### `(* ...)`
 
-Multiplies all its arguments.
+Multiplies all its arguments. With no arguments the answer is the identity
+element, `1`.
 
 #### `(/ ...)`
 
-Divides all its arguments, left to right.
+Divides all its arguments, left to right. Unlike the three above it has no
+identity element to return, so no arguments at all is
+`wrong-number-of-arguments`.

@@ -1,0 +1,6 @@
+{
+ "id": "primitive-mul-arity-zero",
+ "setup": [],
+ "expr": "(*)",
+ "note": "Zero-operand `*` is the identity element 1, the sibling of primitive-add-arity-zero. `(-)` is 0 like `(+)`, and `(/)` alone has no identity and stays wrong-number-of-arguments."
+}

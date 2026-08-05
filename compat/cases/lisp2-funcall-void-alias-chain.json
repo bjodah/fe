@@ -1,0 +1,8 @@
+{
+ "id": "lisp2-funcall-void-alias-chain",
+ "setup": [
+  "(fset 'chain-head 'chain-tail)"
+ ],
+ "expr": "(funcall 'chain-head)",
+ "note": "A designator chain that dies in an empty function cell is void-function at the name the program wrote, not at the last link the resolver reached: Emacs reports chain-head, and so does call position. Fe's funcall arm used to report chain-tail."
+}
