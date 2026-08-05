@@ -1,0 +1,6 @@
+{
+	"id": "cond-cc8",
+	"setup": [],
+	"expr": "(condition-case nil (/ 1 0) ((wrong-type-argument arith-error) 'multi))",
+	"note": "CC8: a handler may name a list of condition symbols; (/ 1 0) signals (arith-error) and the list catches it, returning multi. Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D; the (/ 1 0) producer is Phase 5's arith-error at message level today."
+}

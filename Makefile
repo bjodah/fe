@@ -157,8 +157,23 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # and 30 points of headroom against a row priced at +50 to +70, so the
 # caps move to the top of that range and fund the whole phase at once.
 # This slice adds no code, so the actuals stay put until 05B lands.
-SCC_COMPLEXITY_MAX ?= 540
-SCC_FILE_COMPLEXITY_MAX ?= 340
+#
+# Raised a sixth time, 540->680 / 340->420, by sub-plan 06A of the same
+# program's Phase 6 Decision (set README, dated 2026-08-05), funding
+# 06B-06D by name ahead of when they land: structured errors and non-local
+# exits are priced +80 to +120 against Phase 3's *measured* +101 pmccabe
+# as the closest control-flow comparable (the condition hierarchy has no
+# predecessor), and the measured starting state is 533/540 scc (fe_eval.c
+# 326/340) with 751/760 pmccabe -- 7, 14 and 9 points of headroom against
+# a row priced +80 to +120, so all three caps move at once by the top of
+# that range and fund the whole phase. The scc total is funded explicitly
+# even though the price table's own instruction forgot to name it: at 2
+# points free it is the *tightest* of the three, and the split tax 06A
+# Decision 1 may incur (03B's precedent: +72 scc, pmccabe conserved) is
+# absorbed by the scc raise. This slice adds no code, so the actuals stay
+# put until 06B lands.
+SCC_COMPLEXITY_MAX ?= 680
+SCC_FILE_COMPLEXITY_MAX ?= 420
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
@@ -211,7 +226,18 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # precedent. Both scc gates move with it (480->540 / 300->340, same
 # estimate); the per-symbol manifest is unchanged and is re-banked only if
 # 05B-05D land improvements.
-PMCCABE_TOTAL_MAX ?= 760
+#
+# Raised again, 760->900, by sub-plan 06A's Phase 6 Decision (set README,
+# dated 2026-08-05), funding 06B-06D by name: the phase is priced +80 to
+# +120 pmccabe against Phase 3's measured +101 control-flow weight (the
+# closest comparable -- catch/throw, condition-case, signal/error and the
+# static hierarchy have no predecessor), and the measured starting total
+# is 751/760 across 263 symbols -- 9 points of headroom against a +80 to
+# +120 phase, so the cap moves by the top of that range and funds the
+# whole phase at once, the 00A/03A/04A/05A precedent. Both scc gates move
+# with it (540->680 / 340->420, same estimate); the per-symbol manifest is
+# unchanged and is re-banked only if 06B-06D land improvements.
+PMCCABE_TOTAL_MAX ?= 900
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

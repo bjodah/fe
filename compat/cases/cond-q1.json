@@ -1,0 +1,6 @@
+{
+	"id": "cond-q1",
+	"setup": [],
+	"expr": "(error \"uncaught-batch-probe\")",
+	"note": "Q1: what an uncaught error looks like at the host boundary. The oracle shim catches everything, so this records the caught condition (error \"uncaught-batch-probe\"); the audit additionally measured the uncaught batch form directly: Emacs exits 255 with the message, an 'Error:' line and a backtrace on stderr, and an uncaught quit exits with no backtrace and no 'Error:' line. The fe-side structured channel (06D, Decision 5) is what makes fe's uncaught form comparable here. Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D."
+}

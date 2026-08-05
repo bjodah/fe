@@ -17,6 +17,32 @@ history. It still exists so the remaining pieces -- `condition-case`,
 `catch`/`throw`, and quit as a distinct completion kind -- are not designed
 four times by four separate patches that then have to be reconciled.
 
+**Reconciled 2026-08-05 against the measured oracle (sub-plan 06A of kg's
+`2026-08-03-elisp-subset-and-fe-evaluator` plan set).** One claim below is
+wrong, and 06A's Decision 4 settles it: the "What reaches the host" section
+says "Emacs discards" a cleanup's own error. Measured against the pinned
+Emacs 31.0.90, Emacs lets the **new error replace** the in-flight one --
+`(condition-case e (unwind-protect (error "orig") (error "cleanup"))
+(error e))` → `(error cleanup)` -- and a cleanup's `throw` likewise wins
+over an in-flight throw. Fe's shipped behaviour is a third thing (print the
+cleanup failure to `stderr` and keep unwinding with the original), pinned by
+`test_api.c`'s `TestUnwindLisp`; Decision 4's policy is **match Emacs**, and
+06D implements it, rewriting the three `stderr` assertions with it. The rest
+of 06A's reconciliation is that the substrate this document designs is
+half-built and documented as such: the five completion kinds already exist
+as `FeCompletion` (`fe_internal.h:371`) with only `Normal`/`Error` ever
+assigned (Phase 6 makes the other three true; it does not add the enum), and
+the checkpointed drain `RunCleanupsDownTo` (`fe_eval.c:132`) is already live
+and called by every completing pair frame, so the "Nested evaluation" note's
+"this has to change" is already half-built -- only the drain-to-zero
+`RunCleanupsAfterError` needs a `catch` frame to displace. Phase 5's residue
+is recorded here for the first time: `arith-error` and int64-overflow joined
+the message-level condition names (`num-div-zero`, `num-overflow-bignum`),
+so "only normal and ordinary error are reachable today" is exact only at the
+message level -- the names ride in `FeHandleError()`'s text, exactly as the
+parent plan's "Condition names before conditions exist" note requires, until
+06D turns the named sites into structured signals.
+
 ## The constraint everything follows from
 
 `FeHandleError()` does not return. In the interactive interpreter its handler
@@ -62,6 +88,19 @@ the error callback.
 `quit` and `budget` must not be catchable by ordinary Lisp handlers. Emacs Lisp
 made `condition-case` unable to catch quit by default for good reasons and
 learned them the hard way; Fe should start there.
+
+**The enum is already there, three-fifths dead (06A's audit).**
+`FeCompletion` (`fe_internal.h:371`) declares all five kinds, but only
+`Normal` and `Error` are ever assigned today, and the enum currently serves
+as a one-bit "draining?" flag read exactly once: `AllocateFrame`'s
+`CleanupFrameReserve` gate (`fe_eval.c:656`) tests
+`completion != FeCompletionNormal`. Phase 6 does not add the enum -- it makes
+the other three values true at their producers, and the reserve gate silently
+widens to them the moment they are assigned. That is a live coupling nobody
+has yet had to consider; 06B turns it from an accident into an asserted
+behaviour (a cleanup provoked by frame exhaustion must be pushable regardless
+of which wall tripped), and 06C/06D keep treating it as a decision, not a
+side effect.
 
 ## Two cleanup registries, one ordering
 
@@ -153,6 +192,16 @@ change to "drain to the checkpoint of the frame that catches," exactly as
 this section already says, or a `catch` inside a re-entrant native call
 would incorrectly run cleanups that belong to a scope outside the `catch`.
 
+**The checkpointed half already exists (06A's audit).**
+`RunCleanupsDownTo(ctx, target)` (`fe_eval.c:132`) is live and is what every
+completing pair frame calls (`fe_eval.c:723`) to drop cleanups registered
+above it; only the drain-to-zero `RunCleanupsAfterError` is the thing a
+`catch` frame has to displace. 06C's throw unwinds on exactly this
+function -- search down the frame stack for the innermost matching catch,
+then `RunCleanupsDownTo(ctx, catch->cleanup_checkpoint)`, restore the GC
+checkpoint, and discard the frames above -- so this section's "this has to
+change" is half-built, not open design.
+
 **A Lisp cleanup's own forms are themselves a nested evaluator run,** since
 sub-plan 03E's frame machine: `RunOneCleanupEntry` starts one via
 `RunEvaluationBody` in place of the old recursive `DoList`'s one nested
@@ -201,37 +250,59 @@ call list, and should keep receiving them only for the duration of the call
 (the message is a borrowed buffer today and should stay that way). A cleanup
 that itself raises while unwinding is the one genuinely hard case: the options
 are to abort, to discard the new error and continue unwinding with the
-original, or to replace it. Emacs discards. Discarding is the right default
-here too, but it must be a decision, not an accident, and it must be tested.
+original, or to replace it. **The claim that "Emacs discards" is false,
+measured 2026-08-05 against the pinned Emacs 31.0.90:** a cleanup's error
+*replaces* the in-flight one --
+`(condition-case e (unwind-protect (error "orig") (error "cleanup"))
+(error e))` → `(error cleanup)` -- and a cleanup's `throw` likewise wins over
+an in-flight throw. 06A's Decision 4 settles the policy as **match Emacs --
+the new error replaces the in-flight completion**, because the phase's whole
+point is that handlers can rely on Emacs semantics and the divergence is
+observable from Lisp (`condition-case` around a failing cleanup); 06D
+implements it.
 
-**What shipped instead, for now:** discarding, as this section already
-recommends, but the callback that reaches is not `error_fn` -- a cleanup's own
-failure is printed to `stderr` directly from inside `FeHandleError()`
-(`RunOneCleanupEntry()` in `fe.c`), and `error_fn` never learns a cleanup
-failed at all. Completion kinds are not implemented (item 1 below is still
-open), so there was no distinct value to hand `error_fn` for "a cleanup
-failed" even if this had gone through it. Tested per this section's
-requirement: `test_api.c`'s `TestUnwindLisp()` captures `stderr` around a
-failing nested cleanup and asserts both the diagnostic and that the outer
-cleanup still ran.
+**What shipped instead, for now (superseded by Decision 4 at 06D):**
+discarding was this section's original reading, but the callback that reaches
+is not `error_fn` -- a cleanup's own failure is printed to `stderr` directly
+from inside `FeHandleError()` (`RunOneCleanupEntry()` in `fe.c`), and
+`error_fn` never learns a cleanup failed at all. Completion kinds are not
+implemented (item 1 below is still open), so there was no distinct value to
+hand `error_fn` for "a cleanup failed" even if this had gone through it.
+Tested per this section's requirement: `test_api.c`'s `TestUnwindLisp()`
+captures `stderr` around a failing nested cleanup and asserts both the
+diagnostic and that the outer cleanup still ran. The three assertions pinning
+the `stderr` text (the `CHECK(strstr(captured, "cleanup error") ...)` family,
+`test_api.c:3086, :3155, :3204`) and `error_fn`'s never-sees-cleanup-failures
+contract are rewritten by 06D when the measured replace-policy lands.
 
 ## Order of work
 
 1. Completion kinds in the error callback. Independent, small, unblocks a host
-   telling quit from a genuine error. **Still open.**
+   telling quit from a genuine error. **Still open, sequenced.** 06A's Decision
+   5 fixed the API shape (keep `FeErrorFn` as-is; add additive accessors
+   `FeGetCompletion(ctx)` + `FeGetCondition(ctx)`), and 06B assigns the dormant
+   kinds at their producers (`EvaluationStep`'s step-limit → Budget, interrupt →
+   Quit; the frame/re-entry walls → Budget) and adds the accessors, with a
+   `TestCompletionKinds` suite. The standalone `fe` binary's structured error
+   channel for the compat runner (`condition_source` "message" → "structured")
+   is 06D's half of the same item.
 2. The C-only cleanup stack, with an error-injection matrix: inject an error at
    every allocation position in `fex_io.c` and `fex_process.c` and assert that
    no descriptor and no allocation survives. Only then migrate Fex to it.
    **Still open** -- what shipped is the always-runs registry two sections
    up, not the run-only-on-error-with-cancel one this step and `MakeFile()`
-   need; Fex has not been migrated.
+   need; Fex has not been migrated. **06A records this as staying open with a
+   pointer: it is Fex's resource problem, not Phase 6's control-flow problem,
+   and Phase 9's robustness scope (kg plan set) is its natural home.**
 3. Lisp `unwind-protect` on top of the same sequence numbers. **Shipped**,
    on top of one shared LIFO stack rather than sequence numbers -- see "Two
    cleanup registries, one ordering" above for why that was enough.
 4. `catch`/`throw` and `condition-case`, which need the resumable completion
-   kinds and therefore need 1–3 first. **Still open**, and needs the
-   drain-to-checkpoint change noted under "Nested evaluation and native
-   re-entry" above, not just items 1 and 2.
+   kinds and therefore need 1–3 first. **Still open, sequenced.** 06C lands
+   the catch frame and the throw unwind on the checkpointed drain this
+   document already names; 06D lands `condition-case` on the same machinery,
+   the static hierarchy, and Decision 4's cleanup-raise policy, closing the
+   fe workstream.
 
 Per-context extension type descriptors (`doc/c-api.md`'s "Phase 8") depend on
 step 2, because a descriptor's finalizer is a cleanup with the same rules.

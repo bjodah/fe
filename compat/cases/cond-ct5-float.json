@@ -1,0 +1,6 @@
+{
+	"id": "cond-ct5-float",
+	"setup": [],
+	"expr": "(catch 1.5 (throw 1.5 'hit) 'miss)",
+	"note": "CT5: tag comparison is eq, not eql/equal -- two 1.5 floats are distinct boxed objects, so the throw propagates as (no-catch 1.5 hit). Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06C."
+}

@@ -1,0 +1,8 @@
+{
+	"id": "cond-ct5-shared-cons",
+	"setup": [
+		"(setq cond-ct5-tag (list 1))"
+	],
+	"expr": "(catch cond-ct5-tag (throw cond-ct5-tag 'hit) 'miss)",
+	"note": "CT5: a shared cons matches -- the setup binds the tag once and both the catch and the throw use that same object, so eq holds and the answer is hit. Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06C."
+}

@@ -1,0 +1,6 @@
+{
+	"id": "cond-cc11",
+	"setup": [],
+	"expr": "(condition-case v 5 (:success (list 'succ v)))",
+	"note": "CC11: :success handlers exist in the pinned Emacs 31.0.90 and answer (succ 5). Deliberately deferred by 06A Decision 3 -- new in Emacs 24.1+, nothing in kg's target init-file corpus uses it -- so this row stays planned with its measured answer on file rather than being implemented by 06D. Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D (recorded exclusion)."
+}

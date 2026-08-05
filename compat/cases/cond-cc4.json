@@ -1,0 +1,6 @@
+{
+	"id": "cond-cc4",
+	"setup": [],
+	"expr": "(condition-case v (signal 'arith-error '(7)) (arith-error v))",
+	"note": "CC4: signal's data list reaches the handler verbatim as (arith-error 7). Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D (signal) with the arith-error name already carried at message level by Phase 5."
+}
