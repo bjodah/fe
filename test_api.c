@@ -1632,23 +1632,31 @@ static bool TestFunctionCells(void) {
   FeObject* const arg = FeMakeDouble(context, 21);
   FeObject* const* const args = (FeObject* const[]){arg};
   CHECK(IsRendered(context, FeCall(context, resolved, args, 1), "42"));
-  // And the cycle raises through the API too (re-establish x's self-link,
-  // which the earlier `(fset 'x nil)` recovery step cleared).
+  // Through the public API the very same cycle is `nil` and no error at all
+  // (re-establish x's self-link, which the earlier `(fset 'x nil)` recovery
+  // step cleared). This is the one reader of the chain that does not raise:
+  // its caller is a C frame, so `FeHandleError`'s longjmp would land in an
+  // outer evaluation's catch, or in none, rather than being contained. The
+  // error handler is not reached, and `FeIsFBound` is what tells this `nil`
+  // from the empty cell's `nil` above -- the cell holds `x`.
   FeObject* const cycled = FeMakeSymbol(context, "x");
   FeSetFunction(context, cycled, cycled);
-  const size_t cycle_gc = FeSaveGC(context);
   state.called = false;
-  state.expected_message = "cyclic-function-indirection";
-  if (setjmp(state.jump) == 0) {
-    (void)FeGetFunction(context, cycled);
-    CHECK(false);
-  }
-  FeRestoreGC(context, cycle_gc);
-  CHECK(state.called);
+  CHECK(FeIsNil(FeGetFunction(context, cycled)));
+  CHECK(!state.called);
+  CHECK(FeIsFBound(context, cycled));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 1)",
                                     sizeof("(+ 1 1)") - 1),
                    "2"));
+  // The split is the point, so pin both halves together: the Lisp-level
+  // readers of that same cell are inside an evaluation the host can catch and
+  // keep naming the cycle.
+  CHECK(ExpectEvaluationError(context, &state, "lisp2.fe", "(funcall 'x)",
+                              strlen("(funcall 'x)"),
+                              "lisp2.fe: cyclic-function-indirection"));
+  CHECK(ExpectEvaluationError(context, &state, "lisp2.fe", "(x)", strlen("(x)"),
+                              "lisp2.fe: cyclic-function-indirection"));
 
   FeCloseContext(context);
   return true;

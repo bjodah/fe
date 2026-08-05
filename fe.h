@@ -293,7 +293,13 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 // lookup does -- following defalias symbol indirection iteratively; it returns
 // `nil` when the name has no function binding (04D deleted the transitional
 // value-cell fallback, so a value-cell callable is *not* resolvable through
-// it), and raises `cyclic-function-indirection` for a self-referential chain.
+// it). A self-referential chain (`(fset 'x 'x)`) is `nil` here too, and does
+// *not* raise: this is the resolver a host calls, possibly with no evaluation
+// running, and a C host cannot catch an Fe error, so it must answer rather
+// than longjmp into a frame that has already returned. Every other reader of
+// the chain -- call position, `funcall`, `apply`, `FeIsFunction` -- still
+// raises `cyclic-function-indirection`. Use `FeIsFBound` to tell an empty cell
+// (`nil`, not f-bound) from a cycle (`nil`, f-bound).
 void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn);
 [[nodiscard]] FeObject* FeGetFunction(FeContext* ctx, FeObject* sym);
 [[nodiscard]] bool FeIsFBound(FeContext* ctx, FeObject* sym);
@@ -302,7 +308,9 @@ void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn);
 // primitive? A symbol is resolved through the same function-cell designator
 // chain `FeGetFunction` follows (so this asks about the symbol's binding, not
 // about the symbol), an unbound name is false, and a cycle raises
-// `cyclic-function-indirection`. A macro, a special form (`if`, `quote`,
+// `cyclic-function-indirection` -- unlike `FeGetFunction`, which answers `nil`;
+// resolve with that first if you need the non-raising answer for a name that
+// may be cyclic. A macro, a special form (`if`, `quote`,
 // `lambda`, ...) and any non-callable value are false, which is what Emacs'
 // `functionp` answers for them and what `funcall`/`apply` reject as
 // `invalid-function`.

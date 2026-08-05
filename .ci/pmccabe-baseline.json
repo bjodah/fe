@@ -159,6 +159,7 @@
   "fe_eval.c:PushBodyFrame": 1,
   "fe_eval.c:PushCleanup": 3,
   "fe_eval.c:PushEvaluationFrame": 1,
+  "fe_eval.c:ReportFunctionCycle": 2,
   "fe_eval.c:ResolveCallHead": 1,
   "fe_eval.c:ResolveFunctionCallable": 8,
   "fe_eval.c:ResumeAndOr": 6,

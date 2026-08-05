@@ -204,9 +204,19 @@ meaning and address the value cell. `FeGetFunction()` resolves a name the way
 call position does: the function cell first, symbol indirection followed
 iteratively (one step charged per hop), and -- since sub-plan 04D's namespace
 cut deleted the value-cell fallback -- nothing else. It returns `nil` when the
-name is unbound and raises `cyclic-function-indirection` for a self-referential
-chain (`(fset 'x 'x)`). Outside an active evaluation the per-hop step charges
-are no-ops. The Lisp-level spellings are `(fboundp 'name)`, `(fset 'name ...)`,
+name is unbound, and `nil` for a self-referential chain (`(fset 'x 'x)`) as
+well: it is the one reader of the chain that does not raise
+`cyclic-function-indirection`. That is a host-API design choice, not a copy of
+Emacs -- Emacs has no cyclic chain to resolve, because `fset` itself signals
+`cyclic-function-indirection` and leaves the cell untouched. A C host cannot
+catch an Fe error: `FeHandleError` longjmps into whatever evaluation is
+running, which for a host resolving a callback name is an *outer* run or none
+at all, so the raise would land in a frame that has already returned. Call
+position, `funcall`/`apply` and `FeIsFunction` are all inside a catchable
+evaluation and keep raising. `FeIsFBound()` tells the two `nil`s apart: an
+empty cell is not f-bound, a cycle is. Outside an active evaluation the
+per-hop step charges are no-ops.
+The Lisp-level spellings are `(fboundp 'name)`, `(fset 'name ...)`,
 `(symbol-function 'name)` and `funcall`/`apply`. `FeDefineNative` now shares
 the same cell (see below), which is the meaning change 04D's `FE_API_VERSION`
 3 bump names.
@@ -220,7 +230,9 @@ special form whose operands stay raw (`if`, `quote`, `let`, `lambda`,
 argument is resolved through the same designator chain `FeGetFunction()`
 follows, so this asks about the symbol's binding rather than about the symbol:
 an unbound name is false, and a self-referential chain raises
-`cyclic-function-indirection` here as it does there. The predicate is the same
+`cyclic-function-indirection` -- where `FeGetFunction()` answers `nil`, so a
+host that must not be raised at resolves with that first and asks this about
+the result. The predicate is the same
 classification `funcall`/`apply` reject an `invalid-function` operand by, so a
 host `functionp` built on it and the interpreter cannot disagree. It is an
 additive C entry point: no version bump, per the policy above.

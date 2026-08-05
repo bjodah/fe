@@ -434,22 +434,42 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
   FeHandleError(ctx, "tried to call non-callable value");
 }
 
+// A cycle in a function-designator chain, reported the way the reader that
+// found it asked for: an error for a reader inside a catchable evaluation
+// (`cycle` null), and `&unbound` plus a flag for one that is not.
+static FeObject* ReportFunctionCycle(FeContext* ctx, bool* cycle) {
+  if (cycle == nullptr) {
+    FeHandleError(ctx, "cyclic-function-indirection");
+  }
+  *cycle = true;
+  return &unbound;
+}
+
 // Sub-plan 04C/04D's shared function-designator resolver: a function cell may
 // hold another symbol (the `defalias` indirection), and every reader of the
 // chain -- call position, `funcall`/`apply`, `FeGetFunction` -- follows it
 // through here so the rule cannot drift between the sites. One step is
 // charged per symbol hop, so a chain that never ends still dies on the step
-// budget, and a cycle is named `cyclic-function-indirection` by two-pointer
-// detection rather than left to exhaust the budget (`(fset 'x 'x)` is the
-// canonical case). Since 04D's cut the chain dies in an empty function cell
-// with `&unbound` -- the transitional value-cell fallback is gone, so a
-// callable stored only in the value namespace is *not* reachable in call
-// position. An empty cell anywhere along the chain is reported as plain
-// `&unbound`, and every caller names the symbol *it* was given rather than
-// the last link reached: `(fset 'a 'b) (a)` and `(funcall 'a)` are both
-// `void-function a` in Emacs, the name the program wrote. A non-symbol value
-// is already resolved and is returned unchanged.
-static FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn) {
+// budget, and a cycle is detected by two-pointer walk rather than left to
+// exhaust the budget (`(fset 'x 'x)` is the canonical case). Since 04D's cut
+// the chain dies in an empty function cell with `&unbound` -- the
+// transitional value-cell fallback is gone, so a callable stored only in the
+// value namespace is *not* reachable in call position. An empty cell anywhere
+// along the chain is reported as plain `&unbound`, and every caller names the
+// symbol *it* was given rather than the last link reached: `(fset 'a 'b) (a)`
+// and `(funcall 'a)` are both `void-function a` in Emacs, the name the program
+// wrote. A non-symbol value is already resolved and is returned unchanged.
+//
+// `cycle` is how the caller asks to be *told* about a cycle instead of
+// erroring on one. A null `cycle` raises `cyclic-function-indirection`, which
+// is what every evaluator-side reader wants: call position and the
+// `funcall`/`apply` arm are inside an evaluation the host can catch. A
+// non-null `cycle` is set to true and `&unbound` returned instead, for the
+// host-facing `FeGetFunction`, which may be called with no evaluation running
+// at all and so has no frame to raise into.
+static FeObject* ResolveFunctionCallable(FeContext* ctx,
+                                         FeObject* fn,
+                                         bool* cycle) {
   FeObject* slow = fn;
   FeObject* fast = fn;
   while (FeGetType(slow) == FeTSymbol) {
@@ -467,7 +487,7 @@ static FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn) {
       if (f1 != &unbound && FeGetType(f1) == FeTSymbol) {
         FeObject* const f2 = SymbolFunction(f1);
         if (f2 == slow) {
-          FeHandleError(ctx, "cyclic-function-indirection");
+          return ReportFunctionCycle(ctx, cycle);
         }
         fast = f2;
       } else {
@@ -488,7 +508,7 @@ static FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn) {
 // resolves `car`'s function cell, per the pinned 04A snapshot.
 static FeObject* ResolveCallHead(FeContext* ctx, FeObject* head) {
   EvaluationStep(ctx);
-  return ResolveFunctionCallable(ctx, head);
+  return ResolveFunctionCallable(ctx, head, nullptr);
 }
 
 // The head of a call is resolved on the frame stack rather than through
@@ -1733,7 +1753,7 @@ static bool DispatchFuncallApply(FeContext* ctx,
   // symbol cells while only this frame field keeps the values alive).
   frame->accumulator = list;
   FeObject* const operand = CAR(list);
-  FeObject* const callable = ResolveFunctionCallable(ctx, operand);
+  FeObject* const callable = ResolveFunctionCallable(ctx, operand, nullptr);
   // Both errors name the operand the program wrote, not the last link of a
   // designator chain: `(fset 'a 'b) (funcall 'a)` is `void-function a`, as in
   // Emacs, the same name call position already reports.
@@ -2292,10 +2312,24 @@ FeObject* FeGetFunction(FeContext* ctx, FeObject* sym) {
   // The host's way to resolve a callable name the way call position does
   // (04C/04D): the function cell, defalias indirection followed. A name with
   // no function binding -- even one whose value cell holds a callable -- is
-  // `nil`, since 04D deleted the transitional value-cell fallback; a cycle
-  // raises `cyclic-function-indirection`. Outside an active evaluation the
-  // per-hop `EvaluationStep` charges are no-ops.
-  FeObject* const fn = ResolveFunctionCallable(ctx, sym);
+  // `nil`, since 04D deleted the transitional value-cell fallback. Outside an
+  // active evaluation the per-hop `EvaluationStep` charges are no-ops.
+  //
+  // A *cyclic* chain is `nil` here too, and this one entry point is the only
+  // reader of the chain that does not raise `cyclic-function-indirection`:
+  // call position and `funcall`/`apply` still do. That is a host-API design
+  // choice rather than a copy of Emacs. Emacs cannot be copied here, because
+  // Emacs has no cyclic chain to resolve: `fset` itself signals
+  // `cyclic-function-indirection` and leaves the cell untouched, so
+  // `indirect-function` never sees one. A C host, meanwhile, cannot catch an
+  // Fe error -- `FeHandleError` longjmps to whatever evaluation is running,
+  // which for a host resolving a callback name is some *outer* run, or none
+  // at all, and a raise from here lands in a C frame that has already
+  // returned. The resolver a host calls therefore has to answer rather than
+  // raise, and `nil` -- the same answer an empty cell gets -- is that answer;
+  // `FeIsFBound` tells the two apart for a host that wants to say which.
+  bool cycle = false;
+  FeObject* const fn = ResolveFunctionCallable(ctx, sym, &cycle);
   return fn == &unbound ? FeNil(ctx) : fn;
 }
 
@@ -2303,11 +2337,13 @@ bool FeIsFunction(FeContext* ctx, FeObject* obj) {
   // `functionp`'s question, asked of a resolved callable rather than of a
   // name: a symbol is followed through the same designator chain call
   // position uses, so an unbound name is false and a cycle raises
-  // `cyclic-function-indirection` exactly as `FeGetFunction` does. Macros and
-  // special forms are false -- the answer Emacs' own `functionp` gives for
-  // `if`, `quote` and `lambda` -- and so is every value that is not callable
-  // at all.
-  const FeObject* const fn = ResolveFunctionCallable(ctx, obj);
+  // `cyclic-function-indirection`, as call position does and unlike
+  // `FeGetFunction`. A host that wants the non-raising answer resolves with
+  // `FeGetFunction` first and asks this about the result. Macros and special
+  // forms are false -- the answer Emacs' own `functionp` gives for `if`,
+  // `quote` and `lambda` -- and so is every value that is not callable at
+  // all.
+  const FeObject* const fn = ResolveFunctionCallable(ctx, obj, nullptr);
   const FeType type = FeGetType(fn);
   if (type == FeTFn || type == FeTNativeFn) {
     return true;

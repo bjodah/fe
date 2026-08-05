@@ -112,9 +112,14 @@ the writer rather than impersonating a value.
 The namespace split reached its final form with sub-plan 04D's cut. The
 evaluator's one shared function-designator resolver, `ResolveFunctionCallable`,
 walks a function cell's symbol indirection chain iteratively — charging one
-`EvaluationStep` per hop, and naming a cycle `cyclic-function-indirection`
-with two-pointer detection rather than leaving it to exhaust the step budget —
+`EvaluationStep` per hop, and finding a cycle with two-pointer detection
+rather than leaving it to exhaust the step budget —
 and reports `void-function NAME` when the chain dies in an empty function cell.
+A cycle is `cyclic-function-indirection` for every reader that has a
+catchable evaluation around it, and `nil` for the one that may not — the
+host-facing `FeGetFunction`, whose caller is a C frame the longjmp would
+skip past; the resolver's `cycle` out-parameter is which of the two the
+caller asked for.
 Sub-plan 04C shipped the same resolver with a value-cell fallback after the
 last link, because every bootstrap callable still lived in a value cell; 04D
 moved the bootstrap — the primitives, the `fn` alias, and the math natives
