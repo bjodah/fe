@@ -3651,12 +3651,11 @@ static bool TestMixedCleanupLIFO(void) {
 // in favor of a frame-owned root, which would make this bound disappear
 // along with the C-stack one.
 static bool TestFullDeepFlatness(void) {
-  // Bisected empirically against this exact chain with `max_depth` set to
-  // comfortably clear each candidate N's own physical/logical need: 1021
-  // succeeds, 1022 raises `GC stack overflow`. A third of that, not the
-  // boundary itself, so this assertion has margin against the exact ratio
-  // moving by one or two as unrelated code changes shift how many objects
-  // an ordinary evaluation step allocates.
+  // N is modest only to keep this test cheap: the GC-stack ceiling that
+  // used to cap this chain at 1021 levels is gone (see
+  // `TestGcStackConstantInNesting` below -- the GC stack no longer grows
+  // with nesting at all), so the only live bounds here are this arena's
+  // physical frame capacity and the logical ceiling raised below.
   enum { DeepN = 340 };
   const size_t peak_frames = 3 * (size_t)DeepN + 2;
   const size_t arena_size = 300ULL * 1024 * 1024;
@@ -3730,6 +3729,69 @@ static bool TestFullDeepFlatness(void) {
   return true;
 }
 
+// The GC stack must not grow with Lisp nesting. Every frame is a mark-phase
+// root, so an intermediate result needs no separate `FePushGC`: it is
+// delivered straight into the frame below's `callee`. Before that held, each
+// completed frame left one entry behind, `GcStackSize` (4096, a fixed
+// `FeContext` array that no arena size can grow) bounded recursion at ~1021
+// levels, and it -- not the frame stack -- was what stopped `(deep 100000)`.
+// Asserting a *constant* rather than a threshold is the point: a regression
+// that reintroduces per-level retention shows up as growth here however
+// small its per-level cost is.
+static bool TestGcStackConstantInNesting(void) {
+  const size_t arena_size = 32ULL * 1024 * 1024;
+  unsigned char* arena = malloc(arena_size);
+  CHECK(arena != nullptr);
+  FeContext* context = FeOpenContext(arena, arena_size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char deep_def[] =
+      "(setq deep (fn (n) (if (<= n 0) 0 (+ 1 (deep (- n 1))))))";
+  CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
+                         sizeof(deep_def) - 1) != nullptr);
+
+  // Same context for both runs: `peak_gc_stack_depth` is a high-water mark,
+  // so the deeper run can only ever raise it, never mask a rise.
+  enum { ShallowN = 200, DeepN = 2000 };
+  const FeEvalOptions options = {.max_depth = 3 * (size_t)DeepN * 2};
+  char source[32];
+  char expected[16];
+
+  int written = snprintf(source, sizeof(source), "(deep %d)", ShallowN);
+  CHECK(written > 0 && (size_t)written < sizeof(source));
+  (void)snprintf(expected, sizeof(expected), "%d", ShallowN);
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "shallow.fe", source,
+                                               (size_t)written, &options),
+                   expected));
+  const size_t shallow_peak = FeGetArenaStats(context).peak_gc_stack_depth;
+
+  written = snprintf(source, sizeof(source), "(deep %d)", DeepN);
+  CHECK(written > 0 && (size_t)written < sizeof(source));
+  (void)snprintf(expected, sizeof(expected), "%d", DeepN);
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "deep.fe", source,
+                                               (size_t)written, &options),
+                   expected));
+  const FeArenaStats stats = FeGetArenaStats(context);
+  printf(
+      "gc stack across nesting: deep(%d)=%zu deep(%d)=%zu (peak_depth %zu)\n",
+      ShallowN, shallow_peak, DeepN, stats.peak_gc_stack_depth,
+      stats.peak_evaluation_depth);
+  // Ten times the nesting, not one more GC-stack slot.
+  CHECK(stats.peak_gc_stack_depth == shallow_peak);
+  // And the run really was ten times deeper, so the equality above is not
+  // the two runs having quietly done the same amount of work.
+  CHECK(stats.peak_evaluation_depth == 3 * (size_t)DeepN + 3);
+
+  FeCloseContext(context);
+  free(arena);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
@@ -3749,7 +3811,7 @@ int main(void) {
                  TestResumableFrameGC() && TestCleanupRunGC() &&
                  TestPrimitiveOrder() && TestResumableFrameBudget() &&
                  TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
-                 TestFullDeepFlatness()
+                 TestFullDeepFlatness() && TestGcStackConstantInNesting()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

@@ -599,11 +599,9 @@ static void PushBodyFrame(FeContext* ctx, FeObject* env, FeObject* forms) {
 // pairs with the `EnterEvaluationDepth`/trace-link a real pair-form dispatch
 // already did.
 static void CompleteImplicitBodyFrame(FeContext* ctx,
-                                      const FeEvalFrame* frame,
-                                      FeObject* result) {
+                                      const FeEvalFrame* frame) {
   RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
   FeRestoreGC(ctx, frame->gc_checkpoint);
-  FePushGC(ctx, result);
 }
 
 // Sets up the frame state for a resolved primitive call (`fn`'s `PRIM`,
@@ -879,8 +877,6 @@ static bool ResumeBody(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (!FeIsNil(frame->rest)) {
     EvaluationStep(ctx);
     FeRestoreGC(ctx, frame->gc_checkpoint);
-    FePushGC(ctx, frame->env);
-    FePushGC(ctx, frame->rest);
     PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
                         &frame->env);
     return false;
@@ -915,8 +911,6 @@ static void ResumeMacroBody(FeContext* ctx, FeEvalFrame* frame) {
   if (!FeIsNil(frame->rest)) {
     EvaluationStep(ctx);
     FeRestoreGC(ctx, frame->gc_checkpoint);
-    FePushGC(ctx, frame->env);
-    FePushGC(ctx, frame->rest);
     PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
                         &frame->env);
     return;
@@ -1257,6 +1251,7 @@ static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (frame->callee != &unbound) {
     const FeDouble delivered = FeToDouble(ctx, frame->callee);
     frame->callee = &unbound;
+    const size_t gc = FeSaveGC(ctx);
     if (frame->accumulator == &unbound) {
       frame->accumulator = FeMakeDouble(ctx, delivered);
     } else {
@@ -1278,6 +1273,7 @@ static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       }
       frame->accumulator = FeMakeDouble(ctx, combined);
     }
+    FeRestoreGC(ctx, gc);
   }
   if (!FeIsNil(frame->rest)) {
     PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
@@ -1505,12 +1501,9 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
 // here -- a symbol head, a resolved computed head, a call, or a primitive
 // continuation -- so the evaluation_depth and call_list bookkeeping (and the
 // `macro` arm's own internal restore) cannot drift between the paths.
-static void CompletePairFrame(FeContext* ctx,
-                              FeEvalFrame* frame,
-                              FeObject* result) {
+static void CompletePairFrame(FeContext* ctx, FeEvalFrame* frame) {
   RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
   FeRestoreGC(ctx, frame->gc_checkpoint);
-  FePushGC(ctx, result);
   ctx->call_list = CDR(&frame->trace_cell);
   ctx->evaluation_depth--;
 }
@@ -1591,7 +1584,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
             // at the top of the loop starts the first argument.
             continue;
           }
-          CompletePairFrame(ctx, frame, result);
+          CompletePairFrame(ctx, frame);
         } else if (FeGetType(expr) == FeTSymbol) {
           EvaluationStep(ctx);
           result = CDR(GetBound(ctx, expr, frame_env));
@@ -1614,7 +1607,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
             // at the top of the loop starts the first argument.
             continue;
           }
-          CompletePairFrame(ctx, frame, result);
+          CompletePairFrame(ctx, frame);
         }
         break;
 
@@ -1637,7 +1630,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
           // of the loop.
           continue;
         }
-        CompletePairFrame(ctx, frame, result);
+        CompletePairFrame(ctx, frame);
         break;
 
       case FeFrameImplicitBody:
@@ -1650,7 +1643,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         if (!ResumeBody(ctx, frame, &result)) {
           continue;
         }
-        CompleteImplicitBodyFrame(ctx, frame, result);
+        CompleteImplicitBodyFrame(ctx, frame);
         break;
 
       case FeFrameMacro:
@@ -1666,7 +1659,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         // The expansion above this frame completed and delivered the macro
         // call's result into `callee`; the frame completes with it.
         ResumeMacroExpansion(frame, &result);
-        CompletePairFrame(ctx, frame, result);
+        CompletePairFrame(ctx, frame);
         break;
 
       case FeFrameNative:
@@ -1701,7 +1694,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
           result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
           ctx->native_reentry_depth = saved_native_depth;
           ctx->evaluation_depth = saved_depth;
-          CompletePairFrame(ctx, frame, result);
+          CompletePairFrame(ctx, frame);
         }
         break;
 
@@ -1725,7 +1718,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         if (!ResumeContinuation(ctx, frame, &result)) {
           continue;
         }
-        CompletePairFrame(ctx, frame, result);
+        CompletePairFrame(ctx, frame);
         break;
     }
 
@@ -1743,6 +1736,15 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
     frame->callee = result;
   }
   ctx->frame_stack_index = base;
+  // The run's own result is the one value no frame roots any more: every
+  // intermediate result is delivered straight into the frame below's
+  // `callee` (a mark-phase root) with no allocation in between, so the
+  // per-completion `FePushGC` those completions used to do was one live
+  // GC-stack entry per level of Lisp nesting -- the last thing making the
+  // fixed 4096-slot GC stack, rather than the frame stack, the bound on
+  // recursion depth. Pushing once here keeps the value the caller is about
+  // to receive alive without that per-level cost.
+  FePushGC(ctx, result);
   return result;
 }
 
