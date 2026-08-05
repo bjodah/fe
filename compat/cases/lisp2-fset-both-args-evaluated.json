@@ -5,5 +5,5 @@
   "(fset s (lambda () 4))"
  ],
  "expr": "(k)",
- "note": "04A: `fset` evaluates both arguments, so the symbol named by the value of `s` (k) receives the function, and `(k)` returns 4 -- the first argument being evaluated, not quoted, is the point. Fe has no `fset` today."
+ "note": "04A: `fset` evaluates both arguments, so the symbol named by the value of `s` (k) receives the function, and `(k)` returns 4 -- the first argument being evaluated, not quoted, is the point. Landed in 04C."
 }

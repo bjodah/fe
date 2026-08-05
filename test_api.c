@@ -1343,6 +1343,224 @@ static bool TestSymbolCells(void) {
   return true;
 }
 
+// Sub-plan 04C: the function namespace, additively. This is the full 04A
+// answer table that is implementable behind the transitional value-cell
+// fallback (04D deletes it): coexistence via fset, funcall on values /
+// designators / lambdas, apply spread and its malformed-tail error, the
+// symbol-function/symbol-value/fboundp readers, the makunbound/fmakunbound
+// independence pair, defalias's designator chains and their late binding,
+// the `function` special form, and the cycle that dies with
+// `cyclic-function-indirection` -- plus the public
+// FeSetFunction/FeGetFunction/FeIsFBound surface and context reuse after
+// each error. The compat corpus (fe/compat/) compares the same shapes
+// against the Emacs oracle; this is the implementation-focused side a
+// process-per-case protocol cannot observe (cell state after recovery,
+// host-API behaviour, the exact step budget of the cycle).
+static bool TestFunctionCells(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                   \
+  CHECK(IsRendered(context,                                                   \
+                   FeEvaluateString(context, "lisp2.fe", expr, strlen(expr)), \
+                   expected))
+#define LISP2_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "lisp2.fe", expr, strlen(expr), \
+                              message))
+
+  // The parent plan's headline: one symbol holds a value and a function at
+  // once, call position resolves the function cell, bare-symbol evaluation
+  // the value cell.
+  CHK("(setq f 7)", "7");
+  CHK("(fset 'f (lambda () 9))", "(lambda nil 9)");
+  CHK("(list f (f))", "(7 9)");
+
+  // `fset` evaluates both arguments -- the target is a value, not a quote --
+  // and returns the function object.
+  CHK("(setq s 'k)", "k");
+  CHK("(fset s (lambda () 4))", "(lambda nil 4)");
+  CHK("(k)", "4");
+  // The target is validated as a symbol before the function form evaluates.
+  LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe: expected symbol, got double");
+
+  // `funcall` takes a value: a closure directly, a lexical value, a symbol
+  // designator resolved through the function cell, and -- until 04D's cut --
+  // a bootstrap-style value-cell callable via the fallback.
+  CHK("(funcall (lambda (x) (+ x 1)) 2)", "3");
+  CHK("((lambda (g) (funcall g 3)) (lambda (x) (+ x 1)))", "4");
+  CHK("(setq g 7)", "7");
+  CHK("(fset 'g (lambda () 9))", "(lambda nil 9)");
+  CHK("(funcall 'g)", "9");
+  CHK("(setq myfn (lambda (x) (+ x 1)))", "(lambda (x) (+ x 1))");
+  CHK("(funcall 'myfn 5)", "6");
+  // A value-only designator is not a callable, and an unbound one is
+  // void-function; the context stays reusable after both. A zero-operand
+  // funcall/apply is an arity error, never a crash on an empty operand list.
+  LISP2_ERR("(setq v 7) (funcall 'v)",
+            "lisp2.fe: tried to call non-callable value");
+  LISP2_ERR("(funcall 'no-such)", "lisp2.fe: void-function no-such");
+  LISP2_ERR("(funcall)", "lisp2.fe: wrong-number-of-arguments");
+  LISP2_ERR("(apply)", "lisp2.fe: wrong-number-of-arguments");
+  CHK("(+ 1 2)", "3");
+
+  // `apply` spreads its final list argument; the caller's list is never
+  // mutated, so it still holds its original contents afterwards.
+  CHK("(apply '+ 1 2 (list 3 4))", "10");
+  CHK("(setq lst '(9 8))", "(9 8)");
+  CHK("(apply 'cons lst '(7 6))", "((9 8) . 7)");
+  CHK("lst", "(9 8)");
+  CHK("(apply 'list 1 2 '(3 4))", "(1 2 3 4)");
+  CHK("(apply 'list '())", "nil");
+  // A dotted tail is the malformed-tail error, raised only after every
+  // operand form has run (a side effect in an earlier operand already ran).
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "apply-probe")));
+  LISP2_ERR("(apply '+ 1 (do (setq apply-probe t) '(2 3)) '(4 . 5))",
+            "lisp2.fe: apply: last argument must be a proper list");
+  CHECK(FeIsBound(context, FeMakeSymbol(context, "apply-probe")));
+  LISP2_ERR("(apply 'list 1)",
+            "lisp2.fe: apply: last argument must be a "
+            "proper list");
+  CHK("(apply '+ 1 2 (list 3 4))", "10");
+
+  // `symbol-function` returns the raw cell -- a defalias designator stays a
+  // symbol -- and an empty cell is void-function NAME.
+  CHK("(fset 'h (lambda (x) x))", "(lambda (x) x)");
+  CHK("(funcall (symbol-function 'h) 5)", "5");
+  CHK("(defalias 'g2 'car)", "g2");
+  CHK("(is (symbol-function 'g2) 'car)", "t");
+  LISP2_ERR("(symbol-function 'nope)", "lisp2.fe: void-function nope");
+
+  // `symbol-value` reads the global value cell, empty one void-variable NAME.
+  CHK("(setq sv 5)", "5");
+  CHK("(symbol-value 'sv)", "5");
+  LISP2_ERR("(symbol-value 'nope)", "lisp2.fe: void-variable nope");
+
+  // `fboundp` asks the function cell. The bootstrap still lives in value
+  // cells until 04D, so a primitive name answers nil here -- the compat flip
+  // (`(fboundp 'car)` -> t) is the cut's evidence, not this slice's.
+  CHK("(fboundp 'fresh-fn)", "nil");
+  CHK("(fset 'ff (lambda () 1))", "(lambda nil 1)");
+  CHK("(fboundp 'ff)", "t");
+  CHK("(fboundp 'car)", "nil");
+
+  // The two unbound operations are disjoint: `makunbound` empties the value
+  // cell and leaves the function cell callable; `fmakunbound` the reverse.
+  CHK("(setq m 1)", "1");
+  CHK("(fset 'm (lambda () 2))", "(lambda nil 2)");
+  CHK("(makunbound 'm)", "m");
+  CHK("(m)", "2");
+  CHK("(setq m2 1)", "1");
+  CHK("(fset 'm2 (lambda () 3))", "(lambda nil 3)");
+  CHK("(fmakunbound 'm2)", "m2");
+  CHK("m2", "1");
+  LISP2_ERR("(m2)", "lisp2.fe: void-function m2");
+
+  // `defalias` points one symbol's function cell at another, returns the
+  // aliased symbol, and the chain is resolved at call time -- late binding.
+  CHK("(defalias 'first 'car)", "first");
+  CHK("(first (list 1 2))", "1");
+  CHK("(defalias 'a2 'b2)", "a2");
+  LISP2_ERR("(a2)", "lisp2.fe: void-function a2");
+  CHK("(fset 'b2 (lambda () 1))", "(lambda nil 1)");
+  CHK("(a2)", "1");
+
+  // `function` is a raw-form special form: a symbol is the designator
+  // itself; a lambda form is the closure, built by the same construction arm
+  // `lambda` uses (so it captures the lexical environment); anything else is
+  // unsupported-function-form.
+  CHK("(is (function c2) 'c2)", "t");
+  CHK("(funcall (function (lambda (x) (+ x 1))) 2)", "3");
+  CHK("(funcall (function (fn (x) x)) 9)", "9");
+  CHK("(funcall ((lambda (z) (function (lambda () z))) 7))", "7");
+  CHK("(is (function (lambda (x) x)) (function (lambda (x) x)))", "nil");
+  LISP2_ERR("(function 5)", "lisp2.fe: unsupported-function-form");
+  LISP2_ERR("(function (car 1))", "lisp2.fe: unsupported-function-form");
+  LISP2_ERR("(function f 1)", "lisp2.fe: too many arguments");
+
+  // Cycles in the designator chain are named, in call position, in funcall,
+  // and through the public API -- never left to exhaust the step budget.
+  CHK("(fset 'x 'x)", "x");
+  LISP2_ERR("(x)", "lisp2.fe: cyclic-function-indirection");
+  LISP2_ERR("(funcall 'x)", "lisp2.fe: cyclic-function-indirection");
+  const FeEvalOptions small_budget = {.step_limit = 16};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "lisp2.fe", "(funcall 'x)", strlen("(funcall 'x)"),
+      &small_budget, "lisp2.fe: cyclic-function-indirection"));
+  CHK("(defalias 'p 'q)", "p");
+  CHK("(defalias 'q 'p)", "q");
+  LISP2_ERR("(funcall 'p)", "lisp2.fe: cyclic-function-indirection");
+  // Context fully reusable after the cycle errors, and the cell can be
+  // rebound to something that is merely not callable.
+  CHK("(+ 1 2)", "3");
+  CHK("(fset 'x nil)", "nil");
+  LISP2_ERR("(funcall 'x)", "lisp2.fe: tried to call non-callable value");
+  LISP2_ERR("(funcall 'q)", "lisp2.fe: cyclic-function-indirection");
+
+#undef LISP2_ERR
+#undef CHK
+
+  // The public function-namespace surface. A fresh symbol is neither bound
+  // nor resolvable; FeSetFunction writes the cell, FeIsFBound sees it, and
+  // FeGetFunction follows a symbol designator the way call position does.
+  FeObject* api_fn = FeMakeSymbol(context, "api-fn");
+  CHECK(!FeIsFBound(context, api_fn));
+  CHECK(FeIsNil(FeGetFunction(context, api_fn)));
+  const size_t gc = FeSaveGC(context);
+  FeObject* const closure =
+      FeEvaluateString(context, "api.fe", "(lambda (z) (+ z 1))",
+                       sizeof("(lambda (z) (+ z 1))") - 1);
+  FeSetFunction(context, api_fn, closure);
+  FeRestoreGC(context, gc);
+  CHECK(FeIsFBound(context, api_fn));
+  CHECK(FeGetFunction(context, api_fn) == closure);
+  FeObject* const alias = FeMakeSymbol(context, "api-alias");
+  FeSetFunction(context, alias, api_fn);
+  CHECK(FeGetFunction(context, alias) == closure);
+  CHECK(
+      IsRendered(context,
+                 FeEvaluateString(context, "api.fe", "(funcall 'api-alias 10)",
+                                  sizeof("(funcall 'api-alias 10)") - 1),
+                 "11"));
+  // The transitional fallback also serves the API: a value-cell callable is
+  // what FeGetFunction returns until 04D moves it into the function cell.
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "api.fe",
+                       "(setq api-value (lambda (x) (* x 2)))",
+                       sizeof("(setq api-value (lambda (x) (* x 2)))") - 1),
+      "(lambda (x) (* x 2))"));
+  FeObject* const api_value = FeMakeSymbol(context, "api-value");
+  FeObject* const resolved = FeGetFunction(context, api_value);
+  CHECK(!FeIsNil(resolved));
+  FeObject* const arg = FeMakeDouble(context, 21);
+  FeObject* const* const args = (FeObject* const[]){arg};
+  CHECK(IsRendered(context, FeCall(context, resolved, args, 1), "42"));
+  // And the cycle raises through the API too (re-establish x's self-link,
+  // which the earlier `(fset 'x nil)` recovery step cleared).
+  FeObject* const cycled = FeMakeSymbol(context, "x");
+  FeSetFunction(context, cycled, cycled);
+  const size_t cycle_gc = FeSaveGC(context);
+  state.called = false;
+  state.expected_message = "cyclic-function-indirection";
+  if (setjmp(state.jump) == 0) {
+    (void)FeGetFunction(context, cycled);
+    CHECK(false);
+  }
+  FeRestoreGC(context, cycle_gc);
+  CHECK(state.called);
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(+ 1 1)",
+                                    sizeof("(+ 1 1)") - 1),
+                   "2"));
+
+  FeCloseContext(context);
+  return true;
+}
+
 // Sub-plan 02B: core `setq` (a special form) and `set` (ordinary-function
 // semantics) alongside the still-working assignment `=` primitive. The
 // compat corpus (fe/compat/) proves agreement with Emacs on the same
@@ -3488,6 +3706,19 @@ static bool TestResumableFrameGC(void) {
        "  (do (setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n)"
        "  (setq relay-cleanup-ran t))",
        "2000", nullptr},
+      // funcall/apply (04C's evaluate-then-redispatch): the evaluated
+      // operand buffer, rooted in the EvalList frame's `accumulator` and
+      // carried by the relay frame across the redispatch, must survive
+      // collections forced by the *called body* -- the whole point of the
+      // 03F lesson applied to this new boundary.
+      {"funcall",
+       "(funcall (fn (x y) (setq n 0) (while (< n 2000) (setq n (+ n 1)) "
+       "(cons n n)) (list x y)) 1 2)",
+       "(1 2)", nullptr},
+      {"apply",
+       "(apply (fn (x y) (setq n 0) (while (< n 2000) (setq n (+ n 1)) "
+       "(cons n n)) (list x y)) (list 1 2))",
+       "(1 2)", nullptr},
   };
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     if (!RunFrameGCCase(&cases[i])) {
@@ -3888,18 +4119,19 @@ int main(void) {
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestSymbolCells() &&
-                 TestSetqAndSet() && TestNumericEqual() &&
-                 TestUnwindHostAPI() && TestUnwindLisp() &&
-                 TestUnwindCleanupBudget() && TestFrameLimits() &&
-                 TestFrameSubstrate() && TestArenaStats() &&
-                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
-                 TestArgumentFrame() && TestArgumentProbe() &&
-                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
-                 TestMacroFrame() && TestNativeReentry() &&
-                 TestNativeOwningReentry() && TestResumableFrameGC() &&
-                 TestCleanupRunGC() && TestPrimitiveOrder() &&
-                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
-                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting()
+                 TestFunctionCells() && TestSetqAndSet() &&
+                 TestNumericEqual() && TestUnwindHostAPI() &&
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestFrameLimits() && TestFrameSubstrate() &&
+                 TestArenaStats() && TestEvaluationStackProbe() &&
+                 TestCallHeadProbe() && TestArgumentFrame() &&
+                 TestArgumentProbe() && TestLambdaBodyFrame() &&
+                 TestLambdaBodyChain() && TestMacroFrame() &&
+                 TestNativeReentry() && TestNativeOwningReentry() &&
+                 TestResumableFrameGC() && TestCleanupRunGC() &&
+                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
+                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
+                 TestGcStackConstantInNesting()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

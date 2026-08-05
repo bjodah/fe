@@ -185,6 +185,60 @@ static FeObject* BuildMutation(FeContext* ctx,
                   (FeObject*[]){bind, mutate, FeMakeSymbol(ctx, "x")}, 3);
 }
 
+// Sub-plan 04C's `funcall`/`apply` exercised through the evaluate-then-
+// redispatch path: `FeFrameEvalList` evaluates the complete operand list, the
+// first result is resolved through the designator chain, and the call is
+// redispatched via the quoted-argument call form. The fuzz lane is what
+// vouches for the rooting of that evaluated-operand buffer across the
+// redispatch (03F's lesson) -- a collection forced by the *called body* must
+// not sweep a value the relay frame is still building the call from -- so
+// these shapes build the boundary on purpose rather than leaving the grammar
+// to reach it by accident. Half the shapes pass a direct closure, half a
+// `cons` symbol designator, which also walks the resolver's value-cell
+// fallback (the bootstrap stays value-namespace until 04D).
+static FeObject* BuildFuncallForm(FeContext* ctx,
+                                  FuzzInput* input,
+                                  unsigned depth) {
+  if (FuzzTakeByte(input) % 2 == 0) {
+    FeObject* parameter = FeMakeSymbol(ctx, "x");
+    FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+    FeObject* body = MakeBinary(ctx, "cons", parameter,
+                                BuildExpression(ctx, input, depth + 1));
+    FeObject* function =
+        MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
+    return MakeForm(
+        ctx, "funcall",
+        (FeObject*[]){function, BuildExpression(ctx, input, depth + 1)}, 2);
+  }
+  return MakeForm(ctx, "funcall",
+                  (FeObject*[]){FeMakeSymbol(ctx, "cons"),
+                                BuildExpression(ctx, input, depth + 1),
+                                BuildExpression(ctx, input, depth + 1)},
+                  3);
+}
+
+static FeObject* BuildApplyForm(FeContext* ctx,
+                                FuzzInput* input,
+                                unsigned depth) {
+  if (FuzzTakeByte(input) % 2 == 0) {
+    FeObject* parameter = FeMakeSymbol(ctx, "x");
+    FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+    FeObject* body = MakeBinary(ctx, "cons", parameter,
+                                BuildExpression(ctx, input, depth + 1));
+    FeObject* function =
+        MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
+    FeObject* spread =
+        MakeUnary(ctx, "list", BuildExpression(ctx, input, depth + 1));
+    return MakeForm(ctx, "apply", (FeObject*[]){function, spread}, 2);
+  }
+  return MakeForm(
+      ctx, "apply",
+      (FeObject*[]){
+          FeMakeSymbol(ctx, "cons"), BuildExpression(ctx, input, depth + 1),
+          MakeUnary(ctx, "list", BuildExpression(ctx, input, depth + 1))},
+      3);
+}
+
 static FeObject* BuildExpression(FeContext* ctx,
                                  FuzzInput* input,
                                  unsigned depth) {
@@ -193,7 +247,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 20) {
+  switch (FuzzTakeByte(input) % 22) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -254,6 +308,10 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildMacroCall(ctx, input, depth);
     case 18:
       return BuildMutation(ctx, input, depth);
+    case 19:
+      return BuildFuncallForm(ctx, input, depth);
+    case 20:
+      return BuildApplyForm(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

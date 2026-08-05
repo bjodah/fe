@@ -6,5 +6,5 @@
   "(fmakunbound (quote m))"
  ],
  "expr": "m",
- "note": "04A: the mirror of lisp2-makunbound-keeps-function -- `fmakunbound` leaves the value cell alone, so the bare symbol evaluates to 1. The pair records that the two unbound operations are disjoint."
+ "note": "04A: the mirror of lisp2-makunbound-keeps-function -- `fmakunbound` leaves the value cell alone, so the bare symbol evaluates to 1. The pair records that the two unbound operations are disjoint. Landed in 04C."
 }

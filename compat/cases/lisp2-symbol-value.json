@@ -4,5 +4,5 @@
   "(setq sv 5)"
  ],
  "expr": "(symbol-value (quote sv))",
- "note": "04A: `symbol-value` reads the value cell directly and returns 5. Fe has no `symbol-value` today; the value-cell read is what bare-symbol evaluation already does, but the explicit primitive is the namespace-split contract."
+ "note": "04A: `symbol-value` reads the value cell directly and returns 5. Landed in 04C; the mirror arm lisp2-symbol-value-primitive still waits on 04D's bootstrap move."
 }

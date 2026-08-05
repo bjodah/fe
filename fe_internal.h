@@ -56,6 +56,23 @@ typedef enum Primitive {
   PSub,
   PMul,
   PDiv,
+  // Sub-plan 04C of kg's Emacs-subset program (Lisp-2 namespaces, additive):
+  // the function namespace's primitives. `function` is a special form
+  // (its argument stays raw); `funcall`/`apply` are function-shaped special
+  // forms -- they evaluate their operands like an ordinary call's argument
+  // list and then dispatch, but run on the frame stack rather than re-entering
+  // evaluation (see fe_eval.c). The rest are ordinary functions. The
+  // function-cell accessors (`SymbolFunction`/`SetSymbolFunction`) are 04B's;
+  // this slice is the first to read the cell.
+  PFunction,
+  PFset,
+  PDefalias,
+  PSymbolFunction,
+  PSymbolValue,
+  PFboundp,
+  PFmakunbound,
+  PFuncall,
+  PApply,
   PSentinel
 } Primitive;
 

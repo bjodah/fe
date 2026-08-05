@@ -48,9 +48,11 @@ Symbols store a pair object in the `cdr`; the `car` of that pair is a second
 pair holding the symbol's name string and its function cell, and the `cdr`
 part of the outer pair contains the globally bound value for the symbol:
 `CDR(sym) = ((name . function) . value)` (sub-plan 04B of kg's Emacs-subset
-program). The function cell starts out holding `unbound` and is dormant:
-nothing in the evaluator reads it yet, and only the `fe_internal.h` accessors
-`SymbolFunction`/`SetSymbolFunction` reach it. Every reader of this private
+program). The function cell starts out holding `unbound`; sub-plan 04C made
+it live, not dormant: call position, `funcall`/`apply`, and `FeGetFunction`
+all read it through one shared resolver (`ResolveFunctionCallable`, below),
+and only the `fe_internal.h` accessors `SymbolFunction`/`SetSymbolFunction`
+spell the cell. Every reader of this private
 layout goes through the named accessors (`SymbolName`, `SymbolBindingCell`,
 `SymbolFunction`) rather than spelling the pair walk itself, so the later
 Phase-4 lookup slices can change resolution without touching the
@@ -97,10 +99,51 @@ A fresh symbol's value cell and function cell both hold `unbound`, a private
 static object outside the arena — like `nil`, so the collector neither sweeps
 nor has to mark it, and `FeMark` treats it as a leaf. Nothing returns it: Lisp
 cannot reach a value cell (`(cdr sym)` is a type error, and `(env)` yields
-symbols whose printed form is their name), and the two readers of a value cell
-— symbol evaluation and the head of a call — turn it into `void-variable NAME`
-and `void-function NAME`. It is tagged `FeTFree` so that an escape aborts in
+symbols whose printed form is their name), and the value cell's reader —
+symbol evaluation — turns it into `void-variable NAME`. Since sub-plan 04C,
+call position is no longer a second reader of the value cell: it resolves the
+function cell first, and the value cell is consulted only by the transitional
+fallback that keeps the value-namespace bootstrap callable until 04D. It is
+tagged `FeTFree` so that an escape aborts in
 the writer rather than impersonating a value.
+
+## Sub-plan 04C: the function namespace
+
+The namespace split is deliberately transitional. The evaluator's one shared
+function-designator resolver, `ResolveFunctionCallable`, walks a function
+cell's symbol indirection chain iteratively — charging one `EvaluationStep`
+per hop, and naming a cycle `cyclic-function-indirection` with two-pointer
+detection rather than leaving it to exhaust the step budget — and when the
+chain dies in an empty function cell falls back to the *last link's* value
+cell. That fallback is the whole point of the slice: every bootstrap
+callable still lives in a value cell, so without it call position,
+`funcall`/`apply`, and `FeGetFunction` would all lose `car`, `+`, the `fn`
+alias, and every native. 04D deletes the fallback, moves the bootstrap into
+function cells, and the resolver shrinks. The one upfront `EvaluationStep`
+in `ResolveCallHead` is the charge the pre-04C head resolution made, so an
+unbound cell costs exactly what `CDR(GetBound(head, env))` used to and the
+step pins hold.
+
+`funcall`/`apply` are implemented with the evaluate-then-redispatch shape,
+chosen over a dedicated apply frame kind: both are function-shaped special
+forms that run their complete raw argument list through the existing
+`FeFrameEvalList` machinery, then resolve the first result through the same
+designator resolver and hand the remaining *already evaluated* values to the
+ordinary call path. `MakeCallForm` rebuilds them as a `(callable (quote v)
+...)` form — the same quoted-argument construction `FeCall`'s host path
+uses — so the call is pushed as an ordinary sub-expression frame with no new
+frame kind, no new GC-per-state row, and no new arm in the exhaustive
+`FeFrameKind` switches; the cost is the few conses the wrap and reorder
+build per call, which the dedicated frame shape would have saved at the price
+of a new frame kind touched in every switch. `apply`'s spread is a separate
+helper, `SpreadApplyArgs`, which rebuilds the fixed operands plus the spread
+list's elements into a fresh argument list — never mutating the caller's —
+after validating that the final operand is a proper list. The 03F rooting
+lesson applies to both boundaries: the evaluated operand buffer is rooted in
+the EvalList frame's `accumulator` and, across the redispatch, the relay
+frame's fields, so a collection forced by the *called body* finds every value
+still live (`test_api.c`'s resumable-frame GC table drives collections across
+`funcall` and `apply` calls).
 
 ## Garbage Collection
 
@@ -275,8 +318,11 @@ grouped by evaluation *shape*, not by primitive:
   GC reset, `and`/`or`'s short-circuit, `let`'s `newenv`-or-nothing case,
   `setq`'s pair-at-a-time assignment, a plain relay of whatever a single
   pushed sub-frame delivers).
-- `FeFrameUnary` (`assert`/`not`/`atom`/`car`/`cdr`/`boundp`/`makunbound`)
-  and `FeFrameBinary` (`cons`/`setcar`/`setcdr`/`is`/`<`/`<=`) share one kind
+- `FeFrameUnary`
+  (`assert`/`not`/`atom`/`car`/`cdr`/`boundp`/`makunbound` and 04C's
+  `symbol-function`/`symbol-value`/`fboundp`/`fmakunbound`)
+  and `FeFrameBinary` (`cons`/`setcar`/`setcdr`/`is`/`<`/`<=` and 04C's
+  `fset`/`defalias`) share one kind
   per arity, dispatching the specific check or side effect by the resolved
   primitive object at each delivery -- `setcar`/`setcdr` validate their pair
   operand immediately on the first delivery, before the second is even
@@ -286,9 +332,12 @@ grouped by evaluation *shape*, not by primitive:
   arrives, exactly as the old `ARITH_OP` macro's loop did, never batching
   the whole list first; `FeFramePrint` streams too, but interleaves output
   and separators with evaluation instead of combining a running total.
-- `FeFrameEvalList` (`list`/`=`/`set`) is the one kind that *does* evaluate
+- `FeFrameEvalList` (`list`/`=`/`set`, and 04C's `funcall`/`apply`) is the
+  one kind that *does* evaluate
   its whole raw argument list first, exactly as the old `EvaluateList`-based
-  arms did, before validating or dispatching on any of it.
+  arms did, before validating or dispatching on any of it — which is what
+  makes `funcall`/`apply`'s evaluate-then-redispatch shape fit it with no new
+  frame kind (see "Sub-plan 04C" above).
 
 `PushBodyFrame` pushes a sequential-body frame directly, bypassing the call
 path, for the places a raw form list is evaluated as an implicit body with

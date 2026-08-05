@@ -2,5 +2,5 @@
  "id": "lisp2-function-lambda",
  "setup": [],
  "expr": "(funcall (function (lambda (x) (+ x 1))) 2)",
- "note": "04A: `(function (lambda ...))` under lexical binding is a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. Fe has no `function` special form and no `funcall` today."
+ "note": "04A: `(function (lambda ...))` under lexical binding is a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. Landed in 04C; the reader's `#'` abbreviation stays identity until 04D."
 }

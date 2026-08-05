@@ -4,5 +4,5 @@
   "(setq v 7)"
  ],
  "expr": "(v)",
- "note": "04A: a symbol with only a value (7) and an empty function cell is a call-position error: void-function v. Fe's one-namespace design resolves call position through the value cell, but its call-head error names the head symbol whatever the value is, so fe already emits the same 'void-function v' text -- for a structurally different reason, until Phase 4 makes the function cell the thing that is empty."
+ "note": "04A: a symbol with only a value (7) and an empty function cell is a call-position error: void-function v. 04C makes the function cell the thing that is empty -- call position resolves it first and, via the transitional value-cell fallback, names the head symbol when the fallback yields a non-callable."
 }

@@ -5,5 +5,5 @@
   "(fset (quote f) (lambda () 9))"
  ],
  "expr": "(list f (f))",
- "note": "04A: the parent plan's headline -- one symbol `f` holds a value (7) and a function (a lambda returning 9) at once, and call position resolves the function cell while bare-symbol evaluation resolves the value cell, so the list is (7 9). Fe is one-namespace today: a symbol is (name . value), so `setq` and `fset` would fight over the same cell -- and fe has no `fset` at all, so the setup fails on void-function fset before the expression runs."
+ "note": "04C: the parent plan's headline now works -- one symbol `f` holds a value (7) and a function (an fset'd lambda) at once, call position resolves the function cell while bare-symbol evaluation resolves the value cell, so the list is (7 9)."
 }

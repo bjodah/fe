@@ -271,6 +271,21 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
 [[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 [[nodiscard]] bool FeIsBound(FeContext* ctx, FeObject* sym);
+// The Lisp-2 function namespace (sub-plan 04C of kg's Emacs-subset program).
+// `FeSet`/`FeIsBound` above keep their Emacs meaning -- the value namespace;
+// these three address the function cell instead. `FeSetFunction` writes the
+// cell (the object or symbol designator is stored as-is, so a `defalias`-style
+// indirection stays a symbol). `FeIsFBound` asks whether the cell holds
+// anything. `FeGetFunction` resolves the cell the way call-position lookup
+// does -- following defalias symbol indirection iteratively, and, until
+// sub-plan 04D's cut, falling back to the value cell so bootstrap callables,
+// which still live there, stay reachable; it returns `nil` when the name is
+// unbound in both namespaces, and raises `cyclic-function-indirection` for a
+// self-referential chain. Additive under `FE_API_VERSION` 2; 04D bumps the
+// version when `FeDefineNative`'s meaning moves into the same cell.
+void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn);
+[[nodiscard]] FeObject* FeGetFunction(FeContext* ctx, FeObject* sym);
+[[nodiscard]] bool FeIsFBound(FeContext* ctx, FeObject* sym);
 void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn);
 
 [[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);

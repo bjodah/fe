@@ -430,6 +430,76 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
   FeHandleError(ctx, "tried to call non-callable value");
 }
 
+// Sub-plan 04C's shared function-designator resolver: a function cell may
+// hold another symbol (the `defalias` indirection), and every reader of the
+// chain -- call position, `funcall`/`apply`, `FeGetFunction` -- follows it
+// through here so the rule cannot drift between the sites. One step is
+// charged per symbol hop, so a chain that never ends still dies on the step
+// budget, and a cycle is named `cyclic-function-indirection` by two-pointer
+// detection rather than left to exhaust the budget (`(fset 'x 'x)` is the
+// canonical case). When the chain dies in an empty function cell the
+// *last link's* value cell is consulted instead -- the transitional
+// fallback 04D deletes, which is what keeps the bootstrap primitives and
+// `fn`-aliased closures, still living in value cells, reachable until the
+// cut. `dead` receives the last link symbol on that empty-cell path, so a
+// caller can raise `void-function NAME` at the right name. A non-symbol
+// value is already resolved and is returned unchanged.
+static FeObject* ResolveFunctionCallable(FeContext* ctx,
+                                         FeObject* fn,
+                                         FeObject* env,
+                                         FeObject** dead) {
+  FeObject* slow = fn;
+  FeObject* fast = fn;
+  *dead = &nil;
+  while (FeGetType(slow) == FeTSymbol) {
+    FeObject* const cell = SymbolFunction(slow);
+    if (cell == &unbound) {
+      // 04D deletion site: the transitional value-cell fallback. Call
+      // position and funcall/apply both need the bootstrap, which 04C leaves
+      // in value cells; 04D moves it into the function cell and deletes this
+      // branch (and `env`, which only the fallback's lexical walk uses).
+      FeObject* const fallback = CDR(GetBound(ctx, slow, env));
+      if (fallback == &unbound) {
+        *dead = slow;
+      }
+      return fallback;
+    }
+    if (FeGetType(cell) != FeTSymbol) {
+      return cell;
+    }
+    EvaluationStep(ctx);
+    slow = cell;
+    if (FeGetType(fast) == FeTSymbol) {
+      FeObject* const f1 = SymbolFunction(fast);
+      if (f1 != &unbound && FeGetType(f1) == FeTSymbol) {
+        FeObject* const f2 = SymbolFunction(f1);
+        if (f2 == slow) {
+          FeHandleError(ctx, "cyclic-function-indirection");
+        }
+        fast = f2;
+      } else {
+        fast = f1;
+      }
+    }
+  }
+  return slow;
+}
+
+// A symbol in call position (the `FeFrameExpression` symbol-head arm, and
+// only there -- variable reference still goes through `GetBound` directly).
+// The function cell is consulted first, through
+// `ResolveFunctionCallable`'s designator chain and 04D-deleted value-cell
+// fallback; the one upfront `EvaluationStep` is the charge the fallback path
+// shared with the pre-04C head resolution, so an unbound cell costs exactly
+// what `CDR(GetBound(head, env))` used to and the step pins hold.
+static FeObject* ResolveCallHead(FeContext* ctx,
+                                 FeObject* head,
+                                 FeObject* env) {
+  EvaluationStep(ctx);
+  FeObject* dead;
+  return ResolveFunctionCallable(ctx, head, env, &dead);
+}
+
 // The head of a call is resolved on the frame stack rather than through
 // `Evaluate` so that an unassigned name is `void-function`, as in Emacs Lisp,
 // even though Fe has one namespace and would otherwise say `void-variable`. A
@@ -440,6 +510,18 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
 // Forward-declared so `DispatchResolvedCall`, which every resolved-call path
 // (symbol head and computed head alike) funnels through, can reach it before
 // its own definition below `PushBodyFrame`, which it needs.
+static FeObject* MakeClosure(FeContext* ctx,
+                             FeObject* env,
+                             FeObject* arguments,
+                             FeType type) {
+  FeObject* const closure = FeCons(ctx, env, arguments);
+  (void)FeGetNextArgument(ctx, &arguments);
+  FeObject* const obj = MakeObject(ctx);
+  SetType(obj, type);
+  CDR(obj) = closure;
+  return obj;
+}
+
 static bool DispatchPrimitive(FeContext* ctx,
                               FeEvalFrame* frame,
                               FeObject* fn,
@@ -633,13 +715,29 @@ static bool DispatchPrimitive(FeContext* ctx,
     // the recursive arm's identical discard was.
     case PFn:
     case PMacro: {
-      FeObject* const closure = FeCons(ctx, frame->env, arguments);
-      (void)FeGetNextArgument(ctx, &arguments);
-      FeObject* const obj = MakeObject(ctx);
-      SetType(obj, PRIM(fn) == PFn ? FeTFn : FeTMacro);
-      CDR(obj) = closure;
-      *result = obj;
+      *result = MakeClosure(ctx, frame->env, arguments,
+                            PRIM(fn) == PFn ? FeTFn : FeTMacro);
       return true;
+    }
+    // `function` (sub-plan 04C): a raw-form special form like `quote`, but
+    // restricted -- `(function SYM)` is the symbol designator itself, and
+    // `(function (lambda ...))`/`(function (fn ...))` is the closure, built
+    // by the same helper `lambda`/`fn` themselves use (same validation,
+    // object layout, and environment capture). Any other form is an error, per
+    // the `unsupported-function-form` spelling pinned in 04A.
+    case PFunction: {
+      FeObject* const form = FeGetNextArgument(ctx, &arguments);
+      FeRequireNoArguments(ctx, arguments);
+      if (FeGetType(form) == FeTSymbol) {
+        *result = form;
+        return true;
+      }
+      if (FeGetType(form) == FeTPair && (IsNamedSymbol(CAR(form), "lambda") ||
+                                         IsNamedSymbol(CAR(form), "fn"))) {
+        *result = MakeClosure(ctx, frame->env, CDR(form), FeTFn);
+        return true;
+      }
+      FeHandleError(ctx, "unsupported-function-form");
     }
     // `let`: the raw target check always runs; the value form is evaluated
     // -- and only then bound into `*frame_bind` -- only when this form is
@@ -752,6 +850,28 @@ static bool DispatchPrimitive(FeContext* ctx,
       frame->accumulator = &nil;
       frame->callee = &unbound;
       return false;
+    // `funcall`/`apply` (sub-plan 04C) are function-shaped special forms:
+    // they evaluate every operand with the shared EvalList machinery an
+    // ordinary call's argument list uses, then dispatch the first result
+    // through the designator resolver -- the redispatch shape, chosen over a
+    // dedicated apply frame kind because it adds no frame-kind and no new
+    // GC-per-state row while costing only the few conses `MakeCallForm`
+    // builds (see `ResumeEvalList`'s `PFuncall`/`PApply` arm and
+    // doc/implementation.md's note).
+    case PFuncall:
+    case PApply:
+      // Zero raw operands has no callable to dispatch, so it is an arity
+      // error before anything evaluates (`(funcall)`/`(apply)`), matching
+      // Emacs' wrong-number-of-arguments for both.
+      if (FeIsNil(arguments)) {
+        FeHandleError(ctx, "wrong-number-of-arguments");
+      }
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
     case PAssert:
     case PBoundp:
     case PMakeUnbound:
@@ -759,6 +879,10 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PAtom:
     case PCar:
     case PCdr:
+    case PSymbolFunction:
+    case PSymbolValue:
+    case PFboundp:
+    case PFmakunbound:
       frame->kind = FeFrameUnary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -770,6 +894,8 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PIs:
     case PLess:
     case PLessEqual:
+    case PFset:
+    case PDefalias:
       frame->kind = FeFrameBinary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1162,6 +1288,49 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
           FeMakeBool(ctx, CDR(GetBound(ctx, sym, frame->env)) != &unbound);
       break;
     }
+    // Sub-plan 04C's function-namespace readers, arity-exact like `boundp`/
+    // `makunbound` above. `symbol-function` returns the raw cell -- the
+    // designator chain is *not* followed here, exactly as Emacs returns the
+    // aliased symbol from `(symbol-function 'a)` -- and an empty cell is the
+    // `void-function NAME` error. `symbol-value` reads the *global* value
+    // cell (the value namespace's own reader), an empty one `void-variable
+    // NAME`. `fboundp`/`fmakunbound` address only the function cell, so the
+    // `makunbound`-keeps-function/fmakunbound-keeps-value independence the
+    // 04A cases pin is structural: the two unary families never touch each
+    // other's cell.
+    case PSymbolFunction: {
+      FeObject* const sym = CheckType(ctx, value, FeTSymbol);
+      FeRequireNoArguments(ctx, frame->rest);
+      FeObject* const cell = SymbolFunction(sym);
+      if (cell == &unbound) {
+        HandleVoidSymbol(ctx, sym, "void-function");
+      }
+      *result = cell;
+      break;
+    }
+    case PSymbolValue: {
+      FeObject* const sym = CheckType(ctx, value, FeTSymbol);
+      FeRequireNoArguments(ctx, frame->rest);
+      FeObject* const cell = CDR(GetBound(ctx, sym, &nil));
+      if (cell == &unbound) {
+        HandleVoidSymbol(ctx, sym, "void-variable");
+      }
+      *result = cell;
+      break;
+    }
+    case PFboundp: {
+      FeObject* const sym = CheckType(ctx, value, FeTSymbol);
+      FeRequireNoArguments(ctx, frame->rest);
+      *result = FeMakeBool(ctx, SymbolFunction(sym) != &unbound);
+      break;
+    }
+    case PFmakunbound: {
+      FeObject* const sym = CheckType(ctx, value, FeTSymbol);
+      FeRequireNoArguments(ctx, frame->rest);
+      SetSymbolFunction(sym, &unbound);
+      *result = sym;
+      break;
+    }
     default: {  // PMakeUnbound
       FeObject* const sym = CheckType(ctx, value, FeTSymbol);
       FeRequireNoArguments(ctx, frame->rest);
@@ -1199,6 +1368,13 @@ static bool ResumeBinary(FeContext* ctx,
       case PLess:
       case PLessEqual:
         first = CheckType(ctx, first, FeTDouble);
+        break;
+      // `fset`/`defalias` (04C): the target is a symbol, checked before the
+      // function form is evaluated, matching the other binary primitives'
+      // validate-first ordering.
+      case PFset:
+      case PDefalias:
+        first = CheckType(ctx, first, FeTSymbol);
         break;
       default:
         break;
@@ -1238,6 +1414,18 @@ static bool ResumeBinary(FeContext* ctx,
       break;
     case PIs:
       *result = FeMakeBool(ctx, Equal(first, second));
+      break;
+    // `fset`/`defalias` (04C): both write the function cell; `fset` returns
+    // the function object, `defalias` the aliased symbol (the 04A snapshot's
+    // answer). `defalias` stores `second` as-is, so a symbol designator stays
+    // a symbol and is resolved at call time -- the late-binding case.
+    case PFset:
+      SetSymbolFunction(first, second);
+      *result = second;
+      break;
+    case PDefalias:
+      SetSymbolFunction(first, second);
+      *result = first;
       break;
     default: {  // PLess, PLessEqual
       const FeObject* const checked_second = CheckType(ctx, second, FeTDouble);
@@ -1316,7 +1504,75 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   return true;
 }
 
-// `list`, `=`, `set`: evaluates the complete raw argument list first --
+// Builds `(callable (quote v) ...)` from a list of already-evaluated values
+// -- the same quoted-argument construction `FeCall`'s host path uses -- so a
+// resume arm can hand evaluated operands to the ordinary call machinery by
+// pushing the result as a sub-expression frame, without re-entering
+// evaluation. That is 04C's evaluate-then-redispatch shape for
+// `funcall`/`apply` (see `ResumeEvalList`): it reuses every existing frame
+// kind and adds no new invariants, at the price of the few conses this
+// builds per call. The caller keeps `args` rooted in a frame field across
+// this construction (the 03F lesson: these conses can trigger a collection,
+// and the values being wrapped are live only through that field).
+static FeObject* MakeCallForm(FeContext* ctx,
+                              FeObject* callable,
+                              FeObject* args) {
+  FeObject* const quote = FeMakeSymbol(ctx, "quote");
+  FeObject* forms = &nil;
+  while (!FeIsNil(args)) {
+    FeObject* const wrapped = FeCons(ctx, CAR(args), &nil);
+    FeObject* const quoted = FeCons(ctx, quote, wrapped);
+    forms = FeCons(ctx, quoted, forms);
+    args = CDR(args);
+  }
+  // `forms` was built by prepending, so it holds the quote-wrapped arguments
+  // reversed; reorder it into argument order (`FeCall`'s host construction
+  // cancels the reversal by iterating its array backward -- a singly-linked
+  // list cannot do that, so the reorder here is the equivalent).
+  FeObject* ordered = &nil;
+  while (!FeIsNil(forms)) {
+    FeObject* const next = CDR(forms);
+    CDR(forms) = ordered;
+    ordered = forms;
+    forms = next;
+  }
+  return FeCons(ctx, callable, ordered);
+}
+
+// `apply`'s spread: rebuilds the fixed operands after the callable plus the
+// spread list's elements into a fresh argument list -- never mutating the
+// caller's list -- and reorders the reversed build into argument order.
+// `last` is the final operand's pair and `spread` its value, both already
+// validated proper by the caller. The frame's `accumulator` is the
+// mark-phase root the buffer is built in (and returned through), so every
+// `FeCons` below -- each of which may trigger a collection -- finds the
+// partially built list still rooted, the 03F rule.
+static FeObject* SpreadApplyArgs(FeContext* ctx,
+                                 FeEvalFrame* frame,
+                                 FeObject* list,
+                                 FeObject* last,
+                                 FeObject* spread) {
+  frame->accumulator = &nil;
+  for (FeObject* p = CDR(list); p != last; p = CDR(p)) {
+    frame->accumulator = FeCons(ctx, CAR(p), frame->accumulator);
+  }
+  for (FeObject* p = spread; !FeIsNil(p); p = CDR(p)) {
+    frame->accumulator = FeCons(ctx, CAR(p), frame->accumulator);
+  }
+  FeObject* ordered = &nil;
+  FeObject* acc = frame->accumulator;
+  while (!FeIsNil(acc)) {
+    FeObject* const next = CDR(acc);
+    CDR(acc) = ordered;
+    ordered = acc;
+    acc = next;
+  }
+  frame->accumulator = ordered;
+  return ordered;
+}
+
+// `list`, `=`, `set`, `funcall`, `apply`: evaluates the complete raw
+// argument list first --
 // unlike every other primitive continuation above, whose ordering is what
 // makes them not this -- accumulating and reordering exactly as
 // `FeFrameCallArguments`'s own argument list does, then finishes per
@@ -1326,8 +1582,10 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // it returns (one argument is `t` without comparing anything); `set`
 // (arity already validated by `DispatchPrimitive` before this frame was
 // even created) checks the first element is a symbol and assigns through
-// `FeSet`. Plain C `==` gives the pinned signed-zero and NaN answers for
-// `=`; -Wfloat-equal is suppressed for this intentional exact comparison.
+// `FeSet`. `funcall`/`apply` (04C) resolve the first result through the
+// designator chain and redispatch the remaining evaluated values. Plain C
+// `==` gives the pinned signed-zero and NaN answers for `=`; -Wfloat-equal
+// is suppressed for this intentional exact comparison.
 static bool ResumeEvalList(FeContext* ctx,
                            FeEvalFrame* frame,
                            FeObject** result) {
@@ -1361,6 +1619,69 @@ static bool ResumeEvalList(FeContext* ctx,
       FeSet(ctx, symbol, value);
       *result = value;
       break;
+    }
+    case PFuncall:
+    case PApply: {
+      // Root the operand list -- and the callable it starts with -- across
+      // the resolution below (the 03F lesson: an evaluated operand buffer is
+      // live across every later allocation, and `ResolveFunctionCallable`
+      // follows symbol cells while only this frame field keeps the values
+      // alive).
+      frame->accumulator = list;
+      FeObject* dead = &nil;
+      FeObject* const callable =
+          ResolveFunctionCallable(ctx, CAR(list), &nil, &dead);
+      if (callable == &unbound) {
+        HandleVoidSymbol(ctx, dead, "void-function");
+      }
+      FeObject* args = CDR(list);
+      FeObject* last = &nil;
+      FeObject* spread = &nil;
+      if (PRIM(frame->fn) == PApply) {
+        // Walk to the last pair *after* the callable: the operand list an
+        // EvalList frame builds is always proper, so this finds the final
+        // operand's pair (or nil for a callable-only `(apply 'f)`).
+        last = args;
+        while (FeGetType(last) == FeTPair && FeGetType(CDR(last)) == FeTPair) {
+          last = CDR(last);
+        }
+        if (FeGetType(last) != FeTPair) {
+          FeHandleError(ctx, "apply: last argument must be a proper list");
+        }
+        // The spread value itself must be a proper list -- the operand list
+        // being proper does not stop the final operand from being a dotted
+        // pair (`(apply '+ 1 '(2 . 3))`).
+        spread = CAR(last);
+        FeObject* walk = spread;
+        while (FeGetType(walk) == FeTPair) {
+          walk = CDR(walk);
+        }
+        if (walk != &nil) {
+          FeHandleError(ctx, "apply: last argument must be a proper list");
+        }
+      }
+      // `list` roots the callable when it is a direct operand value and the
+      // operand buffer while it is rebuilt; keep it on the GC stack across
+      // every allocation below. `MakeCallForm`'s conses and the rebuild's
+      // conses can trigger a collection, and once `frame->accumulator`
+      // becomes the (rebuilt) argument list, the callable -- which is not an
+      // element of it -- has no other root until the call form is pushed.
+      const size_t gc = FeSaveGC(ctx);
+      FePushGC(ctx, list);
+      if (PRIM(frame->fn) == PApply) {
+        args = SpreadApplyArgs(ctx, frame, list, last, spread);
+      } else {
+        args = CDR(list);
+      }
+      // Root the (possibly rebuilt) argument list, then hand the evaluated
+      // values to the ordinary call path: this frame becomes a relay for the
+      // call form pushed above it.
+      frame->accumulator = args;
+      frame->kind = FeFrameRelay;
+      PushEvaluationFrame(ctx, MakeCallForm(ctx, callable, args), frame->env,
+                          NULL);
+      FeRestoreGC(ctx, gc);
+      return false;
     }
     default: {  // PNumericEqual
       FeDouble first = GetDouble(CheckNumericEqualOperand(ctx, CAR(list)));
@@ -1582,8 +1903,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
             PushEvaluationFrame(ctx, head, frame_env, NULL);
             continue;
           }
-          EvaluationStep(ctx);
-          FeObject* fn = CDR(GetBound(ctx, head, frame_env));
+          FeObject* fn = ResolveCallHead(ctx, head, frame_env);
           if (fn == &unbound) {
             HandleNonCallable(ctx, head);
           }
@@ -1827,6 +2147,18 @@ static FeObject* Evaluate(FeContext* ctx,
 
 FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {
   return Evaluate(ctx, obj, &nil, NULL);
+}
+
+FeObject* FeGetFunction(FeContext* ctx, FeObject* sym) {
+  // The host's way to resolve a callable name the way call position does
+  // (04C): the function cell first, defalias indirection followed, and --
+  // until 04D's cut -- the value cell as the fallback that keeps bootstrap
+  // callables reachable. Unbound in both namespaces is `nil`; a cycle raises
+  // `cyclic-function-indirection`. Outside an active evaluation the per-hop
+  // `EvaluationStep` charges are no-ops.
+  FeObject* dead;
+  FeObject* const fn = ResolveFunctionCallable(ctx, sym, &nil, &dead);
+  return fn == &unbound ? FeNil(ctx) : fn;
 }
 
 FeObject* FeCall(FeContext* ctx,

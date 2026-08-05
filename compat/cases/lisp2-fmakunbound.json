@@ -5,5 +5,5 @@
   "(fmakunbound (quote j))"
  ],
  "expr": "(j)",
- "note": "04A: `fmakunbound` empties only the function cell, so the subsequent call signals void-function j. Fe has no `fmakunbound` (nor `fset`) today."
+ "note": "04A: `fmakunbound` empties only the function cell, so the subsequent call signals void-function j. Landed in 04C."
 }

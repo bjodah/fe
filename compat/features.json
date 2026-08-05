@@ -619,230 +619,230 @@
    "rationale": "Sub-plan 02C repurposes `=` as numeric equality over Fe's existing doubles (fe.c's EvaluateNumericEqual, reached from EvaluatePrimitive's PNumericEqual arm, formerly the assignment primitive PAssign/primitive-assign-eq, now deleted): a left-to-right chained comparison, at least one argument required, every argument form evaluated left to right before any value is type-checked, and every operand validated and compared without short-circuiting once the result is already known. Phase 5 later extends this to integers/mixed types without redefining it, so these cases are written to leave room for that.",
    "source_name": "="
   },
-  {
-   "id": "lisp2-value-function-coexist",
-   "category": "bindings",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-value-function-coexist"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 ('Replace Fe's Lisp-1 name resolution with Lisp-2 value and function namespaces'), the parent plan's headline: one symbol holds a value and a function simultaneously, call position resolves the function cell, bare-symbol evaluation the value cell. Impossible in fe's one-namespace layout (a symbol is (name . value)), which is exactly what Phase 4 changes.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-let-no-function-shadow",
-   "category": "bindings",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-let-no-function-shadow"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 semantics, value namespace only: `let` binds names in the value namespace and must not shadow a function of the same spelling, so `(car (list 1 2))` still resolves the primitive. Fe's `let` primitive takes a bare symbol, so the Emacs-shaped bindings list is a separate, already-divergent shape (primitive-let); the function-cell side of the split is what this case pins.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-funcall-lexical-value",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-funcall-lexical-value"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `funcall` (04C): it takes a *value*, here a lexical closure, so the function cell of the name is irrelevant. One of the ~9 primitives (function, fset, symbol-function, symbol-value, fboundp, fmakunbound, defalias, funcall, apply) the plan prices into the fe complexity row.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-funcall-designator",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-funcall-designator"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 designator rule: a symbol passed where a function value is expected is resolved through its function cell, the same indirection call-position lookup follows. Function-cell contents may be a symbol (a designator); call-position lookup follows the chain iteratively, charged against the step budget, so a cycle dies on the budget with cyclic-function-indirection.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-apply-spread",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-apply-spread"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `apply` (04C): spreads its final list argument into the call. Priced in the plan as evaluator work (like funcall), roughly double ResumeEvalList's weight, not a leaf primitive.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-fboundp-primitive",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-fboundp-primitive"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `fboundp` (04C): asks the function namespace. Fe's existing `boundp` (primitive-boundp) sees one namespace and answers t for every primitive name; the split gives fboundp a distinct answer and flips (boundp 'car) to nil at 04D, exactly what the pinned one-namespace-boundp snapshot waits for.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-functionp-symbol",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-functionp-symbol",
-    "lisp2-functionp-symbol-missing"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 designator rule for `functionp`: a symbol whose function cell holds a function is t, an unbound name is nil, never an error. kg's native `functionp` must learn designators (04E), and its shape-to-type-of inference (test/test_lisp.c) is one of the kg gates the plan calls out to move with the prelude spelling.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-void-function-value-only",
-   "category": "errors-and-non-local-exits",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-void-function-value-only"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 call-position semantics: a symbol with a value but an empty function cell is void-function. Per the parent plan's message-level rule, void-function is a name carried in FeHandleError()'s message, not a signalable condition object, until Phase 6 -- no case may assert a catchable condition.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-symbol-function-roundtrip",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-symbol-function-roundtrip"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitives `symbol-function` and `funcall` (04C): the roundtrip shape exists because batch Emacs prints an interpreted closure as a closure/bytecode object fe cannot reproduce -- cases compare behaviour through funcall rather than printing, per the plan's printed-closures data question.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-symbol-value",
-   "category": "bindings",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-symbol-value",
-    "lisp2-symbol-value-primitive"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `symbol-value` (04C): reads the value cell directly; an empty value cell (car, a primitive function) is void-variable. The explicit primitive is the namespace-split contract: FeSet/FeIsBound keep their Emacs meaning (the value namespace) in the plan's API table.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-fmakunbound",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-fmakunbound"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `fmakunbound` (04C): empties only the function cell, so the name becomes void-function. The pair with the two keeps-* cases pins that the unbound operations act on disjoint cells.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-makunbound-keeps-function",
-   "category": "bindings",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-makunbound-keeps-function"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 cell separation: existing `makunbound` (primitive-makunbound) acts on the value cell only, leaving the function cell intact -- one half of the disjointness the split must preserve. Fe's current single cell cannot demonstrate this at all.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-fmakunbound-keeps-value",
-   "category": "bindings",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-fmakunbound-keeps-value"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 cell separation, mirror arm: `fmakunbound` leaves the value cell alone. Together with lisp2-makunbound-keeps-function it records that unbounding one namespace never touches the other.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-defalias-symbol",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-defalias-symbol",
-    "lisp2-defalias-return-value"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `defalias` (04C): points one symbol's function cell at another, and call-position resolution follows the designator chain. The second case records defalias's own return value so the whole contract is data, not just the call-site behaviour.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-defalias-late-binding",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-defalias-late-binding"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 designator rule, timing: function-cell symbol indirection is resolved at call time, not at defalias time. FeGetFunction (the plan's new host API, 04C) must follow that same chain, the way call-position lookup does.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-function-lambda",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-function-lambda"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 special form `function` (04C): under lexical binding (function (lambda ...)) is a real closure value, not a designator, and funcall calls it directly. The plan's `#'`-printing data question is answered by reader-sharp-quote-identity, already pinned: Emacs prints (function X) as #'X, and 04D owes the writer that abbreviation to make the flip honest.",
-   "source_name": null
-  },
-  {
-   "id": "lisp2-fset-both-args-evaluated",
-   "category": "functions-and-macros",
-   "status": "planned",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "lisp2-fset-both-args-evaluated"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 4 primitive `fset` (04C): evaluates both arguments -- the first is a value naming the target symbol, not a quote. This is also the primitive the prelude's 53 setq forms rewrite to in 04E.",
-   "source_name": null
-  },
+   {
+    "id": "lisp2-value-function-coexist",
+    "category": "bindings",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-value-function-coexist"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C, the phase's headline: a symbol holds a value (7) and a function (an fset'd lambda) at once, call position resolves the function cell, bare-symbol evaluation the value cell, and (list f (f)) is (7 9). The bootstrap still lives in value cells, reachable through the transitional call-position fallback 04D deletes.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-let-no-function-shadow",
+    "category": "bindings",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-let-no-function-shadow"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 4 semantics, value namespace only: `let` binds names in the value namespace and must not shadow a function of the same spelling, so `(car (list 1 2))` still resolves the primitive. Fe's `let` primitive takes a bare symbol, so the Emacs-shaped bindings list is a separate, already-divergent shape (primitive-let); the function-cell side of the split is what this case pins. Not flippable with 04C: fe cannot even read the Emacs-shaped bindings list until the prelude's Emacs-shaped `let` exists (04E).",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-funcall-lexical-value",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-funcall-lexical-value"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 4 primitive `funcall` (04C): it takes a *value*, here a lexical closure, so the function cell of the name is irrelevant. The funcall machinery itself is complete, but the case's Emacs-shaped `let` bindings list needs the Emacs-shaped `let` (04E), so the comparison cannot run yet.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-funcall-designator",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-funcall-designator"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: a symbol passed to `funcall` is a designator resolved through its function cell, following the same indirection call-position lookup uses, so `(funcall 'g)` calls the fset'd lambda and returns 9. A self-referential chain dies with cyclic-function-indirection rather than exhausting the step budget.",
+    "source_name": "funcall"
+   },
+   {
+    "id": "lisp2-apply-spread",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-apply-spread"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: `apply` spreads its final list argument into the call, so `+` is called with 1 2 3 4 and returns 10. Implemented as an evaluate-then-redispatch on the frame stack (the plan's chosen shape, see doc/implementation.md); a non-list final operand is `apply: last argument must be a proper list`.",
+    "source_name": "apply"
+   },
+   {
+    "id": "lisp2-fboundp-primitive",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-fboundp-primitive"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 4 primitive `fboundp` (04C) asks the function namespace; it exists and answers nil for a fresh name. The primitive `car` still lives in a *value* cell until 04D moves the bootstrap into function cells, so `(fboundp 'car)` is nil here and t after the cut -- the flip is 04D's evidence.",
+    "source_name": "fboundp"
+   },
+   {
+    "id": "lisp2-functionp-symbol",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-functionp-symbol",
+     "lisp2-functionp-symbol-missing"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 4 designator rule for `functionp`: a symbol whose function cell holds a function is t, an unbound name is nil, never an error. Fe has no `functionp` at all -- it is a kg native that must learn designators when the split lands (04E) -- so the comparison still fails on void-function functionp.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-void-function-value-only",
+    "category": "errors-and-non-local-exits",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-void-function-value-only"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C call-position semantics: a symbol with a value but an empty function cell is void-function -- call position resolves the function cell first and, when the transitional value-cell fallback yields a non-callable, names the head symbol. Reported as FeHandleError()'s message text (the parent plan's message-level rule until Phase 6), which is how the runner matches the oracle's structured void-function condition.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-symbol-function-roundtrip",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-symbol-function-roundtrip"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: `symbol-function` returns the function cell's object -- a designator stays a symbol -- and `funcall` calls it, so the roundtrip returns 5. The printed-closure question is avoided by comparing behaviour, per 04A's data decision.",
+    "source_name": "symbol-function"
+   },
+   {
+    "id": "lisp2-symbol-value",
+    "category": "bindings",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-symbol-value",
+     "lisp2-symbol-value-primitive"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 4 primitive `symbol-value` (04C) reads the value cell directly; the explicit read of a setq'd name works and agrees, but the case's mirror arm `lisp2-symbol-value-primitive` needs the primitive `car`'s value cell to be empty -- which only happens when 04D moves the bootstrap out of value cells.",
+    "source_name": "symbol-value"
+   },
+   {
+    "id": "lisp2-fmakunbound",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-fmakunbound"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: `fmakunbound` empties only the function cell, so the subsequent call is void-function j. The pair with the two keeps-* cases pins that the unbound operations act on disjoint cells.",
+    "source_name": "fmakunbound"
+   },
+   {
+    "id": "lisp2-makunbound-keeps-function",
+    "category": "bindings",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-makunbound-keeps-function"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C cell separation: `makunbound` acts on the value cell only, leaving the function cell intact, so `(m)` still returns 2. One half of the disjointness the split must preserve.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-fmakunbound-keeps-value",
+    "category": "bindings",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-fmakunbound-keeps-value"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C cell separation, mirror arm: `fmakunbound` leaves the value cell alone, so the bare symbol still evaluates to 1. Together with lisp2-makunbound-keeps-function it records that unbounding one namespace never touches the other.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-defalias-symbol",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-defalias-symbol",
+     "lisp2-defalias-return-value"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: `defalias` points one symbol's function cell at another symbol, and call-position resolution follows the designator chain, so `(first (list 1 2))` behaves like `car` and returns 1; `defalias` returns the aliased symbol (first), per the 04A snapshot.",
+    "source_name": "defalias"
+   },
+   {
+    "id": "lisp2-defalias-late-binding",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-defalias-late-binding"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C designator rule, timing: function-cell symbol indirection is resolved at call time, not at defalias time -- `a` is aliased to `b` before `b` gets a function, and calling `(a)` afterwards still returns 1. FeGetFunction (the host API, 04C) follows that same chain.",
+    "source_name": null
+   },
+   {
+    "id": "lisp2-function-lambda",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-function-lambda"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: `(function (lambda ...))` is a raw-form special form producing a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. The reader's `#'` abbreviation stays identity until 04D (reader-sharp-quote-identity).",
+    "source_name": "function"
+   },
+   {
+    "id": "lisp2-fset-both-args-evaluated",
+    "category": "functions-and-macros",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lisp2-fset-both-args-evaluated"
+    ],
+    "kg_test": null,
+    "rationale": "Sub-plan 04C: `fset` evaluates both arguments -- the first is a value naming the target symbol, not a quote -- so the symbol named by `s` (k) receives the function and `(k)` returns 4. This is the primitive the prelude's 53 setq forms rewrite to in 04E.",
+    "source_name": "fset"
+   },
   {
    "id": "lisp2-macro-representation",
    "category": "functions-and-macros",

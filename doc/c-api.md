@@ -23,6 +23,16 @@ static_assert(FE_API_VERSION == 2);
 static_assert(FE_LANGUAGE_VERSION == 2);
 ```
 
+Sub-plan 04C of kg's Emacs-subset program (the Lisp-2 function namespace,
+added additively) changed neither macro: `FeSetFunction`, `FeGetFunction`
+and `FeIsFBound` joined the public surface, and the nine primitives
+`function`, `fset`, `defalias`, `symbol-function`, `symbol-value`, `fboundp`,
+`fmakunbound`, `funcall` and `apply` joined the language, but every existing
+API and language construct kept its meaning -- call position still reaches
+the bootstrap through a transitional value-cell fallback. 04D is the breaking
+slice: it moves the bootstrap into function cells, deletes the fallback, and
+bumps `FE_API_VERSION` 2 -> 3 and `FE_LANGUAGE_VERSION` 2 -> 3 together.
+
 `FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
 kg's Emacs-subset program: the frame machine's Lisp-nesting and native
 re-entry bounds are now two separate `FeEvalOptions` fields
@@ -179,6 +189,24 @@ raises `void-variable NAME`, and in head position `void-function NAME`.
 bound value. The Lisp-level spellings are `(boundp 'name)` and
 `(makunbound 'name)`, which also see lexical bindings; `FeIsBound()` has no
 environment to consult and answers about the global one.
+
+### The function namespace (sub-plan 04C)
+
+`FeSetFunction()` writes `sym`'s *function* cell, storing the object or symbol
+designator as-is, so a `defalias`-style indirection stays a symbol;
+`FeIsFBound()` reports whether that cell holds anything. They are the
+function-cell twins of `FeSet()`/`FeIsBound()`, which keep their Emacs
+meaning and address the value cell. `FeGetFunction()` resolves a name the way
+call position does: the function cell first, symbol indirection followed
+iteratively (one step charged per hop), and -- until sub-plan 04D's namespace
+cut -- the value cell as a fallback so the bootstrap's callables, still
+living in value cells, stay reachable. It returns `nil` when the name is
+unbound in both namespaces and raises `cyclic-function-indirection` for a
+self-referential chain (`(fset 'x 'x)`). Outside an active evaluation the
+per-hop step charges are no-ops. The Lisp-level spellings are `(fboundp
+'name)`, `(fset 'name ...)`, `(symbol-function 'name)` and `funcall`/`apply`.
+All three functions are additive under `FE_API_VERSION` 2; 04D bumps the
+version when `FeDefineNative`'s meaning moves into the same cell.
 
 ## Reading And Running Source
 
@@ -604,6 +632,12 @@ than assembling a binding manually, and `FeStringByteLength()` plus
 balancing all temporary GC protection. Native callbacks take a context and a
 list of already-evaluated arguments and return an `FeObject*`. The result must
 never be `nullptr`; use `FeNil(ctx)` to return nil.
+
+Until sub-plan 04D's namespace cut, the native binding lands in the symbol's
+*value* cell -- the bootstrap is still value-namespace, so call position
+reaches it through the transitional fallback. 04D moves `FeDefineNative`'s
+meaning into the function cell (a version bump), observable via
+`(symbol-function 'name)`.
 
 Consume required arguments with `FeGetNextArgument()`, which raises `too few
 arguments` for a missing value. After consuming the supported arguments, call

@@ -249,8 +249,10 @@ error: void-variable wow  ;; There is no binding for the name wow.
 fe > (quote wow)
 wow
 fe > (hello world)
-error: void-function hello  ;; Fe has one namespace, but a name in head
-                            ;; position is reported as a missing function.
+error: void-function hello  ;; A name in head position is resolved through
+                            ;; its function cell -- or, until the namespace
+                            ;; cut, its value cell -- and reported as a
+                            ;; missing function.
 fe > (quote (hello world))
 (hello world)
 ```
@@ -281,14 +283,42 @@ and `unquote-splicing`, which the core does not define.
 
 `` ` `` and `,` are symbol delimiters, so no symbol may contain them. `#` is
 not: it is an ordinary symbol character, and only the two-character sequence
-`#'` is a reader macro. Fe has one namespace, so Emacs Lisp's function quote
-`#'x` reads as plain `x`.
+`#'` is a reader macro. Emacs Lisp's function quote `#'x` still reads as plain
+`x` here -- the reader-level rewrite that makes it read as `(function x)` is
+sub-plan 04D's; until then `#'x`, bare `x`, and `(function x)` all name the
+same symbol designator, so the identity reading is behaviourally harmless for
+the symbols a Lisp-2 program actually calls.
+
+#### The two namespaces
+
+Since sub-plan 04C, Fe has Emacs Lisp's namespace split: a symbol carries two
+cells, a *value cell* and a *function cell*. Bare-symbol evaluation reads the
+value cell, and `setq`, `let`, `makunbound` and `symbol-value` address it.
+Call position resolves the function cell, and `fset`, `defalias`,
+`fmakunbound` and `symbol-function` address it. A name can therefore hold a
+value and a function at once:
+
+```clojure
+fe > (setq f 7)
+7
+fe > (fset 'f (lambda () 9))
+(lambda nil 9)
+fe > (list f (f))
+(7 9)
+```
+
+Until the namespace cut (sub-plan 04D), a symbol whose function cell is empty
+falls back to its value cell in call position, which is how the bootstrap's
+callables, still living in value cells, stay reachable; 04D deletes that
+fallback, moves the bootstrap into function cells, and makes an empty
+function cell `void-function NAME` even when the value cell is full.
 
 #### `(boundp symbol)`
 
 Evaluates `symbol` and returns `t` if it has a binding in the current
 environment or the global one, otherwise `nil`. A variable whose value is `nil`
-is bound.
+is bound. `boundp` asks the *value* namespace; `(fboundp symbol)` below is
+its function-cell twin.
 
 ```clojure
 fe > (boundp 'typo)
@@ -302,7 +332,135 @@ t
 #### `(makunbound symbol)`
 
 Evaluates `symbol`, removes the value from its innermost binding, and returns
-the symbol. Naming it afterwards is `void-variable` again.
+the symbol. Naming it afterwards is `void-variable` again. `makunbound` acts
+on the value cell only; the function cell survives, so an `fset`'d name stays
+callable (`(fmakunbound symbol)` below is the mirror operation on the other
+cell).
+
+#### `(function form)`
+
+A raw-form special form like `quote`, restricted to what Emacs Lisp's `#'`
+abbreviation means. `(function SYMBOL)` is the symbol designator itself;
+`(function (lambda ...))` and `(function (fn ...))` are the closure, built by
+the same construction arm `lambda`/`fn` use and so capturing the lexical
+environment; anything else is `unsupported-function-form`.
+
+```clojure
+fe > (function c2)
+c2
+fe > (funcall (function (lambda (x) (+ x 1))) 2)
+3
+fe > (funcall ((lambda (z) (function (lambda () z))) 7))
+7
+```
+
+#### `(funcall function args...)`
+
+A function-shaped special form: every operand is evaluated like an ordinary
+call's argument list, the first result is resolved through the
+function-designator chain (a symbol is followed through its function cell),
+and the call is dispatched with the remaining values. The callable may be a
+closure value, a native, or a symbol designator. A resolved value that is not
+callable is `tried to call non-callable value`, and `(funcall)` with no
+operands is `wrong-number-of-arguments`.
+
+```clojure
+fe > (funcall (lambda (x) (+ x 1)) 2)
+3
+fe > (setq g 7)
+7
+fe > (fset 'g (lambda () 9))
+(lambda nil 9)
+fe > (funcall 'g)
+9
+```
+
+#### `(apply function args... list)`
+
+Like `funcall`, but the final operand must be a list whose elements are
+spread into the call as extra arguments:
+
+```clojure
+fe > (apply '+ 1 2 (list 3 4))
+10
+fe > (setq lst '(9 8))
+(9 8)
+fe > (apply 'cons lst '(7 6))
+((9 8) . 7)
+fe > lst
+(9 8)
+```
+
+The spread does not mutate the caller's list -- `lst` still holds `(9 8)`
+after `apply` rebuilt it -- and a final operand that is not a proper list is
+`apply: last argument must be a proper list`, raised only after every operand
+form has run. `(apply)` with no operands is `wrong-number-of-arguments`.
+
+#### `(fset symbol function)`
+
+Both arguments are evaluated -- the first is a *value* naming the target
+symbol, not a quote -- and `function` is stored in `symbol`'s function cell.
+Returns `function`. Because the function cell is distinct from the value
+cell, a name can be both a variable and a function at once.
+
+```clojure
+fe > (fset 'square (lambda (n) (* n n)))
+(lambda (n) (* n n))
+fe > (square 4)
+16
+```
+
+#### `(defalias alias definition)`
+
+Both arguments are evaluated; `definition` -- an object or a symbol
+designator -- is stored in `alias`'s function cell, and `alias` is returned.
+Resolution at call time follows the designator chain, so an alias to a name
+that is later given a function picks it up:
+
+```clojure
+fe > (defalias 'first 'car)
+first
+fe > (first (list 1 2))
+1
+fe > (defalias 'a 'b)
+a
+fe > (fset 'b (lambda () 1))
+(lambda nil 1)
+fe > (a)
+1
+```
+
+#### `(symbol-function symbol)`
+
+Returns the raw contents of `symbol`'s function cell -- a designator is
+returned as the symbol, not followed. An empty cell is `void-function NAME`.
+
+```clojure
+fe > (fset 'h (lambda (x) x))
+(lambda (x) x)
+fe > (funcall (symbol-function 'h) 5)
+5
+```
+
+#### `(symbol-value symbol)`
+
+Reads `symbol`'s global value cell directly. An empty cell is
+`void-variable NAME`.
+
+#### `(fboundp symbol)`
+
+`t` if `symbol`'s function cell holds anything, else `nil`. Unlike `boundp`,
+it never consults the value cell and never errors: an unbound name is `nil`.
+Until the namespace cut, the bootstrap primitives live in value cells, so
+`(fboundp 'car)` is `nil`; 04D moves them into the function cell and the
+answer flips to `t`.
+
+#### `(fmakunbound symbol)`
+
+Empties `symbol`'s function cell and returns the symbol. The value cell is
+untouched, so the pair with `makunbound` keeps the two namespaces disjoint:
+`makunbound` empties only the value cell (leaving the function callable), and
+`fmakunbound` empties only the function cell (leaving the variable readable).
 
 #### `(and ...)`
 

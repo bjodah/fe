@@ -57,7 +57,16 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PAdd] = "+",
                                         [PSub] = "-",
                                         [PMul] = "*",
-                                        [PDiv] = "/"};
+                                        [PDiv] = "/",
+                                        [PFunction] = "function",
+                                        [PFset] = "fset",
+                                        [PDefalias] = "defalias",
+                                        [PSymbolFunction] = "symbol-function",
+                                        [PSymbolValue] = "symbol-value",
+                                        [PFboundp] = "fboundp",
+                                        [PFmakunbound] = "fmakunbound",
+                                        [PFuncall] = "funcall",
+                                        [PApply] = "apply"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -855,6 +864,18 @@ void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
 
 bool FeIsBound(FeContext* ctx, FeObject* sym) {
   return CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil)) != &unbound;
+}
+
+// Sub-plan 04C: the function namespace's public surface. `FeSetFunction` and
+// `FeIsFBound` are the cell accessors (`FeGetFunction` lives in fe_eval.c
+// with the evaluator, because following the designator chain charges the
+// step budget and can raise `cyclic-function-indirection`).
+void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn) {
+  SetSymbolFunction(CheckType(ctx, sym, FeTSymbol), fn);
+}
+
+bool FeIsFBound(FeContext* ctx, FeObject* sym) {
+  return SymbolFunction(CheckType(ctx, sym, FeTSymbol)) != &unbound;
 }
 
 // Symbol accessors (sub-plan 04B of kg's Emacs-subset program): a symbol's

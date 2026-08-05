@@ -1,0 +1,86 @@
+;; Sub-plan 04C of kg's Emacs-subset program: the function namespace, added
+;; beside the value namespace. A symbol now has both a function cell and a
+;; value cell; call position resolves the function cell first (falling back
+;; to the value cell until 04D's cut, which is why every callable below is
+;; also fset'd -- a value-only funcall target is exactly what the cut
+;; deletes). This script exercises the whole surface end to end: `function`,
+;; `fset`, `defalias`, `symbol-function`, `symbol-value`, `fboundp`,
+;; `fmakunbound`, `funcall` and `apply`, including designator chains, apply's
+;; spread (without mutating the caller's list), and the
+;; makunbound/fmakunbound independence pair. It must print byte-identically
+;; under all three test.sh passes (normal, RELEASE, -a), so every call below
+;; is arity-correct and nothing prints an answer the 04D cut flips.
+
+;; One symbol holds a value and a function at once: call position resolves
+;; the function cell, bare-symbol evaluation the value cell.
+(setq f 7)
+(fset 'f (lambda () 9))
+(print (list f (f)))
+
+;; `fset` evaluates both arguments -- the target is a value, not a quote --
+;; and writes the function cell.
+(setq s 'k)
+(fset s (lambda () 4))
+(print (k))
+
+;; `funcall` takes a value: a closure directly, a lexical value, and a symbol
+;; designator resolved through the function cell.
+(print (funcall (lambda (x) (+ x 1)) 2))
+(print ((lambda (g) (funcall g 3)) (lambda (x) (+ x 1))))
+(setq g 7)
+(fset 'g (lambda () 9))
+(print (funcall 'g))
+(fset 'myfn (lambda (x) (+ x 1)))
+(print (funcall 'myfn 5))
+
+;; `apply` spreads its final list argument; the caller's list is never
+;; mutated, so it still holds its original contents afterwards.
+(print (apply '+ 1 2 (list 3 4)))
+(setq lst '(9 8))
+(print (apply 'cons lst '(7 6)))
+(print lst)
+(print (apply 'list 1 2 '(3 4)))
+(print (apply 'list '()))
+
+;; `symbol-function` returns the raw cell -- a defalias designator stays a
+;; symbol -- and `funcall` calls whatever it holds.
+(fset 'h (lambda (x) x))
+(print (funcall (symbol-function 'h) 5))
+(defalias 'first 'car)
+(print (first (list 1 2)))
+(print (is (symbol-function 'first) 'car))
+
+;; `symbol-value` reads the global value cell.
+(setq sv 5)
+(print (symbol-value 'sv))
+
+;; `fboundp` asks the function cell. A name that has never been fset'd is
+;; nil; an fset'd one is t.
+(print (fboundp 'fresh-fn))
+(fset 'ff (lambda () 1))
+(print (fboundp 'ff))
+
+;; The two unbound operations are disjoint: `makunbound` empties the value
+;; cell and leaves the function cell callable; `fmakunbound` the reverse.
+(setq m 1)
+(fset 'm (lambda () 2))
+(makunbound 'm)
+(print (m))
+(setq m2 1)
+(fset 'm2 (lambda () 3))
+(fmakunbound 'm2)
+(print m2)
+
+;; `defalias` points one symbol's function cell at another, resolves at call
+;; time, and returns the aliased symbol.
+(defalias 'a2 'b2)
+(fset 'b2 (lambda () 1))
+(print (a2))
+(print (defalias 'c3 'car))
+
+;; `function` is a raw-form special form: a symbol is the designator itself,
+;; a lambda or fn form the closure, capturing the lexical environment.
+(print (is (function c2) 'c2))
+(print (funcall (function (lambda (x) (+ x 1))) 2))
+(print (funcall (function (fn (x) x)) 9))
+(print (funcall ((lambda (z) (function (lambda () z))) 7)))
