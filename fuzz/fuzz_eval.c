@@ -43,20 +43,50 @@ static FeObject* MakeBinary(FeContext* ctx,
   return MakeForm(ctx, name, (FeObject*[]){first, second}, 2);
 }
 
+// Magnitudes an int16 window cannot reach. Without these the whole grammar
+// generated operands in [-32768, 32767], so no reduction it built could ever
+// overflow int64: the `ckd_add`/`ckd_sub`/`ckd_mul` arms, the unary negation
+// of INT64_MIN and the INT64_MIN/-1 division edge -- every arith-error path
+// 05C added -- were unreachable by construction, and the fuzz lane that
+// exists to chase exactly that class of change never reached it. Both signs
+// of 2^62 and 2^31 are here as well as the two extremes, because overflow at
+// the boundary is a different arithmetic than overflow of two mid-sized
+// operands, and -1/0/1 are here so a sentinel can pair with the identity and
+// zero-divisor edges rather than only with another huge value.
+static const int64_t number_sentinels[] = {
+    INT64_MIN,
+    INT64_MIN + 1,
+    INT64_MAX,
+    (int64_t)1 << 62,
+    -((int64_t)1 << 62),
+    (int64_t)1 << 31,
+    -((int64_t)1 << 31),
+    -1,
+    0,
+    1,
+};
+
 static FeObject* BuildNumber(FeContext* ctx, FuzzInput* input) {
   const int16_t value = (int16_t)((uint16_t)FuzzTakeByte(input) |
                                   (uint16_t)FuzzTakeByte(input) << 8);
-  // The host integer mix: the reader still produces only doubles (05C's whole
-  // premise -- FeRead's atom path builds an FeTDouble, so no source text can
-  // spell an integer before 05D's cut), which means this grammar and the host
-  // API are the only producers of FeTInteger values the tower sees. 05B's
-  // reach-ahead landed the odd-tag-byte integer arm so the grammar already
-  // mixed both numeric types before the reader could; 05C now makes every
-  // arithmetic, comparison, equality and predicate path dispatch on both
-  // tags, so this tag byte is what decides which side of the promotion rule a
-  // generated operand lands on.
-  return FuzzTakeByte(input) & 1 ? FeMakeInteger(ctx, value)
-                                 : FeMakeDouble(ctx, (double)value);
+  // The host integer mix. 05B's reach-ahead landed the odd-tag-byte integer
+  // arm so the grammar mixed both numeric types before the reader could;
+  // 05C made every arithmetic, comparison, equality and predicate path
+  // dispatch on both tags, so bit 0 of this tag byte is what decides which
+  // side of the promotion rule a generated operand lands on. Bit 1 swaps the
+  // int16 window for a sentinel, which is what makes mixed-magnitude
+  // arithmetic -- a huge operand against a small one -- generatable at all.
+  // The sentinel index is a separate byte, taken only on that arm, so the
+  // ordinary path consumes exactly the three bytes it always did.
+  const uint8_t tag = FuzzTakeByte(input);
+  int64_t magnitude = value;
+  if ((tag & 2) != 0) {
+    magnitude =
+        number_sentinels[FuzzTakeByte(input) % (sizeof(number_sentinels) /
+                                                sizeof(number_sentinels[0]))];
+  }
+  return (tag & 1) != 0 ? FeMakeInteger(ctx, magnitude)
+                        : FeMakeDouble(ctx, (double)magnitude);
 }
 
 static FeObject* BuildString(FeContext* ctx, FuzzInput* input) {
