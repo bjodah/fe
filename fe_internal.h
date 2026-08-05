@@ -368,14 +368,6 @@ typedef enum FeFrameKind {
   FeFrameEvalList,
 } FeFrameKind;
 
-typedef enum FeCompletion {
-  FeCompletionNormal,
-  FeCompletionError,
-  FeCompletionThrow,
-  FeCompletionQuit,
-  FeCompletionBudget,
-} FeCompletion;
-
 typedef struct FeEvalFrame {
   FeFrameKind kind;
   FeObject* expr;
@@ -574,6 +566,13 @@ struct FeContext {
   // their text and trace below before jumping to it.
   jmp_buf* evaluator_catch;
   FeObject* evaluator_error_trace;
+  // The kind of the completion currently being drained -- Normal otherwise.
+  // Assigned by `RaiseCompletion` (fe_eval.c) for every barrier-backed raise,
+  // reset by the outermost run's barrier and by a normal top-level return.
+  // Read by `FeGetCompletion` for the host and, as a "draining?" flag, by
+  // `AllocateFrame`'s `CleanupFrameReserve` gate: a non-Normal kind grants
+  // the reserve, so a cleanup provoked by frame exhaustion is pushable
+  // regardless of which wall (step/frame/re-entry/interrupt) tripped.
   FeCompletion completion;
   char evaluator_error_message[1024];
   bool evaluation_active;

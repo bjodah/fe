@@ -62,6 +62,11 @@ typedef struct ErrorState {
   bool reentry_cleanup_ran;
   size_t reentry_current;
   size_t reentry_max_seen;
+  // Sub-plan 06B: the completion kind the error callback observed, recorded by
+  // `HandleError` for `TestCompletionKinds`. Every pre-existing test ignores
+  // these fields, which is itself part of the no-behaviour-change proof.
+  FeCompletion observed_completion;
+  bool completion_seen;
 } ErrorState;
 
 // The frame partition must leave the existing 200-level C-stack probe below
@@ -93,6 +98,8 @@ static bool IsRendered(FeContext* context,
   state->called = state->context == context &&
                   strcmp(message, state->expected_message) == 0;
   state->stack_was_nil = FeIsNil(stack);
+  state->observed_completion = FeGetCompletion(context);
+  state->completion_seen = true;
   longjmp(state->jump, 1);
 }
 
@@ -185,6 +192,41 @@ static bool ExpectEvaluationOptionsError(FeContext* context,
   }
   FeRestoreGC(context, gc);
   CHECK(state->called);
+  return true;
+}
+
+// Sub-plan 06B's expectation helper: like `ExpectEvaluationOptionsError`,
+// but additionally pins the completion kind the host's error callback must
+// observe, the same kind read *after* recovery (the accessor stays valid
+// until the next run's outermost barrier resets it), and the nil condition
+// object that is all 06B ever produces. Every existing test goes through the
+// helper above and never sees these checks.
+static bool ExpectCompletionKind(FeContext* context,
+                                 ErrorState* state,
+                                 const char* label,
+                                 const char* source,
+                                 size_t length,
+                                 const FeEvalOptions* options,
+                                 const char* expected_message,
+                                 FeCompletion expected_kind) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->completion_seen = false;
+  state->expected_message = expected_message;
+  if (setjmp(state->jump) == 0) {
+    (void)FeEvaluateStringWithOptions(context, label, source, length, options);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  CHECK(state->completion_seen);
+  CHECK(state->observed_completion == expected_kind);
+  // The kind survives the host's recovery longjmp: nothing resets it until
+  // the next run's outermost barrier or a normal top-level return.
+  CHECK(FeGetCompletion(context) == expected_kind);
+  // The condition object is nil until 06D builds the static hierarchy
+  // (Decision 5: a host written against 06B must not break at 06D).
+  CHECK(FeIsNil(FeGetCondition(context)));
   return true;
 }
 
@@ -526,8 +568,14 @@ static bool TestUserDataAndErrors(void) {
     CHECK(FeGetUserData(contexts[i]) == &error_states[i]);
   }
   CHECK(TriggerAndRecover(contexts[0], &error_states[0]));
+  CHECK(error_states[0].completion_seen);
+  CHECK(error_states[0].observed_completion == FeCompletionError);
+  CHECK(FeGetCompletion(contexts[0]) == FeCompletionError);
   CHECK(!error_states[1].called);
   CHECK(TriggerAndRecover(contexts[1], &error_states[1]));
+  CHECK(error_states[1].completion_seen);
+  CHECK(error_states[1].observed_completion == FeCompletionError);
+  CHECK(FeGetCompletion(contexts[1]) == FeCompletionError);
 
   for (size_t i = 0; i < 2; i++) {
     FeCloseContext(contexts[i]);
@@ -735,6 +783,126 @@ static bool TestEvaluationControl(void) {
   CHECK(nested_interrupt.polls == 0);
   CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "7", 1),
                    "7"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 06B: the completion kind is true at its producers and readable
+// through Decision 5's accessors. Each case pins the kind the error callback
+// observes (step limit -> Budget, interrupt -> Quit, the frame and re-entry
+// walls -> Budget, an ordinary error -> Error), the same kind after the
+// host's recovery, the nil condition object, and the reset to Normal that a
+// normal top-level return performs. It also carries the
+// `CleanupFrameReserve` coupling from the plan's item 2: a cleanup provoked
+// by frame exhaustion must be pushable regardless of which wall tripped,
+// because the frame wall now assigns Budget (a non-Normal kind) before the
+// drain runs.
+static bool TestCompletionKinds(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // A fresh context and a normal evaluation both read Normal: nothing has
+  // completed abnormally, and the normal return clears whatever the last
+  // error left behind.
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
+  CHECK(IsRendered(context, FeEvaluateString(context, "plain.fe", "42", 2),
+                   "42"));
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
+
+  // Step limit -> Budget.
+  static const char loop[] = "(while t 1)";
+  const FeEvalOptions step = {.step_limit = 32};
+  CHECK(ExpectCompletionKind(
+      context, &state, "steps.fe", loop, sizeof(loop) - 1, &step,
+      "steps.fe: evaluation step limit exceeded", FeCompletionBudget));
+
+  // Interrupt -> Quit.
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectCompletionKind(context, &state, "interrupt.fe", loop,
+                             sizeof(loop) - 1, &interrupt_options,
+                             "interrupt.fe: evaluation cancelled",
+                             FeCompletionQuit));
+  CHECK(interrupt.polls == interrupt.cancel_after);
+
+  // Frame wall -> Budget. The fixed expression measures its own peak first
+  // (the same push-before-write trick `TestFrameLimits` uses), so "one below
+  // the measured peak" is a real refusal, not a hand-picked frame count.
+  static const char fixed[] = "(+ 1 (+ 2 (+ 3 (+ 4 5))))";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "measure.fe", fixed, sizeof(fixed) - 1), "15"));
+  const size_t peak = FeGetArenaStats(context).peak_frame_depth;
+  const FeEvalOptions one_less = {.max_frames = peak - 1};
+  CHECK(ExpectCompletionKind(
+      context, &state, "frames.fe", fixed, sizeof(fixed) - 1, &one_less,
+      "frames.fe: evaluation frame limit exceeded", FeCompletionBudget));
+
+  // Re-entry wall -> Budget, through a native that synchronously re-enters
+  // `FeCallWithOptions` on itself until `max_native_reentry` blocks it.
+  FeObject* native = FeMakeNativeFn(context, ReentrantNative);
+  state.reentry_self = FeCreateRoot(context, native);
+  FeSetFunction(context, FeMakeSymbol(context, "reentrant-native"), native);
+  state.reentry_remaining = 9;
+  state.reentry_cleanup_ran = false;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  const FeEvalOptions reentry = {.max_native_reentry = 8};
+  CHECK(ExpectCompletionKind(
+      context, &state, "reentry.fe", "(reentrant-native)",
+      sizeof("(reentrant-native)") - 1, &reentry,
+      "reentry.fe: native evaluation re-entry limit exceeded",
+      FeCompletionBudget));
+
+  // An ordinary error -> Error.
+  static const char type_error[] = "(car 1)";
+  CHECK(ExpectCompletionKind(
+      context, &state, "error.fe", type_error, sizeof(type_error) - 1, nullptr,
+      "error.fe: expected pair, got integer", FeCompletionError));
+
+  // The CleanupFrameReserve coupling (plan item 2): a body that exhausts a
+  // tight `max_frames` still gets its `unwind-protect` cleanup -- the frame
+  // wall assigns Budget before the drain, so the reserve is granted to a
+  // cleanup provoked by frame exhaustion -- and the kind read is Budget.
+  static const char reset_flag[] = "(setq cleanup-ran nil)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "reset.fe", reset_flag, sizeof(reset_flag) - 1),
+      "nil"));
+  static const char overflow_with_cleanup[] =
+      "(fset 'loop (fn (x) (loop x))) "
+      "(unwind-protect (loop 1)"
+      "  (setq cleanup-ran t))";
+  const FeEvalOptions tight_frames = {.max_frames = 6};
+  CHECK(ExpectCompletionKind(
+      context, &state, "reserve.fe", overflow_with_cleanup,
+      sizeof(overflow_with_cleanup) - 1, &tight_frames,
+      "reserve.fe: evaluation frame limit exceeded", FeCompletionBudget));
+  static const char check_cleanup_ran[] = "cleanup-ran";
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "check.fe", check_cleanup_ran,
+                                    sizeof(check_cleanup_ran) - 1),
+                   "t"));
+
+  // Recovery: after every kind above, a normal evaluation returns its value
+  // and leaves the accessor back at Normal -- the plan's "a host polling the
+  // accessor between evaluations reads Normal" invariant.
+  static const char deep[] =
+      "(fset 'deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep "
+      "40)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "recovered.fe", deep, sizeof(deep) - 1), "40"));
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
 
   FeCloseContext(context);
   return true;
@@ -5034,12 +5202,13 @@ static bool TestGcStackConstantInNesting(void) {
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestFileInput() &&
-                 TestEvaluationControl() && TestExtensionAPI() &&
-                 TestRootsAndCalls() && TestCallWithOptions() &&
-                 TestMathNatives() && TestSerialization() &&
-                 TestDottedLists() && TestMacroExpansion() && TestWriter() &&
-                 TestParameterLists() && TestBinding() && TestSymbolCells() &&
-                 TestInteger() && TestFunctionCells() && TestNamespaceCut() &&
+                 TestEvaluationControl() && TestCompletionKinds() &&
+                 TestExtensionAPI() && TestRootsAndCalls() &&
+                 TestCallWithOptions() && TestMathNatives() &&
+                 TestSerialization() && TestDottedLists() &&
+                 TestMacroExpansion() && TestWriter() && TestParameterLists() &&
+                 TestBinding() && TestSymbolCells() && TestInteger() &&
+                 TestFunctionCells() && TestNamespaceCut() &&
                  TestSetqAndSet() && TestNumericEqual() && TestNumericTower() &&
                  TestNumericCut() && TestUnwindHostAPI() && TestUnwindLisp() &&
                  TestUnwindCleanupBudget() && TestFrameLimits() &&

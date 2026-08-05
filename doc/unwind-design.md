@@ -3,18 +3,20 @@
 Status: **`unwind-protect` and its C-side counterpart are implemented**
 (`FeProtectWithCleanup()`, `doc/c-api.md`'s "Unwinding And Cleanup",
 `doc/implementation.md`'s section of the same name, `doc/language.md`'s
-`(unwind-protect ...)`). The evaluator has private normal/error/throw/quit/
-budget completion kinds and a context-owned frame stack; only normal and
-ordinary error are reachable today. An error under an evaluator barrier is
+`(unwind-protect ...)`). The evaluator has normal/error/throw/quit/budget
+completion kinds and a context-owned frame stack. Only normal and
+ordinary error are reachable through the Lisp-facing machinery; since
+sub-plan 06B the Quit and Budget kinds are also *true at their producers*
+and host-readable through Decision 5's additive accessors, while `throw`
+remains unassigned. An error under an evaluator barrier is
 copied into context storage, drains the current cleanup registry, then reaches
 the outer public boundary exactly once. `condition-case`, `catch`/`throw`,
-distinct
-completion kinds, and the token-based rollback-on-error registry sketched
+and the token-based rollback-on-error registry sketched
 below for `MakeFile()`-shaped problems are still design only. The rest of
 this document is the original design; where the shipped implementation took
 a narrower or different shape, a note says so inline rather than rewriting
 history. It still exists so the remaining pieces -- `condition-case`,
-`catch`/`throw`, and quit as a distinct completion kind -- are not designed
+`catch`/`throw`, and quit as a distinct *catchable* kind -- are not designed
 four times by four separate patches that then have to be reconciled.
 
 **Reconciled 2026-08-05 against the measured oracle (sub-plan 06A of kg's
@@ -30,7 +32,8 @@ cleanup failure to `stderr` and keep unwinding with the original), pinned by
 06D implements it, rewriting the three `stderr` assertions with it. The rest
 of 06A's reconciliation is that the substrate this document designs is
 half-built and documented as such: the five completion kinds already exist
-as `FeCompletion` (`fe_internal.h:371`) with only `Normal`/`Error` ever
+as `FeCompletion` (in `fe.h` since 06B made the enum public; `fe_internal.h`
+before it) with only `Normal`/`Error` ever
 assigned (Phase 6 makes the other three true; it does not add the enum), and
 the checkpointed drain `RunCleanupsDownTo` (`fe_eval.c:132`) is already live
 and called by every completing pair frame, so the "Nested evaluation" note's
@@ -85,15 +88,28 @@ except by string comparison. That is the first thing to fix, and it is fixable
 independently of everything else: a completion kind alongside the message in
 the error callback.
 
+**Fixed 2026-08-05 (sub-plan 06B).** `FeCompletion` is now a public enum
+(`fe.h`), the interrupt path assigns Quit and the step-limit/frame/re-entry
+walls assign Budget (all four through a private `RaiseCompletion` sibling of
+`FeHandleError`, whose signature is unchanged), every ordinary raise stays
+Error, and a host reads the kind with `FeGetCompletion(ctx)` and the (nil,
+until 06D) condition with `FeGetCondition(ctx)` -- Decision 5's additive
+accessors. The kinds are a parallel channel only: no Lisp program can observe
+them (`catch` and `condition-case` do not exist yet), quit and budget remain
+ordinary `longjmp`-to-the-host completions, and the completion resets to
+Normal at the outermost barrier and after a normal top-level return exactly as
+before.
+
 `quit` and `budget` must not be catchable by ordinary Lisp handlers. Emacs Lisp
 made `condition-case` unable to catch quit by default for good reasons and
 learned them the hard way; Fe should start there.
 
 **The enum is already there, three-fifths dead (06A's audit).**
-`FeCompletion` (`fe_internal.h:371`) declares all five kinds, but only
+`FeCompletion` (in `fe.h`; `fe_internal.h` before 06B moved it to the public
+header) declares all five kinds, but only
 `Normal` and `Error` are ever assigned today, and the enum currently serves
 as a one-bit "draining?" flag read exactly once: `AllocateFrame`'s
-`CleanupFrameReserve` gate (`fe_eval.c:656`) tests
+`CleanupFrameReserve` gate (`fe_eval.c:711`) tests
 `completion != FeCompletionNormal`. Phase 6 does not add the enum -- it makes
 the other three values true at their producers, and the reserve gate silently
 widens to them the moment they are assigned. That is a live coupling nobody
@@ -194,7 +210,7 @@ would incorrectly run cleanups that belong to a scope outside the `catch`.
 
 **The checkpointed half already exists (06A's audit).**
 `RunCleanupsDownTo(ctx, target)` (`fe_eval.c:132`) is live and is what every
-completing pair frame calls (`fe_eval.c:723`) to drop cleanups registered
+completing pair frame calls (`fe_eval.c:2273`) to drop cleanups registered
 above it; only the drain-to-zero `RunCleanupsAfterError` is the thing a
 `catch` frame has to displace. 06C's throw unwinds on exactly this
 function -- search down the frame stack for the innermost matching catch,
@@ -265,10 +281,12 @@ implements it.
 discarding was this section's original reading, but the callback that reaches
 is not `error_fn` -- a cleanup's own failure is printed to `stderr` directly
 from inside `FeHandleError()` (`RunOneCleanupEntry()` in `fe.c`), and
-`error_fn` never learns a cleanup failed at all. Completion kinds are not
-implemented (item 1 below is still open), so there was no distinct value to
-hand `error_fn` for "a cleanup failed" even if this had gone through it.
-Tested per this section's requirement: `test_api.c`'s `TestUnwindLisp()`
+`error_fn` never learns a cleanup failed at all. Completion kinds now have a
+distinct value for the drain that is in flight (`FeGetCompletion()`, 06B), but
+"a cleanup failed" still is not one -- the in-flight kind is preserved by
+design, so a cleanup that runs out of its own steps mid-drain does not
+overwrite the Error/Quit/Budget the drain is for. Tested per this section's
+requirement: `test_api.c`'s `TestUnwindLisp()`
 captures `stderr` around a failing nested cleanup and asserts both the
 diagnostic and that the outer cleanup still ran. The three assertions pinning
 the `stderr` text (the `CHECK(strstr(captured, "cleanup error") ...)` family,
@@ -278,12 +296,13 @@ contract are rewritten by 06D when the measured replace-policy lands.
 ## Order of work
 
 1. Completion kinds in the error callback. Independent, small, unblocks a host
-   telling quit from a genuine error. **Still open, sequenced.** 06A's Decision
-   5 fixed the API shape (keep `FeErrorFn` as-is; add additive accessors
-   `FeGetCompletion(ctx)` + `FeGetCondition(ctx)`), and 06B assigns the dormant
-   kinds at their producers (`EvaluationStep`'s step-limit → Budget, interrupt →
-   Quit; the frame/re-entry walls → Budget) and adds the accessors, with a
-   `TestCompletionKinds` suite. The standalone `fe` binary's structured error
+   telling quit from a genuine error. **Landed 2026-08-05 (sub-plan 06B),**
+   per 06A's Decision 5: `FeErrorFn` is unchanged, `FeGetCompletion(ctx)` +
+   `FeGetCondition(ctx)` are the additive accessors, the dormant kinds are
+   true at their producers (`EvaluationStep`'s step-limit → Budget, interrupt
+   → Quit; the frame/re-entry walls → Budget), and `TestCompletionKinds` pins
+   each kind read from inside the callback and after recovery. The standalone
+   `fe` binary's structured error
    channel for the compat runner (`condition_source` "message" → "structured")
    is 06D's half of the same item.
 2. The C-only cleanup stack, with an error-injection matrix: inject an error at

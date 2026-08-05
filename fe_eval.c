@@ -203,7 +203,21 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   longjmp(*ctx->evaluator_catch, 1);
 }
 
-[[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
+// The core of every completion raise (sub-plan 06B of kg's Emacs-subset
+// program): assigns the completion kind, then does what `FeHandleError` has
+// always done -- drain the cleanup registry under a fresh budget and transfer
+// control to the enclosing barrier or the host. The kind is the parameter so
+// the four wall sites (step limit, interrupt, frame limit, native re-entry
+// limit) can raise Quit/Budget without touching the shared body, while every
+// ordinary raise -- including the public `FeHandleError` wrapper below -- is
+// an Error completion. Assignment happens for every raise, including a
+// host-level `FeHandleError` outside an evaluator run, so the accessor never
+// leaves a stale kind behind. The reserve gate in `AllocateFrame`
+// (`completion != FeCompletionNormal`) still means "a cleanup drain is in
+// progress" because only an evaluator barrier can reach that cleanup path.
+[[noreturn]] static void RaiseCompletion(FeContext* ctx,
+                                         FeCompletion kind,
+                                         const char* msg) {
   FeObject* cl = ctx->call_list;
   const char* label = ctx->error_label;
   const size_t offset = ctx->error_offset;
@@ -247,20 +261,49 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     // A cleanup entry's own `fn` or unwind-forms raised. Resume at
     // `RunOneCleanupEntry`'s `setjmp` instead of reaching the host: that
     // keeps unwinding the cleanup stack instead of abandoning it, and
-    // preserves whatever error is already in flight above this one.
+    // preserves whatever error is already in flight above this one. The
+    // in-flight completion kind is preserved too -- nothing here assigns
+    // `kind`, so a cleanup that runs out of its own steps mid-drain does not
+    // overwrite the Error/Quit/Budget the drain is for.
     SaveCleanupErrorMessage(ctx, msg);
     longjmp(*ctx->cleanup_catch, 1);
   }
 
-  if (ctx->evaluator_catch != nullptr) {
-    ctx->completion = FeCompletionError;
-  }
+  ctx->completion = kind;
 
   // A fresh, bounded budget, not the exhausted or cancelled one the body
   // was running under and not no budget at all: see `RunCleanupsAfterError`.
   RunCleanupsAfterError(ctx, &cleanup_budget);
 
   TransferEvaluationError(ctx, msg, cl);
+}
+
+// The public raise entry point: an ordinary Error completion, which is what
+// every one of the 100+ call sites through fe.c/fex_*.c and kg's 112 raise
+// sites means. The signature is pinned (kg calls it directly); the four wall
+// sites that need a different kind call `RaiseCompletion` directly instead.
+[[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
+  RaiseCompletion(ctx, FeCompletionError, msg);
+}
+
+// Decision 5's (sub-plan 06A) additive host surface. The kind is always
+// valid: the value `RaiseCompletion` assigned, which survives the host's
+// recovery `longjmp` and stays readable until the next run's outermost
+// barrier resets it (or a normal top-level return clears it -- see
+// `RunEvaluation`). A host polls `FeGetCompletion` from inside its error
+// callback to tell quit/budget from a genuine error without reading message
+// strings, and reads the same answer after it recovers.
+FeCompletion FeGetCompletion(const FeContext* ctx) {
+  return ctx->completion;
+}
+
+// The condition object, nil until 06D builds the static hierarchy. The
+// parameter is unused today but fixed by Decision 5's accessor shape; keep it
+// so a host written against this slice does not change its call sites when
+// 06D starts returning real condition objects.
+FeObject* FeGetCondition(const FeContext* ctx) {
+  (void)ctx;
+  return &nil;
 }
 
 bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
@@ -288,7 +331,10 @@ bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
 void EvaluationStep(FeContext* ctx) {
   if (ctx->evaluation_limited) {
     if (ctx->evaluation_steps == 0) {
-      FeHandleError(ctx, "evaluation step limit exceeded");
+      // Step-budget exhaustion is a Budget completion (06B): the host set a
+      // ceiling and the program hit it. Message text is pinned verbatim.
+      RaiseCompletion(ctx, FeCompletionBudget,
+                      "evaluation step limit exceeded");
     }
     ctx->evaluation_steps--;
   }
@@ -296,7 +342,9 @@ void EvaluationStep(FeContext* ctx) {
       --ctx->evaluation_poll_countdown == 0) {
     ctx->evaluation_poll_countdown = ctx->evaluation_poll_interval;
     if (ctx->evaluation_interrupt(ctx, ctx->evaluation_userdata)) {
-      FeHandleError(ctx, "evaluation cancelled");
+      // The interrupt path is a Quit completion (06B): the user asked to
+      // stop, which the host must be able to tell from a genuine error.
+      RaiseCompletion(ctx, FeCompletionQuit, "evaluation cancelled");
     }
   }
 }
@@ -318,7 +366,11 @@ static void EnterNativeReentry(FeContext* ctx) {
                            ? ctx->native_reentry_limit
                            : DefaultNativeReentry;
   if (ctx->native_reentry_depth >= limit) {
-    FeHandleError(ctx, "native evaluation re-entry limit exceeded");
+    // The re-entry wall is a Budget completion (06B), grouped with the
+    // other host-configured ceilings: the parent's resource-exhaustion rule
+    // puts it beside the step and frame limits, not beside ordinary errors.
+    RaiseCompletion(ctx, FeCompletionBudget,
+                    "native evaluation re-entry limit exceeded");
   }
   ctx->native_reentry_depth++;
   if (ctx->native_reentry_depth > ctx->arena_peak_native_reentry) {
@@ -642,7 +694,7 @@ static bool DispatchResolvedCall(FeContext* ctx,
 // can only lower the bound the arena partition already sized, never raise
 // it. `CleanupFrameReserve` extra slots are available only while a cleanup
 // is draining (`ctx->completion != FeCompletionNormal`, set by
-// `FeHandleError` before `RunCleanupsAfterError` runs); by then
+// `RaiseCompletion` before `RunCleanupsAfterError` runs); by then
 // `ClearEvaluationControl` has already zeroed `max_frames_limit`, so a
 // cleanup pushes against the full physical capacity plus the reserve, not
 // whatever tight body limit the abandoned computation was configured with,
@@ -655,7 +707,13 @@ static FeEvalFrame* AllocateFrame(FeContext* ctx) {
   const size_t reserve =
       ctx->completion == FeCompletionNormal ? 0 : CleanupFrameReserve;
   if (ctx->frame_stack_index == limit + reserve) {
-    FeHandleError(ctx, "evaluation frame limit exceeded");
+    // The frame wall is a Budget completion (06B), grouped with the step and
+    // re-entry ceilings as host-configured resource exhaustion. Assigning
+    // Budget here -- instead of the Error the old shared call did -- is what
+    // makes the reserve above load-bearing for a frame-wall drain: this raise
+    // sets `completion` before the drain runs, so the cleanup's own pushes
+    // are not refused by the same wall the body just hit.
+    RaiseCompletion(ctx, FeCompletionBudget, "evaluation frame limit exceeded");
   }
   FeEvalFrame* const frame = &ctx->frame_stack[ctx->frame_stack_index++];
   if (ctx->frame_stack_index > ctx->arena_peak_frame_depth) {
@@ -2469,6 +2527,15 @@ static FeObject* RunEvaluation(FeContext* ctx,
   FeObject* const result = RunEvaluationLoop(ctx, base);
   ctx->evaluator_catch = saved_catch;
   ctx->native_reentry_depth = saved_native_reentry_depth;
+  if (saved_catch == nullptr) {
+    // This run owned the outermost barrier, so its ordinary return reaches
+    // the host: leave the accessor reading Normal, whatever a previous
+    // error left behind. A nested run never clears here -- during a cleanup
+    // drain its sibling runs must not reset the kind the reserve gate is
+    // still testing (`AllocateFrame`'s `completion != FeCompletionNormal`),
+    // which is the same reason `BeginRunBarrier`'s reset is outermost-only.
+    ctx->completion = FeCompletionNormal;
+  }
   return result;
 }
 

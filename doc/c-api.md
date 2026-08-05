@@ -585,6 +585,43 @@ message is printed to `stderr` and the remaining cleanups, inner to outer,
 still run. Whichever error, interrupt, or budget exhaustion was actually
 unwinding when the cleanup failed is still what `error_fn` eventually sees.
 
+### Completion kinds
+
+Every abnormal way out of a form is a **completion**, and the context
+remembers which kind it was. The four a host can observe today are a
+`FeCompletion` value:
+
+| Kind | Producer |
+| --- | --- |
+| `FeCompletionNormal` | a form produced a value; the default, and the value after any normal top-level return |
+| `FeCompletionError` | every ordinary `FeHandleError()` call |
+| `FeCompletionQuit` | the interrupt callback returned true ("evaluation cancelled") |
+| `FeCompletionBudget` | the step limit, the frame wall, or the native re-entry wall was hit |
+| `FeCompletionThrow` | Lisp `throw` -- unassigned until `catch`/`throw` land |
+
+```c
+FeCompletion FeGetCompletion(const FeContext* ctx);
+FeObject* FeGetCondition(const FeContext* ctx);
+```
+
+`FeGetCompletion()` is Decision 5's additive migration path: a host telling
+quit from a genuine error reads the kind instead of comparing message
+strings, and `FeErrorFn`'s signature is unchanged, so every existing host
+compiles and behaves as before without edits. The kind is always valid --
+it is assigned before the cleanup drain and before `error_fn` runs, and it
+stays readable after the host's recovery `longjmp` until the next run's
+outermost barrier or a normal top-level return resets it to
+`FeCompletionNormal`. `FeGetCondition()` returns the completion's condition
+object, which is `nil` until the static condition hierarchy lands; a host
+written against this API must handle that value before 06D provides one.
+
+The kind also has one internal effect a host can rely on: while a
+non-Normal completion is draining, a cleanup's own frame pushes get the
+private `CleanupFrameReserve` of extra slots, so a cleanup provoked by
+frame exhaustion is not refused by the same wall the body just hit. That
+coupling used to be free -- only `FeCompletionError` was ever assigned --
+and is now load-bearing, since the frame wall assigns `FeCompletionBudget`.
+
 ## Serializing Objects
 
 `FeWrite()` renders an object as Fe syntax one character at a time through a
@@ -765,7 +802,11 @@ than treating this interface as context-local.
 Runtime errors call the function installed by `FeSetErrorFn()`. The callback
 receives the context, an error message, and the active Fe call trace. The
 message and trace are borrowed and valid only during the callback. Do not
-create Fe objects or resume evaluation from inside the callback.
+create Fe objects or resume evaluation from inside the callback. The
+callback can additionally distinguish the kind of failure -- an ordinary
+error, a quit, or budget exhaustion -- through `FeGetCompletion()`, valid
+for the duration of the callback and after the host's recovery (see
+"Unwinding And Cleanup" above).
 
 Returning from the error callback is not recovery. A recovering callback must
 perform a nonlocal transfer, normally `longjmp`, to a host-owned recovery point.

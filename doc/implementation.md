@@ -581,7 +581,10 @@ the configured error callback. The borrowed error message and trace are valid
 only for that invocation. A recovering callback must `longjmp` or perform an
 equivalent nonlocal transfer; it must not allocate Fe objects. If the callback
 is absent or returns, Fe silently calls `abort()`. Error reporting and process
-exit policy belong to the host.
+exit policy belong to the host. The callback can distinguish the failure's
+kind with `FeGetCompletion()` -- ordinary Error, Quit for the interrupt path,
+Budget for the step/frame/re-entry ceilings -- valid for the duration of the
+call and after recovery (sub-plan 06B; see "Unwinding And Cleanup").
 
 String and file evaluation temporarily install a borrowed source label and
 reader byte offset in the context. `FeHandleError()` copies those values into a
@@ -637,8 +640,15 @@ Collection" above.
 
 `doc/unwind-design.md` is the design this section's implementation follows;
 it also records which parts of that design (checkpoints and tokens for a
-rollback-on-error registry, distinct completion kinds, `catch`/`throw`,
-`condition-case`) are still future work.
+rollback-on-error registry, `catch`/`throw`, `condition-case`) are still
+future work. The distinct completion kinds are no longer wholly future work:
+since sub-plan 06B the interrupt path assigns `FeCompletionQuit`, the
+step-limit/frame/re-entry walls assign `FeCompletionBudget`, and every
+ordinary `FeHandleError()` assigns `FeCompletionError`, all readable through
+`FeGetCompletion()`/`FeGetCondition()` (condition nil until 06D). They are a
+parallel host channel -- no Lisp program can observe them -- and quit/budget
+remain ordinary `longjmp`-to-the-host completions until `condition-case`
+exists.
 
 Lisp `unwind-protect` and the host's `FeProtectWithCleanup()` share one
 registry, `FeContext.cleanup_stack`: a fixed-size array of entries, each

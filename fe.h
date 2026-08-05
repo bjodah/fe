@@ -73,6 +73,25 @@ typedef void FeCleanupFn(FeContext* ctx, void* data);
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
 
+// The kind of the most recent evaluation completion, read through
+// `FeGetCompletion`. Sub-plan 06B (kg's Emacs-subset program) made the
+// previously dormant kinds true at their producers: the interrupt path raises
+// Quit, the step-limit/frame-wall/native-re-entry-wall ceilings raise Budget,
+// and every ordinary `FeHandleError` stays Error. Throw is still unassigned
+// until 06C. A kind is assigned before a completion reaches the host and stays
+// valid until the next run's outermost barrier resets it, so a host reads the
+// failing kind from inside its error callback and after it recovers. `quit`
+// and `budget` are not signalable condition symbols (06A Decision 1 records
+// that as a deliberate exclusion); they are completion kinds, observable only
+// through this accessor until 06C/06D give them catch semantics.
+typedef enum FeCompletion {
+  FeCompletionNormal,
+  FeCompletionError,
+  FeCompletionThrow,
+  FeCompletionQuit,
+  FeCompletionBudget,
+} FeCompletion;
+
 typedef struct FeEvalOptions {
   size_t step_limit;
   size_t poll_interval;
@@ -227,6 +246,24 @@ void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetStrictArity(FeContext* ctx, bool strict);
 [[nodiscard]] bool FeGetStrictArity(const FeContext* ctx);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
+
+// The completion kind of the last completion that reached a host boundary:
+// `FeCompletionError` for an ordinary error, `FeCompletionQuit` for the
+// interrupt path, `FeCompletionBudget` for the step-limit/frame/re-entry
+// walls, and `FeCompletionNormal` after any normal top-level return. Always
+// valid -- inside the error callback, and until the next run's outermost
+// barrier resets it after recovery. This is Decision 5's (sub-plan 06A)
+// additive migration path: a host telling quit from a genuine error reads
+// this instead of comparing message strings, and the `FeErrorFn` signature
+// itself is unchanged, so every existing host compiles and behaves as before
+// without edits.
+[[nodiscard]] FeCompletion FeGetCompletion(const FeContext* ctx);
+// The completion's condition object, nil until sub-plan 06D builds the static
+// condition hierarchy. Documented here so a host written against 06B -- which
+// must only ever see nil -- does not break when 06D starts returning real
+// condition objects: a host that needs a condition must handle nil before
+// 06D provides one.
+[[nodiscard]] FeObject* FeGetCondition(const FeContext* ctx);
 
 [[nodiscard]] FeType FeGetType(const FeObject* obj);
 [[nodiscard]] bool FeIsNil(const FeObject* obj);
