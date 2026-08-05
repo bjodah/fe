@@ -1,0 +1,8 @@
+{
+ "id": "num-symbol-hex",
+ "setup": [
+  "(setq 0x10 7)"
+ ],
+ "expr": "0x10",
+ "note": "05A, row R6: `0x10` is a *symbol*, not a hex number -- Emacs needs `#x` radix syntax (Phase 8), so binding the symbol and reading it back gives 7. Fe's bare `strtod` reads 0x10 as 16.0 today; Decision 3 (05D) kills strtod's hex."
+}

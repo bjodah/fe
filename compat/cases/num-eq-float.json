@@ -1,0 +1,6 @@
+{
+ "id": "num-eq-float",
+ "setup": [],
+ "expr": "(eq 3.0 3.0)",
+ "note": "05A, row E2: floats are boxed, so two separately-read 3.0s are not `eq` -- nil. `eq` is pointer identity, never numeric equality across floats; 05D."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-zerop",
+ "setup": [],
+ "expr": "(list (zerop 0) (zerop 0.0))",
+ "note": "05A, row Z1a: `zerop` is t for both integer 0 and float 0.0. kg's prelude one-liner over `=` (no fe spend) lands in 05E; the wrong-type case is its sibling."
+}

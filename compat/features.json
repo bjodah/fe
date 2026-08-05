@@ -884,5 +884,492 @@
    "rationale": "kg-policy representation divergence, recorded by Phase 4's own plan (04A): Emacs stores a macro as a (macro . FUNCTION) cons in the function cell, observable only through (symbol-function 'NAME); fe has a distinct FeTMacro type and prints a macro value as (macro PARAMS BODY). Pinned by fe/test_api.c's TestWriter, which already asserts '(macro (a) a)' renders '(macro (a) a)'. The Phase 4 function-cell work (04C) must not imitate the cons representation to pass a case nobody wrote yet; this is kg-policy because Emacs has no anonymous macro object to snapshot at all.",
    "source_name": null
   }
+,
+  {
+   "id": "num-type-of",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-type-of-integer-float"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R1: the numeric split exists -- 42 is integer, 42.0 is float. Fe's one FeTNumber double answers (double double) today. The type_names[] slot lands in 05B; the reader that feeds it integers in 05D.",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-trailing-dot",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-literal-trailing-dot"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R2: an integer with a trailing dot reads as the integer, Decision 3's lexer (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-leading-dot",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-literal-leading-dot"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R3: a leading-dot token is a float, Decision 3's lexer (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-sign-prefix",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-literal-sign-prefix"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R4: a signed integer literal reads as an integer, Decision 3's lexer (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-exponent",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-literal-exponent"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R5: a bare exponent makes a token a float, Decision 3's lexer (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-hex-symbol",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-symbol-hex"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R6: `0x10` is a symbol, not a hex number; strtod's hex must die, Decision 3 (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-inf-nan-symbol",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-symbol-inf-nan"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R7: `inf` and `nan` are unbound symbols, not numbers; strtod's inf/nan must die, Decision 3 (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-reader-partial-exponent",
+   "category": "reader-and-literals",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-symbol-partial-exponent"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R8: a partial exponent token is a symbol, Decision 3 (05D) classifies before converting.",
+   "source_name": null
+  },
+  {
+   "id": "num-int64-exactness",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-integer-past-2^53"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R9: int64 exactness past 2^53 -- 9007199254740993 reads and prints exactly. The integer object (05B) and the integer reader (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-negative-zero-print",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-negative-zero"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row R10: signed zero survives read->print as -0.0, Decision 4 (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-float-shortest-roundtrip",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-float-shortest"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row P2: floats print shortest-round-trip, not %.7g noise; Decision 4's loop (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-nonfinite-inf",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-nonfinite-inf"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row P3: positive infinity prints 1.0e+INF, Decision 4 (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-nonfinite-neg-inf",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-nonfinite-neg-inf"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row P4: negative infinity prints -1.0e+INF, Decision 4 (05D).",
+   "source_name": null
+  },
+  {
+   "id": "num-nonfinite-nan",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-nonfinite-nan"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row P5: the pinned Emacs prints NaN as -0.0e+NaN; Decision 4 (05D) adopts the spelling and the reader accepts it back.",
+   "source_name": null
+  },
+  {
+   "id": "num-unary-minus",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-unary-minus"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A1: unary minus is negation, (- 5) is -5. Fe's double-only tower ignores the seed today; 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-unary-reciprocal",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-unary-reciprocal"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A2: unary / is reciprocal, truncated -- (/ 5) is the integer 0. 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-div-truncation",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-div-truncation"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A3: integer division truncates toward zero, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-div-mixed",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-div-mixed"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A4: mixed division promotes to float, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-div-zero",
+   "category": "errors-and-non-local-exits",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-div-zero"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A5: integer division by zero is arith-error, carried in FeHandleError()'s message until Phase 6. 05C, Decision 5.",
+   "source_name": null
+  },
+  {
+   "id": "num-mul-int",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-mul-int"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A6: all-integer arithmetic stays integer, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-add-mixed",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-add-mixed"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A7: mixed addition promotes to float, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-overflow-bignum",
+   "category": "errors-and-non-local-exits",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-overflow-bignum"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A8, the recorded divergence: int64 overflow is an arith-error-style message, never a bignum (modern Emacs prints the bignum 18446744073709551616); use __builtin_*_overflow, never UB. 05C, Decision 5.",
+   "source_name": null
+  },
+  {
+   "id": "num-less-chain",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-less-chain"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row C1: < is variadic and chained; fe today ignores the third operand. 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-greater-chain",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-greater-chain"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row C2: the new comparators > and >= chain too; fe core primitives, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-not-equal",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-not-equal",
+    "num-not-equal-arity"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row C3: `/=` is an fe core primitive, strictly binary -- three operands are wrong-number-of-arguments (unlike the chained `=`), enforced by the primitive since lambda arity stays lax. 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-eq-mixed",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-eq-mixed"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row C4: numeric = is mathematical value equality across types, 05C extends the existing arm.",
+   "source_name": null
+  },
+  {
+   "id": "num-comparison-wrong-type",
+   "category": "errors-and-non-local-exits",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-comparison-wrong-type"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row C5: comparison type errors say wrong-type-argument, replacing the expected-double texts on the numeric family. 05C, Decision 5.",
+   "source_name": null
+  },
+  {
+   "id": "num-eq",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-eq-int",
+    "num-eq-float",
+    "num-eq-string"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, rows E1-E3: fe-core `eq` -- pointer identity or both-integers-equal -- kills kg's prelude alias of `is` (which compares strings by content and floats epsilon-approximately). 05D lands the primitive; 05E deletes the prelude alias in the pin commit.",
+   "source_name": null
+  },
+  {
+   "id": "num-eql",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-eql-type-strict",
+    "num-eql-signed-zero"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, rows E4-E5: fe-core `eql` beside `eq` -- same-type numbers equal by bits for floats, by value for integers. 05D.",
+   "source_name": null
+  },
+  {
+   "id": "num-equal",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-equal"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row E6: the kg prelude `equal` rewrite target -- strings -> string=, numbers -> eql, else eq. Lands in 05E; standalone fe has no `equal`, so this stays a planned target snapshot in fe's corpus.",
+   "source_name": null
+  },
+  {
+   "id": "num-sqrt-float",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-sqrt-float"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row M1: sqrt returns a float always, per-function math-native return types, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-expt",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-expt"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row M2: expt's per-signature rule (all-int stays int, negative exponent flips to float, float base stays float), 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-rounding",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-rounding"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row M3: the rounding family returns integers; fe's Fex shadowing of these names is a recorded fact 05C works around. 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-round-half-even",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-round-half-even"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row M4: round is round-half-even (2.5 to 2, 3.5 to 4); the integer return type is 05C's.",
+   "source_name": null
+  },
+  {
+   "id": "num-sin-float",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-sin-float"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row M5: transcendentals are floats always, 05C.",
+   "source_name": null
+  },
+  {
+   "id": "num-zerop",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-zerop",
+    "num-zerop-wrong-type"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, rows Z1: the kg prelude one-liner over `=` (no fe spend) lands in 05E; the wrong-type case rides ='s 05C error name.",
+   "source_name": null
+  },
+  {
+   "id": "num-predicates",
+   "category": "values-and-equality",
+   "status": "planned",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-predicates"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row T1: integerp/floatp are fe core primitives (05C); numberp stays kg's native, widened to two tags in 05E -- fe must never add a numberp primitive (manifest collision).",
+   "source_name": null
+  }
  ]
 }

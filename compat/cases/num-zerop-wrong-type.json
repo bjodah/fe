@@ -1,0 +1,6 @@
+{
+ "id": "num-zerop-wrong-type",
+ "setup": [],
+ "expr": "(zerop \"a\")",
+ "note": "05A, row Z1b: `(zerop \"a\")` is `wrong-type-argument` -- the kg prelude one-liner over `=` gets it for free once `=` carries the Emacs error name (05C), landing with the prelude rewrite in 05E."
+}

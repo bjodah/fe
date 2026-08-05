@@ -1,0 +1,6 @@
+{
+ "id": "num-comparison-wrong-type",
+ "setup": [],
+ "expr": "(< 1 'a)",
+ "note": "05A, row C5: a non-numeric comparison operand is `wrong-type-argument` -- the Emacs condition name -- replacing fe's `expected double, got X` texts on the numeric family (CheckNumericEqualOperand's comment in fe_eval.c explains why the oracle comparator needs the Emacs name). 05C, Decision 5."
+}

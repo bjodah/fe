@@ -1,0 +1,6 @@
+{
+ "id": "num-unary-reciprocal",
+ "setup": [],
+ "expr": "(/ 5)",
+ "note": "05A, row A2: unary `/` is reciprocal, truncated -- (/ 5) is (/ 1 5) over integers, the integer 0. Fe's double-only tower answers 0.2 today; 05C's tower learns the unary reciprocal with integer truncation."
+}

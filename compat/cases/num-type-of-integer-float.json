@@ -1,0 +1,6 @@
+{
+ "id": "num-type-of-integer-float",
+ "setup": [],
+ "expr": "(list (type-of 42) (type-of 42.0))",
+ "note": "05A, row R1: pins that the numeric split exists -- a bare integer literal and a float literal are different types. Fe today has one FeTNumber double, so standalone Fe answers (double double); the `type_names[]` slot for the new type lands in 05B, and the reader that feeds it integers in 05D."
+}

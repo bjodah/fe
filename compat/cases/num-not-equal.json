@@ -1,0 +1,6 @@
+{
+ "id": "num-not-equal",
+ "setup": [],
+ "expr": "(/= 1 2)",
+ "note": "05A, row C3a: `/=` is fe core primitive, strictly binary -- (t). 05C lands it."
+}

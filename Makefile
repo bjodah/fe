@@ -144,8 +144,21 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # authoritative unit for the core from 03A's Decision; both units are
 # priced and reported anyway. kg needs no raise for the same phase -- its
 # +15 to +25 estimate sits inside 56 points of measured headroom (5444/5500).
-SCC_COMPLEXITY_MAX ?= 480
-SCC_FILE_COMPLEXITY_MAX ?= 300
+#
+# Raised a fifth time, 480->540 / 300->340, by sub-plan 05A of the same
+# program's Phase 5 Decision (set README, dated 2026-08-05), funding
+# 05B-05D by name ahead of when they land: the integer tower is priced
+# +50 to +70 against the real tree (the type in the existing Value union,
+# the Emacs number lexer replacing ReadAtom's strtod, shortest-round-trip
+# float printing, either-type ResumeArith/ResumeBinary arms, the chained
+# comparators, the `>`/`>=`/`/=`/`integerp`/`floatp`/`eq`/`eql` primitives, per-function
+# math-native return types), and the measured starting state is 459/480
+# scc (fe_eval.c 276/300) with 660/690 pmccabe across 248 symbols -- 21
+# and 30 points of headroom against a row priced at +50 to +70, so the
+# caps move to the top of that range and fund the whole phase at once.
+# This slice adds no code, so the actuals stay put until 05B lands.
+SCC_COMPLEXITY_MAX ?= 540
+SCC_FILE_COMPLEXITY_MAX ?= 340
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
@@ -184,7 +197,21 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # precedent. Both scc gates move with it (420->480 / 240->300, same
 # estimate); the per-symbol manifest is unchanged and is re-banked only if
 # 04B-04D land improvements.
-PMCCABE_TOTAL_MAX ?= 690
+#
+# Raised again, 690->760, by sub-plan 05A's Phase 5 Decision (set README,
+# dated 2026-08-05), funding integers 05B-05D by name: the phase is priced
+# +50 to +70 pmccabe against the real tree (integer dispatch in
+# `ResumeArith`/`ResumeBinary`/the `=` arm -- the `ARITH_OP`/`NUM_CMP_OP`
+# macros this row originally named died with the recursive evaluator in
+# 03E -- plus seven new primitives `>` `>=` `/=` `integerp` `floatp` 05D's
+# `eq`/`eql`, the Emacs number lexer and the shortest-round-trip printer),
+# and the measured starting total is 660/690 across 248 symbols -- 30
+# points of headroom against a +50 to +70 phase, so the cap moves by the
+# top of that range and funds the whole phase at once, the 00A/03A/04A
+# precedent. Both scc gates move with it (480->540 / 300->340, same
+# estimate); the per-symbol manifest is unchanged and is re-banked only if
+# 05B-05D land improvements.
+PMCCABE_TOTAL_MAX ?= 760
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

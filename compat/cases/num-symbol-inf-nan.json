@@ -1,0 +1,6 @@
+{
+ "id": "num-symbol-inf-nan",
+ "setup": [],
+ "expr": "(list (boundp 'inf) (boundp 'nan))",
+ "note": "05A, row R7: `inf` and `nan` are unbound symbols, not numbers -- strtod's inf/nan recognition must die with Decision 3 (05D). The nonfinite floats have their own spellings (num-nonfinite-*), read only if the printer emits them."
+}

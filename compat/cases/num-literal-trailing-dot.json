@@ -1,0 +1,6 @@
+{
+ "id": "num-literal-trailing-dot",
+ "setup": [],
+ "expr": "1.",
+ "note": "05A, row R2: an integer with a trailing dot reads as the integer 1, not a float. Decision 3's lexer (05D): integer = optional sign, digits, optional trailing dot."
+}

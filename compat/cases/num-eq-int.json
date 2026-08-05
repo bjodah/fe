@@ -1,0 +1,6 @@
+{
+ "id": "num-eq-int",
+ "setup": [],
+ "expr": "(eq 3 3)",
+ "note": "05A, row E1: two equal fixnums are `eq` by value -- load-bearing for kg's `memq` and `auto-fill.el`. `eq` today is kg's prelude alias of `is`; 05D lands it as an fe core primitive (pointer identity or both-integers-equal), with the prelude alias deleted in 05E's pin commit."
+}

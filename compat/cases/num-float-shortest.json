@@ -1,0 +1,6 @@
+{
+ "id": "num-float-shortest",
+ "setup": [],
+ "expr": "0.1",
+ "note": "05A, row P2: a float prints via shortest-round-trip, not `%.7g` noise -- 0.1 stays 0.1. Decision 4's loop (05D): `%.{1..17}g` until `strtod` round-trips."
+}

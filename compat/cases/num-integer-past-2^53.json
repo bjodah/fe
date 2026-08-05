@@ -1,0 +1,6 @@
+{
+ "id": "num-integer-past-2^53",
+ "setup": [],
+ "expr": "9007199254740993",
+ "note": "05A, row R9: 2^53+1 reads and prints exactly -- int64 exactness past the double mantissa, where a double-only reader would print 9007199254740992. The integer object (05B) and the integer reader (05D)."
+}

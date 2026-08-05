@@ -1,0 +1,8 @@
+{
+ "id": "num-symbol-partial-exponent",
+ "setup": [
+  "(setq 1e 5)"
+ ],
+ "expr": "1e",
+ "note": "05A, row R8: a partial exponent token is a symbol -- `1e` binds and reads back as 5. Decision 3's lexer (05D) classifies tokens before conversion; a bare exponent marker with no digits is not a number."
+}

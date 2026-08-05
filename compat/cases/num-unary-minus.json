@@ -1,0 +1,6 @@
+{
+ "id": "num-unary-minus",
+ "setup": [],
+ "expr": "(- 5)",
+ "note": "05A, row A1: unary minus is negation -- (- 5) is the integer -5. Fe's double-only tower answers 5 today (the seed is ignored), so this flips in 05C when the tower learns the unary semantics."
+}

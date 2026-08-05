@@ -1,0 +1,6 @@
+{
+ "id": "num-div-truncation",
+ "setup": [],
+ "expr": "(list (/ 7 2) (/ -7 2))",
+ "note": "05A, row A3: integer division truncates toward zero -- 3 and -3, never 3.5 or floor semantics. 05C's tower; primitive-div's existing case (/ 10 2) cannot see the distinction."
+}

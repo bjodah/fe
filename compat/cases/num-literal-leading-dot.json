@@ -1,0 +1,6 @@
+{
+ "id": "num-literal-leading-dot",
+ "setup": [],
+ "expr": ".5",
+ "note": "05A, row R3: a leading-dot token is a float 0.5. Decision 3's lexer (05D): digits with a fractional part and/or exponent are floats."
+}

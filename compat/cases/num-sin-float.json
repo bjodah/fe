@@ -1,0 +1,6 @@
+{
+ "id": "num-sin-float",
+ "setup": [],
+ "expr": "(sin 0)",
+ "note": "05A, row M5: transcendentals are floats, always -- (sin 0) is 0.0. 05C's per-function math-native return types; the integral-shortcut printer hides the type today."
+}

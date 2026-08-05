@@ -1,0 +1,6 @@
+{
+ "id": "num-literal-exponent",
+ "setup": [],
+ "expr": "1e3",
+ "note": "05A, row R5: a bare exponent makes a token a float -- 1e3 is the float 1000.0, not the integer 1000. Decision 3's lexer (05D): float = digits with a fractional part and/or exponent."
+}

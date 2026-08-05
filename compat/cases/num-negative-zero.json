@@ -1,0 +1,6 @@
+{
+ "id": "num-negative-zero",
+ "setup": [],
+ "expr": "-0.0",
+ "note": "05A, row R10: signed zero survives read->print as `-0.0`. Pins the printer must not normalise negative zero, and the reader must preserve it. Decision 4 (05D)."
+}

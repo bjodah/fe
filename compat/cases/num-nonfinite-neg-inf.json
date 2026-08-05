@@ -1,0 +1,6 @@
+{
+ "id": "num-nonfinite-neg-inf",
+ "setup": [],
+ "expr": "(- 0 (/ 1.0 0))",
+ "note": "05A, row P4: the negative-infinite float prints `-1.0e+INF`. Decision 4 (05D): nonfinite spellings include the sign."
+}

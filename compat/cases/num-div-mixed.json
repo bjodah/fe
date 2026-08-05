@@ -1,0 +1,6 @@
+{
+ "id": "num-div-mixed",
+ "setup": [],
+ "expr": "(/ 7 2.0)",
+ "note": "05A, row A4: a mixed integer/float division promotes to float -- 3.5, not 3. 05C's tower promotion rule."
+}

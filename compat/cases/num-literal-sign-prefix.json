@@ -1,0 +1,6 @@
+{
+ "id": "num-literal-sign-prefix",
+ "setup": [],
+ "expr": "+5",
+ "note": "05A, row R4: a plus-signed integer literal reads as the integer 5. Decision 3's lexer (05D): optional sign, digits, optional trailing dot."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-greater-chain",
+ "setup": [],
+ "expr": "(list (> 3 2 1) (>= 2 2 1))",
+ "note": "05A, row C2: the new comparators `>` and `>=` chain too. Neither exists in fe today (fe_internal.h carries the TODO); 05C lands them as fe core primitives with the chained semantics."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-rounding",
+ "setup": [],
+ "expr": "(list (floor 7.5) (truncate -7.5) (ceiling -7 2))",
+ "note": "05A, row M3: the rounding family returns integers -- floor 7, truncate -7, ceiling -3 -- and the two-argument forms divide first. 05C's per-function math-native return types; fe's Fex shadowing of these names (fex_math.c) is a recorded fact 05C's tests work around, not something to fix."
+}

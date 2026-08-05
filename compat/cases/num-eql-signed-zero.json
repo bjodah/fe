@@ -1,0 +1,6 @@
+{
+ "id": "num-eql-signed-zero",
+ "setup": [],
+ "expr": "(eql 0.0 -0.0)",
+ "note": "05A, row E5: float `eql` is bit-level -- 0.0 and -0.0 are `=` but not `eql`, so nil. Confirmed against the pinned Emacs (2026-08-05); 05D's `eql` compares same-type floats by bits."
+}

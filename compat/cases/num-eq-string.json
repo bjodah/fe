@@ -1,0 +1,6 @@
+{
+ "id": "num-eq-string",
+ "setup": [],
+ "expr": "(eq \"a\" \"a\")",
+ "note": "05A, row E3: strings are identity under `eq` -- two separately-read \"a\"s are nil. This is today's headline `eq` divergence: kg's prelude alias of `is` compares strings by content and answers t. 05D's fe-core `eq` + 05E's prelude alias deletion kill it."
+}

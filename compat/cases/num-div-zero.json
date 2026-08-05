@@ -1,0 +1,6 @@
+{
+ "id": "num-div-zero",
+ "setup": [],
+ "expr": "(/ 1 0)",
+ "note": "05A, row A5: integer division by zero is `arith-error` -- the Emacs condition name carried in FeHandleError()'s message until Phase 6, per the standing message-level rule. 05C's tower (Decision 5)."
+}

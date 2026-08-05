@@ -1,0 +1,6 @@
+{
+ "id": "num-add-mixed",
+ "setup": [],
+ "expr": "(+ 1 2.0)",
+ "note": "05A, row A7: mixed addition promotes to float -- 3.0, printed with its decimal point. 05C's tower promotion rule; value-arith-add's existing all-integer case cannot see it."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-round-half-even",
+ "setup": [],
+ "expr": "(list (round 2.5) (round 3.5))",
+ "note": "05A, row M4: `round` is round-half-even -- 2.5 to 2, 3.5 to 4. The integer return type is 05C's; the half-even rounding itself is already `nearbyint` in fe's native."
+}

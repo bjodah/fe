@@ -1,0 +1,6 @@
+{
+ "id": "num-predicates",
+ "setup": [],
+ "expr": "(list (integerp 3) (integerp 3.0) (floatp 3.0) (numberp 3))",
+ "note": "05A, row T1: the predicate family -- integerp t/nil, floatp t, numberp t. `integerp`/`floatp` land as fe core primitives in 05C; `numberp` stays kg's native (`src/lisp_cmd.c`), widened to two tags in 05E -- fe must never add its own `numberp` primitive (manifest collision, and FeDefineNative would silently overwrite it)."
+}

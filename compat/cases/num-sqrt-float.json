@@ -1,0 +1,6 @@
+{
+ "id": "num-sqrt-float",
+ "setup": [],
+ "expr": "(sqrt 16)",
+ "note": "05A, row M1: `sqrt` returns a float, always -- (sqrt 16) is 4.0. 05C gives the math natives per-function return types; today every native returns a double, but the integral-shortcut printer hides it."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-mul-int",
+ "setup": [],
+ "expr": "(* 2 3)",
+ "note": "05A, row A6: all-integer arithmetic stays integer -- (* 2 3) is the integer 6. 05C's tower keeps integer types through the arms; primitive-mul's existing case cannot tell integer from float."
+}

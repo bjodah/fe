@@ -1,0 +1,6 @@
+{
+ "id": "num-equal",
+ "setup": [],
+ "expr": "(list (equal 3 3.0) (equal \"ab\" \"ab\"))",
+ "note": "05A, row E6: `equal` is `eql` on numbers (3 vs 3.0 nil) and content on strings (two \"ab\"s t). The target is kg's prelude `equal` rewrite -- its atom tail becomes strings -> string=, numbers -> eql, else eq -- landing in 05E; standalone fe has no `equal` at all, so this stays a planned target snapshot in fe's corpus."
+}

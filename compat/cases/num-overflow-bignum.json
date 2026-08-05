@@ -1,0 +1,6 @@
+{
+ "id": "num-overflow-bignum",
+ "setup": [],
+ "expr": "(* 4611686018427387904 4)",
+ "note": "05A, row A8, the divergence row: 2^62 * 4 overflows int64, so modern Emacs promotes to a bignum and prints 18446744073709551616. Fe's target is int64 with a recorded divergence: overflow is an `arith-error`-style message, never UB (`__builtin_*_overflow`), per Decision 5 (05C). The snapshot pins what Emacs does; fe must not imitate the bignum."
+}

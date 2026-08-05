@@ -1,0 +1,6 @@
+{
+ "id": "num-expt",
+ "setup": [],
+ "expr": "(list (expt 2 8) (expt 2 -1) (expt 2.0 8))",
+ "note": "05A, row M2: `expt`'s per-signature rule -- all-integer stays integer (256), negative exponent flips to float (0.5), float base stays float (256.0). 05C's per-function math-native return types. kg's own lisp-exponentiation.yaml already asserts the middle column's shape."
+}

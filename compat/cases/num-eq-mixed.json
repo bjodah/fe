@@ -1,0 +1,6 @@
+{
+ "id": "num-eq-mixed",
+ "setup": [],
+ "expr": "(= 3 3.0)",
+ "note": "05A, row C4: numeric `=` is mathematical value equality across types -- 3 equals 3.0. 05C extends the existing chained `=` arm to mixed numeric values."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-nonfinite-nan",
+ "setup": [],
+ "expr": "(sqrt -1)",
+ "note": "05A, row P5: the pinned Emacs prints NaN as `-0.0e+NaN`. Fe's reader cannot spell that today (and the compatibility note on primitive-numeric-eq-nan records the same gap), so the snapshot records Emacs' exact text; Decision 4 (05D) makes the printer emit it and the reader accept it back as the read/print round-trip invariant."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "num-eql-type-strict",
+ "setup": [],
+ "expr": "(list (eql 3 3.0) (eql 1.5 1.5))",
+ "note": "05A, row E4: `eql` is type-strict value equality -- 3 and 3.0 are not eql, two equal same-type floats are. 05D lands `eql` as an fe core primitive beside `eq` (no prelude collision, but they are siblings and land together)."
+}

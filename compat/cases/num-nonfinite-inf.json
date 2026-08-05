@@ -1,0 +1,6 @@
+{
+ "id": "num-nonfinite-inf",
+ "setup": [],
+ "expr": "(/ 1.0 0)",
+ "note": "05A, row P3: float division by zero yields the positive-infinite float, printed in Emacs' spelling `1.0e+INF`. Decision 4 adopts the nonfinite spellings (05D), retiring the kg.1 format divergence whose rationale this phase deletes."
+}
