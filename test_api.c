@@ -490,6 +490,22 @@ static bool ExpectReleaseError(FeContext* context,
   return true;
 }
 
+static bool ExpectIntegerError(FeContext* context,
+                               ErrorState* state,
+                               FeObject* object,
+                               const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  state->called = false;
+  state->expected_message = expected;
+  if (setjmp(state->jump) == 0) {
+    (void)FeToInteger(context, object);
+    CHECK(false);
+  }
+  FeRestoreGC(context, gc);
+  CHECK(state->called);
+  return true;
+}
+
 static bool TestUserDataAndErrors(void) {
   TestArena arenas[2];
   const size_t size = sizeof(arenas[0].bytes);
@@ -1349,6 +1365,76 @@ static bool TestSymbolCells(void) {
                    FeEvaluateString(context, "cell.fe", "cell-probe",
                                     sizeof("cell-probe") - 1),
                    "42"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 05B of kg's Emacs-subset program: the integer object, dormant.
+// It exists on the host C surface -- constructible, readable, printable,
+// typed, collectable -- and is producible by no Lisp program: the reader is
+// untouched and no primitive returns one, so every golden stays
+// byte-identical. `(type-of ...)` cannot observe it from Lisp (no
+// producer); the `type_names` slot is asserted through the C surface
+// instead, via the error text `CheckType` names it with.
+static bool TestInteger(void) {
+  TestArena arena;
+  const size_t size = FeMinimumArenaSize() + 8 * 1024;
+  CHECK(size <= sizeof(arena.bytes));
+  FeContext* context = FeOpenContext(arena.bytes, size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // FeMakeInteger round-trips through FeToInteger at both extremes, and
+  // FeGetType names the new tag.
+  FeObject* min_integer = FeMakeInteger(context, INT64_MIN);
+  CHECK(FeGetType(min_integer) == FeTInteger);
+  CHECK(FeToInteger(context, min_integer) == INT64_MIN);
+  FeObject* max_integer = FeMakeInteger(context, INT64_MAX);
+  CHECK(FeGetType(max_integer) == FeTInteger);
+  CHECK(FeToInteger(context, max_integer) == INT64_MAX);
+
+  // The writer prints integers exactly, at the extreme that would overflow
+  // a double and at an ordinary value.
+  CHECK(IsRendered(context, min_integer, "-9223372036854775808"));
+  CHECK(IsRendered(context, FeMakeInteger(context, 42), "42"));
+
+  // FeToDouble widens, so every current double-taking host read already
+  // accepts a host-made integer. The converted double is asserted exactly
+  // through the writer (an integral
+  // double prints bare), which sidesteps -Wfloat-equal.
+  CHECK(IsRendered(
+      context,
+      FeMakeDouble(context, FeToDouble(context, FeMakeInteger(context, 42))),
+      "42"));
+  CHECK(IsRendered(context,
+                   FeMakeDouble(context, FeToDouble(context, min_integer)),
+                   "-9223372036854775808"));
+
+  // The `type_names` slot, which is what `type-of` will return once the
+  // reader can produce integers.
+  CHECK(ExpectIntegerError(context, &state, FeMakeDouble(context, 1),
+                           "expected integer, got double"));
+
+  // A forced collection with a live integer preserves the value. The only
+  // root is the symbol's value cell: the object is popped off the GC stack
+  // before the churn, so a collection must reach it through the symbol.
+  const size_t gc = FeSaveGC(context);
+  FeObject* integer = FeMakeInteger(context, INT64_MAX);
+  FeSet(context, FeMakeSymbol(context, "integer-probe"), integer);
+  FeRestoreGC(context, gc);
+  const size_t collections = FeGetArenaStats(context).collection_count;
+  static const char churn[] =
+      "(setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "churn.fe", churn, sizeof(churn) - 1),
+      "2000"));
+  CHECK(FeGetArenaStats(context).collection_count > collections);
+  CHECK(FeToInteger(context, FeEvaluateString(
+                                 context, "probe.fe", "integer-probe",
+                                 sizeof("integer-probe") - 1)) == INT64_MAX);
 
   FeCloseContext(context);
   return true;
@@ -4327,7 +4413,7 @@ int main(void) {
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestSymbolCells() &&
-                 TestFunctionCells() && TestNamespaceCut() &&
+                 TestInteger() && TestFunctionCells() && TestNamespaceCut() &&
                  TestSetqAndSet() && TestNumericEqual() &&
                  TestUnwindHostAPI() && TestUnwindLisp() &&
                  TestUnwindCleanupBudget() && TestFrameLimits() &&

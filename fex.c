@@ -17,6 +17,7 @@ static FeObject* FexGC(FeContext* ctx, FeObject* o) {
     case FeTFree:
     case FeTNil:
     case FeTDouble:
+    case FeTInteger:
     case FeTSymbol:
     case FeTString:
     case FeTFn:

@@ -84,6 +84,7 @@ const char* type_names[] = {
     [FeTFree] = "free",
     [FeTNil] = "nil",
     [FeTDouble] = "double",
+    [FeTInteger] = "integer",
     [FeTSymbol] = "symbol",
     [FeTString] = "string",
     [FeTFn] = "lambda",
@@ -279,6 +280,7 @@ begin:
     case FeTFree:
     case FeTNil:
     case FeTDouble:
+    case FeTInteger:
     case FeTPrimitive:
     case FeTNativeFn:
       // Do nothing.
@@ -432,6 +434,13 @@ FeObject* FeMakeDouble(FeContext* ctx, FeDouble n) {
   FeObject* obj = MakeObject(ctx);
   SetType(obj, FeTDouble);
   DOUBLE(obj) = n;
+  return obj;
+}
+
+FeObject* FeMakeInteger(FeContext* ctx, int64_t n) {
+  FeObject* obj = MakeObject(ctx);
+  SetType(obj, FeTInteger);
+  INTEGER(obj) = n;
   return obj;
 }
 
@@ -687,6 +696,11 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
       EmitDouble(w, obj);
       break;
 
+    case FeTInteger:
+      Format(buf, sizeof(buf), "%" PRId64, INTEGER(obj));
+      EmitString(w, buf);
+      break;
+
     case FeTPair:
       // `(function X)` prints as `#'X`, the reader macro's abbreviation --
       // the writer half of sub-plan 04D's `#'` change, and the exact shape
@@ -851,7 +865,14 @@ bool FeCopyStringBytes(FeContext* ctx,
 }
 
 FeDouble FeToDouble(FeContext* ctx, FeObject* obj) {
+  if (FeGetType(obj) == FeTInteger) {
+    return (FeDouble)INTEGER(obj);
+  }
   return GetDouble(CheckType(ctx, obj, FeTDouble));
+}
+
+int64_t FeToInteger(FeContext* ctx, FeObject* obj) {
+  return INTEGER(CheckType(ctx, obj, FeTInteger));
 }
 
 void* FeToPtr(FeContext*, FeObject* obj) {

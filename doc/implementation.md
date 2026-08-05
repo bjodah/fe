@@ -66,6 +66,18 @@ smaller in size than an `FeObject` pointer. If a different type of value is
 used, `FeRead` and `FeWrite` must also be updated to handle the new type
 correctly.
 
+Sub-plan 05B of kg's Emacs-subset program added the dormant integer object:
+`FeTInteger`, an `int64_t` payload in the `cdr` (the `Value` union, which
+`static_assert`s pointer-size on both CI compilers). It is constructible and
+readable through the host API (`FeMakeInteger`/`FeToInteger`) and `FeToDouble`
+accepts it, but the reader is untouched and no primitive returns one, so no
+Lisp program can produce an integer yet and the writer's integer arm
+(`%PRId64`) is reachable only from the host. An integer marks and collects
+exactly as a double does: a leaf. The doubles-only arithmetic paths are
+unchanged; a host-made integer reaching them goes through the widened
+`FeToDouble` (arithmetic) or fails the existing `FeTDouble` checks (`<`, `=`).
+Both behaviours are dormant-state artifacts the numeric tower (05C) replaces.
+
 ### Primitives
 
 Primitives (built-ins) store a `Primtive` `enum` value in the `cdr` part of the

@@ -44,9 +44,12 @@ static FeObject* MakeBinary(FeContext* ctx,
 }
 
 static FeObject* BuildNumber(FeContext* ctx, FuzzInput* input) {
-  const uint16_t bits =
-      (uint16_t)FuzzTakeByte(input) | (uint16_t)FuzzTakeByte(input) << 8;
-  return FeMakeDouble(ctx, (double)(int16_t)bits);
+  const int16_t value = (int16_t)((uint16_t)FuzzTakeByte(input) |
+                                  (uint16_t)FuzzTakeByte(input) << 8);
+  // 05B reach-ahead: odd tag bytes make an integer, so the grammar already
+  // mixes both numeric types before the reader can produce integers.
+  return FuzzTakeByte(input) & 1 ? FeMakeInteger(ctx, value)
+                                 : FeMakeDouble(ctx, (double)value);
 }
 
 static FeObject* BuildString(FeContext* ctx, FuzzInput* input) {

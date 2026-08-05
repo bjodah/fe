@@ -14,6 +14,7 @@
 
 #include <setjmp.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "fe.h"
 
@@ -80,9 +81,17 @@ typedef union {
   FeObject* o;
   FeNativeFn* f;
   FeDouble n;
+  // Sub-plan 05B of kg's Emacs-subset program: the integer payload. 05A's
+  // spike confirmed the union stays pointer-sized with it; the assert below
+  // makes that permanent.
+  int64_t i;
   // TODO: Might need/want to make this `uintptr_t` someday.
   char c;
 } Value;
+
+// The representation Decision the integer object stands on (05A's spike,
+// confirmed on both CI compilers): every object is exactly one pointer.
+static_assert(sizeof(Value) == sizeof(FeObject*));
 
 enum {
   // Stored in the lowest-order bit of `Value.c`:
@@ -416,6 +425,7 @@ extern FeObject unbound;
 #define CDR(x) ((x)->cdr.o)
 #define TAG(x) ((x)->car.c)
 #define DOUBLE(x) ((x)->cdr.n)
+#define INTEGER(x) ((x)->cdr.i)
 #define PRIM(x) ((x)->cdr.c)
 #define NATIVE_FN(x) ((x)->cdr.f)
 #define STRING_BUFFER(x) (&(x)->car.c + 1)

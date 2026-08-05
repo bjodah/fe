@@ -185,6 +185,14 @@ context.
 `FeNil()` returns Fe's nil object without requiring an embedder to reference
 the legacy public `nil` global.
 
+`FeMakeInteger(ctx, value)` creates an `FeTInteger` with an exact `int64_t`
+payload, and `FeToInteger(ctx, object)` returns that payload or raises an
+`expected integer` type error. Integers are currently a host-only API value:
+the reader and built-in primitives still produce doubles, so no Lisp program
+can create one. `FeToDouble()` also accepts an integer and converts it to an
+`FeDouble`; as with any integer-to-floating conversion, large values may not
+be represented exactly.
+
 `FeIsBound()` reports whether a symbol has a global value. A symbol exists as
 soon as it is read or interned, but its value cell starts out holding a private
 sentinel that no API returns and Lisp cannot reach; evaluating such a symbol

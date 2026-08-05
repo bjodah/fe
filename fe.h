@@ -6,6 +6,7 @@
 #define FE_H
 
 #include <stddef.h>  // IWYU pragma: keep
+#include <stdint.h>
 #include <stdio.h>
 
 // The embedding contract: the C functions, types, and callback signatures
@@ -26,6 +27,14 @@
 // contract. A host that called `FeDefineNative` for names it then called
 // from Lisp must recompile anyway -- the tripwire is kg's own
 // `static_assert(FE_API_VERSION == 2)`, which this bump fires.
+//
+// Version 4 (sub-plan 05D of kg's Emacs-subset program) is the numeric cut,
+// and the bump has been pending since 05B: 05A's placement (a) Decision
+// inserted `FeTInteger` into the public `FeType` enum immediately after
+// `FeTDouble`, renumbering every later constant including `FeTPtr`, so a
+// host built against this header is already ABI-incompatible with a core
+// linked before that renumbering even though `FE_API_VERSION` still reads 3
+// here. The version move is deliberately 05D's, not 05B's.
 #define FE_API_VERSION 3
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
@@ -119,6 +128,11 @@ typedef enum FeType {
   FeTFree,
   FeTNil,
   FeTDouble,
+  // Sub-plan 05A's placement (a) Decision (kg's Emacs-subset program): an
+  // integer sits next to the double it was born from, renumbering every
+  // later constant. See the version comment above -- the ABI break rides
+  // 05D's FE_API_VERSION bump, not this slice.
+  FeTInteger,
   FeTSymbol,
   FeTString,
   FeTFn,
@@ -240,6 +254,11 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 [[nodiscard]] FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr);
 [[nodiscard]] FeObject* FeMakeBool(FeContext* ctx, bool b);
 [[nodiscard]] FeObject* FeMakeDouble(FeContext* ctx, FeDouble n);
+// Sub-plan 05B of kg's Emacs-subset program: an `int64_t` number, dormant
+// -- constructible and readable from the host API but producible by no Lisp
+// program yet. `FeToDouble` accepts it, so a host-made integer already flows
+// through every double-taking host read; `FeToInteger` is its mirror.
+[[nodiscard]] FeObject* FeMakeInteger(FeContext* ctx, int64_t n);
 [[nodiscard]] FeObject* FeMakeString(FeContext* ctx, const char* str);
 [[nodiscard]] FeObject* FeMakeSymbol(FeContext* ctx, const char* name);
 [[nodiscard]] FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn);
@@ -281,6 +300,7 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
                                      char* dst,
                                      size_t size);
 [[nodiscard]] FeDouble FeToDouble(FeContext* ctx, FeObject* obj);
+[[nodiscard]] int64_t FeToInteger(FeContext* ctx, FeObject* obj);
 [[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 [[nodiscard]] bool FeIsBound(FeContext* ctx, FeObject* sym);
