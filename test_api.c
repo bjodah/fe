@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "fe.h"
+#include "fe_internal.h"
 
 #define CHECK(condition)                                 \
   do {                                                   \
@@ -1271,6 +1272,72 @@ static bool TestBinding(void) {
 
   CHECK(FeIsBound(context, FeMakeSymbol(context, "holds-nil")));
   CHECK(!FeIsBound(context, absent));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 04B: the symbol layout lives behind the fe_internal.h accessors,
+// and a fresh symbol carries a dormant function cell. The function cell is
+// written by this test and read by nothing else until Phase 4's lookup
+// slices (04C/04D); the value cell must be untouched by function-cell
+// writes, and a function object reachable only through the cell must survive
+// a forced collection -- the collector's symbol arm walks `CDR(sym)` into the
+// new inner pair, so this is where a missed GC-rooting change would show up.
+static bool TestSymbolCells(void) {
+  TestArena arena;
+  const size_t size = FeMinimumArenaSize() + 8 * 1024;
+  CHECK(size <= sizeof(arena.bytes));
+  FeContext* context = FeOpenContext(arena.bytes, size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Interning still deduplicates, and the scan goes through SymbolName.
+  FeObject* first = FeMakeSymbol(context, "cell-probe");
+  CHECK(first != nullptr);
+  CHECK(FeMakeSymbol(context, "cell-probe") == first);
+
+  // A symbol prints its name through SymbolName; nothing leaks the layout.
+  CHECK(IsRendered(context, first, "cell-probe"));
+
+  // A fresh symbol's function cell and value cell are both unbound, and the
+  // function cell is independent of the value one.
+  CHECK(SymbolFunction(first) == &unbound);
+  CHECK(!FeIsBound(context, first));
+
+  // SetSymbolFunction roundtrips. The function object's only root is the
+  // cell: it is popped off the GC stack before the collection below.
+  const size_t gc = FeSaveGC(context);
+  FeObject* native = FeMakeNativeFn(context, OrdinaryNative);
+  SetSymbolFunction(first, native);
+  CHECK(SymbolFunction(first) == native);
+  FeRestoreGC(context, gc);
+
+  // The value cell is untouched by function-cell writes.
+  FeSet(context, first, FeMakeDouble(context, 42));
+  CHECK(FeIsBound(context, first));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "cell.fe", "cell-probe",
+                                    sizeof("cell-probe") - 1),
+                   "42"));
+  CHECK(SymbolFunction(first) == native);
+
+  // A churn loop allocates until the freelist empties, forcing collections;
+  // the function object, reachable only through the symbol's cell, survives.
+  const size_t collections = FeGetArenaStats(context).collection_count;
+  static const char churn[] =
+      "(setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "churn.fe", churn, sizeof(churn) - 1),
+      "2000"));
+  CHECK(FeGetArenaStats(context).collection_count > collections);
+  CHECK(SymbolFunction(first) == native);
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "cell.fe", "cell-probe",
+                                    sizeof("cell-probe") - 1),
+                   "42"));
 
   FeCloseContext(context);
   return true;
@@ -3820,19 +3887,19 @@ int main(void) {
                  TestRootsAndCalls() && TestCallWithOptions() &&
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
-                 TestParameterLists() && TestBinding() && TestSetqAndSet() &&
-                 TestNumericEqual() && TestUnwindHostAPI() &&
-                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestFrameLimits() && TestFrameSubstrate() &&
-                 TestArenaStats() && TestEvaluationStackProbe() &&
-                 TestCallHeadProbe() && TestArgumentFrame() &&
-                 TestArgumentProbe() && TestLambdaBodyFrame() &&
-                 TestLambdaBodyChain() && TestMacroFrame() &&
-                 TestNativeReentry() && TestNativeOwningReentry() &&
-                 TestResumableFrameGC() && TestCleanupRunGC() &&
-                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
-                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
-                 TestGcStackConstantInNesting()
+                 TestParameterLists() && TestBinding() && TestSymbolCells() &&
+                 TestSetqAndSet() && TestNumericEqual() &&
+                 TestUnwindHostAPI() && TestUnwindLisp() &&
+                 TestUnwindCleanupBudget() && TestFrameLimits() &&
+                 TestFrameSubstrate() && TestArenaStats() &&
+                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
+                 TestArgumentFrame() && TestArgumentProbe() &&
+                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
+                 TestMacroFrame() && TestNativeReentry() &&
+                 TestNativeOwningReentry() && TestResumableFrameGC() &&
+                 TestCleanupRunGC() && TestPrimitiveOrder() &&
+                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
+                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

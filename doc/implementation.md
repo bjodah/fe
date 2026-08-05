@@ -44,9 +44,17 @@ of the string, or `nil` if this was the last part of the string.
 
 ### Symbols
 
-Symbols store a pair object in the `cdr`; the `car` of this pair contains a
-`string` object, and the `cdr` part contains the globally bound value for the
-symbol. Symbols are interned.
+Symbols store a pair object in the `cdr`; the `car` of that pair is a second
+pair holding the symbol's name string and its function cell, and the `cdr`
+part of the outer pair contains the globally bound value for the symbol:
+`CDR(sym) = ((name . function) . value)` (sub-plan 04B of kg's Emacs-subset
+program). The function cell starts out holding `unbound` and is dormant:
+nothing in the evaluator reads it yet, and only the `fe_internal.h` accessors
+`SymbolFunction`/`SetSymbolFunction` reach it. Every reader of this private
+layout goes through the named accessors (`SymbolName`, `SymbolBindingCell`,
+`SymbolFunction`) rather than spelling the pair walk itself, so the later
+Phase-4 lookup slices can change resolution without touching the
+representation readers. Symbols are interned.
 
 ### Numbers
 
@@ -77,18 +85,22 @@ place of an arguments list.
 Environments are stored as association lists; for example, an environment with
 the symbol `x` bound to `10` and `y` bound to `20` would be `((x . 10) (y .
 20))`. Globally bound values are stored directly in the symbol object: a symbol's
-`cdr` is the pair `(name . value)`, so a global binding and a lexical one are
-the same shape and one lookup returns the cell either way.
+`cdr` is the pair `((name . function) . value)`, whose `cdr` -- the value cell
+-- is the same shape as a lexical binding, so `GetBound`'s global path returns
+that cell (`SymbolBindingCell`) and one lookup returns the cell either way. The
+`(name . function)` inner pair is private to the symbol accessors; the value
+path's unit of currency is the binding cell, so there is deliberately no
+value-shaped accessor.
 
 A symbol exists as soon as it is read, which is not the same as having a value.
-A fresh symbol's value cell holds `unbound`, a private static object outside the
-arena — like `nil`, so the collector neither sweeps nor has to mark it, and
-`FeMark` treats it as a leaf. Nothing returns it: Lisp cannot reach a value cell
-(`(cdr sym)` is a type error, and `(env)` yields symbols whose printed form is
-their name), and the two readers of a value cell — symbol evaluation and the
-head of a call — turn it into `void-variable NAME` and `void-function NAME`. It
-is tagged `FeTFree` so that an escape aborts in the writer rather than
-impersonating a value.
+A fresh symbol's value cell and function cell both hold `unbound`, a private
+static object outside the arena — like `nil`, so the collector neither sweeps
+nor has to mark it, and `FeMark` treats it as a leaf. Nothing returns it: Lisp
+cannot reach a value cell (`(cdr sym)` is a type error, and `(env)` yields
+symbols whose printed form is their name), and the two readers of a value cell
+— symbol evaluation and the head of a call — turn it into `void-variable NAME`
+and `void-function NAME`. It is tagged `FeTFree` so that an escape aborts in
+the writer rather than impersonating a value.
 
 ## Garbage Collection
 

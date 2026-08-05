@@ -410,8 +410,20 @@ FeNativeFn* GetNativeFn(const FeObject* o);
 void SetType(FeObject* o, FeType type);
 FeObject* CheckType(FeContext* ctx, FeObject* obj, FeType type);
 FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
+// Symbol accessors (sub-plan 04B of kg's Emacs-subset program): a symbol's
+// `cdr` is one cons holding `((name . function) . value)`, and every reader
+// of that private layout goes through these instead of spelling the pair walk
+// itself. `SymbolBindingCell` is the cell `GetBound`'s global path returns;
+// the value path's unit of currency is the cell, not a value-shaped accessor
+// -- lexical environment entries and the global cell share the `CDR(cell)`
+// read/write contract `GetBound` depends on, so wrapping that in an accessor
+// would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
+// the dormant function cell, which nothing in the evaluator reads yet.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
-FeObject* SymbolBindingCell(FeObject* sym);
+FeObject* SymbolBindingCell(
+    FeObject* sym);  // the cell GetBound's global path returns
+FeObject* SymbolFunction(FeObject* sym);  // &unbound when no function binding
+void SetSymbolFunction(FeObject* sym, FeObject* fn);
 FeObject* MakeObject(FeContext* ctx);
 bool Equal(FeObject* a, FeObject* b);
 bool IsNamedSymbol(const FeObject* v, const char* name);

@@ -93,10 +93,12 @@ FeObject nil = {.car = {.c = FeTNil << GcMarkBit | OtherCell},
 // The value of a symbol that has never been assigned. Like `nil` it is a
 // static object outside the arena, so the collector neither sweeps it nor has
 // to mark it, and `FeMark` treats it as a leaf. It is never returned to Lisp or
-// to a host: the only place it lives is a symbol's value cell, which Lisp
-// cannot reach (`(cdr sym)` is a type error) and which every reader of a value
-// cell turns into `void-variable`. It is tagged `FeTFree` so that an escape
-// aborts in the writer instead of impersonating a value.
+// to a host: the only place it lives is a symbol's value cell and the dormant
+// function cell of a fresh symbol (`CDR(sym)` is `((name . function) .
+// value)`, sub-plan 04B), which Lisp cannot reach (`(cdr sym)` is a type
+// error) and which every reader of a value cell turns into `void-variable`.
+// It is tagged `FeTFree` so that an escape aborts in the writer instead of
+// impersonating a value.
 FeObject unbound = {.car = {.c = FeTFree << GcMarkBit | OtherCell},
                     .cdr = {.o = NULL}};
 
@@ -455,10 +457,16 @@ FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
       return CAR(obj);
     }
   }
-  // Create new object, push to symbol_list and return:
+  // Create new object, push to symbol_list and return. A symbol's cdr is one
+  // cons: `((name . function) . value)` (sub-plan 04B). The function cell is
+  // dormant, initialized to `&unbound` and written only through
+  // `SetSymbolFunction`; the name moves one pair down so the binding cell --
+  // the cdr of the outer pair -- is unchanged, which is what keeps the whole
+  // value path (`GetBound`, `FeSet`, `FeIsBound`, `ResumeSetq`) untouched.
   obj = MakeObject(ctx);
   SetType(obj, FeTSymbol);
-  CDR(obj) = FeCons(ctx, FeMakeString(ctx, name), &unbound);
+  CDR(obj) =
+      FeCons(ctx, FeCons(ctx, FeMakeString(ctx, name), &unbound), &unbound);
   ctx->symbol_list = FeCons(ctx, obj, ctx->symbol_list);
   return obj;
 }
@@ -849,13 +857,29 @@ bool FeIsBound(FeContext* ctx, FeObject* sym) {
   return CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil)) != &unbound;
 }
 
-// Symbol accessors keep symbol representation knowledge out of the evaluator.
+// Symbol accessors (sub-plan 04B of kg's Emacs-subset program): a symbol's
+// `cdr` is one cons, `((name . function) . value)`, and every reader of that
+// private layout goes through these. The value path deliberately has no
+// accessor of its own: its unit of currency is the binding cell, and lexical
+// environment entries and the global cell share the `CDR(cell)` read/write
+// contract `GetBound` depends on. The function cell is dormant -- written by
+// `SetSymbolFunction`, read by nothing until Phase 4's lookup slices -- and
+// `SymbolName`/`SymbolBindingCell` read through a `const FeObject*` because
+// `GetStringObject`/`IsNamedSymbol` do.
 FeObject* SymbolName(const FeObject* sym) {
-  return CAR(CDR(sym));
+  return CAR(CAR(CDR(sym)));
 }
 
 FeObject* SymbolBindingCell(FeObject* sym) {
   return CDR(sym);
+}
+
+FeObject* SymbolFunction(FeObject* sym) {
+  return CDR(CAR(SymbolBindingCell(sym)));
+}
+
+void SetSymbolFunction(FeObject* sym, FeObject* fn) {
+  CDR(CAR(SymbolBindingCell(sym))) = fn;
 }
 
 static FeObject rparen;
@@ -1232,9 +1256,13 @@ FeObject* FeEvaluateFileWithOptions(FeContext* ctx,
 }
 
 static size_t GetSymbolObjectCount(const char* name) {
+  // A symbol object plus its one `(name . function) . value` cons chain:
+  // the symbol, the name string cells, and the single extra pair the 04B
+  // function cell added. `StringBufferSize` name characters fit in one
+  // string cell.
   const size_t length = strlen(name);
   assert(length > 0);
-  return 4 + (length - 1) / StringBufferSize;
+  return 5 + (length - 1) / StringBufferSize;
 }
 
 static FeObject* native_sin(FeContext* ctx, FeObject* arg) {
