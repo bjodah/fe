@@ -40,21 +40,21 @@ typedef struct ErrorState {
   bool nested_with_options;
   bool called;
   bool stack_was_nil;
-  // 03D stage 5 native-re-entry bookkeeping: how many more nested
-  // `FeCallWithOptions` hops `ReentrantNative` may take before returning
-  // (so the test never needs the default 1000 nested C calls to prove an
-  // off-by-one), the legacy `max_depth` it re-enters under, the rooted
-  // self-callable for the re-entering native, the callable `OwningReenter`
-  // invokes through its owning nested call, whether a registered cleanup
-  // ran, and the nesting depth observed on the C side. `reentry_current` is
-  // the level of the currently running activation (incremented on entry,
-  // restored on the ordinary return) and `reentry_max_seen` the high-water
-  // mark; the deepest activation reports its own level as the result, so a
-  // success case's value *is* the nesting depth. Error paths longjmp past
-  // the decrements, so the test resets both fields before each run it
-  // asserts on.
+  // 03D stage 5 native-re-entry bookkeeping (renamed for 03F's two-bounds
+  // split): how many more nested `FeCallWithOptions` hops `ReentrantNative`
+  // may take before returning (so the test never needs the default nested
+  // C calls to prove an off-by-one), the `max_native_reentry` it re-enters
+  // under, the rooted self-callable for the re-entering native, the
+  // callable `OwningReenter` invokes through its owning nested call,
+  // whether a registered cleanup ran, and the nesting depth observed on the
+  // C side. `reentry_current` is the level of the currently running
+  // activation (incremented on entry, restored on the ordinary return) and
+  // `reentry_max_seen` the high-water mark; the deepest activation reports
+  // its own level as the result, so a success case's value *is* the nesting
+  // depth. Error paths longjmp past the decrements, so the test resets both
+  // fields before each run it asserts on.
   size_t reentry_remaining;
-  size_t reentry_max_depth;
+  size_t reentry_max_native_reentry;
   FeRoot* reentry_self;
   FeRoot* reentry_owning_target;
   bool reentry_cleanup_ran;
@@ -230,15 +230,15 @@ static void MarkReentryCleanup(FeContext* context, void* data) {
   state->reentry_cleanup_ran = true;
 }
 
-// 03D stage 5: a native that synchronously re-enters evaluation through
-// `FeCallWithOptions` on itself, bounded on the C side by
-// `reentry_remaining` (so the test drives a deliberately small `max_depth`
-// instead of the default 1000 nested C calls) and on the Fe side by the
-// ambient legacy `max_depth`. Registers a host cleanup on every entry, so
-// both the ordinary return and the error paths are observed to run it. The
-// deepest activation (the one that exhausted the budget) returns its own
-// nesting level, so a success case's result directly reports how many
-// activations were live at the deepest point.
+// 03D stage 5, renamed for 03F: a native that synchronously re-enters
+// evaluation through `FeCallWithOptions` on itself, bounded on the C side by
+// `reentry_remaining` (so the test drives a deliberately small
+// `max_native_reentry` instead of the default nested C calls) and on the Fe
+// side by the ambient `max_native_reentry`. Registers a host cleanup on
+// every entry, so both the ordinary return and the error paths are observed
+// to run it. The deepest activation (the one that exhausted the budget)
+// returns its own nesting level, so a success case's result directly
+// reports how many activations were live at the deepest point.
 static FeObject* ReentrantNative(FeContext* context,
                                  // cppcheck-suppress constParameterCallback
                                  FeObject* arguments) {
@@ -255,7 +255,8 @@ static FeObject* ReentrantNative(FeContext* context,
     return FeMakeDouble(context, level);
   }
   state->reentry_remaining--;
-  const FeEvalOptions options = {.max_depth = state->reentry_max_depth};
+  const FeEvalOptions options = {.max_native_reentry =
+                                     state->reentry_max_native_reentry};
   FeObject* result = FeCallWithOptions(context, FeGetRoot(state->reentry_self),
                                        nullptr, 0, &options);
   state->reentry_current--;
@@ -266,11 +267,11 @@ static FeObject* ReentrantNative(FeContext* context,
 // that performs one *owning* `FeCallWithOptions` (so the test drives it from
 // a plain, non-owning `FeEvaluateString`, where no control record is active
 // and the nested call takes ownership). The owning call's
-// `EndEvaluationControl` clears the whole control record -- including
-// `native_reentry_depth` -- before this native returns; the native frame
-// must restore its pre-call counter instead of decrementing the zeroed one,
-// or a later native in the same run sees SIZE_MAX and raises a spurious
-// depth error.
+// `EndEvaluationControl` clears the ambient limits (`max_frames_limit`,
+// `native_reentry_limit`) before this native returns, but 03F deliberately
+// leaves `native_reentry_depth` itself alone -- it is a live count, not a
+// configured ceiling -- so there is no counter here left needing a restore
+// the way the pre-03F shared depth counter did.
 static FeObject* OrdinaryNative(FeContext* context,
                                 // cppcheck-suppress constParameterCallback
                                 FeObject* arguments) {
@@ -283,7 +284,8 @@ static FeObject* OwningReenter(FeContext* context,
                                FeObject* arguments) {
   FeRequireNoArguments(context, arguments);
   const ErrorState* state = FeGetUserData(context);
-  const FeEvalOptions options = {.max_depth = state->reentry_max_depth};
+  const FeEvalOptions options = {.max_native_reentry =
+                                     state->reentry_max_native_reentry};
   return FeCallWithOptions(context, FeGetRoot(state->reentry_owning_target),
                            nullptr, 0, &options);
 }
@@ -305,7 +307,8 @@ static FeObject* GCNative(FeContext* context, FeObject* arguments) {
       "(setq n 0) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n";
   (void)FeEvaluateString(context, "native-gc.fe", collecting,
                          sizeof(collecting) - 1);
-  const FeEvalOptions options = {.max_depth = state->reentry_max_depth};
+  const FeEvalOptions options = {.max_native_reentry =
+                                     state->reentry_max_native_reentry};
   FeObject* callarg = value;
   return FeCallWithOptions(context, FeGetRoot(state->reentry_self), &callarg, 1,
                            &options);
@@ -2040,16 +2043,24 @@ static bool TestUnwindCleanupBudget(void) {
   return true;
 }
 
-// `evaluation_depth` (`FeEvalOptions.max_depth`) bounds C-stack recursion
-// explicitly, replacing the accidental bound `GcStackSize` slot consumption
-// used to provide. Four properties, mirroring what `TestEvaluationControl`
-// already covers for the step budget: the limit fires, the error it raises
-// is an ordinary catchable one, a later legal deep call still works (the
-// counter is reset the same way `call_list` is, in `FeHandleError`), and an
-// `unwind-protect` cleanup still runs after the overflow (the counter gets
-// the same fresh re-arm `RunCleanupsAfterError` already gives the step
-// budget for cleanup entries).
-static bool TestEvaluationDepth(void) {
+// Sub-plan 03F: `FeEvalOptions.max_frames` bounds Lisp nesting -- the number
+// of simultaneously live ordinary evaluator frames -- replacing the deleted
+// transitional `evaluation_depth` counter this test used to exercise. Every
+// property `TestEvaluationDepth` used to cover for the old shared counter
+// still applies to the frame-specific one: the limit fires with the exact
+// "evaluation frame limit exceeded" text, a later legal call still works
+// (nothing here is a sticky poison), and both a Lisp `unwind-protect`
+// cleanup and a host `FeProtectWithCleanup` cleanup still run during the
+// unwind.
+//
+// The boundary case does not hand-pick a frame count: `AllocateFrame`'s
+// exact push-before-write rule (`min(max_frames, frame_capacity)`, checked
+// *before* the slot is written) means the same fixed expression, run once
+// unrestricted, tells the test its own true peak through
+// `FeGetArenaStats().peak_frame_depth` -- so "the last permitted push
+// succeeds, the next fails" is asserted against a measured number, not one
+// that silently drifts out of date if an internal frame's shape changes.
+static bool TestFrameLimits(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
@@ -2057,29 +2068,43 @@ static bool TestEvaluationDepth(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
-  // A tight explicit `max_depth` against unbounded self-recursion -- the
-  // same shape `TestEvaluationControl`'s step-limit recursion case uses --
-  // fires well before the call could otherwise terminate, so the test does
-  // not depend on exactly how many `evaluation_depth` units one Lisp
-  // recursion level costs.
-  static const char recursion[] =
-      "(setq recurse (fn (x) (recurse x))) (recurse 1)";
-  const FeEvalOptions tight_depth = {.max_depth = 5};
-  CHECK(ExpectEvaluationOptionsError(
-      context, &state, "depth.fe", recursion, sizeof(recursion) - 1,
-      &tight_depth, "depth.fe: evaluation depth limit exceeded"));
-
-  // The reset: a bounded, legal recursion right after the overflow must not
-  // see the exhausted counter the call above left behind.
-  static const char deep[] =
-      "(setq deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep 40)";
+  // A nested, fixed-shape computation (no recursion, so its frame cost is
+  // deterministic) measures its own simultaneous frame peak.
+  static const char fixed[] = "(+ 1 (+ 2 (+ 3 (+ 4 5))))";
   CHECK(IsRendered(
       context,
-      FeEvaluateString(context, "recovered.fe", deep, sizeof(deep) - 1), "40"));
+      FeEvaluateString(context, "measure.fe", fixed, sizeof(fixed) - 1), "15"));
+  const size_t peak = FeGetArenaStats(context).peak_frame_depth;
+  CHECK(peak > 0);
 
-  // An unwind-protect cleanup still runs after a depth overflow: the
-  // overflow unwinds through `RunCleanupsAfterError` the same way a step-
-  // budget exhaustion or an ordinary error does.
+  // Exactly at the measured peak: the last permitted push succeeds.
+  const FeEvalOptions exact = {.max_frames = peak};
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(context, "exact.fe", fixed,
+                                               sizeof(fixed) - 1, &exact),
+                   "15"));
+
+  // One below: the exact same expression's push that would reach the same
+  // peak is refused before writing, with the exact frame-limit text.
+  const FeEvalOptions one_less = {.max_frames = peak - 1};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "toosmall.fe", fixed, sizeof(fixed) - 1, &one_less,
+      "toosmall.fe: evaluation frame limit exceeded"));
+
+  // A separate, deliberately tiny `max_frames` against unbounded
+  // self-recursion -- not tied to the measured peak above, since unbounded
+  // recursion overflows any small ceiling regardless of its exact value --
+  // proves both a registered Lisp cleanup (`unwind-protect`) and a
+  // registered native cleanup (`FeProtectWithCleanup`, through
+  // `ReentrantNative`'s own `MarkReentryCleanup`) run during the unwind, and
+  // that the context is reusable afterward.
+  FeObject* native = FeMakeNativeFn(context, ReentrantNative);
+  state.reentry_self = FeCreateRoot(context, native);
+  FeSet(context, FeMakeSymbol(context, "reentrant-native"), native);
+  state.reentry_remaining = 0;
+  state.reentry_cleanup_ran = false;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
   static const char reset_flag[] = "(setq cleanup-ran nil)";
   CHECK(IsRendered(
       context,
@@ -2087,31 +2112,38 @@ static bool TestEvaluationDepth(void) {
       "nil"));
   static const char overflow_with_cleanup[] =
       "(setq loop (fn (x) (loop x))) "
-      "(unwind-protect (loop 1) (setq cleanup-ran t))";
-  const FeEvalOptions tight_depth_cleanup = {.max_depth = 5};
+      "(unwind-protect (do (reentrant-native) (loop 1))"
+      "  (setq cleanup-ran t))";
+  const FeEvalOptions tight_frames = {.max_frames = 6};
   CHECK(ExpectEvaluationOptionsError(
-      context, &state, "cleanup-depth.fe", overflow_with_cleanup,
-      sizeof(overflow_with_cleanup) - 1, &tight_depth_cleanup,
-      "cleanup-depth.fe: evaluation depth limit exceeded"));
+      context, &state, "cleanup-frames.fe", overflow_with_cleanup,
+      sizeof(overflow_with_cleanup) - 1, &tight_frames,
+      "cleanup-frames.fe: evaluation frame limit exceeded"));
+  CHECK(state.reentry_cleanup_ran);
   static const char check_cleanup_ran[] = "cleanup-ran";
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "check.fe", check_cleanup_ran,
                                     sizeof(check_cleanup_ran) - 1),
                    "t"));
 
-  // A macro whose expansion is another macro call recurses through
-  // `Evaluate`'s macro arm, which evaluates the expansion in what is a tail
-  // call in Fe but not in C. The counter has to be held across that call
-  // rather than dropped before it: released early, this recursed on the C
-  // stack with `evaluation_depth` never moving, and crashed under MSan
-  // instead of raising. Function recursion above does not cover this arm.
+  // A macro whose expansion is another macro call recurses through the
+  // macro frame's own resumption, not a fresh top-level call, so its frame
+  // cost has to be covered too: released early, this recursed on the C
+  // stack instead of the frame stack and crashed under MSan.
   static const char macro_recursion[] =
       "(setq m (macro () (list (quote m)))) (m)";
-  const FeEvalOptions tight_macro_depth = {.max_depth = 5};
+  const FeEvalOptions tight_macro_frames = {.max_frames = 5};
   CHECK(ExpectEvaluationOptionsError(
-      context, &state, "macro-depth.fe", macro_recursion,
-      sizeof(macro_recursion) - 1, &tight_macro_depth,
-      "macro-depth.fe: evaluation depth limit exceeded"));
+      context, &state, "macro-frames.fe", macro_recursion,
+      sizeof(macro_recursion) - 1, &tight_macro_frames,
+      "macro-frames.fe: evaluation frame limit exceeded"));
+
+  // The context is reusable after both overflow paths.
+  static const char deep[] =
+      "(setq deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep 40)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "recovered.fe", deep, sizeof(deep) - 1), "40"));
 
   FeCloseContext(context);
   return true;
@@ -2120,7 +2152,7 @@ static bool TestEvaluationDepth(void) {
 // Sub-plan 03C's frame substrate keeps the old evaluator's observable
 // language behaviour while making live frames explicit GC roots. These cases
 // exercise the converted leaves, a collection through a temporary frame, and
-// the arena-derived physical frame bound independently of max_depth.
+// the arena-derived physical frame bound independently of max_frames.
 static bool TestFrameSubstrate(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -2163,10 +2195,13 @@ static bool TestFrameSubstrate(void) {
   CHECK(FeGetArenaStats(gc_context).collection_count > collections);
   FeCloseContext(gc_context);
 
-  // With max_depth deliberately above the small arena's physical capacity,
-  // this is the frame-push wall, not the compatibility depth counter. The
-  // old public text remains intentional until 03F, and the same context must
-  // remain usable after the barrier handles it.
+  // `max_frames == 0` selects the arena's full physical capacity -- the
+  // default -- so this is the frame-push wall itself, not a host-configured
+  // ceiling: default physical exhaustion, repeated (03F requires it). It
+  // fires *before* object-allocation failure -- `allocation_failures` is
+  // still 0 once the context is queryable again, confirming 03C's
+  // requirement that the frame bound, not arena exhaustion, is what a deep
+  // recursion hits first -- and the same context remains usable afterward.
   TestArena frame_arena;
   FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
   CHECK(frame_context != nullptr);
@@ -2176,11 +2211,12 @@ static bool TestFrameSubstrate(void) {
   static const char recurse[] =
       "(setq recurse (fn (x) (if (<= x 0) 0 (recurse (- x 1))))) "
       "(recurse 100)";
-  const FeEvalOptions physical_only = {.max_depth = 10000};
+  const FeEvalOptions physical_only = {.max_frames = 0};
   CHECK(ExpectEvaluationOptionsError(
       frame_context, &frame_state, "frames.fe", recurse, sizeof(recurse) - 1,
-      &physical_only, "frames.fe: evaluation depth limit exceeded"));
+      &physical_only, "frames.fe: evaluation frame limit exceeded"));
   CHECK(!frame_state.stack_was_nil);
+  CHECK(FeGetArenaStats(frame_context).allocation_failures == 0);
   CHECK(IsRendered(frame_context,
                    FeEvaluateString(frame_context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
@@ -2191,11 +2227,16 @@ static bool TestFrameSubstrate(void) {
   return true;
 }
 
-// `FeGetArenaStats` (sub-plan 00D of kg's Emacs-subset program): a
-// read-only accessor over counters `MakeObject`, `CollectGarbage`,
-// `FePushGC`, `EnterEvaluationDepth` and `PushCleanup` already maintain.
-// This exercises that querying it neither allocates nor mutates state,
-// that each peak moves off zero the first time its own event happens, and
+// `FeGetArenaStats` (sub-plan 00D of kg's Emacs-subset program, fields
+// renamed and added by 03F): a read-only accessor over counters
+// `MakeObject`, `CollectGarbage`, `FePushGC`, `AllocateFrame`,
+// `EnterNativeReentry` and `PushCleanup` already maintain. This exercises
+// that querying it neither allocates nor mutates state, that
+// `frame_capacity` is nonzero and stable, that each peak moves off zero the
+// first time its own event happens (`peak_native_reentry`'s own convention
+// is zero-at-top-level: no native re-entry here means it never moves), that
+// `peak_frame_depth` never exceeds `frame_capacity` for an ordinary
+// computation that never has to reach for the private cleanup reserve, and
 // that arena exhaustion is directly observable through it.
 static bool TestArenaStats(void) {
   TestArena arena;
@@ -2207,13 +2248,16 @@ static bool TestArenaStats(void) {
 
   // `FeOpenContext` already registered `t`, every primitive and the math
   // natives through the same `MakeObject` any other allocation uses, so
-  // the baseline is not zero.
+  // the baseline is not zero. `frame_capacity` is fixed at context-open
+  // time by the arena partition, so it is already nonzero here too.
   const FeArenaStats initial = FeGetArenaStats(context);
   CHECK(initial.total_slots > 0);
   CHECK(initial.free_slots > 0);
   CHECK(initial.free_slots < initial.total_slots);
   CHECK(initial.peak_live_objects > 0);
   CHECK(initial.allocation_failures == 0);
+  CHECK(initial.frame_capacity > 0);
+  CHECK(initial.peak_native_reentry == 0);
 
   // Querying twice with nothing evaluated in between changes nothing: the
   // accessor allocates no Fe object, walks no list, and mutates no
@@ -2224,12 +2268,15 @@ static bool TestArenaStats(void) {
   CHECK(requeried.peak_live_objects == initial.peak_live_objects);
   CHECK(requeried.collection_count == initial.collection_count);
   CHECK(requeried.peak_gc_stack_depth == initial.peak_gc_stack_depth);
-  CHECK(requeried.peak_evaluation_depth == initial.peak_evaluation_depth);
+  CHECK(requeried.frame_capacity == initial.frame_capacity);
+  CHECK(requeried.peak_frame_depth == initial.peak_frame_depth);
   CHECK(requeried.peak_cleanup_stack_depth == initial.peak_cleanup_stack_depth);
+  CHECK(requeried.peak_native_reentry == initial.peak_native_reentry);
 
-  // Every allocation pushes onto the GC stack (`FePushGC`), and every pair
-  // form runs through `EnterEvaluationDepth`, so evaluating anything moves
-  // both peaks off zero.
+  // Every allocation pushes onto the GC stack (`FePushGC`), and every pushed
+  // evaluator frame runs through `AllocateFrame`, so evaluating anything
+  // moves both peaks off zero -- and the frame peak stays within the
+  // context's own physical capacity, since nothing here is near it.
   static const char one_cons[] = "(cons 1 2)";
   CHECK(IsRendered(
       context,
@@ -2237,7 +2284,8 @@ static bool TestArenaStats(void) {
       "(1 . 2)"));
   const FeArenaStats after_cons = FeGetArenaStats(context);
   CHECK(after_cons.peak_gc_stack_depth > 0);
-  CHECK(after_cons.peak_evaluation_depth > 0);
+  CHECK(after_cons.peak_frame_depth > 0);
+  CHECK(after_cons.peak_frame_depth <= after_cons.frame_capacity);
   CHECK(after_cons.peak_live_objects >= initial.peak_live_objects);
   CHECK(after_cons.total_slots == initial.total_slots);
 
@@ -2249,6 +2297,27 @@ static bool TestArenaStats(void) {
       FeEvaluateString(context, "cleanup.fe", cleanup, sizeof(cleanup) - 1),
       "1"));
   CHECK(FeGetArenaStats(context).peak_cleanup_stack_depth > 0);
+
+  // A native that re-opens evaluation through `FeCallWithOptions` moves
+  // `peak_native_reentry` off zero -- the one peak nothing above touched --
+  // while an ordinary top-level call of the same native does not.
+  FeObject* ordinary = FeMakeNativeFn(context, OrdinaryNative);
+  FeSet(context, FeMakeSymbol(context, "ordinary-native"), ordinary);
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "ordinary.fe", "(ordinary-native)",
+                                    sizeof("(ordinary-native)") - 1),
+                   "42"));
+  CHECK(FeGetArenaStats(context).peak_native_reentry == 0);
+  FeObject* reentrant = FeMakeNativeFn(context, ReentrantNative);
+  state.reentry_self = FeCreateRoot(context, reentrant);
+  FeSet(context, FeMakeSymbol(context, "reentrant-native"), reentrant);
+  state.reentry_remaining = 2;
+  CHECK(
+      IsRendered(context,
+                 FeEvaluateString(context, "reentrant.fe", "(reentrant-native)",
+                                  sizeof("(reentrant-native)") - 1),
+                 "3"));
+  CHECK(FeGetArenaStats(context).peak_native_reentry == 2);
 
   FeCloseContext(context);
 
@@ -2288,23 +2357,27 @@ static bool TestArenaStats(void) {
   return true;
 }
 
-// The C-stack high-water probe (sub-plan 03A of kg's Emacs-subset program).
-// Phase 3's gate is "a measured C-stack high-water mark is flat across
-// `(deep 10)`, `(deep 1000)` and `(deep 100000)`"; nothing before this test
-// measured that property at all, only crash points (GC-stack overflow, an
-// MSan crash) that show where the recursive evaluator stops, not whether a
-// number stopped growing. This is the "before" the post-Phase-3 flatness
-// assertion will be compared against; that assertion is 03F's, not this
-// slice's -- see the function comment below and the sub-plan's own Status
-// for the recorded pre-change table.
+// The C-stack high-water probe (sub-plan 03A of kg's Emacs-subset program),
+// turned into the permanent flatness gate by 03F, as the parent plan's own
+// document requires: "a measured C-stack high-water mark is flat across
+// `(deep 10)`, `(deep 1000)` and `(deep 100000)`". Before 03E's frame
+// machine landed in full, nothing could even take this measurement -- only
+// crash points (GC-stack overflow, an MSan crash) showed where the
+// recursive evaluator stopped, not whether a number stopped growing -- and
+// `(deep 100000)` could not run at all under the old shared logical/native
+// depth ceiling. Both blockers are gone: the frame machine roots Lisp
+// nesting in the arena, not the C stack, and `max_frames` has nothing to do
+// with `max_native_reentry`'s small C-stack budget any more, so this probe
+// can ask for the real 10/1000/100000 triple directly.
 //
-// `(deep 100000)` cannot run yet: `DefaultEvaluationDepth` (1000) and this
-// fixture's arena both bound recursion far below it, and that is the
-// row Phase 3 has to change, not something to work around here by
-// disabling the guard. Widening either bound to chase the physical
-// crash boundary is exactly the "drive a sanitizer process into a
-// host-stack crash" 03A warns against, since `evaluation_depth`'s own
-// guard is what stands between today's builds and that crash.
+// A tight, deliberately small first run measures the "depth zero" baseline
+// and confirms `max_frames`' own boundary error and recovery (the same
+// shape `TestFrameLimits` already proves in general); the second part is
+// the actual gate, run against a dynamically allocated arena sized for
+// `(deep 100000)`'s own measured frame cost -- `./fe -s` cannot run the
+// test-only `stack-probe` native and kg's 1 MiB arena cannot hold 100000
+// frames and is not expected to, so this is deliberately an fe-side-only
+// measurement (03A/03F's Decision in kg's plan tree).
 static bool TestEvaluationStackProbe(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -2320,6 +2393,49 @@ static bool TestEvaluationStackProbe(void) {
   CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
                          sizeof(deep_def) - 1) != nullptr);
 
+  // The expected frame-limit error, recovered without poisoning the
+  // context -- the same shape `TestFrameLimits` already proves for the
+  // general case.
+  const FeEvalOptions tight_frames = {.max_frames = 5};
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "probe-frames.fe", "(deep 50)", sizeof("(deep 50)") - 1,
+      &tight_frames, "probe-frames.fe: evaluation frame limit exceeded"));
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "recovered.fe", "(deep 20)",
+                                    sizeof("(deep 20)") - 1),
+                   "20"));
+  FeCloseContext(context);
+
+  // The permanent gate: a dynamically sized arena, large enough to hold
+  // `(deep 100000)`'s own frame peak. `test_api.c` only ever includes the
+  // public `fe.h`, not the private `fe_internal.h` where `FeEvalFrame` and
+  // `FrameArenaPercent` actually live, so the byte estimate below is a
+  // generous, hand-computed upper bound, not a value derived from the
+  // private struct's real size: this canonical chain's peak is ~3 frames
+  // per level (the call, `if`, and the arithmetic waiting on its second
+  // operand -- kg's 03A Decision derives and cross-validates this), so
+  // 100000 levels need on the order of 300000 frames; at a generous 128
+  // bytes/frame (the private struct measures smaller) that is ~38 MB of
+  // frame region, which is ~10% of the arena beyond the minimum -- so
+  // comfortably under 400 MB total covers it with room to spare for the
+  // object slots the run's own arithmetic needs too.
+  const size_t max_deep = 100000;
+  const size_t generous_bytes_per_frame = 128;
+  const size_t frame_region_bytes =
+      (3 * max_deep + 16) * generous_bytes_per_frame;
+  const size_t big_arena_size =
+      FeMinimumArenaSize() + frame_region_bytes * 10 + (16u * 1024 * 1024);
+  unsigned char* big_arena = malloc(big_arena_size);
+  CHECK(big_arena != nullptr);
+  FeContext* big_context = FeOpenContext(big_arena, big_arena_size);
+  CHECK(big_context != nullptr);
+  ErrorState big_state = {.context = big_context};
+  FeSetUserData(big_context, &big_state);
+  FeSetErrorFn(big_context, HandleError);
+  FeDefineNative(big_context, "stack-probe", StackProbe);
+  CHECK(FeEvaluateString(big_context, "deep-def.fe", deep_def,
+                         sizeof(deep_def) - 1) != nullptr);
+
   // "Depth zero", measured the same way as every other depth: the same
   // native, called through the same evaluator, with no `deep` wrapper
   // around it. This is the reference the deltas below are taken against,
@@ -2327,15 +2443,17 @@ static bool TestEvaluationStackProbe(void) {
   // test's own call-path layout into the number and make a compiler
   // rebuild look like evaluator growth.
   stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
   static const char bare_probe[] = "(stack-probe)";
-  CHECK(IsRendered(
-      context,
-      FeEvaluateString(context, "bare.fe", bare_probe, sizeof(bare_probe) - 1),
-      "0"));
+  CHECK(IsRendered(big_context,
+                   FeEvaluateString(big_context, "bare.fe", bare_probe,
+                                    sizeof(bare_probe) - 1),
+                   "0"));
   CHECK(stack_probe_last_address != 0);
-  const uintptr_t baseline = stack_probe_last_address;
+  const uintptr_t baseline = stack_probe_deepest_address;
+  const FeArenaStats before_deep = FeGetArenaStats(big_context);
 
-  static const size_t depths[] = {10, 100, 200};
+  static const size_t depths[] = {10, 1000, 100000};
   for (size_t i = 0; i < sizeof(depths) / sizeof(depths[0]); i++) {
     char source[32];
     const int written =
@@ -2347,35 +2465,33 @@ static bool TestEvaluationStackProbe(void) {
     (void)snprintf(expected, sizeof(expected), "%zu", depths[i]);
 
     stack_probe_last_address = 0;
-    CHECK(IsRendered(context,
-                     FeEvaluateString(context, label, source, (size_t)written),
-                     expected));
+    stack_probe_deepest_address = 0;
+    CHECK(IsRendered(
+        big_context,
+        FeEvaluateString(big_context, label, source, (size_t)written),
+        expected));
     CHECK(stack_probe_last_address != 0);
-    const uintptr_t probed = stack_probe_last_address;
+    const uintptr_t probed = stack_probe_deepest_address;
     const uintptr_t delta =
         probed > baseline ? probed - baseline : baseline - probed;
-    printf("stack probe: n=%5zu baseline=%#" PRIxPTR " probe=%#" PRIxPTR
-           " delta=%" PRIuPTR " bytes\n",
-           depths[i], baseline, probed, delta);
+    const FeArenaStats after = FeGetArenaStats(big_context);
+    printf("stack probe: n=%6zu baseline=%#" PRIxPTR " probe=%#" PRIxPTR
+           " delta=%" PRIuPTR " bytes, peak_frame_depth=%zu/%zu\n",
+           depths[i], baseline, probed, delta, after.peak_frame_depth,
+           after.frame_capacity);
+    // Flat: the same < 2 KiB tolerance measured and asserted throughout
+    // 03A/03D/03E for this exact property, under both default and
+    // sanitizer builds -- not "one frame's slop", a specific measured
+    // number that a regression sending Lisp nesting back through a
+    // recursive C call would blow through by tens of kilobytes at these
+    // depths, not by a few bytes of noise.
+    CHECK(delta < 2048);
+    CHECK(after.peak_frame_depth <= after.frame_capacity);
+    CHECK(after.peak_frame_depth > before_deep.peak_frame_depth);
   }
 
-  // The expected pre-change depth error, recovered without poisoning the
-  // context -- the same shape `TestEvaluationDepth` already proves for the
-  // recursive evaluator's existing ceiling. A tight explicit `max_depth`
-  // is used rather than searching for the arena- or default-depth-bound
-  // failure point: that search is this sub-plan's manual measurement
-  // exercise (recorded in the Status table), not something to repeat, at
-  // sanitizer-build cost, on every `make check`.
-  const FeEvalOptions tight_depth = {.max_depth = 5};
-  CHECK(ExpectEvaluationOptionsError(
-      context, &state, "probe-depth.fe", "(deep 50)", sizeof("(deep 50)") - 1,
-      &tight_depth, "probe-depth.fe: evaluation depth limit exceeded"));
-  CHECK(IsRendered(context,
-                   FeEvaluateString(context, "recovered.fe", "(deep 20)",
-                                    sizeof("(deep 20)") - 1),
-                   "20"));
-
-  FeCloseContext(context);
+  FeCloseContext(big_context);
+  free(big_arena);
   return true;
 }
 
@@ -2899,11 +3015,10 @@ static bool TestMacroFrame(void) {
   // its macro frame -- the expansion child reuses the caller's slot and
   // becomes the next level's macro frame -- while the body-form and quote
   // sub-expressions run above it, so the stack grows one held frame per
-  // level until `PushEvaluationFrame` refuses. With the transitional logical
-  // `max_depth` put deliberately above the small arena's physical capacity
-  // -- as 03C's exhaustion test did -- the frame push check is what fires,
-  // with the old transitional text, the original macro-call trace, and a
-  // context still usable afterwards.
+  // level until `PushEvaluationFrame` refuses. `max_frames == 0` selects the
+  // small arena's own physical capacity -- as 03C's exhaustion test did --
+  // so the frame push check is what fires, with the exact frame-limit text,
+  // the original macro-call trace, and a context still usable afterwards.
   const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
   TestArena frame_arena;
   FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
@@ -2912,11 +3027,11 @@ static bool TestMacroFrame(void) {
   FeSetUserData(frame_context, &frame_state);
   FeSetErrorFn(frame_context, HandleError);
   static const char self_expanding[] = "(setq m (macro () (list 'm))) (m)";
-  const FeEvalOptions physical_only = {.max_depth = 10000};
+  const FeEvalOptions physical_only = {.max_frames = 0};
   CHECK(ExpectEvaluationOptionsError(
       frame_context, &frame_state, "macro-frames.fe", self_expanding,
       sizeof(self_expanding) - 1, &physical_only,
-      "macro-frames.fe: evaluation depth limit exceeded"));
+      "macro-frames.fe: evaluation frame limit exceeded"));
   CHECK(!frame_state.stack_was_nil);
   CHECK(IsRendered(frame_context,
                    FeEvaluateString(frame_context, "recovered.fe", "(+ 1 2)",
@@ -2928,74 +3043,75 @@ static bool TestMacroFrame(void) {
   return true;
 }
 
-// Sub-plan 03D, stage 5: the native-call boundary. After the argument frame
-// has reordered the evaluated arguments, a native callable switches to its
-// own `FeFrameNative` kind and the loop invokes it synchronously from that
-// explicit state -- one fixed C activation, no per-native setjmp, the
-// enclosing run's barrier the only one in effect. A native that calls back
-// into `FeCallWithOptions` starts a nested run on a fresh C frame, so the
-// private `native_reentry_depth` counter -- capped by the ambient legacy
-// `max_depth` and reporting the old `evaluation depth limit exceeded` text
-// until 03F -- bounds that C growth. This test drives a deliberately small
-// `max_depth` instead of the default 1000 nested C calls, exactly as the
-// sub-plan requires.
+// Sub-plan 03D, stage 5 (renamed and re-derived for 03F): the native-call
+// boundary. After the argument frame has reordered the evaluated arguments,
+// a native callable switches to its own `FeFrameNative` kind and the loop
+// invokes it synchronously from that explicit state -- one fixed C
+// activation, no per-native setjmp, the enclosing run's barrier the only
+// one in effect. A native that calls back into `FeCallWithOptions` starts a
+// nested run on a fresh C frame; that nested `RunEvaluation` call is what
+// `EnterNativeReentry` bounds and counts, against `max_native_reentry`, with
+// the exact "native evaluation re-entry limit exceeded" text.
 //
-// Off-by-one, precisely: each zero-argument activation is one pair form and
-// one native level, so with the shared ceiling the two counters track the
-// same nesting and reach the limit together. With `max_depth` 8 exactly 8
-// native activations fit (the deepest one returns its own level, 8, as the
-// result); the 9th activation is the one that raises. The legacy pair-depth
-// check runs earlier in the loop, so it reports the old message first, at
-// the same blocked activation; `native_reentry_depth` is live bookkeeping
-// for 03F, not a bound independently observable while the limits are shared.
+// Off-by-one, precisely, and different from before 03F: calling a native is
+// not itself re-entry, so `ReentrantNative`'s first (outermost,
+// non-nested) activation is never counted -- only its own recursive
+// `FeCallWithOptions` calls are, one increment per nested activation. With
+// `max_native_reentry` 8, exactly 8 *nested* activations fit (activations 2
+// through 9; the deepest, 9, returns its own level as the result); the 9th
+// nested activation -- the call from activation 9 attempting to start
+// activation 10 -- is the one that raises, so `reentry_max_seen` stays 9
+// (activation 10 never starts).
 static bool TestNativeReentry(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
-  ErrorState state = {.context = context, .reentry_max_depth = 8};
+  ErrorState state = {.context = context, .reentry_max_native_reentry = 8};
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
   FeObject* native = FeMakeNativeFn(context, ReentrantNative);
   state.reentry_self = FeCreateRoot(context, native);
   FeSet(context, FeMakeSymbol(context, "reentrant-native"), native);
 
-  // Success through the allowed bound: max_depth 8 admits 8 nested native
-  // activations (7 re-entries; the deepest returns its own level), the
-  // ordinary-return cleanups run, and the C-side high-water mark agrees.
-  state.reentry_remaining = 7;
-  const FeEvalOptions options = {.max_depth = 8};
+  // Success through the allowed bound: `max_native_reentry` 8 admits 8
+  // nested re-entries (9 activations total; the deepest returns its own
+  // level), the ordinary-return cleanups run, and the C-side high-water
+  // mark agrees.
+  state.reentry_remaining = 8;
+  const FeEvalOptions options = {.max_native_reentry = 8};
   CHECK(IsRendered(context,
                    FeEvaluateStringWithOptions(
                        context, "native-reentry.fe", "(reentrant-native)",
                        sizeof("(reentrant-native)") - 1, &options),
-                   "8"));
-  CHECK(state.reentry_max_seen == 8);
+                   "9"));
+  CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
+  CHECK(FeGetArenaStats(context).peak_native_reentry == 8);
 
-  // One beyond: the 9th activation raises the old transitional message. The
+  // One beyond: the 9th nested re-entry raises the exact native message. The
   // host sees the original nested trace, the registered cleanups ran during
   // the unwind, the C-side high-water mark shows the recursion really did
-  // reach 8 live activations before the block, and the context -- including
+  // reach 8 live re-entries before the block, and the context -- including
   // a fresh re-entry through the same native boundary, which would fail at
   // level one if `native_reentry_depth` had leaked past the barrier restore
   // -- evaluates again afterwards.
   // cppcheck-suppress redundantAssignment
-  state.reentry_remaining = 8;
+  state.reentry_remaining = 9;
   state.reentry_cleanup_ran = false;
   state.reentry_current = 0;
   state.reentry_max_seen = 0;
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "native-reentry.fe", "(reentrant-native)",
       sizeof("(reentrant-native)") - 1, &options,
-      "native-reentry.fe: evaluation depth limit exceeded"));
+      "native-reentry.fe: native evaluation re-entry limit exceeded"));
   CHECK(!state.stack_was_nil);
-  CHECK(state.reentry_max_seen == 8);
+  CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
                    "3"));
-  state.reentry_remaining = 7;
+  state.reentry_remaining = 8;
   state.reentry_cleanup_ran = false;
   state.reentry_current = 0;
   state.reentry_max_seen = 0;
@@ -3003,32 +3119,32 @@ static bool TestNativeReentry(void) {
                    FeEvaluateStringWithOptions(
                        context, "native-reentry.fe", "(reentrant-native)",
                        sizeof("(reentrant-native)") - 1, &options),
-                   "8"));
-  CHECK(state.reentry_max_seen == 8);
+                   "9"));
+  CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
 
   // The ceiling is what bounds re-entry, not a fixed internal cap: raising
-  // max_depth admits more activations, and one more again fails.
+  // `max_native_reentry` admits more activations, and one more again fails.
   // cppcheck-suppress redundantAssignment
-  state.reentry_remaining = 15;
+  state.reentry_remaining = 16;
   state.reentry_current = 0;
   state.reentry_max_seen = 0;
-  const FeEvalOptions deeper = {.max_depth = 16};
+  const FeEvalOptions deeper = {.max_native_reentry = 16};
   CHECK(IsRendered(context,
                    FeEvaluateStringWithOptions(
                        context, "native-reentry.fe", "(reentrant-native)",
                        sizeof("(reentrant-native)") - 1, &deeper),
-                   "16"));
-  CHECK(state.reentry_max_seen == 16);
+                   "17"));
+  CHECK(state.reentry_max_seen == 17);
   // cppcheck-suppress redundantAssignment
-  state.reentry_remaining = 16;
+  state.reentry_remaining = 17;
   state.reentry_current = 0;
   state.reentry_max_seen = 0;
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "native-reentry.fe", "(reentrant-native)",
       sizeof("(reentrant-native)") - 1, &deeper,
-      "native-reentry.fe: evaluation depth limit exceeded"));
-  CHECK(state.reentry_max_seen == 16);
+      "native-reentry.fe: native evaluation re-entry limit exceeded"));
+  CHECK(state.reentry_max_seen == 17);
 
   FeCloseContext(context);
 
@@ -3040,27 +3156,26 @@ static bool TestNativeReentry(void) {
   return true;
 }
 
-// Sub-plan 03D, stage 5 regression: an owning nested evaluation inside a
-// native must not corrupt the two active-depth counters. The outer call is a
-// plain, non-owning `FeEvaluateString` -- no evaluation-control record is
-// active -- so `OwningReenter`'s `FeCallWithOptions` takes ownership, and
-// its `EndEvaluationControl` clears the whole record, `native_reentry_depth`
-// and `evaluation_depth` both included, before the native returns. The
-// `FeFrameNative` resume therefore restores *both* saved pre-call values on
-// the ordinary return: if it decremented `native_reentry_depth` instead, the
-// counter would wrap to SIZE_MAX and the very next native in the same run --
-// the second ordinary native of the same lambda body -- would raise a
-// spurious `evaluation depth limit exceeded`; and if it left `evaluation_depth`
-// at 0, the still-live enclosing pair forms would be under-counted for every
-// later form in the run, weakening the logical max_depth bound. (The same
-// body written as `(do ...)` would not catch this: `DoList` evaluates each
-// form in its own nested `RunEvaluation`, whose barrier restores the native
-// counter before the next form.)
+// Sub-plan 03D, stage 5 regression, re-derived for 03F: an owning nested
+// evaluation inside a native must not corrupt the run's own
+// `native_reentry_depth`. The outer call is a plain, non-owning
+// `FeEvaluateString` -- no evaluation-control record is active -- so
+// `OwningReenter`'s `FeCallWithOptions` takes ownership, and its
+// `EndEvaluationControl` clears the ambient *limits* before the native
+// returns. It deliberately does *not* clear `native_reentry_depth` itself
+// any more (03F; see the field's own comment on `struct FeContext`), and
+// calling `owning-reenter` is not itself re-entry (it is the outer run's
+// first, non-nested native activation), so there is no counter here left
+// that an owning call could corrupt: this test is the regression guard that
+// keeps it that way, proving both `RunEvaluation` barriers -- the owning
+// call's own nested one, and any that a *separate* re-entering native
+// starts afterward in the same run -- restore their counters correctly and
+// do not interfere with each other.
 static bool TestNativeOwningReentry(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
-  ErrorState state = {.context = context, .reentry_max_depth = 8};
+  ErrorState state = {.context = context, .reentry_max_native_reentry = 8};
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
   FeObject* ordinary = FeMakeNativeFn(context, OrdinaryNative);
@@ -3075,6 +3190,7 @@ static bool TestNativeOwningReentry(void) {
   CHECK(IsRendered(
       context, FeEvaluateString(context, "owning.fe", body, sizeof(body) - 1),
       "42"));
+  CHECK(FeGetArenaStats(context).peak_native_reentry == 1);
 
   // The same shape with the owning call removed succeeds identically, so the
   // assertion above is about the owning call, not about the lambda body.
@@ -3083,31 +3199,45 @@ static bool TestNativeOwningReentry(void) {
       context, FeEvaluateString(context, "owning.fe", plain, sizeof(plain) - 1),
       "42"));
 
-  // The *enclosing* live depth must also survive the owning call, not just
-  // the native counter. This body runs the re-entering native right after
-  // the owning call; the re-entering native's own first `FeCallWithOptions`
-  // establishes a small ambient limit (8) for its nesting, and its depth is
-  // counted from the enclosing body's restored level. With the restore, the
-  // 8th re-entry needs depth 9 and raises; if the owning call had merely
-  // left `evaluation_depth` at 0, the 8th would fit and this would return
-  // "8" instead. The C-side high-water mark shows the re-entry really did
-  // reach 7 live activations before the block at the 8th.
-  state.reentry_remaining = 7;
+  // A *separate* re-entering native run right after the owning call sees
+  // the same numbers `TestNativeReentry` measures standalone: the owning
+  // call's own nested run left `native_reentry_depth` at exactly 0
+  // afterward (both because nothing increments a non-nested native call at
+  // all, and because 03F stopped resetting the depth counter through
+  // `ClearEvaluationControl`), so there is no leftover level for this
+  // chain to inherit or lose. `max_native_reentry` 8 admits 8 nested
+  // re-entries (9 activations; the deepest returns its own level).
+  state.reentry_remaining = 8;
   state.reentry_current = 0;
   state.reentry_max_seen = 0;
   state.reentry_cleanup_ran = false;
   static const char deep_body[] =
       "((fn () (owning-reenter) (reentrant-native)))";
-  CHECK(ExpectEvaluationError(context, &state, "owning.fe", deep_body,
-                              sizeof(deep_body) - 1,
-                              "owning.fe: evaluation depth limit exceeded"));
-  CHECK(state.reentry_max_seen == 7);
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "owning.fe", deep_body, sizeof(deep_body) - 1),
+      "9"));
+  CHECK(state.reentry_max_seen == 9);
+  CHECK(FeGetArenaStats(context).peak_native_reentry == 8);
+
+  // One beyond the reentrant chain's own limit still raises exactly as it
+  // does standalone -- the owning call ahead of it changes nothing.
+  // cppcheck-suppress redundantAssignment
+  state.reentry_remaining = 9;
+  state.reentry_current = 0;
+  state.reentry_max_seen = 0;
+  // cppcheck-suppress redundantAssignment
+  state.reentry_cleanup_ran = false;
+  CHECK(ExpectEvaluationError(
+      context, &state, "owning.fe", deep_body, sizeof(deep_body) - 1,
+      "owning.fe: native evaluation re-entry limit exceeded"));
+  CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
 
   // An ordinary native still succeeds after an owning call that raised: the
   // error path is the enclosing barrier's job, and both counters are clean
   // for the next evaluation.
-  state.reentry_remaining = 7;
+  state.reentry_remaining = 8;
   state.reentry_current = 0;
   state.reentry_max_seen = 0;
   state.reentry_cleanup_ran = false;
@@ -3608,127 +3738,6 @@ static bool TestMixedCleanupLIFO(void) {
   return true;
 }
 
-// Sub-plan 03E: the full `(deep N)` flatness result, for the largest N this
-// tree can actually run with `max_depth` raised above the legacy 1000-unit
-// default. Unlike 03D's pure call-chain probes, the canonical `(defun deep
-// (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))` also recurses through `if` and
-// arithmetic continuations, which stayed on the temporary recursive path
-// through 03D; this is the first slice where the C-stack high-water mark is
-// expected to stay flat across it -- the parent plan's own gate -- and it
-// does, all the way to the bound below.
-//
-// It is not `N = 100000`, and that is this slice's most important finding,
-// not a test-sizing detail. `GcStackSize` (4096, `fe_internal.h`) is a
-// fixed-size array field of `FeContext` itself -- never carved from the
-// arena, so raising the arena or `max_depth` does not grow it. The
-// lambda-body wrapper (03D, `ResumeBody`'s `FeRestoreGC`/
-// `FePushGC(env)`/`FePushGC(rest)` pattern) pushes two entries onto it per
-// still-open level that stay live -- not popped -- until the whole
-// enclosing activation unwinds. (`if`'s false branch would retain a second
-// such wrapper per level too, except that its single-form case -- the
-// common shape, and the one this canonical chain uses -- pushes the form
-// directly instead: see `ResumeIf`'s own comment. Skipping that special
-// case was tried during this slice's development and found first as a
-// *physical-frame* regression, not a GC-stack one -- kg's own
-// `test/test_perf.c` `(dc 300)` fixture started failing at N ~ 274, since
-// kg's 1 MiB arena's 1100-frame capacity assumes 3 simultaneously-open
-// frames per level, not 4 -- fixed there, which is what leaves only one
-// wrapper's entries here.) A `(deep N)` chain therefore retains roughly 4
-// GC-stack entries per simultaneously-open level (measured, not derived
-// from first principles: bisecting with `max_depth` raised well above each
-// candidate N's own `peak_depth`, `(deep 1021)` succeeds and `(deep 1022)`
-// raises `GC stack overflow`, 4096/1022 ~ 4.0). Under the *default*
-// `max_depth` (1000) this never fires -- `peak_depth(N) = 3N + 2` already
-// crosses 1000 at N = 333, hundreds of levels before the GC-stack bound at
-// ~1022, so every existing default-configured test (`TestEvaluationDepth`,
-// `TestRecursionDepth`-shaped kg cases) stays exactly where it already was.
-// It matters only once `max_depth` is deliberately raised past its
-// default, which is exactly what asking for `(deep 100000)` does. 03F,
-// which owns the two-bounds redesign, is where this should be revisited --
-// either a larger fixed `GcStackSize`, or (as the 03A/03D pattern of moving
-// state off the C stack into arena-resident frame fields already suggests)
-// retiring `FePushGC`/`FeRestoreGC` from the lambda-body wrapper entirely
-// in favor of a frame-owned root, which would make this bound disappear
-// along with the C-stack one.
-static bool TestFullDeepFlatness(void) {
-  // N is modest only to keep this test cheap: the GC-stack ceiling that
-  // used to cap this chain at 1021 levels is gone (see
-  // `TestGcStackConstantInNesting` below -- the GC stack no longer grows
-  // with nesting at all), so the only live bounds here are this arena's
-  // physical frame capacity and the logical ceiling raised below.
-  enum { DeepN = 340 };
-  const size_t peak_frames = 3 * (size_t)DeepN + 2;
-  const size_t arena_size = 300ULL * 1024 * 1024;
-  unsigned char* arena = malloc(arena_size);
-  CHECK(arena != nullptr);
-  FeContext* context = FeOpenContext(arena, arena_size);
-  CHECK(context != nullptr);
-  ErrorState state = {.context = context};
-  FeSetUserData(context, &state);
-  FeSetErrorFn(context, HandleError);
-  FeDefineNative(context, "stack-probe", StackProbe);
-
-  static const char deep_def[] =
-      "(setq deep (fn (n) (if (<= n 0) (stack-probe) (+ 1 (deep (- n "
-      "1))))))";
-  CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
-                         sizeof(deep_def) - 1) != nullptr);
-
-  stack_probe_last_address = 0;
-  stack_probe_deepest_address = 0;
-  static const char bare_probe[] = "(stack-probe)";
-  CHECK(IsRendered(
-      context,
-      FeEvaluateString(context, "bare.fe", bare_probe, sizeof(bare_probe) - 1),
-      "0"));
-  CHECK(stack_probe_last_address != 0);
-  const uintptr_t baseline = stack_probe_deepest_address;
-
-  char source[32];
-  const int written = snprintf(source, sizeof(source), "(deep %d)", DeepN);
-  CHECK(written > 0 && (size_t)written < sizeof(source));
-  char expected[16];
-  (void)snprintf(expected, sizeof(expected), "%d", DeepN);
-
-  // Twice the derived logical need -- well above the legacy default 1000,
-  // which N = 340's own peak_depth (1022) already exceeds -- so the
-  // *logical* ceiling is not what this test exercises; only the physical
-  // frame capacity (this arena's) and the GC-stack bound above are live.
-  const FeEvalOptions options = {.max_depth = peak_frames * 2};
-  stack_probe_last_address = 0;
-  stack_probe_deepest_address = 0;
-  CHECK(IsRendered(context,
-                   FeEvaluateStringWithOptions(context, "deep-flat.fe", source,
-                                               (size_t)written, &options),
-                   expected));
-  CHECK(stack_probe_last_address != 0);
-  const uintptr_t deepest = stack_probe_deepest_address;
-  const uintptr_t delta =
-      deepest > baseline ? deepest - baseline : baseline - deepest;
-  const size_t peak_evaluation_depth =
-      FeGetArenaStats(context).peak_evaluation_depth;
-  printf("full deep(%d) probe: baseline=%#" PRIxPTR " deepest=%#" PRIxPTR
-         " delta=%" PRIuPTR
-         " bytes, peak_evaluation_depth=%zu (predicted "
-         "%zu)\n",
-         DeepN, baseline, deepest, delta, peak_evaluation_depth, peak_frames);
-  // Flat: the same < 2 KiB budget 03D's own probes used, for the same
-  // reason -- a regression that sent `if` or arithmetic back through a
-  // recursive C call would grow this by tens of kilobytes at this depth,
-  // not stay under a couple.
-  CHECK(delta < 2048);
-  // `+1`, not `peak_frames` exactly: this `deep` ends in a call to
-  // `stack-probe`, one more pair-form entry than the canonical
-  // `0`-returning definition 03A's Decision derives `peak_depth` against
-  // (the same offset `TestEvaluationStackProbe`'s own probe-carrying `deep`
-  // produces).
-  CHECK(peak_evaluation_depth == peak_frames + 1);
-
-  FeCloseContext(context);
-  free(arena);
-  return true;
-}
-
 // The GC stack must not grow with Lisp nesting. Every frame is a mark-phase
 // root, so an intermediate result needs no separate `FePushGC`: it is
 // delivered straight into the frame below's `callee`. Before that held, each
@@ -3756,7 +3765,7 @@ static bool TestGcStackConstantInNesting(void) {
   // Same context for both runs: `peak_gc_stack_depth` is a high-water mark,
   // so the deeper run can only ever raise it, never mask a rise.
   enum { ShallowN = 200, DeepN = 2000 };
-  const FeEvalOptions options = {.max_depth = 3 * (size_t)DeepN * 2};
+  const FeEvalOptions options = {.max_frames = 3 * (size_t)DeepN * 2};
   char source[32];
   char expected[16];
 
@@ -3778,14 +3787,26 @@ static bool TestGcStackConstantInNesting(void) {
                    expected));
   const FeArenaStats stats = FeGetArenaStats(context);
   printf(
-      "gc stack across nesting: deep(%d)=%zu deep(%d)=%zu (peak_depth %zu)\n",
+      "gc stack across nesting: deep(%d)=%zu deep(%d)=%zu (peak_frame_depth "
+      "%zu)\n",
       ShallowN, shallow_peak, DeepN, stats.peak_gc_stack_depth,
-      stats.peak_evaluation_depth);
+      stats.peak_frame_depth);
   // Ten times the nesting, not one more GC-stack slot.
   CHECK(stats.peak_gc_stack_depth == shallow_peak);
   // And the run really was ten times deeper, so the equality above is not
-  // the two runs having quietly done the same amount of work.
-  CHECK(stats.peak_evaluation_depth == 3 * (size_t)DeepN + 3);
+  // the two runs having quietly done the same amount of work: this
+  // canonical chain's single-else-form `if` special case (`ResumeIf`'s own
+  // comment) keeps exactly 3 simultaneously-open frames per level -- the
+  // call, `if`, and the arithmetic waiting on its second operand, the same
+  // count kg's 03A Decision derives and cross-validates -- with no extra
+  // implicit-body frame. `+4`, measured: one more than the deleted logical
+  // `evaluation_depth` peak's own `3N + 2` offset for this exact
+  // 0-returning construct, since a live frame's own base entry (pushed
+  // before its kind is known) and completion (popped after delivery) both
+  // now cost a frame-stack slot at the instant they happen, where the old
+  // counter incremented and decremented around only the pair-form's own
+  // body.
+  CHECK(stats.peak_frame_depth == 3 * (size_t)DeepN + 4);
 
   FeCloseContext(context);
   free(arena);
@@ -3802,7 +3823,7 @@ int main(void) {
                  TestParameterLists() && TestBinding() && TestSetqAndSet() &&
                  TestNumericEqual() && TestUnwindHostAPI() &&
                  TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestEvaluationDepth() && TestFrameSubstrate() &&
+                 TestFrameLimits() && TestFrameSubstrate() &&
                  TestArenaStats() && TestEvaluationStackProbe() &&
                  TestCallHeadProbe() && TestArgumentFrame() &&
                  TestArgumentProbe() && TestLambdaBodyFrame() &&
@@ -3811,7 +3832,7 @@ int main(void) {
                  TestResumableFrameGC() && TestCleanupRunGC() &&
                  TestPrimitiveOrder() && TestResumableFrameBudget() &&
                  TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
-                 TestFullDeepFlatness() && TestGcStackConstantInNesting()
+                 TestGcStackConstantInNesting()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

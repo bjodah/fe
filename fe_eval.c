@@ -26,6 +26,13 @@
 #include "fe.h"
 #include "fe_internal.h"
 
+// Clears the ambient *limits* a cleanup should not inherit from the
+// abandoned body (`max_frames_limit`, `native_reentry_limit`, and the rest
+// of the ordinary control record), but deliberately leaves
+// `native_reentry_depth` alone: that counter is a census of live C
+// activations, not a configured ceiling, and those activations are still
+// real and still on the C stack when this runs -- see its own comment on
+// `struct FeContext`.
 static void ClearEvaluationControl(FeContext* ctx) {
   ctx->evaluation_interrupt = nullptr;
   ctx->evaluation_userdata = nullptr;
@@ -35,9 +42,8 @@ static void ClearEvaluationControl(FeContext* ctx) {
   ctx->evaluation_active = false;
   ctx->evaluation_limited = false;
   ctx->cleanup_step_limit = 0;
-  ctx->evaluation_depth = 0;
-  ctx->evaluation_depth_limit = 0;
-  ctx->native_reentry_depth = 0;
+  ctx->max_frames_limit = 0;
+  ctx->native_reentry_limit = 0;
 }
 
 void EndEvaluationControl(FeContext* ctx, bool owns_control) {
@@ -273,7 +279,8 @@ bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
                                       : DefaultEvalPollInterval;
   ctx->evaluation_poll_countdown = ctx->evaluation_poll_interval;
   ctx->cleanup_step_limit = options->cleanup_step_limit;
-  ctx->evaluation_depth_limit = options->max_depth;
+  ctx->max_frames_limit = options->max_frames;
+  ctx->native_reentry_limit = options->max_native_reentry;
   return true;
 }
 
@@ -293,51 +300,29 @@ void EvaluationStep(FeContext* ctx) {
   }
 }
 
-// Bounds C-stack recursion explicitly, instead of the accidental bound
-// `GcStackSize` slot consumption used to provide (see
-// `DefaultEvaluationDepth`). Called once from `Evaluate`'s pair path, which
-// brackets exactly the region `call_list` above it also brackets: both
-// restore points there (the macro tail call and the ordinary return)
-// decrement `evaluation_depth` back down, and `FeHandleError`, via
-// `ClearEvaluationControl`, resets it to 0 on any error the way it resets
-// `call_list` to `&nil` -- see the field's comment on `struct FeContext`.
-static void EnterEvaluationDepth(FeContext* ctx) {
-  ctx->evaluation_depth++;
-  if (ctx->evaluation_depth > ctx->arena_peak_evaluation_depth) {
-    ctx->arena_peak_evaluation_depth = ctx->evaluation_depth;
-  }
-  const size_t depth_limit = ctx->evaluation_depth_limit != 0
-                                 ? ctx->evaluation_depth_limit
-                                 : DefaultEvaluationDepth;
-  if (ctx->evaluation_depth > depth_limit) {
-    FeHandleError(ctx, "evaluation depth limit exceeded");
-  }
-}
-
-// Bounds the native-re-entry boundary explicitly: `native_reentry_depth`
-// counts the currently active native C activations. The `FeFrameNative`
-// resume saves both this counter and `evaluation_depth` before calling
-// through this helper, and restores both saved values on the ordinary return
-// (an owning nested `FeCallWithOptions` can clear the whole control record --
-// both counters included -- before the native returns, so the enclosing
-// frames' accounting must be put back); an error skips the restore and is the
-// enclosing run barrier's job, and `ClearEvaluationControl` resets the
-// counter to 0 with the other live-depth state. An ordinary native is one
-// level; only a native that synchronously calls `FeCall`/`FeCallWithOptions`
-// starts a nested run and another level, which is the one place a fresh C
-// frame legitimately enters through this boundary. Until 03F it shares the
-// ambient legacy `evaluation_depth_limit`/`DefaultEvaluationDepth` ceiling
-// and the old `evaluation depth limit exceeded` text, so no public
-// expectation moves mid-migration; 03F gives native re-entry its own public
-// option, statistic and message.
-static void EnterNativeDepth(FeContext* ctx) {
-  const size_t depth_limit = ctx->evaluation_depth_limit != 0
-                                 ? ctx->evaluation_depth_limit
-                                 : DefaultEvaluationDepth;
-  if (ctx->native_reentry_depth >= depth_limit) {
-    FeHandleError(ctx, "evaluation depth limit exceeded");
+// Bounds native re-entry: a nested evaluator run reached only because a
+// native, synchronously, started `FeCall`/`FeCallWithOptions`/`FeEvaluate*`
+// while another run was already live below it -- see `native_reentry_depth`'s
+// own comment on `struct FeContext` for exactly which runs that is (not
+// every native invocation, and not a cleanup drain). Called from
+// `RunEvaluation` itself, once, only when its own frame stack was already
+// non-empty at entry; the caller's local `saved_native_reentry_depth` (its
+// value from just before this call) is what every exit path -- ordinary
+// return or `longjmp` error -- restores, so the increment this makes is
+// exactly undone as that one `RunEvaluation` activation unwinds, with no
+// separate reset anywhere else (`ClearEvaluationControl` deliberately leaves
+// this counter alone; see its own comment).
+static void EnterNativeReentry(FeContext* ctx) {
+  const size_t limit = ctx->native_reentry_limit != 0
+                           ? ctx->native_reentry_limit
+                           : DefaultNativeReentry;
+  if (ctx->native_reentry_depth >= limit) {
+    FeHandleError(ctx, "native evaluation re-entry limit exceeded");
   }
   ctx->native_reentry_depth++;
+  if (ctx->native_reentry_depth > ctx->arena_peak_native_reentry) {
+    ctx->arena_peak_native_reentry = ctx->native_reentry_depth;
+  }
 }
 
 static FeObject* Evaluate(FeContext* ctx,
@@ -527,20 +512,33 @@ static bool DispatchResolvedCall(FeContext* ctx,
   HandleNonCallable(ctx, CAR(frame->expr));
 }
 
-// Allocates the next frame-stack slot, or raises the same transitional
-// "evaluation depth limit exceeded" text 03D's native boundary already uses
-// (03F gives the physical frame wall its own message). `CleanupFrameReserve`
-// extra slots are available only while a cleanup is draining
-// (`ctx->completion != FeCompletionNormal`, set by `FeHandleError` before
-// `RunCleanupsAfterError` runs), so a cleanup triggered by exhaustion is not
-// itself immediately refused by the same wall the body just hit.
+// Allocates the next frame-stack slot, or raises "evaluation frame limit
+// exceeded" before writing it. The effective ceiling is
+// `min(max_frames_limit, frame_stack_capacity)` with 0 meaning "no
+// configured limit, use the full physical capacity" -- `max_frames_limit`
+// can only lower the bound the arena partition already sized, never raise
+// it. `CleanupFrameReserve` extra slots are available only while a cleanup
+// is draining (`ctx->completion != FeCompletionNormal`, set by
+// `FeHandleError` before `RunCleanupsAfterError` runs); by then
+// `ClearEvaluationControl` has already zeroed `max_frames_limit`, so a
+// cleanup pushes against the full physical capacity plus the reserve, not
+// whatever tight body limit the abandoned computation was configured with,
+// and is not itself immediately refused by the same wall the body just hit.
 static FeEvalFrame* AllocateFrame(FeContext* ctx) {
+  size_t limit = ctx->frame_stack_capacity;
+  if (ctx->max_frames_limit != 0 && ctx->max_frames_limit < limit) {
+    limit = ctx->max_frames_limit;
+  }
   const size_t reserve =
       ctx->completion == FeCompletionNormal ? 0 : CleanupFrameReserve;
-  if (ctx->frame_stack_index == ctx->frame_stack_capacity + reserve) {
-    FeHandleError(ctx, "evaluation depth limit exceeded");
+  if (ctx->frame_stack_index == limit + reserve) {
+    FeHandleError(ctx, "evaluation frame limit exceeded");
   }
-  return &ctx->frame_stack[ctx->frame_stack_index++];
+  FeEvalFrame* const frame = &ctx->frame_stack[ctx->frame_stack_index++];
+  if (ctx->frame_stack_index > ctx->arena_peak_frame_depth) {
+    ctx->arena_peak_frame_depth = ctx->frame_stack_index;
+  }
+  return frame;
 }
 
 static void PushEvaluationFrame(FeContext* ctx,
@@ -565,11 +563,11 @@ static void PushEvaluationFrame(FeContext* ctx,
 // iteration, `do`, and a cleanup's unwind forms (`RunEvaluationBody`,
 // below). `env` is the environment the forms see (never a fresh callee
 // environment; nothing here binds parameters). `FeFrameImplicitBody`, not
-// `FeFrameBody`: this frame's push has no preceding `EnterEvaluationDepth`
-// or trace-cell link to balance the way a lambda-body frame's dispatch
-// already did, so it completes through a lighter path (see
-// `CompleteImplicitBodyFrame`) that does not touch `evaluation_depth` or
-// `call_list` -- see `FeFrameImplicitBody`'s own comment in fe_internal.h.
+// `FeFrameBody`: this frame's push has no preceding trace-cell link to
+// balance the way a lambda-body frame's dispatch already did, so it
+// completes through a lighter path (see `CompleteImplicitBodyFrame`) that
+// does not touch `call_list` -- see `FeFrameImplicitBody`'s own comment in
+// fe_internal.h.
 // This frame gets its own fresh GC/cleanup checkpoints, exactly as the
 // recursive `DoList` took its own `FeSaveGC()` on every call, independent
 // of whatever checkpoint the enclosing form already holds; `.expr` is set
@@ -593,10 +591,9 @@ static void PushBodyFrame(FeContext* ctx, FeObject* env, FeObject* forms) {
 // The completion for a synthetic `FeFrameImplicitBody`: drains cleanups it
 // registered directly (ordinarily a no-op, since each inner pair-form
 // already drained its own on the way out) and restores its own GC
-// checkpoint, protecting the result -- but does not decrement
-// `evaluation_depth` or unlink `call_list`, because pushing this frame never
-// incremented or linked either. `CompletePairFrame`, by contrast, always
-// pairs with the `EnterEvaluationDepth`/trace-link a real pair-form dispatch
+// checkpoint, protecting the result -- but does not unlink `call_list`,
+// because pushing this frame never linked it. `CompletePairFrame`, by
+// contrast, always pairs with the trace-link a real pair-form dispatch
 // already did.
 static void CompleteImplicitBodyFrame(FeContext* ctx,
                                       const FeEvalFrame* frame) {
@@ -1220,8 +1217,13 @@ static bool ResumeBinary(FeContext* ctx,
   // `FeCons`'s possible collection -- reachable only from a register or a
   // stack slot the collector does not scan -- so a `(cons a b)` whose
   // allocation happened to trigger a GC produced a pair with a freed cdr.
-  // The general rule for every resume: a frame field stays live until the
-  // last operation that might allocate has finished with it.
+  // That was survivable only while every completed sub-expression's result
+  // also sat on the GC stack; once those per-level pushes went away (they
+  // were what made the fixed 4096-slot GC stack, not the frame stack, bound
+  // recursion depth) the latent hazard became a live use-after-free, found
+  // by `fuzz_eval` under the 64 KiB arena that collects often enough to hit
+  // it. The general rule for every resume: a frame field stays live until
+  // the last operation that might allocate has finished with it.
   switch (PRIM(frame->fn)) {
     case PCons:
       *result = FeCons(ctx, first, second);
@@ -1507,13 +1509,12 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
 // this form was being evaluated, restore its GC checkpoint, protect its
 // result, and unlink its call-trace cell. Every pair form completes through
 // here -- a symbol head, a resolved computed head, a call, or a primitive
-// continuation -- so the evaluation_depth and call_list bookkeeping (and the
-// `macro` arm's own internal restore) cannot drift between the paths.
+// continuation -- so the `call_list` bookkeeping (and the `macro` arm's own
+// internal restore) cannot drift between the paths.
 static void CompletePairFrame(FeContext* ctx, FeEvalFrame* frame) {
   RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
   FeRestoreGC(ctx, frame->gc_checkpoint);
   ctx->call_list = CDR(&frame->trace_cell);
-  ctx->evaluation_depth--;
 }
 
 // Transfers an evaluator-run error to the enclosing barrier, or to the host
@@ -1570,7 +1571,6 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
           CAR(&frame->trace_cell) = expr;
           CDR(&frame->trace_cell) = ctx->call_list;
           ctx->call_list = &frame->trace_cell;
-          EnterEvaluationDepth(ctx);
           frame->gc_checkpoint = FeSaveGC(ctx);
           frame->cleanup_checkpoint = ctx->cleanup_stack_index;
           FeObject* const head = CAR(expr);
@@ -1644,10 +1644,10 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
       case FeFrameImplicitBody:
         // `ResumeBody`'s own logic is exactly right for this synthetic
         // body -- append `callee`, push the next form or complete -- but
-        // this frame's own push had no `EnterEvaluationDepth`/trace-link to
-        // balance, so it completes through the lighter
-        // `CompleteImplicitBodyFrame` instead of `CompletePairFrame`. See
-        // `FeFrameImplicitBody`'s comment in fe_internal.h.
+        // this frame's own push had no trace-link to balance, so it
+        // completes through the lighter `CompleteImplicitBodyFrame` instead
+        // of `CompletePairFrame`. See `FeFrameImplicitBody`'s comment in
+        // fe_internal.h.
         if (!ResumeBody(ctx, frame, &result)) {
           continue;
         }
@@ -1674,36 +1674,17 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         // The argument frame just switched to this kind and moved the
         // reordered argument list into `accumulator`. Invoke the native
         // synchronously from the loop -- no per-native setjmp, the run's own
-        // barrier is the one in effect -- bounded by `native_reentry_depth`.
-        // A native that calls `FeCall`/`FeCallWithOptions` starts a nested
-        // run above this frame on a fresh C activation and counts as another
-        // active level until it returns, which is why the counter, not the
-        // pair-depth accounting, owns this seam.
-        //
-        // Both active-depth values are restored to their pre-call values on
-        // the ordinary return, before `CompletePairFrame`: an owning nested
-        // `FeCallWithOptions` (started when no control record is active,
-        // e.g. under a plain `FeEvaluateString`) runs `EndEvaluationControl`
-        // on its way out, which clears the whole control record --
-        // `native_reentry_depth` *and* `evaluation_depth` included -- while
-        // the enclosing frames are still live. Restoring both keeps the
-        // enclosing evaluation's logical max_depth accounting intact (a blind
-        // decrement would wrap `native_reentry_depth` to SIZE_MAX, and
-        // merely leaving `evaluation_depth` at 0 would under-count the live
-        // pair forms for every later form in this run). `CompletePairFrame`
-        // then performs its own unconditional decrement for the enclosing
-        // pair form. An error inside the native skips this restore entirely
-        // and is the enclosing run barrier's job, exactly as for
-        // `evaluator_catch`.
-        {
-          const size_t saved_depth = ctx->evaluation_depth;
-          const size_t saved_native_depth = ctx->native_reentry_depth;
-          EnterNativeDepth(ctx);
-          result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
-          ctx->native_reentry_depth = saved_native_depth;
-          ctx->evaluation_depth = saved_depth;
-          CompletePairFrame(ctx, frame);
-        }
+        // barrier is the one in effect. Calling the native is not itself
+        // bounded here: it is not re-entry (see `native_reentry_depth`'s
+        // comment on `struct FeContext`). If this native synchronously
+        // starts a nested run of its own -- `FeCall`/`FeCallWithOptions`/
+        // `FeEvaluate*` -- that nested `RunEvaluation` call sees a non-empty
+        // frame stack at its own entry and bounds and accounts for itself
+        // through `EnterNativeReentry`, restoring its own pre-entry counter
+        // on every exit path; nothing here needs to save or restore
+        // anything around the call.
+        result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
+        CompletePairFrame(ctx, frame);
         break;
 
       case FeFrameIf:
@@ -1761,13 +1742,21 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
 // run's catch and native-reentry depth on every exit -- normal or by
 // `longjmp` on error. `bind` is the `newenv` target a `let` at the top of
 // `obj` writes into, exactly as the recursive `Evaluate`'s own parameter
-// was.
+// was. A non-empty frame stack at entry is only possible if a native,
+// somewhere below, synchronously started this call while its own run was
+// still live -- see `native_reentry_depth`'s comment on `struct FeContext`
+// -- so that is exactly the condition `EnterNativeReentry` bounds and
+// counts; a fresh top-level host call always sees an empty stack and is
+// never counted.
 static FeObject* RunEvaluation(FeContext* ctx,
                                FeObject* obj,
                                FeObject* env,
                                FeObject** bind) {
   const size_t base = ctx->frame_stack_index;
   const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
+  if (base > 0) {
+    EnterNativeReentry(ctx);
+  }
   jmp_buf jump;
   jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
 
@@ -1799,7 +1788,13 @@ static FeObject* RunEvaluation(FeContext* ctx,
 // identical to `RunEvaluation`, except the base frame is a sequential body
 // (`PushBodyFrame`) rather than a single expression, so `let` threads
 // between the cleanup's own forms exactly as it did through the recursive
-// `DoList`'s `&env` out-parameter.
+// `DoList`'s `&env` out-parameter -- and, deliberately, this function never
+// calls `EnterNativeReentry`: a cleanup drain is not native re-entry,
+// however non-empty the frame stack it runs on top of is (see
+// `native_reentry_depth`'s comment on `struct FeContext`). A native invoked
+// *from within* the cleanup's own forms that itself re-enters evaluation is
+// still counted, through its own nested `RunEvaluation` call, same as
+// anywhere else.
 static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* forms,
                                    FeObject* env) {

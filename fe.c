@@ -21,7 +21,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "2.0";
+const char* FeVersion = "3.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -1384,8 +1384,10 @@ FeArenaStats FeGetArenaStats(const FeContext* ctx) {
       .peak_live_objects = ctx->arena_peak_live_count,
       .collection_count = ctx->arena_collection_count,
       .peak_gc_stack_depth = ctx->arena_peak_gc_stack_depth,
-      .peak_evaluation_depth = ctx->arena_peak_evaluation_depth,
+      .frame_capacity = ctx->frame_stack_capacity,
+      .peak_frame_depth = ctx->arena_peak_frame_depth,
       .peak_cleanup_stack_depth = ctx->arena_peak_cleanup_stack_depth,
+      .peak_native_reentry = ctx->arena_peak_native_reentry,
       .allocation_failures = ctx->arena_allocation_failures,
   };
 }

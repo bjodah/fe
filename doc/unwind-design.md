@@ -167,6 +167,33 @@ one, so `RunOneCleanupEntry`'s own manual restores (frame index, saved
 `evaluator_catch`, `native_reentry_depth`, `call_list`) are what an eventual
 `catch` inside a cleanup would also have to reconcile with.
 
+**A cleanup's own resource limits are fresh, but its live counts are not.**
+Sub-plan 03F split the evaluator's single depth bound into two
+(`FeEvalOptions.max_frames` for Lisp nesting, `max_native_reentry` for
+nested runs a native starts), and unwinding treats the two halves of that
+state differently on purpose:
+
+- The *configured limits* are cleared. `FeHandleError` calls
+  `ClearEvaluationControl` before draining, so a cleanup runs under the
+  built-in ceilings rather than whatever tight `max_frames` the abandoned
+  body was configured with. This is the same fresh-re-arm the step budget
+  already gets via `cleanup_step_limit`, and for the same reason: a body
+  that ran out of a resource must still get a working cleanup.
+- `CleanupFrameReserve` frames beyond the physical capacity become
+  pushable, but only while `ctx->completion != FeCompletionNormal`. A
+  cleanup provoked by frame exhaustion is therefore not immediately refused
+  by the same wall the body just hit.
+- `native_reentry_depth` is **not** cleared, because it is a census of live
+  C activations rather than a ceiling. While the drain runs, no `longjmp`
+  has popped a single one of the native C frames the abandoned computation
+  was inside; they are still on the real stack, and a cleanup native that
+  re-enters evaluation stacks a fresh activation on top of all of them. The
+  counter falls back to the truth one `RunEvaluation` barrier restore at a
+  time, as the unwind actually happens.
+
+The asymmetry is the point: forgiving a cleanup its predecessor's *budget*
+is safe, whereas pretending its predecessor's *C stack* went away is not.
+
 ## What reaches the host
 
 The error callback should receive the completion kind, the message, and the

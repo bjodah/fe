@@ -108,68 +108,81 @@ until the caller explicitly calls `FePushGC()`.
 
 `FeGetArenaStats()` (`doc/c-api.md`'s "Arena Statistics") exposes this
 freelist/live-object bookkeeping, the collection count, and the peaks
-described below (GC-stack depth, evaluation depth, cleanup-stack depth) as a
-read-only snapshot. It adds no new counters beyond what the sites already
-below track for their own bookkeeping -- `arena_live_count` is the one
-exception, a running total `MakeObject()`/`CollectGarbage()` maintain solely
-so the accessor can report `free_slots` without walking the freelist.
+described below (GC-stack depth, frame depth, cleanup-stack depth, native
+re-entry depth) as a read-only snapshot. It adds no new counters beyond what
+the sites already below track for their own bookkeeping -- `arena_live_count`
+is the one exception, a running total `MakeObject()`/`CollectGarbage()`
+maintain solely so the accessor can report `free_slots` without walking the
+freelist.
 
-The `gc_stack` is a fixed 4096-slot array inside `FeContext`, so it also caps
-recursion: a self-recursive Fe function costs several slots per frame, which
-allows roughly 450 frames before `GC stack overflow`. Because the array lives in
-the arena, its size is the dominant term in `FeMinimumArenaSize()`.
+The `gc_stack` is a fixed 4096-slot array inside `FeContext`. Sub-plan 03E
+(the frame machine's own gate) stopped it growing with Lisp nesting at all --
+every live frame is a mark-phase root, so an intermediate result needs no
+separate `FePushGC()`, only the run's own final result gets one push -- so
+today it bounds only the reader's and writer's own native C recursion, not
+evaluation. Because the array lives in the arena, its size is still the
+dominant term in `FeMinimumArenaSize()`.
 
-That cap is incidental, not designed: it tracks GC-stack slot consumption,
-not C-stack usage, so a build with fatter per-call C frames (a sanitizer,
-`-O0`, a debug build) can exhaust the real C stack first and crash instead
-of raising `GC stack overflow`. `Evaluate()`'s recursion is bounded
-separately and explicitly by `evaluation_depth` against
-`FeEvalOptions.max_depth` (`DefaultEvaluationDepth` when left 0), checked on
-every pair-form evaluation regardless of whether any `*WithOptions()` control
-is active. See `doc/c-api.md`'s "Bounding Recursion". `evaluation_depth` is
-reset to 0 by `FeHandleError()`, the same way `call_list` is, since a
-`longjmp` skips every pending decrement.
+Sub-plan 03F replaced the single, transitional `max_depth`/
+`evaluation_depth` pair -- itself a stand-in the frame machine's own
+migration (03C-03E) kept alive only for API continuity while it moved
+Lisp-nesting state off the C stack -- with two independent, permanent
+bounds, because they protect two different things:
 
-Native re-entry is bounded separately at the native-call boundary by a
-private `native_reentry_depth` counter on `FeContext`. It counts currently
-active native invocations -- an ordinary native is one fixed C activation,
-and a native that synchronously calls `FeCall`/`FeCallWithOptions` starts a
-nested `RunEvaluation` and then another active native level, which is the
-one place a fresh C frame legitimately enters through the evaluator. Until
-03F it is capped by the same ambient legacy `evaluation_depth_limit`/
-`DefaultEvaluationDepth` and reports the same old
-`evaluation depth limit exceeded` text, so no public expectation moves
-mid-migration; 03F gives native re-entry its own public option, measured
-smaller default, statistic and error. Each `RunEvaluation` barrier saves and
-restores the counter beside `evaluator_catch` on both the normal and the
-`longjmp` path -- the counter is a plain `size_t`, never a copied `jmp_buf`
--- and `FeHandleError()` resets it to 0 with the other live-depth state, so
-a recovered context starts fresh.
+- **Lisp nesting** (`FeEvalOptions.max_frames`, `FeArenaStats.frame_capacity`
+  / `peak_frame_depth`) is a frame-stack slot count, not a C-stack bound: the
+  frame machine roots every level of ordinary recursion in the arena, so this
+  costs no C stack regardless of its value. `AllocateFrame()` checks it
+  before every push -- `min(max_frames, frame_stack_capacity)`, zero meaning
+  "use the arena's own physical capacity" -- and raises `evaluation frame
+  limit exceeded` before writing the slot that would exceed it. A private
+  `CleanupFrameReserve` (32 frames) is available only while a cleanup is
+  draining (`ctx->completion != FeCompletionNormal`), so exhaustion during an
+  ordinary body does not itself immediately refuse the cleanup it triggers.
+- **Native re-entry** (`FeEvalOptions.max_native_reentry`,
+  `FeArenaStats.peak_native_reentry`) is the one place a fresh C activation
+  still legitimately enters the evaluator: a native that synchronously calls
+  `FeCall`/`FeCallWithOptions`/`FeEvaluate*` starts a nested `RunEvaluation`
+  on top of its own C frame. `native_reentry_depth` on `FeContext` counts
+  exactly those nested runs, not every native invocation -- calling a native
+  from Lisp is not itself re-entry, only that native synchronously starting
+  *another* evaluation is. `RunEvaluation()` increments it, checked against
+  `EnterNativeReentry()`'s effective limit (`native_reentry_limit`, or
+  `DefaultNativeReentry` when left 0), exactly when its own frame stack was
+  already non-empty at entry -- the one condition that can only be true if a
+  native, somewhere below on the C stack, is what started this run. A
+  top-level host call always sees an empty frame stack at its own entry and
+  is never counted; neither is a cleanup drain (`RunEvaluationBody()`, a
+  distinct function that never calls `EnterNativeReentry()`, even though its
+  own base is typically deep inside the physical frame reserve). Exceeding
+  the limit raises `native evaluation re-entry limit exceeded` before the
+  nested run starts.
 
-For a zero-argument re-entering chain the two counters track the same
-nesting: each activation is one pair form and one native level, so with the
-shared legacy ceiling they reach the limit together. The legacy pair-depth
-check runs earlier in the loop and reports the old message first, at the
-same blocked activation; `native_reentry_depth` is live bookkeeping for
-03F -- incremented, restored, barrier-saved and error-reset, so its nesting
-level is honest even though it is not the independently observable bound
-today. 03F gives it its own smaller default and that is when it becomes the
-reported bound.
-
-The `FeFrameNative` resume saves both active-depth values -- this counter
-and `evaluation_depth` -- before calling the native and restores both on the
-ordinary return, before `CompletePairFrame` runs its own unconditional
-decrement for the enclosing pair form. An owning nested `FeCallWithOptions`
--- started when no control record is active, e.g. under a plain
-`FeEvaluateString` -- runs `EndEvaluationControl` on its way out, which
-clears the whole control record (both counters included) while the enclosing
-frames are still live. Restoring both puts the enclosing evaluation's
-accounting back: a blind decrement would wrap `native_reentry_depth` to
-`SIZE_MAX` and spuriously block the next native, and merely leaving
-`evaluation_depth` at 0 would under-count the still-live pair forms for
-every later form in the same run, weakening the logical max_depth bound.
-Error paths skip the restore entirely: the enclosing barrier restores its
-saved counter, and `FeHandleError()` resets both to 0.
+Every `RunEvaluation()` barrier saves its own pre-entry `native_reentry_depth`
+in a local and restores it on both the normal-return and `longjmp` paths, so
+nesting unwinds the counter level by level as each C activation actually
+returns -- the counter is a plain `size_t`, never a copied `jmp_buf`.
+`ClearEvaluationControl()` -- run by `FeHandleError()` before cleanups drain,
+and by `EndEvaluationControl()` on an owning call's ordinary return -- resets
+the ambient *limits* (`max_frames_limit`, `native_reentry_limit`) to their
+built-in defaults, but deliberately leaves `native_reentry_depth` itself
+alone: while an error is unwinding, before any `longjmp` has popped a single
+C frame, every native activation the abandoned computation was inside is
+still real and still live on the C stack, and a cleanup native that itself
+re-enters evaluation stacks a fresh C frame on top of all of them, so the
+check needs the true count to stay meaningful. It falls back to the correct
+value only as the unwind actually happens, one `RunEvaluation()` barrier's
+restore at a time. This replaces a genuine, now-closed hazard from the
+migration period: an *owning* nested `FeCallWithOptions` (started when no
+control record was yet active, e.g. under a plain `FeEvaluateString`) used to
+run `EndEvaluationControl()` on its way out, which cleared the whole control
+record -- both counters, in the pre-03F design -- while the enclosing frames
+were still live, so `FeFrameNative`'s resume had to save and restore both
+active-depth values around every native call to put the enclosing
+evaluation's accounting back. 03F's redefinition (only nested `RunEvaluation`
+calls increment; `ClearEvaluationControl()` never resets the depth) makes
+that per-call save/restore unnecessary: there is no longer a live counter for
+an owning call's cleanup to corrupt in the first place.
 
 Evaluation has one context-owned frame stack. The collector marks every live
 frame. There is no temporary recursive-dispatch frame kind any more: sub-plan
@@ -226,10 +239,14 @@ special form or primitive: once the argument frame has reordered the
 evaluated argument list, the frame switches to `FeFrameNative` and the run
 loop invokes the `FeNativeFn` synchronously from that explicit state -- the
 existing public signature unchanged, and no per-native `setjmp` (the
-enclosing `RunEvaluation` barrier is the only one in effect). The
-`native_reentry_depth` check wraps that invocation, so a native calling back
-into `FeCall*` is the one C-recursion route the frame machine deliberately
-keeps.
+enclosing `RunEvaluation` barrier is the only one in effect), and no
+per-call bookkeeping either: calling the native is not itself bounded here,
+because it is not itself re-entry. If the native synchronously starts a
+nested run of its own, that nested `RunEvaluation()` call is what checks and
+counts it (see "Native re-entry" above) -- a native calling back into
+`FeCall*` is the one C-recursion route the frame machine deliberately keeps,
+and it is bounded at its own entry point, not wrapped around every native
+call whether or not it re-enters.
 
 Every remaining special form and primitive is a frame continuation, added by
 sub-plan 03E. `EvaluatePrimitive`'s old recursive switch is not one frame
@@ -267,17 +284,22 @@ no call involved: `if`'s false branch when it has more than one form,
 `while`'s body each pass, and `do`. It reuses `FeFrameBody`'s own resume
 logic (`ResumeBody`) but is its own kind, `FeFrameImplicitBody`, because it
 completes through a lighter path, `CompleteImplicitBodyFrame`, that does not
-touch `evaluation_depth` or `call_list`: a lambda-body frame's push already
-went through `EnterEvaluationDepth`/the trace-cell link when it was still
-the call form's own `FeFrameExpression`, but this frame's push has no such
-entry to balance. Conflating the two here caused `evaluation_depth` to be
-decremented once too many times per level during this slice's own
-development, unsigned-wrapping it to a huge value and turning the very next
-pair-form entry into a false "evaluation depth limit exceeded" -- worth
-recording because the fix generalizes: any new frame kind pushed by
-something other than `FeFrameExpression`'s own pair-form dispatch must not
-route through `CompletePairFrame`, or its unmatched decrement corrupts the
-counter the same way.
+touch `call_list`: a lambda-body frame's push already went through the
+trace-cell link when it was still the call form's own `FeFrameExpression`,
+but this frame's push has no such entry to balance.
+
+Conflating the two here was a real bug during 03E's development, and the
+lesson outlived the counter it was found on. Back when a transitional
+`evaluation_depth` counter still existed beside the frame stack, routing
+this frame through `CompletePairFrame` decremented that counter once too
+many times per level, unsigned-wrapping it to a huge value and turning the
+very next pair-form entry into a false depth error. 03F deleted the
+counter, so that exact failure can no longer happen -- but the rule
+generalizes to every piece of per-form bookkeeping `CompletePairFrame`
+still owns (`call_list`, the GC and cleanup checkpoints): a new frame kind
+pushed by something other than `FeFrameExpression`'s own pair-form dispatch
+must not route through `CompletePairFrame`, or its unmatched restore
+corrupts whatever that path balances.
 
 `if`'s false branch is special-cased when it has exactly one form -- the
 common shape, and the one the canonical `(deep N)` chain uses -- to push
@@ -288,15 +310,19 @@ own sake: 03A/03C/03D's frame-storage Decision derives kg's 1 MiB arena's
 1100-frame capacity from *3* simultaneously-open frames per `(deep N)`
 level (the call, `if`, and the arithmetic form waiting on its second
 operand). A whole extra retained `FeFrameImplicitBody` per level for a
-single form makes that 4, and 1100 physical frames divided by 4 is reached
-at N ~ 274 -- long before the intended logical ceiling at N = 333, the
-exact regression this special case exists to prevent (measured during this
-slice's own development: without it, `(dc 300)` in kg's own
-`test/test_perf.c` -- unaffected by the raised-`max_depth` probe, since it
-uses the ordinary 1 MiB arena and default `max_depth` -- failed with the
-physical-exhaustion route of the same transitional "evaluation depth limit
-exceeded" text). With the special case, `(deep 332)` succeeds and
-`(deep 333)` fails again, exactly the 03A/03C/03D boundary.
+single form makes that 4 -- a 33% cut in every host's usable recursion
+depth for no behavioural gain. It was found as a regression rather than
+reasoned about in advance: without the special case, `(dc 300)` in kg's own
+`test/test_perf.c` failed at N ~ 274 on the ordinary 1 MiB arena.
+
+Since 03F this arithmetic is the *whole* bound, not half of it. While the
+transitional logical counter still existed, its 1000-unit default fired
+first for kg's arena and partly masked the frames-per-level cost; deleting
+it (see "two independent, permanent bounds" above) leaves `frame_capacity`
+alone deciding how deep a host can recurse, so frames per level now
+converts directly and solely into usable depth. Any future change that
+retains an extra frame per level of ordinary recursion is a proportional
+cut in every embedding's recursion depth, and should be measured as one.
 
 `unwind-protect`'s cleanup forms run through a second entry point,
 `RunEvaluationBody`, sharing `RunEvaluation`'s own barrier/`setjmp`
@@ -315,23 +341,27 @@ old recursive `DoList`'s implicit one; `RunOneCleanupEntry`'s own restores
 what put the context back together afterward, unchanged by this slice.
 
 Embedded frame trace cells preserve the host error callback's semantic
-call trace without allocating after an error. Frame exhaustion keeps the
-existing `evaluation depth limit exceeded` text until the final public-bound
-slice (03F).
+call trace without allocating after an error. Frame exhaustion raises the
+final, permanent `evaluation frame limit exceeded` text (03F); nothing
+transitional remains at this boundary.
 
-A raised `max_depth` reveals a second, previously non-binding bound:
-`GcStackSize` (4096) is a fixed-size array field of `FeContext`, never
-carved from the arena. With the single-form `if` special case above, the
-canonical `(deep N)` chain's only remaining GC-stack retention per level is
-the lambda-body wrapper's `FePushGC(env)`/`FePushGC(rest)` pair, not popped
-until the whole activation unwinds. Under the default `max_depth` (1000)
-this is never the binding constraint -- the logical ceiling already fires
-at N = 333, hundreds of levels before the GC-stack bound -- but raising
-`max_depth` far enough (as the full-flatness probe does) reaches it before
-either the physical frame wall or the C stack move at all: empirically,
-`(deep 1021)` succeeds and `(deep 1022)` raises `GC stack overflow`. See
-`fe/test_api.c`'s `TestFullDeepFlatness` for the measurement and 03F's own
-scope for where this should be resolved.
+The GC-stack retention this section used to describe -- the lambda-body
+wrapper's `FePushGC(env)`/`FePushGC(rest)` pair, left live per still-open
+level until the whole activation unwound, which made `GcStackSize` (4096) a
+second, previously non-binding recursion bound once `max_frames` was raised
+far enough past its default (`(deep 1021)` succeeded, `(deep 1022)` raised
+`GC stack overflow`) -- is gone. An intermediate frame's result is delivered
+straight into the frame below's `callee`, already a mark-phase root
+(`FeMarkEvaluatorRoots()`), with no allocation in between; only the run's
+own final result needs one `FePushGC()`, at the barrier, not per level. See
+`fe/test_api.c`'s `TestGcStackConstantInNesting`, which pins
+`peak_gc_stack_depth` as a small *constant* across `(deep 200)` and
+`(deep 2000)` on the same context rather than a threshold, and the permanent
+flatness gate in `TestEvaluationStackProbe`, which now runs `(deep 100000)`
+itself -- on a dynamically sized arena, since neither `./fe -s` nor kg's
+1 MiB arena needs to or can hold that many frames -- and asserts a flat
+C-stack high-water mark across `(deep 10)`, `(deep 1000)` and
+`(deep 100000)`.
 
 The context's three result/retention roots have separate lifetimes.
 `evaluation_result` holds the latest string or file evaluation result,
@@ -412,9 +442,14 @@ same polling state.
 
 Budget exhaustion and interrupt cancellation both enter `FeHandleError()`.
 Along with clearing the call trace and temporary source label, that function
-clears the complete control record before invoking the host error callback.
-Consequently a nonlocal transfer cannot leave a stale budget active in a
-recovered context.
+clears the ambient control record -- `step_limit`, `interrupt`,
+`max_frames_limit`, `native_reentry_limit`, and the rest -- before invoking
+the host error callback. Consequently a nonlocal transfer cannot leave a
+stale *budget* active in a recovered context. `native_reentry_depth` is the
+one deliberate exception: it is a live count of C activations, not a
+configured limit, and those activations are still real while cleanups drain
+before the `longjmp` actually happens -- see "Native re-entry" in "Garbage
+Collection" above.
 
 ## Unwinding And Cleanup
 

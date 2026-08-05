@@ -9,9 +9,16 @@
 #include <stdio.h>
 
 // The embedding contract: the C functions, types, and callback signatures
-// below. Nothing here has broken since 1; a Lisp-only change such as
-// FE_LANGUAGE_VERSION 2's assignment/numeric-equality cut does not move it.
-#define FE_API_VERSION 1
+// below. A Lisp-only change such as FE_LANGUAGE_VERSION 2's
+// assignment/numeric-equality cut does not move this. Version 2 (sub-plan
+// 03F of kg's Emacs-subset program) is the frame machine's bound rename:
+// `FeEvalOptions.max_depth` split into `max_frames` and
+// `max_native_reentry`, and `FeArenaStats.peak_evaluation_depth` split into
+// `frame_capacity`, `peak_frame_depth` and `peak_native_reentry`. Every host
+// that set the old fields gets a compile error, which is the point -- their
+// *meaning* changed, not just their name, so silently keeping the old
+// spelling would be the wrong kind of compatibility.
+#define FE_API_VERSION 2
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -52,13 +59,46 @@ typedef struct FeEvalOptions {
   // drain, re-armed fresh per entry. See `doc/c-api.md`'s "Unwinding And
   // Cleanup" for the worst-case bound this implies.
   size_t cleanup_step_limit;
-  // The maximum live recursion depth `Evaluate` may reach -- a C-stack
-  // bound, not an evaluation-step count. Zero selects the built-in
-  // default (`DefaultEvaluationDepth`), sized for the fattest per-call C
-  // frames any of kg's own sanitizer builds measured. A host embedding Fe
-  // with a smaller C stack than that sets this lower explicitly; see
+  // Lisp nesting: the maximum number of simultaneously live ordinary
+  // evaluator frames (nested calls, nested special forms, self-expanding
+  // macros, deep argument lists) the context-owned frame stack may hold at
+  // once. This is a slot count, not a C-stack bound -- the frame machine
+  // roots Lisp nesting in the arena, not in C recursion, so this limit costs
+  // no C stack no matter how large it is. Zero selects the arena's own
+  // physical capacity (`FeArenaStats.frame_capacity`); a nonzero value only
+  // ever *lowers* that ceiling, never raises it past what the arena
+  // partition actually holds. A push that would exceed the effective limit
+  // fails before writing, with "evaluation frame limit exceeded". See
   // `doc/c-api.md`'s "Bounding And Cancelling Evaluation".
-  size_t max_depth;
+  size_t max_frames;
+  // Native re-entry: the maximum number of nested evaluator runs a native
+  // may start synchronously, one below another -- e.g. `internal--
+  // with-current-buffer` calling `FeCall` on a body that itself calls
+  // `internal--save-excursion`. Unlike `max_frames`, each level here *is* a
+  // real C-stack bound: a native's own C activation, `FeCall`, `Evaluate`
+  // and the nested run's barrier cannot be moved off the C stack, so this
+  // has to stay a small number, not a large one. Calling a native from Lisp
+  // is not by itself re-entry; only that native synchronously starting
+  // another evaluation is, so an ordinary top-level host call is never
+  // counted against this limit no matter how deep the Lisp nesting it
+  // drives. Zero selects the built-in default (`DefaultNativeReentry`,
+  // derived from the deepest synchronous re-entry any known embedding
+  // actually nests, times a comfortable safety margin -- see its own
+  // comment in fe_internal.h). Exceeding it raises "native evaluation
+  // re-entry limit exceeded" before the nested run starts.
+  //
+  // Both `max_frames` and `max_native_reentry` are owned by the outermost
+  // active evaluation: a nested `FeCallWithOptions` reached from a native
+  // does not replace either ambient limit merely because it was handed
+  // another `FeEvalOptions` pointer (see `BeginEvaluationControl`). While an
+  // error is unwinding, every cleanup's own re-entry runs under the default
+  // ceiling for both limits, not the abandoned body's -- but
+  // `native_reentry_depth` itself (the live count, not the configured
+  // limit) is not reset for the duration of that unwind: the real C
+  // activations the abandoned computation was inside are still live below
+  // the barrier until `longjmp` actually pops them, one run at a time. See
+  // `doc/c-api.md`'s "Unwinding And Cleanup".
+  size_t max_native_reentry;
 } FeEvalOptions;
 
 typedef enum FeType {
@@ -114,17 +154,28 @@ typedef struct FeArenaStats {
   size_t
       total_slots;    // `ctx`'s fixed object capacity (see FeMinimumArenaSize).
   size_t free_slots;  // total_slots minus objects currently live.
-  size_t peak_live_objects;      // high-water mark of live objects since
-                                 // FeOpenContext.
-  size_t collection_count;       // CollectGarbage() calls so far.
-  size_t peak_gc_stack_depth;    // high-water mark of the FePushGC root stack
-                                 // (bound: GcStackSize, 4096).
-  size_t peak_evaluation_depth;  // high-water mark of live Evaluate() recursion
-                                 // (bound: FeEvalOptions.max_depth, default
-                                 // DefaultEvaluationDepth).
+  size_t peak_live_objects;    // high-water mark of live objects since
+                               // FeOpenContext.
+  size_t collection_count;     // CollectGarbage() calls so far.
+  size_t peak_gc_stack_depth;  // high-water mark of the FePushGC root stack
+                               // (bound: GcStackSize, 4096).
+  // The arena's host-usable evaluator frame capacity -- i.e. NOT counting
+  // the private cleanup reserve -- the same ceiling FeEvalOptions.max_frames
+  // of 0 selects.
+  size_t frame_capacity;
+  // High-water mark of simultaneously live ordinary evaluator frames
+  // (bound: FeEvalOptions.max_frames, default frame_capacity above); always
+  // <= frame_capacity for a computation that never triggers cleanup's
+  // private reserve.
+  size_t peak_frame_depth;
   size_t peak_cleanup_stack_depth;  // high-water mark of the
                                     // unwind-protect/FeProtectWithCleanup
                                     // registry (bound: CleanupStackSize).
+  // High-water mark of nested evaluator runs started synchronously from a
+  // native (bound: FeEvalOptions.max_native_reentry, default
+  // DefaultNativeReentry); zero for a program that never re-enters through
+  // a native, no matter how deep its Lisp nesting.
+  size_t peak_native_reentry;
   size_t allocation_failures;  // MakeObject() calls that still found no free
                                // slot after a collection.
 } FeArenaStats;

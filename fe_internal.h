@@ -74,33 +74,16 @@ enum {
   // The 2nd-lowest-order bit of `Value.c` is the mark bit:
   GcMarkBit = 2,
   // TODO: This should scale with arena size?
-  // A self-recursive Fe call costs several slots, so this also bounds usable
-  // recursion depth, at roughly 450 frames -- but that is a side effect of
-  // slot consumption, not a designed bound; `DefaultEvaluationDepth` below
-  // is the designed one, and is tuned to fire first.
+  // A self-recursive Fe call no longer costs any GC-stack slots at all
+  // (every live pair form roots its own operands as frame fields --
+  // `FeMarkEvaluatorRoots`, fe_eval.c); nothing pushes here per level of
+  // ordinary Lisp nesting any more, so this is no longer a recursion bound
+  // of any kind, designed or accidental. It still bounds the reader's own
+  // native recursion (`Read`/`ReadList`) and the writer's, neither of which
+  // go through the frame machine.
   GcStackSize = 4096,
   StringBufferSize = (sizeof(FeObject*) - 1),
   DefaultEvalPollInterval = 1024,
-  // The default `evaluation_depth` ceiling (see `struct FeContext`) when
-  // `FeEvalOptions.max_depth` is left 0. Recursion was previously bounded
-  // only by `GcStackSize` slot consumption -- an accident of how many GC
-  // stack slots a call happens to use, not a designed limit -- so a build
-  // with fatter per-call C frames than the one that measured "roughly 450
-  // frames" (any sanitizer, `-O0`, a debug build) could exhaust the real C
-  // stack first, crashing instead of raising a catchable error. This is a
-  // measured value, not a guessed one, and it is measured in
-  // `evaluation_depth` units, which count Evaluate() re-entries -- several
-  // per level of ordinary recursion like `(deep n)`'s own `if`/`+`/`-`
-  // sub-forms, not one -- so it is not directly comparable to a Lisp
-  // recursion count `N`. See the commit that introduced this constant for
-  // the full binary search across `-Os`, ASan/UBSan and MSan builds and
-  // the conversion between the two units; in short, MSan's fatter frames
-  // are what make the C stack the binding constraint, and this default
-  // stays comfortably under that measured ceiling while keeping a
-  // multiple of the >200 floor `test_recursion_depth` requires, since
-  // that measured ceiling turned out closer to the floor than a flat
-  // "half the ceiling" rule leaves room for.
-  DefaultEvaluationDepth = 1000,
   // Cleanup entries are pushed only by `unwind-protect` and
   // `FeProtectWithCleanup`, not by every object creation the way the GC
   // stack is, so nesting this deep is not a realistic program; it is sized
@@ -117,6 +100,44 @@ enum {
   // wants a different bound, tighter or looser, sets `cleanup_step_limit`
   // explicitly instead of tuning this constant.
   DefaultCleanupStepLimit = 4096,
+  // The default `native_reentry_limit` ceiling (see `struct FeContext`) when
+  // `FeEvalOptions.max_native_reentry` is left 0. Unlike `max_frames`, this
+  // bound is a real C-stack bound: each level is a live C activation chain
+  // (the native's own frame, `FeCall`, `Evaluate`, `RunEvaluation`, its
+  // `jmp_buf`, `RunEvaluationLoop`) that the frame machine cannot move off
+  // the C stack, so it has to stay small.
+  //
+  // Derived from kg's own corpus, sub-plan 03F of kg's Emacs-subset program:
+  // kg's only synchronously re-entering natives are
+  // `internal--save-excursion` and `internal--with-current-buffer` (each one
+  // `FeCall`s a body thunk it was handed), plus hook dispatch and process
+  // filter/sentinel callbacks (each one `FeCallWithOptions`s a resolved
+  // handler once). The deepest nesting actually found by grepping kg's Lisp
+  // prelude and PTY corpus is 2 -- `with-current-buffer` wrapping
+  // `save-excursion` (e.g. `test/pty/lisp-auto-fill-mode-undo.yaml`) -- and a
+  // hook or process callback invoking that pattern adds one more live level
+  // on top, for 3 in the deepest real construct found. Static grep is only a
+  // lower bound on what a host program might legitimately nest, so the
+  // default is not that number: it is a **10x** margin over it, chosen small
+  // enough to stay a "small number" (the parent plan's own words, contrasted
+  // with the legacy 1000) rather than a second `DefaultEvaluationDepth`.
+  //
+  // Measured (`test_api.c`'s `TestNativeReentry`, and a throwaway host-side
+  // probe run for this derivation, not checked in) against a native that
+  // mimics `internal--with-current-buffer`'s shape -- call `FeCall` on a
+  // thunk, synchronously, once per level -- built with the same flags
+  // `.ci/ci-05` (MSan) uses: roughly 1000-1100 bytes of C stack per level of
+  // `native_reentry_depth`. `DefaultNativeReentry` levels therefore costs on
+  // the order of 30-35 KiB against a default 8 MiB C stack (`ulimit -s`) --
+  // under 0.5% of it -- even before accounting for the fact that a
+  // synthetic minimal native almost certainly *understates* what a real one
+  // (kg's, with its own locals, mallocs and wrapper C frames around the fe
+  // call) costs per level. There is no measured crash boundary this default
+  // is being tuned against, unlike the deleted `DefaultEvaluationDepth`: the
+  // margin above is wide enough on both sides (10x the deepest real corpus
+  // use, well under 1% of a default C stack) that no binary search was
+  // needed to place it safely between them.
+  DefaultNativeReentry = 32,
 };
 
 struct FeObject {
@@ -214,10 +235,9 @@ typedef enum FeFrameKind {
   // and a cleanup's unwind forms (`RunEvaluationBody`). Reuses `FeFrameBody`'s
   // own resume logic (`env`/`rest`/`accumulator`/`callee` mean exactly the
   // same thing) but completes through a lighter path that does not touch
-  // `evaluation_depth` or `call_list`: unlike a lambda body, whose wrapping
-  // frame *is* the call form's own frame (one `EnterEvaluationDepth` at
-  // entry, one matching decrement at completion, one trace-cell link and
-  // unlink), this frame is an extra child with no entry of its own to
+  // `call_list`: unlike a lambda body, whose wrapping frame *is* the call
+  // form's own frame (one trace-cell link at entry, one matching unlink at
+  // completion), this frame is an extra child with no entry of its own to
   // balance, and its `trace_cell` is never linked into `call_list` at all.
   // Folding it into `FeFrameBody` and telling the two apart some other way
   // was tried and rejected: the two need different completions, not just
@@ -344,11 +364,20 @@ typedef struct FeEvalFrame {
 enum {
   MinFrameCapacity = 64,
   CleanupFrameReserve = 32,
-  // The share of the bytes beyond the minimum that become frame storage. 10%
-  // keeps kg's 1 MiB arena at 1100 frames -- above `DefaultEvaluationDepth`'s
-  // 1000 -- so the legacy logical depth limit, not the physical frame wall,
-  // remains the bound on the canonical `(deep N)` chain. The 8% -> 10% retune
-  // and its object-slot cost are recorded in kg's 03D Decision follow-up.
+  // The share of the bytes beyond the minimum that become frame storage.
+  // Sub-plan 03F (kg's Emacs-subset program) deleted the transitional
+  // logical `evaluation_depth` counter that `DefaultEvaluationDepth` (1000)
+  // used to bound: the Lisp-nesting bound is now `frame_stack_capacity`
+  // (this partition's own output, exposed as `FeArenaStats.frame_capacity`)
+  // and *nothing else* -- there is one number, not two independent ones that
+  // happened to be close. Before this slice, "the logical limit fires
+  // before the physical frame wall" held only by a ~10% margin (1100 frames
+  // against the 1000 default) and broke once already (03D's frame-size
+  // retune, 8% -> 10%, recorded in kg's 03D Decision follow-up); that
+  // coincidence cannot recur now that the physical wall is the only wall.
+  // The 10% split itself is unchanged by this slice -- it was already
+  // retuned once for kg's 1 MiB arena's frame/object trade-off, and 03F's
+  // own scope is the bound API, not the partition.
   FrameArenaPercent = 10,
 };
 
@@ -419,35 +448,48 @@ struct FeContext {
   // the fresh per-entry budget every cleanup runs under while unwinding
   // still reflects what the host asked for.
   size_t cleanup_step_limit;
-  // Live recursion depth: incremented and decremented around the pair path
-  // of `Evaluate` only (see the comment there), so it counts exactly the
-  // recursion that consumes C stack. Reset to 0 by `ClearEvaluationControl`,
-  // which `FeHandleError` calls before draining cleanup entries, so a
-  // cleanup that recurses after a depth overflow starts from 0 too -- the
-  // same fresh-re-arm treatment `RunCleanupsAfterError` already gives
-  // `evaluation_steps`.
-  size_t evaluation_depth;
-  // The ambient call's configured `FeEvalOptions.max_depth` (0 until set,
-  // meaning "use `DefaultEvaluationDepth`"), resolved where it is checked,
-  // not here, for the same reason `cleanup_step_limit` is not.
-  size_t evaluation_depth_limit;
-  // The number of native invocations currently active, each one a live C
-  // activation on top of its `RunEvaluation` loop. An ordinary native is one
-  // level; a native that synchronously calls `FeCall`/`FeCallWithOptions`
-  // starts a nested run and then another active native level, so this counts
-  // exactly the C growth that legitimately happens through the native
-  // boundary. The `FeFrameNative` resume saves this counter and
-  // `evaluation_depth` together before the call and restores both saved
-  // values on the ordinary return -- an owning nested `FeCallWithOptions`
-  // runs `EndEvaluationControl` and clears the whole control record (both
-  // counters included) before the native returns, so the enclosing frames'
-  // accounting must be put back rather than decremented or left at 0. Each
-  // `RunEvaluation` barrier also saves and restores this counter beside
-  // `evaluator_catch` on both the normal and the longjmp paths, and
-  // `ClearEvaluationControl` resets it to 0 with the other live-depth state,
-  // so a recovered context starts fresh. Until 03F it shares
-  // `evaluation_depth_limit`/`DefaultEvaluationDepth` and the old
-  // `evaluation depth limit exceeded` text.
+  // The ambient call's configured `FeEvalOptions.max_frames` (0 until set,
+  // meaning "use `frame_stack_capacity`"), resolved where it is checked
+  // (`AllocateFrame`), not here, for the same reason `cleanup_step_limit`
+  // is not. Cleared to 0 by `ClearEvaluationControl` before cleanups run, so
+  // a cleanup pushes against the full physical capacity (plus
+  // `CleanupFrameReserve`) rather than whatever tight body limit the
+  // abandoned computation was configured with.
+  size_t max_frames_limit;
+  // The ambient call's configured `FeEvalOptions.max_native_reentry` (0
+  // until set, meaning "use `DefaultNativeReentry`"), resolved where it is
+  // checked (`EnterNativeReentry`). Cleared to 0 by `ClearEvaluationControl`
+  // for the same reason `max_frames_limit` is: a cleanup that itself
+  // re-enters through a native runs under the default ceiling, not the
+  // body's.
+  size_t native_reentry_limit;
+  // The number of nested evaluator runs currently active below the
+  // outermost one -- i.e. live `RunEvaluation` C activations reached only
+  // by a native synchronously starting `FeCall`/`FeCallWithOptions`/
+  // `FeEvaluate*` while another run is already in progress underneath it.
+  // Calling a native from Lisp is not itself re-entry; only that native
+  // synchronously entering evaluation again is, so a top-level host call
+  // (an empty frame stack at its own `RunEvaluation` entry) is never
+  // counted, and neither is a cleanup drain (`RunEvaluationBody`, a
+  // different function that never touches this counter). `RunEvaluation`
+  // increments this once, checked against the ambient limit, exactly when
+  // its own frame stack was already non-empty at entry -- see
+  // `EnterNativeReentry`'s comment -- and every `RunEvaluation` barrier
+  // saves and restores its own pre-entry value on both the normal and the
+  // `longjmp` error path, so nesting unwinds it level by level as each C
+  // activation actually returns.
+  //
+  // Deliberately **not** reset by `ClearEvaluationControl`: unlike the
+  // ambient *limits* above, which a cleanup should run under fresh
+  // defaults, this counter is a census of live C activations. While
+  // `FeHandleError` is draining cleanups -- before any `longjmp` has
+  // actually popped a single one of those C frames -- every native
+  // activation the abandoned computation was inside is still live on the
+  // real C stack; a cleanup native that itself re-enters evaluation is
+  // stacking a fresh C frame on top of all of them, and the check needs the
+  // true count to stay meaningful. It falls back to the correct value only
+  // as the `longjmp` unwind actually happens, one `RunEvaluation` barrier's
+  // restore at a time.
   size_t native_reentry_depth;
   const char* error_label;
   size_t error_offset;
@@ -476,18 +518,27 @@ struct FeContext {
   // Read-only arena/evaluator statistics, exposed by `FeGetArenaStats`.
   // Every field here is maintained at the one or two existing sites that
   // already change the value it tracks (`MakeObject`, `CollectGarbage`,
-  // `FePushGC`, `EnterEvaluationDepth`, `PushCleanup`); nothing here reads
-  // back its own state to compute anything, so querying it does not walk
-  // the arena or any list. `arena_live_count` is the only running total;
-  // the rest are high-water marks or event counts, and `free_slots` in
-  // `FeArenaStats` is `object_count - arena_live_count` computed at query
-  // time rather than stored.
+  // `FePushGC`, `AllocateFrame`, `EnterNativeReentry`, `PushCleanup`);
+  // nothing here reads back its own state to compute anything, so querying
+  // it does not walk the arena or any list. `arena_live_count` is the only
+  // running total; the rest are high-water marks or event counts, and
+  // `free_slots` in `FeArenaStats` is `object_count - arena_live_count`
+  // computed at query time rather than stored.
   size_t arena_live_count;
   size_t arena_peak_live_count;
   size_t arena_collection_count;
   size_t arena_peak_gc_stack_depth;
-  size_t arena_peak_evaluation_depth;
+  // High-water mark of `frame_stack_index`: actual simultaneously live
+  // ordinary evaluator frames, updated in `AllocateFrame` right after a
+  // push succeeds. Unlike the deleted transitional `evaluation_depth`, this
+  // counts frames, not pair-form re-entries, so it is directly comparable
+  // to `frame_capacity` below.
+  size_t arena_peak_frame_depth;
   size_t arena_peak_cleanup_stack_depth;
+  // High-water mark of `native_reentry_depth`, the same zero-at-top-level
+  // convention: a program that never re-enters through a native never
+  // moves this off zero, however deep its ordinary Lisp nesting.
+  size_t arena_peak_native_reentry;
   size_t arena_allocation_failures;
 };
 

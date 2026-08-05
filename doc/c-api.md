@@ -19,9 +19,20 @@ as numeric equality (see `doc/language.md`). A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 1);
+static_assert(FE_API_VERSION == 2);
 static_assert(FE_LANGUAGE_VERSION == 2);
 ```
+
+`FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
+kg's Emacs-subset program: the frame machine's Lisp-nesting and native
+re-entry bounds are now two separate `FeEvalOptions` fields
+(`max_frames`/`max_native_reentry`) and three separate `FeArenaStats` fields
+(`frame_capacity`/`peak_frame_depth`/`peak_native_reentry`), replacing the
+single `max_depth`/`peak_evaluation_depth` pair whose *meaning* changed when
+the frame machine replaced the recursive evaluator. `FE_LANGUAGE_VERSION`
+stayed at 2 -- Phase 3 is behaviour-neutral by design; no Lisp-visible
+evaluation result, side effect, ordering, or diagnostic changed below the new
+bounds, only the bounds' own names, defaults, and statistics.
 
 Each macro is bumped for every breaking change in its own axis: a C ABI/API
 break bumps `FE_API_VERSION` without necessarily touching the language, and a
@@ -76,12 +87,19 @@ independent kg-style contexts; see "Legacy Fex Custom Types" below.
 
 `FeGetArenaStats(ctx)` returns an `FeArenaStats` snapshot: total and
 currently-free object slots, the peak live-object count, the collection
-count, the peak GC-stack (root) depth, the peak live evaluation depth, the
-peak cleanup-stack depth, and the count of allocation failures (a
-`MakeObject()` call that still found no free slot after a collection). Every
-field is a counter Fe already maintains at the site that changes it; the call
-itself allocates no object, walks no list, and mutates nothing, so it is safe
-to call at any time, including from an error handler or between collections.
+count, the peak GC-stack (root) depth, the arena's host-usable evaluator
+frame capacity (`frame_capacity`, excluding the private cleanup reserve --
+the same ceiling `FeEvalOptions.max_frames` of 0 selects) and the peak
+number of simultaneously live evaluator frames against it
+(`peak_frame_depth`), the peak cleanup-stack depth, the peak number of
+nested evaluator runs started synchronously from a native
+(`peak_native_reentry`, zero for a program that never re-enters through a
+native no matter how deep its Lisp nesting), and the count of allocation
+failures (a `MakeObject()` call that still found no free slot after a
+collection). Every field is a counter Fe already maintains at the site that
+changes it; the call itself allocates no object, walks no list, and mutates
+nothing, so it is safe to call at any time, including from an error handler
+or between collections.
 
 This is a read-only accessor for baselining and margin questions -- "how
 close is the fixed arena to full" -- not a live diagnostic surface: there is
@@ -264,50 +282,89 @@ control through the error callback. Cancellation is cooperative at evaluator
 step boundaries: a native callback that does not return cannot be preempted by
 Fe.
 
-### Bounding Recursion
+### Bounding Recursion: Two Bounds, Not One
 
-`max_depth` is the maximum live recursion depth `Evaluate()` may reach; zero
-selects the built-in default. Attempting to exceed it raises `evaluation
-depth limit exceeded`. This is a **C-stack** bound, not an evaluation-step
-count: before it existed, recursion was bounded only as a side effect of how
-many GC-stack slots a self-recursive call happens to consume (the arena is
-fixed-size; see `Bounding Recursion` in `doc/implementation.md` for the slot
-mechanics), which tracks C-stack usage only by accident. A build with fatter
-per-call C frames than the one the built-in default was measured against --
-a sanitizer, `-O0`, a debug build -- could exhaust the real C stack before
-the GC stack noticed, crashing the process instead of raising a catchable
-error. `max_depth` is the designed bound instead: a host embedding Fe with a
-smaller C stack than kg's own sanitizer CI measured against sets it lower
-explicitly, the same way `cleanup_step_limit` is set lower or higher than
-its own built-in default.
+Sub-plan 03F of kg's Emacs-subset program split the single, historical
+`max_depth`/`evaluation_depth` pair into two independent bounds, because they
+protect two different things:
 
-The control state is ambient for the complete outermost `*WithOptions()` call.
-Evaluation re-entered from a native callback through either a plain evaluator
-or another controlled evaluator consumes the same outer step budget and uses
-the outer interrupt settings. Options supplied to a nested controlled call are
-ignored; nested code cannot reset or extend the active budget. This includes
-all forms in nested string and file evaluation. Passing `nullptr` as the
-outermost options pointer is equivalent to zero-initialized options and still
-establishes an unlimited ambient control scope whose nested options are
-ignored.
+- **`max_frames`** bounds Lisp nesting: the number of simultaneously live
+  ordinary evaluator frames on the context-owned frame stack -- nested calls,
+  nested special forms, self-expanding macros, deep argument lists. The frame
+  machine (sub-plan 03C-03E) roots every one of those in the arena, not in C
+  recursion, so **this costs no C stack no matter how large it is**. Zero
+  selects the arena's own physical frame capacity
+  (`FeGetArenaStats().frame_capacity`); a nonzero value only ever *lowers*
+  that ceiling, never raises it past what the arena partition actually holds.
+  A push that would exceed the effective limit fails before writing, raising
+  `evaluation frame limit exceeded`.
+- **`max_native_reentry`** bounds native re-entry: the number of nested
+  evaluator runs a native may start synchronously, one below another --
+  e.g. a native that calls `FeCall`/`FeCallWithOptions`/`FeEvaluate*` on a
+  callback or body it was handed, the way `unwind-protect`'s own cleanup
+  mechanism, or a host's `with-current-buffer`-shaped native, does. Unlike
+  `max_frames`, this **is** a real C-stack bound: each level is a live native
+  C activation, `FeCall`, `Evaluate`, and the nested run's own barrier, none
+  of which the frame machine can move off the C stack. Zero selects the
+  built-in default (`DefaultNativeReentry`, a small number, derived from the
+  deepest synchronous re-entry any known embedding actually nests, times a
+  comfortable safety margin). Exceeding it raises `native evaluation
+  re-entry limit exceeded` before the nested run starts.
 
-The plain `FeEvaluate()`, `FeEvaluateString()`, and `FeEvaluateFile()` functions
-remain unlimited when no ambient control is active. When called during a
-controlled evaluation, they inherit and consume its controls. Recursion depth
-is the one exception: unlike `step_limit` and `interrupt`, it is not opt-in.
-`Evaluate()` checks it on every call, controlled or plain, so the plain
-functions are bounded by the built-in default even with no `FeEvalOptions` in
-sight -- the point being that this bound protects the C stack whether or not
-a host ever thinks about evaluation control at all. Successful return from
-the outermost controlled call clears the control state, including
-`evaluation_depth`. `FeHandleError()` also clears it before calling the host
-error callback, so a context recovered with `longjmp` starts its next
-top-level evaluation fresh -- a `longjmp` skips every pending decrement, so
-without this reset the next legal deep call would see a depth already
-exhausted by one that failed. The exhaustion and cancellation messages pass
-through normal label handling;
-for example, a controlled string call labelled `init.fe` reports
-`init.fe: evaluation cancelled`.
+Calling a native from Lisp is **not**, by itself, re-entry -- only that
+native *synchronously starting another evaluation* is. An ordinary top-level
+host call therefore never counts against `max_native_reentry`, no matter how
+deep the Lisp nesting it drives; only a native, invoked during that
+evaluation, that turns around and starts a nested run moves the counter.
+
+```c
+FeEvalOptions options = {
+  .step_limit = 100000,
+  .poll_interval = 256,
+  .interrupt = ShouldCancel,
+  .userdata = host,
+  .max_frames = 0,             // this run's own physical capacity
+  .max_native_reentry = 4,     // tighter than the built-in default
+};
+FeObject* result = FeEvaluateStringWithOptions(
+    ctx, "init.fe", source, source_length, &options);
+```
+
+Both bounds are ambient for the complete outermost `*WithOptions()` call, the
+same way `step_limit` and `interrupt` are. Evaluation re-entered from a
+native callback through either a plain evaluator or another controlled
+evaluator is bound by the same outer `max_frames`/`max_native_reentry`
+values; options supplied to a nested controlled call are ignored -- nested
+code cannot reset or extend either active ceiling. This includes all forms
+in nested string and file evaluation. Passing `nullptr` as the outermost
+options pointer is equivalent to zero-initialized options and still
+establishes an ambient control scope (both bounds at their built-in
+defaults) whose nested options are ignored.
+
+The plain `FeEvaluate()`, `FeEvaluateString()`, and `FeEvaluateFile()`
+functions remain unlimited on `step_limit` and `interrupt` when no ambient
+control is active, but `max_frames` and `max_native_reentry` are not opt-in
+the way those are: every frame push and every nested run is checked against
+its effective ceiling (the arena's own physical capacity, or
+`DefaultNativeReentry`, when nothing more specific was configured)
+regardless of whether a host ever calls a `*WithOptions()` function at all --
+the point being that native re-entry's C-stack bound in particular protects
+the process whether or not a host ever thinks about evaluation control.
+Successful return from the outermost controlled call clears the *ambient
+limits* (`max_frames`/`max_native_reentry` revert to their built-in
+defaults for the next call), but **not** `native_reentry_depth` itself:
+that counter is a census of live C activations, and while an error is
+unwinding -- before any `longjmp` has actually popped a single one of those
+C frames -- every native activation the abandoned computation was inside is
+still real and still live on the C stack, so a cleanup native that itself
+re-enters evaluation is stacking a fresh C frame on top of all of them and
+the check needs the true count to stay meaningful. It falls back to the
+correct value only as the unwind actually happens, one nested run's own
+barrier at a time -- see "Unwinding And Cleanup" below. The exhaustion and
+cancellation messages pass through normal label handling; for example, a
+controlled string call labelled `init.fe` reports `init.fe: evaluation
+cancelled`, `init.fe: evaluation frame limit exceeded`, or `init.fe: native
+evaluation re-entry limit exceeded`.
 
 ## Calling A Function
 
@@ -419,12 +476,25 @@ immediately abort its own cleanup, and a *second* interrupt during a
 runaway cleanup aborts that one entry while the remaining cleanups still
 run.
 
-Recursion depth gets the same fresh treatment, for free: `FeHandleError()`
-resets `evaluation_depth` to 0 before it drains the cleanup registry (see
-"Bounding Recursion" above), so a cleanup that itself recurses starts from
-an empty counter rather than one already at the limit that just fired. A
-cleanup body that recurses as deep as `max_depth` allows is therefore
-exactly as legal as a top-level call doing the same.
+Both recursion bounds get a fresh *ceiling* the same way, but the two differ
+in what "fresh" means for their live counters. `FeHandleError()` resets the
+ambient `max_frames`/`max_native_reentry` *limits* to 0 (their built-in
+defaults) before it drains the cleanup registry, so a cleanup that itself
+nests Lisp forms or re-enters through a native is checked against the full
+default ceiling, not whatever tighter body limit the abandoned computation
+was configured with. For frames this is the whole story: a cleanup's own
+frame pushes get `frame_stack_capacity` slots (plus the private cleanup
+reserve) to work with, exactly as a top-level call would. For native
+re-entry it is not: `native_reentry_depth` -- the live count of C
+activations, not the configured ceiling -- is **not** reset by
+`FeHandleError()`. The abandoned computation's own native activations are
+still real and still live on the C stack while cleanups run (nothing has
+`longjmp`ed yet), so a cleanup native that itself re-enters evaluation is
+stacking a fresh C frame on top of all of them, and resetting the count to 0
+would let it re-enter far deeper than the C stack actually has room for. The
+count falls back to its correct, lower value only as the unwind actually
+happens afterward, one nested run's own barrier at a time -- see "Bounding
+Recursion" above.
 
 The worst case a host must be able to tolerate is therefore
 
