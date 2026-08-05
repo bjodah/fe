@@ -1214,7 +1214,14 @@ static bool ResumeBinary(FeContext* ctx,
   }
   FeObject* const first = frame->accumulator;
   FeObject* const second = frame->callee;
-  frame->callee = &unbound;
+  // `frame->callee` is deliberately *not* cleared before the switch: it is
+  // `second`'s only collector root, and `PCons` allocates. Clearing first and
+  // relying on the C local left `second` invisible to the mark phase across
+  // `FeCons`'s possible collection -- reachable only from a register or a
+  // stack slot the collector does not scan -- so a `(cons a b)` whose
+  // allocation happened to trigger a GC produced a pair with a freed cdr.
+  // The general rule for every resume: a frame field stays live until the
+  // last operation that might allocate has finished with it.
   switch (PRIM(frame->fn)) {
     case PCons:
       *result = FeCons(ctx, first, second);
@@ -1239,6 +1246,7 @@ static bool ResumeBinary(FeContext* ctx,
       break;
     }
   }
+  frame->callee = &unbound;
   return true;
 }
 

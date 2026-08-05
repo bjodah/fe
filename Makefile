@@ -220,7 +220,7 @@ fuzz-eval-smoke: $(FUZZ_EVAL_BIN)
 		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
 		-verbosity=$(FUZZ_VERBOSITY) \
 		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/eval/ \
-		$(FUZZ_CORPUS_DIR)/eval scripts
+		$(FUZZ_CORPUS_DIR)/eval $(FUZZ_DIR)/seeds/eval scripts
 
 fuzz-write-smoke: $(FUZZ_WRITE_BIN)
 	mkdir -p $(FUZZ_CORPUS_DIR)/write $(FUZZ_ARTIFACT_DIR)/write
