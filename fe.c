@@ -1093,19 +1093,23 @@ typedef enum NumberKind {
 // `p` points at the `e`/`E` of an exponent; the significand has been
 // consumed. A `+`/`-` sign, digits, or the exact `INF`/`NaN` spellings decide
 // a float from a symbol -- `1e3`, `1e+5`, `1e-7` are floats, `1e`, `1e+`,
-// `1e+Inf`, `1.0e+NAN` are symbols, and only `e+INF`/`e+NaN` (never `e-INF`)
-// are nonfinite, exactly as the pinned Emacs answers. The sign of a nonfinite
-// spelling is read from the token's leading `+`/`-` by `ReadAtom`, not here.
-// Digit runs use `strspn`, which the analyzer models as reading a
-// NUL-terminated string (a bare `while (digit(*p))` loop it cannot bound).
+// `1e+Inf`, `1.0e+NAN` are symbols, and the nonfinite spellings need an
+// *explicit* `+`: `1e+INF`/`1E+INF`/`1e+NaN` are nonfinite, while `1e-INF`,
+// `1eINF` and `1eNaN` are symbols, exactly as the pinned Emacs answers
+// (`(read "1eINF")` is the symbol `1eINF`). A missing sign is not a positive
+// sign here, which is why the flag records that a `+` was seen rather than
+// that a `-` was not. The sign of a nonfinite spelling is read from the
+// token's leading `+`/`-` by `ReadAtom`, not here. Digit runs use `strspn`,
+// which the analyzer models as reading a NUL-terminated string (a bare
+// `while (digit(*p))` loop it cannot bound).
 static NumberKind ClassifyExponent(const char* p) {
   p++;
-  bool exponent_negative = false;
+  bool exponent_plus = false;
   if (*p == '+' || *p == '-') {
-    exponent_negative = *p == '-';
+    exponent_plus = *p == '+';
     p++;
   }
-  if (!exponent_negative) {
+  if (exponent_plus) {
     if (strcmp(p, "INF") == 0) {
       return NumberInf;
     }

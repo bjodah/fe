@@ -1,0 +1,6 @@
+{
+	"id": "num-symbol-unsigned-exponent",
+	"setup": [],
+	"expr": "(list (floatp '1eINF) (floatp '1eNaN) (floatp '1EINF) (floatp '1e-INF) (floatp '1e+INF) (floatp '1E+INF))",
+	"note": "05A, row R7's sign rule: the nonfinite exponent spellings need an *explicit* `+`. Emacs reads `1eINF`, `1eNaN`, `1EINF` and `1e-INF` as symbols and only `1e+INF`/`1E+INF`/`1e+NaN` as nonfinite floats, so the answer is (nil nil nil nil t t). `floatp` is the predicate both sides have, which is why the case asks the question that way rather than with `symbolp` (fe has none) or `type-of` (kg's native)."
+}

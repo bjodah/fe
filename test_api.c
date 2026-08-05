@@ -2494,6 +2494,18 @@ static bool TestNumericCut(void) {
   READS_AS("-1.0e+INF", FeTDouble, "-1.0e+INF");
   READS_AS("0.0e+NaN", FeTDouble, "0.0e+NaN");
   READS_AS("-0.0e+NaN", FeTDouble, "-0.0e+NaN");
+  // The nonfinite spellings need the explicit `+`; a missing sign is not a
+  // positive one. `1eINF`/`1eNaN`/`1EINF` are symbols in Emacs and now here,
+  // and their signed neighbours are re-confirmed on both sides of the rule.
+  READS_AS("1eINF", FeTSymbol, "1eINF");
+  READS_AS("1eNaN", FeTSymbol, "1eNaN");
+  READS_AS("1EINF", FeTSymbol, "1EINF");
+  READS_AS("1e-INF", FeTSymbol, "1e-INF");
+  READS_AS("1e+INF", FeTDouble, "1.0e+INF");
+  READS_AS("1E+INF", FeTDouble, "1.0e+INF");
+  READS_AS("1e+NaN", FeTDouble, "0.0e+NaN");
+  READS_AS("1e+Inf", FeTSymbol, "1e+Inf");
+  READS_AS("1.0e+NAN", FeTSymbol, "1.0e+NAN");
 
   // R9: int64 exactness past 2^53, read and printed exactly.
   READS_AS("9007199254740993", FeTInteger, "9007199254740993");
