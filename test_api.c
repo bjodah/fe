@@ -96,6 +96,14 @@ static bool IsRendered(FeContext* context,
 }
 
 static bool TestContextCreation(void) {
+  // The three version handles a downstream pins against move together and are
+  // asserted together: the two macros are compile-time (test_header.c states
+  // them for the header on its own), `FeVersion` is a runtime string and can
+  // only be checked here.
+  static_assert(FE_API_VERSION == 3);
+  static_assert(FE_LANGUAGE_VERSION == 3);
+  CHECK(strcmp(FeVersion, "4.0") == 0);
+
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
   CHECK(minimum > 0);

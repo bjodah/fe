@@ -644,7 +644,7 @@
      "lisp2-let-no-function-shadow"
     ],
     "kg_test": null,
-    "rationale": "Phase 4 semantics, value namespace only: `let` binds names in the value namespace and must not shadow a function of the same spelling, so `(car (list 1 2))` still resolves the primitive. Fe's `let` primitive takes a bare symbol, so the Emacs-shaped bindings list is a separate, already-divergent shape (primitive-let); the function-cell side of the split is what this case pins. Not flippable with 04C: fe cannot even read the Emacs-shaped bindings list until the prelude's Emacs-shaped `let` exists (04E).",
+    "rationale": "Phase 4 semantics, value namespace only: `let` binds names in the value namespace and must not shadow a function of the same spelling, so `(car (list 1 2))` still resolves the primitive. Fe's `let` primitive takes a bare symbol, so the Emacs-shaped bindings list is a separate, already-divergent shape (primitive-let); the function-cell side of the split is what this case pins. Not flippable yet, and 04E (now landed) was never the blocker: fe cannot read the Emacs-shaped bindings list this case is written in at all, because fe's own `let` takes a bare symbol. That lands when an Emacs-shaped `let` moves into fe's core -- Phase 8 Wave A of the kg plan set -- and this row flips with it.",
     "source_name": null
    },
    {
@@ -657,7 +657,7 @@
      "lisp2-funcall-lexical-value"
     ],
     "kg_test": null,
-    "rationale": "Phase 4 primitive `funcall` (04C): it takes a *value*, here a lexical closure, so the function cell of the name is irrelevant. The funcall machinery itself is complete, but the case's Emacs-shaped `let` bindings list needs the Emacs-shaped `let` (04E), so the comparison cannot run yet.",
+    "rationale": "Phase 4 primitive `funcall` (04C): it takes a *value*, here a lexical closure, so the function cell of the name is irrelevant. The funcall machinery itself is complete; what the comparison still waits on is the case's Emacs-shaped `let` bindings list, which fe's bare-symbol `let` cannot read -- not 04E, which has landed. An Emacs-shaped `let` in fe's core is Phase 8 Wave A of the kg plan set (the same blocker as lisp2-let-no-function-shadow).",
     "source_name": null
    },
    {
@@ -736,7 +736,7 @@
      "lisp2-functionp-symbol-missing"
     ],
     "kg_test": null,
-    "rationale": "Phase 4 designator rule for `functionp`: a symbol whose function cell holds a function is t, an unbound name is nil, never an error. Fe has no `functionp` at all -- it is a kg native that must learn designators when the split lands (04E) -- so the comparison still fails on void-function functionp.",
+    "rationale": "Phase 4 designator rule for `functionp`: a symbol whose function cell holds a function is t, an unbound name is nil, never an error. The blocker is not 04E (landed) but that fe has no `functionp` primitive at all, so the comparison still fails on void-function functionp. Fe now exposes the predicate to its hosts as the C API's FeIsFunction() -- the designator chain, macros and special forms answered exactly as Emacs' `functionp` answers them -- and the row flips when a Lisp-callable `functionp` exists, whether fe grows the primitive or kg's native is rewritten onto FeIsFunction().",
     "source_name": null
    },
    {
@@ -855,7 +855,7 @@
      "lisp2-function-lambda"
     ],
     "kg_test": null,
-    "rationale": "Sub-plan 04C: `(function (lambda ...))` is a raw-form special form producing a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. Since the 04D reader change, `#'(lambda ...)` reads as this same form (reader-sharp-quote-identity).",
+    "rationale": "Sub-plan 04C: `(function (lambda ...))` is a raw-form special form producing a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. Since the 04D reader change, `#'(lambda ...)` reads as this same form (reader-sharp-quote-identity). Known gap, deliberate and unsnapshotted: fe accepts only a symbol or a lambda/fn form, so `(function 5)` is `unsupported-function-form`, where Emacs' `function` is plain `quote` and answers 5. Fe rejects what it cannot make a callable out of rather than quietly handing back a non-function, and the 04A pin names that spelling; a case for it would record a divergence nobody intends to close.",
     "source_name": "function"
    },
    {
@@ -868,7 +868,7 @@
      "lisp2-fset-both-args-evaluated"
     ],
     "kg_test": null,
-    "rationale": "Sub-plan 04C: `fset` evaluates both arguments -- the first is a value naming the target symbol, not a quote -- so the symbol named by `s` (k) receives the function and `(k)` returns 4. This is the primitive the prelude's 53 setq forms rewrite to in 04E.",
+    "rationale": "Sub-plan 04C: `fset` evaluates both arguments -- the first is a value naming the target symbol, not a quote -- so the symbol named by `s` (k) receives the function and `(k)` returns 4. Sub-plan 04E has since landed: kg's prelude defines its 52 functions in the function namespace, respelled from the old `setq` forms to `defalias`, `fset`'s sibling primitive writing the same cell.",
     "source_name": "fset"
    },
   {
