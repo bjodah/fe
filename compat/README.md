@@ -46,8 +46,25 @@ compat/
                           binary and the checked-in snapshots; no Emacs
                           needed
   check_compat_manifest.py   structural checks on features.json and the
-                              corpus it claims to describe
+                              corpus it claims to describe, plus (with
+                              --primitive-source fe.c, which `make compat`
+                              always passes) the source-coverage check:
+                              every name in fe.c's primitive_names[] and
+                              primitive_aliases[] is claimed by some
+                              entry's source_name, and no entry claims a
+                              name that is not there
 ```
+
+The source-coverage check is opt-in because kg's
+`utils/check_lisp_compat.py` runs this same script over *kg's* manifest,
+which does not own fe's primitive pool. It is a deliberate copy of the
+equivalent check on the kg side rather than a call into it: fe is usable
+standalone, so its gate cannot depend on a script in the parent checkout,
+and the version that existed only over there did not run in `make -C fe
+compat` -- which is how commit 17ac959 shipped `eq` and `eql` with no
+manifest entry, fixed only in 66ff904, minutes before kg moved its pin.
+It is coverage, not uniqueness: one source declaration may have several
+separately pinned behaviours, which is why `funcall` has two entries.
 
 `run-emacs-oracle.py` takes the corpus root as its first argument (not a
 constant), so sub-plan 00C can point it at kg's own

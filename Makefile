@@ -405,7 +405,8 @@ coverage-clean:
 # target that runs Emacs, and only it may rewrite those snapshots.
 compat: $(TARGET)
 	python3 utils/check_compat_manifest.py \
-		--manifest $(COMPAT_ROOT)/features.json
+		--manifest $(COMPAT_ROOT)/features.json \
+		--primitive-source fe.c
 	python3 utils/run-fe-compat.py --fe ./$(TARGET) \
 		--corpus-root $(COMPAT_ROOT)
 
