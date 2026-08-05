@@ -2148,8 +2148,9 @@ static bool CheckNumericError(FeContext* context,
 // that returns `integers[churn_index]`, so a collection happens while the
 // `name` frame is suspended after an earlier operand, and the host integers
 // in the frame's fields must survive to be combined or compared afterwards.
-// The churn returns an integer only because the last body form *is* the host
-// integer -- the reader still spells nothing but doubles.
+// The churn's last body form *is* the host integer, so the value delivered
+// back into the suspended frame is one the caller made, not one the reader
+// interned.
 static bool GCSurvivesResume(FeContext* context,
                              const char* name,
                              const int64_t* integers,
@@ -2479,6 +2480,17 @@ static bool TestNumericTower(void) {
     CHECK(GCSurvivesResume(context, "integerp", unary, 1, 0, "t"));
     const int64_t native[] = {5};
     CHECK(GCSurvivesResume(context, "floor", native, 1, 0, "5"));
+    // The `FeFrameBinary` arms take the same treatment: `eq`/`eql` hold the
+    // first operand in the frame across the churn and must still find the
+    // integer they were given, and `/=` is the comparator arm that is not
+    // part of the chained loop above.
+    const int64_t identical[] = {1000, 1000};
+    CHECK(GCSurvivesResume(context, "eq", identical, 2, 1, "t"));
+    CHECK(GCSurvivesResume(context, "eql", identical, 2, 1, "t"));
+    CHECK(GCSurvivesResume(context, "is", identical, 2, 1, "t"));
+    const int64_t distinct[] = {1000, 2000};
+    CHECK(GCSurvivesResume(context, "/=", distinct, 2, 1, "t"));
+    CHECK(GCSurvivesResume(context, "eq", distinct, 2, 1, "nil"));
   }
 
 #undef CHECK_NUM_ERR
