@@ -426,10 +426,11 @@ static NumericPair GetNumericPair(FeContext* ctx, FeObject* a, FeObject* b) {
 // semantics -- the complete raw argument list is evaluated left to right
 // before any value is type-checked, so a type error in an early operand
 // never erases a side effect a later operand's form already had -- then
-// every operand is validated and compared without short-circuiting, even
-// once the chain is already known unequal, so every operand form has both
-// run and been checked by the time `=` returns -- one argument is `t`
-// without comparing anything. The comparison itself is 05C's tower: exact
+// adjacent pairs are compared left to right and the loop stops at the first
+// false pair, Emacs' rule, so an operand past a settled answer is not
+// type-checked (its form has run either way) -- and one argument is `t`
+// without comparing or checking anything. The comparison itself is 05C's
+// tower: exact
 // within integers, mathematical value across int/float through
 // `GetNumericPair`, and -- for double/double -- plain C `==`, which gives
 // the pinned signed-zero (`0.0 = -0.0` is true) and NaN (never `=` to
@@ -1999,11 +2000,11 @@ static bool DispatchFuncallApply(FeContext* ctx,
 // unlike every other primitive continuation above, whose ordering is what
 // makes them not this -- accumulating and reordering exactly as
 // `FeFrameCallArguments`'s own argument list does, then finishes per
-// primitive: `list` returns it as-is; `=`/`<`/`<=`/`>`/`>=` validate and
-// compare every adjacent pair without short-circuiting, even once the chain
-// is already known unequal, so every operand form has both run and been
-// checked by the time it returns (one argument is `t` without comparing
-// anything); `/=` is the same shape over its arity-checked two, exact
+// primitive: `list` returns it as-is; `=`/`<`/`<=`/`>`/`>=` compare
+// adjacent pairs left to right and stop at the first false one, so an
+// operand past a settled answer is never type-checked (one argument is `t`
+// without comparing or checking anything); `/=` is the same shape over its
+// arity-checked two, exact
 // inequality across types; `set`
 // (arity already validated by `DispatchPrimitive` before this frame was
 // even created) checks the first element is a symbol and assigns through

@@ -455,7 +455,8 @@ grouped by evaluation *shape*, not by primitive:
   arms did, before validating or dispatching on any of it — which is what
   makes `funcall`/`apply`'s evaluate-then-redispatch shape fit it with no new
   frame kind (see "Sub-plan 04C" above). The chained comparators and `=`
-  validate and compare every adjacent pair without short-circuiting;
+  compare adjacent pairs left to right and stop at the first false pair, and
+  a single operand is `t` without any type check;
   `/=`'s binary arity is rejected at dispatch before this frame is even
   created.
 

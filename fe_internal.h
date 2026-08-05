@@ -357,8 +357,9 @@ typedef enum FeFrameKind {
   // `set`: evaluates the complete raw argument list first --
   // unlike every other kind above, whose ordering is what makes them not
   // this -- then finishes per primitive: `list` returns it, `=`/`<`/`<=`/
-  // `>`/`>=` validate and compare every element without short-circuiting
-  // (`/=` is the same shape over its arity-checked two), and `set` checks
+  // `>`/`>=` compare adjacent pairs left to right and stop at the first
+  // false one (`/=` is the same shape over its arity-checked two), and
+  // `set` checks
   // the (already arity-validated) two-element list and assigns through
   // `FeSet`. `fn` holds the resolved primitive object, `rest` the remaining
   // raw forms, and `accumulator` the list built so far (reversed into order

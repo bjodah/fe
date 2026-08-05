@@ -684,7 +684,7 @@
     "primitive-numeric-eq-hard-cut-unbound"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 02C repurposes `=` as numeric equality over Fe's existing doubles (fe.c's EvaluateNumericEqual, reached from EvaluatePrimitive's PNumericEqual arm, formerly the assignment primitive PAssign/primitive-assign-eq, now deleted): a left-to-right chained comparison, at least one argument required, every argument form evaluated left to right before any value is type-checked, and every operand validated and compared without short-circuiting once the result is already known. Phase 5 later extends this to integers/mixed types without redefining it, so these cases are written to leave room for that.",
+   "rationale": "Sub-plan 02C repurposes `=` as numeric equality over Fe's existing doubles (fe.c's EvaluateNumericEqual, reached from EvaluatePrimitive's PNumericEqual arm, formerly the assignment primitive PAssign/primitive-assign-eq, now deleted): a left-to-right chained comparison, at least one argument required, and every argument form evaluated left to right before any value is type-checked. This row originally also claimed every operand was validated and compared without short-circuiting once the result was already known; that was fe's behaviour, not Emacs', and the num-comparison-short-circuit row records the correction -- the pair loop stops at the first false pair, so an operand past a settled answer is not type-checked, while a single operand is `t` with no check at all (num-comparison-unary). Only the check short-circuits; the evaluate-everything-first rule this row does pin is unchanged. Phase 5 extended the comparison to integers/mixed types without redefining it, so these cases were written to leave room for that.",
    "source_name": "="
   },
   {
