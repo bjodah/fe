@@ -10,6 +10,10 @@ coverage.
 the public `FeRead` callback API, renders every successfully parsed object, and
 closes the context to exercise collection. Existing example scripts and
 `fuzz/fe.dict` seed valid Lisp tokens, but mutations remain arbitrary bytes.
+Since 05D the dict also carries the numeric token families the new
+classify-then-convert lexer must get right: integers, floats, trailing/leading
+dots, exponents, the nonfinite spellings (`1.0e+INF`, `0.0e+NaN`), and the
+tokens that must stay symbols (`0x10`, `inf`, `nan`, `1e`).
 
 The harness uses a fresh 64 KiB arena for each input. Invalid syntax, excessive
 nesting, long symbols, and arena exhaustion are expected Fe errors and recover
@@ -24,7 +28,9 @@ intentionally not consumed.
 `make fuzz-eval` builds `fuzz/fuzz_eval`. Arbitrary bytes select a bounded AST
 grammar, built through the public C API. Generated expressions cover atoms,
 quoted data, lists, arithmetic, comparisons, conditionals, short-circuiting,
-bindings, functions, macros, and non-cyclic pair mutation. Macro bodies expand
+bindings, functions, macros, and non-cyclic pair mutation, plus (05C) the
+variadic arithmetic and chained comparators over the grammar's host-made
+integer/double mix and (05D) the `eq`/`eql` identity pair. Macro bodies expand
 to a list, to `nil`, to `t`, to a symbol, or to a number, so the target reaches
 the atom expansions as well as the structural one.
 

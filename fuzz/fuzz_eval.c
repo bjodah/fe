@@ -141,6 +141,21 @@ static FeObject* BuildComparisonForm(FeContext* ctx, FuzzInput* input) {
   return MakeForm(ctx, operators[op_index], arguments, count);
 }
 
+// 05D's identity operators `eq`/`eql`, binary leaves in the same
+// `FeFrameBinary` family as `is`: the grammar's host-made integer/double mix
+// reaches eq's both-integers-equal rule and eql's same-type-bit equality
+// (and, through the 05D reader in the source-dict lane, the boxed-float
+// identity the two-separately-read `3.0` spellings exercise).
+static FeObject* BuildIdentityForm(FeContext* ctx,
+                                   FuzzInput* input,
+                                   unsigned depth) {
+  const char* name = FuzzTakeByte(input) % 2 == 0 ? "eq" : "eql";
+  return MakeForm(ctx, name,
+                  (FeObject*[]){BuildExpression(ctx, input, depth + 1),
+                                BuildExpression(ctx, input, depth + 1)},
+                  2);
+}
+
 // 05C's numeric predicates: leaves that answer t or nil by tag, fed from the
 // grammar's host-made integer/double mix -- the only way to reach an integer
 // without the reader.
@@ -474,9 +489,9 @@ static FeObject* BuildExpression(FeContext* ctx,
     case 25:
       return BuildPredicateForm(ctx, input, depth + 1);
     case 26:
-      return BuildComparisonForm(ctx, input);
+      return BuildIdentityForm(ctx, input, depth + 1);
     case 27:
-      return BuildPredicateForm(ctx, input, depth + 1);
+      return BuildIdentityForm(ctx, input, depth + 1);
     case 28:
       return BuildComparisonForm(ctx, input);
     default:

@@ -20,10 +20,10 @@
 #include <assert.h>
 #include <setjmp.h>
 #include <stdckdint.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "fe.h"
 #include "fe_internal.h"
 
@@ -738,6 +738,17 @@ static void CompleteImplicitBodyFrame(FeContext* ctx,
 // which primitives share which evaluation-order rules and why a single
 // generic "evaluate every argument first" policy is not an equivalent
 // replacement for most of them.
+// Rejects a primitive call whose raw argument list is not exactly two
+// elements, before anything evaluates. The strict-binary primitives -- `set`,
+// `/=` (05A row C3) and `eq`/`eql` (05D) -- share the rule, and a third
+// operand is `wrong-number-of-arguments`, never a chain or a comparison.
+static void RequireTwoArguments(FeContext* ctx, const FeObject* arguments) {
+  if (FeGetType(arguments) != FeTPair || FeGetType(CDR(arguments)) != FeTPair ||
+      !FeIsNil(CDR(CDR(arguments)))) {
+    FeHandleError(ctx, "wrong-number-of-arguments");
+  }
+}
+
 static bool DispatchPrimitive(FeContext* ctx,
                               FeEvalFrame* frame,
                               FeObject* fn,
@@ -859,11 +870,7 @@ static bool DispatchPrimitive(FeContext* ctx,
     // then evaluated left to right by the shared `FeFrameEvalList` machinery
     // an ordinary call's argument list also uses.
     case PSet:
-      if (FeGetType(arguments) != FeTPair ||
-          FeGetType(CDR(arguments)) != FeTPair ||
-          !FeIsNil(CDR(CDR(arguments)))) {
-        FeHandleError(ctx, "wrong-number-of-arguments");
-      }
+      RequireTwoArguments(ctx, arguments);
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -896,11 +903,7 @@ static bool DispatchPrimitive(FeContext* ctx,
       // arity -- exactly two operands -- is checked before anything
       // evaluates. A third operand is `wrong-number-of-arguments`, not a
       // chain.
-      if (FeGetType(arguments) != FeTPair ||
-          FeGetType(CDR(arguments)) != FeTPair ||
-          !FeIsNil(CDR(CDR(arguments)))) {
-        FeHandleError(ctx, "wrong-number-of-arguments");
-      }
+      RequireTwoArguments(ctx, arguments);
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -952,6 +955,19 @@ static bool DispatchPrimitive(FeContext* ctx,
       frame->kind = FeFrameUnary;
       frame->fn = fn;
       frame->rest = arguments;
+      frame->callee = &unbound;
+      return false;
+    // `eq`/`eql` (05D): strictly binary, matching the pinned Emacs and the
+    // `/=` rule (05A row C3) -- the raw arity, exactly two operands, is
+    // checked before anything evaluates, so `(eq 1)` and `(eq 1 2 3)` are
+    // `wrong-number-of-arguments`.
+    case PEq:
+    case PEql:
+      RequireTwoArguments(ctx, arguments);
+      frame->kind = FeFrameBinary;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
       frame->callee = &unbound;
       return false;
     case PCons:
@@ -1487,6 +1503,12 @@ static bool ResumeBinary(FeContext* ctx,
     case PIs:
       *result = FeMakeBool(ctx, Equal(first, second));
       break;
+    case PEq:
+      *result = FeMakeBool(ctx, IdentityObjects(first, second, false));
+      break;
+    case PEql:
+      *result = FeMakeBool(ctx, IdentityObjects(first, second, true));
+      break;
     // `fset`/`defalias` (04C): both write the function cell; `fset` returns
     // the function object, `defalias` the aliased symbol (the 04A snapshot's
     // answer). `defalias` stores `second` as-is, so a symbol designator stays
@@ -1764,18 +1786,25 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // would otherwise hand quote-wrapped operands to an arm that never evaluates
 // them.
 static const bool primitive_is_function[PSentinel] = {
-    [PAssert] = true,      [PEnv] = true,          [PNumericEqual] = true,
-    [PSet] = true,         [PBoundp] = true,       [PMakeUnbound] = true,
-    [PCons] = true,        [PCar] = true,          [PCdr] = true,
-    [PSetCar] = true,      [PSetCdr] = true,       [PList] = true,
-    [PNot] = true,         [PIs] = true,           [PAtom] = true,
-    [PPrint] = true,       [PLess] = true,         [PLessEqual] = true,
-    [PGreater] = true,     [PGreaterEqual] = true, [PNotEqual] = true,
-    [PIntegerp] = true,    [PFloatp] = true,       [PAdd] = true,
-    [PSub] = true,         [PMul] = true,          [PDiv] = true,
-    [PFset] = true,        [PDefalias] = true,     [PSymbolFunction] = true,
-    [PSymbolValue] = true, [PFboundp] = true,      [PFmakunbound] = true,
-    [PFuncall] = true,     [PApply] = true,
+    [PAssert] = true,       [PEnv] = true,
+    [PNumericEqual] = true, [PSet] = true,
+    [PBoundp] = true,       [PMakeUnbound] = true,
+    [PCons] = true,         [PCar] = true,
+    [PCdr] = true,          [PSetCar] = true,
+    [PSetCdr] = true,       [PList] = true,
+    [PNot] = true,          [PIs] = true,
+    [PEq] = true,           [PEql] = true,
+    [PAtom] = true,         [PPrint] = true,
+    [PLess] = true,         [PLessEqual] = true,
+    [PGreater] = true,      [PGreaterEqual] = true,
+    [PNotEqual] = true,     [PIntegerp] = true,
+    [PFloatp] = true,       [PAdd] = true,
+    [PSub] = true,          [PMul] = true,
+    [PDiv] = true,          [PFset] = true,
+    [PDefalias] = true,     [PSymbolFunction] = true,
+    [PSymbolValue] = true,  [PFboundp] = true,
+    [PFmakunbound] = true,  [PFuncall] = true,
+    [PApply] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`.
 };

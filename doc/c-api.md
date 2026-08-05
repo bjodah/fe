@@ -13,27 +13,29 @@ break; a host should assert both.
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
 types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-version 3 is the Lisp-2 contract of the Emacs-subset hard cut: call position
-resolves a symbol's function cell only, `#'` reads as `(function x)`, and the
-bootstrap callables live in function cells, so a primitive name is no longer
-value-bound (see `doc/language.md`). A host that vendors or pins Fe should
-assert both versions it was written against at compile time:
+version 4 is the numeric contract of the Emacs-subset cut: the reader
+classifies `42` as an integer and `42.0` as a float (05A Decision 3), floats
+print shortest-round-trip with an explicit `.0`, integer division truncates
+with `arith-error` on overflow and divide-by-zero, and `eq`/`eql` are core
+primitives with Emacs' identity semantics. A host that vendors or pins Fe
+should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 3);
-static_assert(FE_LANGUAGE_VERSION == 3);
+static_assert(FE_API_VERSION == 4);
+static_assert(FE_LANGUAGE_VERSION == 4);
 ```
 
-Both macros moved 2 -> 3 together in sub-plan 04D of kg's Emacs-subset
-program, the namespace cut: `FeDefineNative` changed meaning (it now writes
-the symbol's *function* cell instead of its value cell), the call-position
-value-cell fallback was deleted, the bootstrap moved into function cells, and
-`#'` became the `(function x)` reader macro; `FeVersion` moves "3.0" -> "4.0"
-with the same break. The 04C additions the cut landed
-on -- `FeSetFunction`, `FeGetFunction`, `FeIsFBound` on the C surface, and the
-primitives `function`, `fset`, `defalias`, `symbol-function`, `symbol-value`,
-`fboundp`, `fmakunbound`, `funcall` and `apply` in the language -- kept their
-meaning; only the fallback that had hidden their target semantics was removed.
+Both macros moved 3 -> 4 together in sub-plan 05D of kg's Emacs-subset
+program, the numeric cut: 05A's placement (a) Decision had inserted
+`FeTInteger` into the public `FeType` enum immediately after `FeTDouble`,
+renumbering every later constant, so a host built against the pre-cut header
+was already ABI-incompatible; `FeMakeInteger`/`FeToInteger` (05B) joined the
+constructor/accessor pair; and the reader now produces integers from source
+text, so a host-made and a read number share one meaning. The bump was
+deliberately deferred to the cut so the whole numeric contract moves as one
+visible break, and kg's existing `static_assert(FE_API_VERSION == 3)` fails
+at the 05E pin as the designed tripwire. `FeVersion` moves "4.0" -> "5.0"
+with the same break.
 
 `FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
 kg's Emacs-subset program: the frame machine's Lisp-nesting and native
@@ -675,7 +677,7 @@ Since sub-plan 04D's namespace cut, the native binding lands in the symbol's
 directly, and `(symbol-function 'name)` observes it. Before the cut the
 binding went to the value cell and call position reached it through the
 transitional fallback; `FeDefineNative`'s new home is the meaning change the
-`FE_API_VERSION` 3 bump carries.
+`FE_API_VERSION` 3 bump carried (the 05D numeric cut moved both versions to 4).
 
 Consume required arguments with `FeGetNextArgument()`, which raises `too few
 arguments` for a missing value. After consuming the supported arguments, call

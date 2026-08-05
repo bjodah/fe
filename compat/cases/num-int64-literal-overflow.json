@@ -1,0 +1,6 @@
+{
+	"id": "num-int64-literal-overflow",
+	"setup": [],
+	"expr": "18446744073709551616",
+	"note": "05A, row A8's reader sibling, Decision 3: an integer literal that overflows int64 reads as a double (the pre-bignum Emacs behaviour) -- the recorded divergence row against modern Emacs' bignum. 2^64 is the canonical example: Emacs prints the bignum 18446744073709551616, fe reads the nearest double and prints its shortest round-trip spelling."
+}

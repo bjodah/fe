@@ -48,6 +48,13 @@ typedef enum Primitive {
   PList,
   PNot,
   PIs,
+  // Sub-plan 05D of kg's Emacs-subset program (the numeric cut): `eq` and
+  // `eql`, Emacs' identity operators, land with the cut because they are the
+  // names kg's prelude still aliases to `is` until 05E deletes the alias.
+  // `eq` is pointer identity or both-integers-equal; `eql` adds same-type
+  // float equality by bits.
+  PEq,
+  PEql,
   PAtom,
   PPrint,
   PLess,
@@ -467,6 +474,10 @@ FeObject* SymbolFunction(FeObject* sym);  // &unbound when no function binding
 void SetSymbolFunction(FeObject* sym, FeObject* fn);
 FeObject* MakeObject(FeContext* ctx);
 bool Equal(FeObject* a, FeObject* b);
+// `eq`/`eql`'s shared answer (05D): pointer identity, both-integers-equal, or
+// -- for `eql` (`compare_floats`) -- same-type floats equal by bits. Defined
+// in fe.c beside `Equal`; the evaluator's `eq`/`eql` primitives call it.
+bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats);
 bool IsNamedSymbol(const FeObject* v, const char* name);
 void __attribute((format(printf, 3, 4))) Format(char* result,
                                                 size_t size,

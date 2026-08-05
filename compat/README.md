@@ -84,9 +84,8 @@ messages) goes to stderr and is never parsed.
 string** -- it is decided by which code path produced the record:
 
 * `value` -- normal completion. `printed` is the comparison key; `type`
-  is informational only (Fe has no integer/float split yet, so it is
-  omitted on Fe's side rather than forced to agree with something Phase 5
-  has not built).
+  is informational only (Fe omits it on its side rather than force it to
+  agree, since the emacs-shim's type is the Emacs-side claim).
 * `condition` -- an error was signaled. `condition_source` says how firm
   the `condition` field's claim is:
   * `"structured"` -- from Emacs' own `condition-case`, which hands back

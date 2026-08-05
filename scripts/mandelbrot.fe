@@ -13,10 +13,10 @@
   ; write pixels
   (let ypixel 0)
   (while (< ypixel height)
-    (let y (- (/ ypixel (/ height 2)) 1))
+    (let y (- (/ ypixel (/ height 2.0)) 1))
     (let xpixel 0)
     (while (< xpixel width)
-      (let x (- (/ xpixel (/ width 3)) 2))
+      (let x (- (/ xpixel (/ width 3.0)) 2))
       (let x0 x)
       (let y0 y)
       (let iter 0)

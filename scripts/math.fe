@@ -1,7 +1,7 @@
 (assert-is 200 (abs -200))
 (assert-is 200 (abs 200))
 (assert-is 433 (ceiling 432.1))
-(assert-is 3 (cube-root 27))
+(assert-is 3.0 (cube-root 27))
 (assert-is 432 (floor 432.1))
 (assert-is 5 (hypotenuse 3 4))
 (assert-is t (is-finite 42.6))
@@ -24,5 +24,8 @@
 
 (print pi)
 (print e)
-(print (/ 1 0))
+; `(/ 1.0 0)` deliberately keeps the float spelling: the script is
+; demonstrating nonfinite printing, and the integer spelling `(/ 1 0)` is
+; `arith-error` since 05D's cut.
+(print (/ 1.0 0))
 (print 1e100)

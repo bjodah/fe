@@ -567,14 +567,14 @@
   {
    "id": "reader-no-integers",
    "category": "values-and-equality",
-   "status": "divergent",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "reader-no-integers"
    ],
    "kg_test": null,
-   "rationale": "Parent plan section 2's numeric model ('Add: signed 64-bit integers; existing floating-point values') is Phase 5, not yet implemented; fe.c has exactly one FeTNumber double representation today, and its writer (EmitDouble) special-cases integral values to omit the fractional part -- matching Emacs' printed form for genuine integers by coincidence, and diverging from it for floats that happen to be integral. This is one of the plan's named day-one divergences ('No integers. 42 and 42.0 are the same object and print the same.').",
+   "rationale": "Sub-plan 05D's cut: `42.0` now reads as a float and prints as `42.0` (this case's pinned answer), and `42` reads as an integer -- the reader/printer half of Phase 5's numeric split. The old one-type divergence ('42 and 42.0 are the same object and print the same') is gone: an integral float keeps its `.0` (P1), so the float never impersonates an integer on output.",
    "source_name": null
   },
   {
@@ -961,176 +961,176 @@
     "num-type-of-integer-float"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R1: the numeric split exists -- 42 is integer, 42.0 is float. Fe's one FeTNumber double answers (double double) today. The type_names[] slot lands in 05B; the reader that feeds it integers in 05D.",
+   "rationale": "Phase 5, row R1: the numeric split exists -- `42` is an integer and `42.0` a float, the type_names[] slot (05B) fed by the integer reader (05D). The case names `type-of`, which is kg's native (`src/lisp_*.c`), not an fe primitive, so standalone fe answers void-function and the row cannot flip in fe's corpus until 05E, exactly like num-predicates' `numberp`.",
    "source_name": null
   },
   {
    "id": "num-reader-trailing-dot",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-literal-trailing-dot"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R2: an integer with a trailing dot reads as the integer, Decision 3's lexer (05D).",
+   "rationale": "Phase 5, row R2, landed at 05D's cut: `1.` reads as the integer 1 (Decision 3's trailing-dot integer), and `1.5` is still a float.",
    "source_name": null
   },
   {
    "id": "num-reader-leading-dot",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-literal-leading-dot"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R3: a leading-dot token is a float, Decision 3's lexer (05D).",
+   "rationale": "Phase 5, row R3, landed at 05D's cut: a leading-dot token is a float -- `.5` reads as `0.5` (Decision 3).",
    "source_name": null
   },
   {
    "id": "num-reader-sign-prefix",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-literal-sign-prefix"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R4: a signed integer literal reads as an integer, Decision 3's lexer (05D).",
+   "rationale": "Phase 5, row R4, landed at 05D's cut: a signed integer literal reads as an integer -- `+5` is the integer 5 (Decision 3).",
    "source_name": null
   },
   {
    "id": "num-reader-exponent",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-literal-exponent"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R5: a bare exponent makes a token a float, Decision 3's lexer (05D).",
+   "rationale": "Phase 5, row R5, landed at 05D's cut: a bare exponent makes a token a float -- `1e3` reads as `1000.0` (Decision 3).",
    "source_name": null
   },
   {
    "id": "num-reader-hex-symbol",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-symbol-hex"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R6: `0x10` is a symbol, not a hex number; strtod's hex must die, Decision 3 (05D).",
+   "rationale": "Phase 5, row R6, landed at 05D's cut: `0x10` is a symbol, not a hex number -- strtod's hex parsing died with the classifier (Decision 3).",
    "source_name": null
   },
   {
    "id": "num-reader-inf-nan-symbol",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-symbol-inf-nan"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R7: `inf` and `nan` are unbound symbols, not numbers; strtod's inf/nan must die, Decision 3 (05D).",
+   "rationale": "Phase 5, row R7, landed at 05D's cut: `inf` and `nan` are unbound symbols, not numbers -- strtod's inf/nan parsing died with the classifier (Decision 3).",
    "source_name": null
   },
   {
    "id": "num-reader-partial-exponent",
    "category": "reader-and-literals",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-symbol-partial-exponent"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R8: a partial exponent token is a symbol, Decision 3 (05D) classifies before converting.",
+   "rationale": "Phase 5, row R8, landed at 05D's cut: a partial exponent token is a symbol -- `1e` reads as a symbol, the classifier deciding before any conversion (Decision 3).",
    "source_name": null
   },
   {
    "id": "num-int64-exactness",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-integer-past-2^53"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R9: int64 exactness past 2^53 -- 9007199254740993 reads and prints exactly. The integer object (05B) and the integer reader (05D).",
+   "rationale": "Phase 5, row R9, landed at 05D's cut: `9007199254740993` reads and prints exactly -- int64 exactness past 2^53 (Decision 3's integer reader on top of 05B's object).",
    "source_name": null
   },
   {
    "id": "num-negative-zero-print",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-negative-zero"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R10: signed zero survives read->print as -0.0, Decision 4 (05D).",
+   "rationale": "Phase 5, row R10, landed at 05D's cut: signed zero survives read->print as `-0.0` (Decision 4's shortest-round-trip printer, which never folds -0.0's sign).",
    "source_name": null
   },
   {
    "id": "num-float-shortest-roundtrip",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-float-shortest"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row P2: floats print shortest-round-trip, not %.7g noise; Decision 4's loop (05D).",
+   "rationale": "Phase 5, row P2, landed at 05D's cut: floats print shortest-round-trip, not %.7g noise -- `0.1` prints `0.1` (Decision 4's dtoastr-style loop).",
    "source_name": null
   },
   {
    "id": "num-nonfinite-inf",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-nonfinite-inf"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row P3: positive infinity prints 1.0e+INF, Decision 4 (05D).",
+   "rationale": "Phase 5, row P3, landed at 05D's cut: positive infinity prints `1.0e+INF` and reads back as +inf (Decision 4).",
    "source_name": null
   },
   {
    "id": "num-nonfinite-neg-inf",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-nonfinite-neg-inf"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row P4: negative infinity prints -1.0e+INF, Decision 4 (05D).",
+   "rationale": "Phase 5, row P4, landed at 05D's cut: negative infinity prints `-1.0e+INF` and reads back as -inf (Decision 4).",
    "source_name": null
   },
   {
    "id": "num-nonfinite-nan",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-nonfinite-nan"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row P5: the pinned Emacs prints NaN as -0.0e+NaN; Decision 4 (05D) adopts the spelling and the reader accepts it back.",
+   "rationale": "Phase 5, row P5, landed at 05D's cut: NaN prints in the pinned Emacs spelling `-0.0e+NaN`/`0.0e+NaN` (sign bit only) and reads back (Decision 4).",
    "source_name": null
   },
   {
@@ -1149,27 +1149,27 @@
   {
    "id": "num-unary-reciprocal",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-unary-reciprocal"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A2: unary `/` is reciprocal, truncated -- (/ 5) is the integer 0. The tower's unary seed lands in 05C, but with the double-only reader `5` reads as `5.0`, so the seed computes `1/5.0` and answers 0.2; the *integer* 0 needs the integer reader, so this row flips at 05D with the cut.",
+   "rationale": "Phase 5, row A2, landed at 05D's cut: unary `/` is the truncated reciprocal -- `(/ 5)` is the integer 0, reachable at last because `5` reads as an integer.",
    "source_name": null
   },
   {
    "id": "num-div-truncation",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-div-truncation"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A3: integer division truncates toward zero -- 3 and -3, never 3.5 or floor semantics. The tower's integer division path lands in 05C, but with the double-only reader `7` and `2` read as doubles and divide to 3.5; the truncating answer needs the integer reader, so this row flips at 05D with the cut.",
+   "rationale": "Phase 5, row A3, landed at 05D's cut: integer division truncates toward zero -- `(/ 7 2)` is 3 and `(/ -7 2)` is -3, reachable at last because the literals read as integers.",
    "source_name": null
   },
   {
@@ -1188,14 +1188,14 @@
   {
    "id": "num-div-zero",
    "category": "errors-and-non-local-exits",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-div-zero"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A5: integer division by zero is `arith-error` (05A Decision 5), carried in FeHandleError()'s message until Phase 6. The tower's integer division path raises it in 05C, but with the double-only reader `1` and `0` read as doubles and `1.0/0.0` is IEEE +inf, no error; the arith-error is reachable only from host integers until 05D's reader makes the literals integers, so this row flips at the cut.",
+   "rationale": "Phase 5, row A5, landed at 05D's cut: integer division by zero is `arith-error`, reachable at last because `1` and `0` read as integers (carried in FeHandleError()'s message until Phase 6).",
    "source_name": null
   },
   {
@@ -1214,27 +1214,27 @@
   {
    "id": "num-add-mixed",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-add-mixed"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A7: mixed addition promotes to float -- the value is 3.0. The tower's promotion rule lands in 05C, but the *printed* answer is 3.0, which needs the 05D printer (the integral-double shortcut prints 3 today), so this row flips with the cut, not the tower.",
+   "rationale": "Phase 5, row A7, landed at 05D's cut: mixed addition promotes to float and prints `3.0` -- the 05D printer's `.0` guarantee, on top of 05C's promotion rule.",
    "source_name": null
   },
   {
    "id": "num-overflow-bignum",
    "category": "errors-and-non-local-exits",
-   "status": "planned",
+   "status": "divergent",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-overflow-bignum"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A8, the recorded divergence: int64 overflow is an arith-error-style message, never a bignum (modern Emacs prints the bignum 18446744073709551616); use __builtin_*_overflow, never UB (05A Decision 5). The tower's integer combine raises it in 05C for host-made integers (pinned by TestNumericTower), but with the double-only reader the literal operands read as doubles and the product computes as 2^64 in doubles -- the divergence becomes visible in this corpus only when 05D's reader feeds the integers, so the row flips (to divergent) at the cut, not the tower.",
+   "rationale": "Phase 5, row A8, the recorded divergence, now visible at 05D's cut: int64 overflow is an arith-error-style message, never a bignum (modern Emacs prints the bignum 18446744073709551616); use __builtin_*_overflow, never UB (05A Decision 5). With 05D's reader the literal operands are integers, so `(* 4611686018427387904 4)` raises `arith-error` where Emacs answers the bignum -- the divergence row 05A pinned.",
    "source_name": null
   },
   {
@@ -1306,7 +1306,7 @@
   {
    "id": "num-eq",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1315,13 +1315,13 @@
     "num-eq-string"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, rows E1-E3: fe-core `eq` -- pointer identity or both-integers-equal -- kills kg's prelude alias of `is` (which compares strings by content and floats epsilon-approximately). 05D lands the primitive; 05E deletes the prelude alias in the pin commit.",
+   "rationale": "Phase 5, rows E1-E3, landed at 05D's cut: fe-core `eq` is pointer identity or both-integers-equal -- `(eq 3 3)` t, `(eq 3.0 3.0)` nil (boxed floats), `(eq \"a\" \"a\")` nil. 05E deletes kg's prelude alias of `is` in the pin commit.",
    "source_name": null
   },
   {
    "id": "num-eql",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1329,7 +1329,7 @@
     "num-eql-signed-zero"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, rows E4-E5: fe-core `eql` beside `eq` -- same-type numbers equal by bits for floats, by value for integers. 05D.",
+   "rationale": "Phase 5, rows E4-E5, landed at 05D's cut: fe-core `eql` is `eq` or same-type numbers equal by bits -- `(eql 3 3.0)` nil (type-strict), `(eql 0.0 -0.0)` nil (the sign bit differs).",
    "source_name": null
   },
   {
@@ -1348,27 +1348,27 @@
   {
    "id": "num-sqrt-float",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-sqrt-float"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row M1: sqrt returns a float, always -- (sqrt 16) is 4.0. The core native already returns the float; the *printed* answer is 4.0, which needs the 05D printer (the integral-double shortcut prints 4 today), so the row flips with the cut, not the tower.",
+   "rationale": "Phase 5, row M1, landed at 05D's cut: sqrt returns a float, always -- `(sqrt 16)` prints `4.0`, the 05D printer's `.0` guarantee.",
    "source_name": null
   },
   {
    "id": "num-expt",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-expt"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row M2: expt's per-signature rule lands in 05C (all-int stays int with the tower's arith-error on overflow, a negative exponent or float operand flips to float), but the float column prints 256.0, which needs the 05D printer, so the row flips with the cut.",
+   "rationale": "Phase 5, row M2, landed at 05D's cut: expt's per-signature rule from 05C, with the float column printing `256.0` at last via the 05D printer.",
    "source_name": null
   },
   {
@@ -1400,14 +1400,14 @@
   {
    "id": "num-sin-float",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "num-sin-float"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row M5: transcendentals are floats always -- (sin 0) is 0.0. The core native already returns the float; the *printed* answer is 0.0, which needs the 05D printer (the integral-double shortcut prints 0 today), so the row flips with the cut, not the tower.",
+   "rationale": "Phase 5, row M5, landed at 05D's cut: transcendentals are floats always -- `(sin 0)` prints `0.0`, the 05D printer's `.0` guarantee.",
    "source_name": null
   },
   {
@@ -1435,6 +1435,19 @@
    ],
    "kg_test": null,
    "rationale": "Phase 5, row T1: integerp/floatp land as fe core primitives in 05C (answered from the tag alone), but this case also names `numberp`, which stays kg's native (widened to two tags in 05E) and does not exist in standalone fe -- so the case cannot flip in fe's corpus until it no longer depends on a kg-owned name. Fe must never add a numberp primitive (manifest collision).",
+   "source_name": null
+  },
+  {
+   "id": "num-int64-literal-overflow",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-int64-literal-overflow"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row A8's reader sibling (05A Decision 3): an integer literal that overflows int64 reads as a double -- the pre-bignum Emacs behaviour -- while modern Emacs reads it as a bignum. 2^64 (= 18446744073709551616) is the canonical example: Emacs prints the bignum 18446744073709551616, fe reads the nearest double and prints its shortest round-trip. The alternative -- a read error -- would punish pasted constants.",
    "source_name": null
   }
  ]

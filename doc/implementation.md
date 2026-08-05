@@ -73,12 +73,16 @@ through the host API (`FeMakeInteger`/`FeToInteger`). 05C's numeric tower made
 it live rather than dormant: arithmetic, the chained comparators, `=`, `/=`,
 `integerp`/`floatp`, `Equal()`/`is`, and the math natives all dispatch on both
 numeric tags, and the arithmetic primitives and the rounding family return
-integers. The reader is still untouched, so no source text can produce an
-integer before 05D's cut: integers reach a program only through the host API
-(and, inside the fuzz harness, the grammar's own `FeMakeInteger` calls), the
-tower's zero-operand identities, and the integer-returning math natives, so a
-written `(+ 2 3)` still computes the double `5.0` end to end. An
-integer marks and collects exactly as a double does: a leaf.
+integers. 05D's cut made it reachable from source: `ReadAtom`'s bare `strtod`
+became a classify-then-convert lexer (integer = sign + digits + optional
+trailing dot; float = fraction and/or exponent; the printer's nonfinite
+spellings read back; everything else -- `0x10`, `inf`, `nan`, `1e` -- is a
+symbol), integer literals overflow int64 by falling back to a double (the
+recorded pre-bignum divergence), and the writer's `EmitDouble` integral
+shortcut died: floats print Emacs' shortest-round-trip spelling with an
+explicit `.0` or exponent, and `eq`/`eql` landed beside `is`. A written
+`(+ 2 3)` now computes the integer `5` end to end. An integer marks and
+collects exactly as a double does: a leaf.
 
 ### The numeric tower
 

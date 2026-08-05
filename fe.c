@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <assert.h>
+#include <errno.h>
 #include <float.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -21,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "4.0";
+const char* FeVersion = "5.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -50,6 +51,8 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PList] = "list",
                                         [PNot] = "not",
                                         [PIs] = "is",
+                                        [PEq] = "eq",
+                                        [PEql] = "eql",
                                         [PAtom] = "atom",
                                         [PPrint] = "print",
                                         [PLess] = "<",
@@ -420,6 +423,38 @@ bool Equal(FeObject* a, FeObject* b) {
   return false;
 }
 
+// Same-type doubles equal by their exact bits (05A Decision 2, rows E4-E5,
+// landed 05D): `(eql 0.0 -0.0)` is nil because the sign bit differs, the one
+// distinction IEEE `==` folds away. `memcmp` rather than `==`, and `!` on the
+// result, because the comparison is exactly what must not be `==`-semantics.
+static bool DoublesEqualByBits(double a, double b) {
+  return !memcmp(&a, &b, sizeof(a));
+}
+
+// `eq`/`eql`'s shared answer (rows E1-E5): pointer identity -- the Emacs rule
+// for symbols, strings, and boxed floats -- or both-integers-equal, the
+// fixnum rule Emacs' `(eq 3 3)` depends on. Two separately-read `3.0` literals
+// are two float objects, so `(eq 3.0 3.0)` is nil; two `3` literals are two
+// integer objects but answer t. `eql` (`compare_floats`) adds same-type
+// floats equal by bits -- type-strict value equality, so `(eql 3 3.0)` is nil
+// (different types).
+bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats) {
+  if (a == b) {
+    return true;
+  }
+  const FeType type = FeGetType(a);
+  if (type != FeGetType(b)) {
+    return false;
+  }
+  if (type == FeTInteger) {
+    return INTEGER(a) == INTEGER(b);
+  }
+  if (type == FeTDouble) {
+    return compare_floats && DoublesEqualByBits(GetDouble(a), GetDouble(b));
+  }
+  return false;
+}
+
 static int IsStringEqual(FeObject* obj, const char* str) {
   while (!FeIsNil(obj)) {
     for (size_t i = 0; i < StringBufferSize; i++) {
@@ -636,14 +671,54 @@ static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
   }
 }
 
+// Emacs' float spelling (05A Decision 4, 05D), byte for byte: nonfinite
+// values get the `1.0e+INF`/`-1.0e+INF`/`0.0e+NaN`/`-0.0e+NaN` family, and
+// finite values print via the shortest `%.*g` that `strtod` round-trips back
+// to the same double -- Emacs starts at `DBL_DIG` and increments (gnulib's
+// `dtoastr`), so a short value like `0.1` prints `0.1` while a long one like
+// `(log 8)` prints all its digits. The post-pass Emacs' `float_to_string`
+// runs is then reproduced exactly: the result must always contain a decimal
+// point or an exponent, so a bare integer text gets `.0` appended and a
+// trailing `100.` gets a `0` -- the old integral-double shortcut (a double
+// that happened to be integral printing bare) dies with the cut, because a
+// bare `42` is an integer now and `42.0` must print `42.0`.
 static void EmitDouble(Writer* w, const FeObject* obj) {
-  char buf[32];
   const double d = GetDouble(obj);
-  // cppcheck-suppress incorrectLogicOperator
-  if (d >= -0x1p63 && d < 0x1p63 && floor(d) == d) {
-    Format(buf, sizeof(buf), "%" PRId64, (int64_t)d);
-  } else {
-    Format(buf, sizeof(buf), "%.7g", d);
+  char buf[40];
+  if (isnan(d)) {
+    // The sign bit is the only NaN payload fe ever produces (the canonical
+    // `0.0/0.0` family), and it is what Emacs' own mantissa-printing spelling
+    // reduces to for that payload; `(sqrt -1)` prints `-0.0e+NaN`.
+    Format(buf, sizeof(buf), "%s0.0e+NaN", signbit(d) ? "-" : "");
+    EmitString(w, buf);
+    return;
+  }
+  if (isinf(d)) {
+    Format(buf, sizeof(buf), "%s1.0e+INF", d < 0 ? "-" : "");
+    EmitString(w, buf);
+    return;
+  }
+  const double magnitude = fabs(d);
+  int precision = magnitude < DBL_MIN ? 1 : DBL_DIG;
+  for (; precision <= 17; precision++) {
+    Format(buf, sizeof(buf), "%.*g", precision, d);
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfloat-equal"
+#endif
+    const bool round_trips = strtod(buf, nullptr) == d;
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+    if (round_trips) {
+      break;
+    }
+  }
+  // The decimal point must always be printed, or a float reads back as an
+  // integer: `100` becomes `100.0`, `0.1` already carries its own point, and
+  // an exponent (`1e+100`) already marks a float.
+  if (strpbrk(buf, ".eE") == nullptr) {
+    Format(buf + strlen(buf), sizeof(buf) - strlen(buf), ".0");
   }
   EmitString(w, buf);
 }
@@ -996,6 +1071,96 @@ static FeObject* ReadWrapped(FeContext* ctx,
   return FeCons(ctx, FeMakeSymbol(ctx, name), FeCons(ctx, v, &nil));
 }
 
+// Emacs' number lexer (05A Decision 3, 05D), replacing ReadAtom's bare
+// `strtod`: classify the token first, then convert only the classified text
+// with `strtoll`/`strtod`. Integer = optional sign, digits, optional trailing
+// dot (`1.` is the integer 1, R2). Float = a fraction and/or an exponent
+// (`.5`, `1e3`, `1.e3`, R3/R5). The nonfinite spellings the printer emits --
+// `1.0e+INF`, `-1.0e+INF`, `0.0e+NaN`, `-0.0e+NaN` -- read back as nonfinite
+// floats, keeping read/print round-tripping an invariant. Everything else is
+// a symbol: `0x10`, `inf`, `nan`, `1e`, `1.0e+` are un-numbered (R6-R8).
+// An integer literal that overflows `int64_t` reads as a double (the
+// pre-bignum Emacs behaviour), recorded as a divergence row against modern
+// Emacs' bignums (05A Decision 3).
+typedef enum NumberKind {
+  NumberSymbol,
+  NumberInteger,
+  NumberFloat,
+  NumberInf,
+  NumberNan,
+} NumberKind;
+
+// `p` points at the `e`/`E` of an exponent; the significand has been
+// consumed. A `+`/`-` sign, digits, or the exact `INF`/`NaN` spellings decide
+// a float from a symbol -- `1e3`, `1e+5`, `1e-7` are floats, `1e`, `1e+`,
+// `1e+Inf`, `1.0e+NAN` are symbols, and only `e+INF`/`e+NaN` (never `e-INF`)
+// are nonfinite, exactly as the pinned Emacs answers. The sign of a nonfinite
+// spelling is read from the token's leading `+`/`-` by `ReadAtom`, not here.
+// Digit runs use `strspn`, which the analyzer models as reading a
+// NUL-terminated string (a bare `while (digit(*p))` loop it cannot bound).
+static NumberKind ClassifyExponent(const char* p) {
+  p++;
+  bool exponent_negative = false;
+  if (*p == '+' || *p == '-') {
+    exponent_negative = *p == '-';
+    p++;
+  }
+  if (!exponent_negative) {
+    if (strcmp(p, "INF") == 0) {
+      return NumberInf;
+    }
+    if (strcmp(p, "NaN") == 0) {
+      return NumberNan;
+    }
+  }
+  if (strspn(p, "0123456789") == 0) {
+    return NumberSymbol;
+  }
+  p += strspn(p, "0123456789");
+  return *p == '\0' ? NumberFloat : NumberSymbol;
+}
+
+static NumberKind ClassifyNumber(const char* s) {
+  const char* p = s;
+  if (*p == '+' || *p == '-') {
+    p++;
+  }
+  const char* digits = p;
+  p += strspn(p, "0123456789");
+  const bool before = p != digits;
+  if (*p == '.') {
+    p++;
+  }
+  const char* fraction = p;
+  p += strspn(p, "0123456789");
+  const bool after = p != fraction;
+  if (!before && !after) {
+    return NumberSymbol;  // `+`, `-`, `.`, `e5`, `.e3` -- no digits at all
+  }
+  if (*p == 'e' || *p == 'E') {
+    return ClassifyExponent(p);  // `1e3`, `1.e3`, `.5e2`, `1e`->symbol
+  }
+  if (*p != '\0') {
+    return NumberSymbol;  // `0x10`, `5.x`, `1.2.3`, `1.0.`
+  }
+  if (!after) {
+    return NumberInteger;  // `5`, `+5`, `5.`
+  }
+  return NumberFloat;  // `5.0`, `.5`
+}
+
+// The NaN with `signbit` == `negative`. `nan("")` returns an implementation
+// quiet NaN (no redundant `0.0/0.0` division), and the sign of any NaN is
+// observable and flip-able, so normalize the sign explicitly rather than
+// trusting which way a given compiler folds a division.
+static double NanWithSign(bool negative) {
+  double value = nan("");
+  if (signbit(value) != negative) {
+    value = -value;
+  }
+  return value;
+}
+
 // A number, `nil`, or a symbol. `chr` is the first character; a character
 // already pushed back into `ctx->nextchr` is consumed before the input.
 static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
@@ -1012,10 +1177,27 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   } while (chr && !strchr(delimiter, chr));
   *p = '\0';
   ctx->nextchr = chr;
-  // Try to read it as a double:
-  FeDouble n = strtod(buf, &p);
-  if (p != buf && strchr(delimiter, *p)) {
-    return FeMakeDouble(ctx, n);
+  switch (ClassifyNumber(buf)) {
+    case NumberInteger: {
+      errno = 0;
+      // The classifier has already pinned the token as `[+-]digits`, with an
+      // optional trailing dot, so `strtoll` reads the whole number and
+      // `ERANGE` is set only when the literal overflows int64 -- the recorded
+      // pre-bignum fallback to a double (Decision 3).
+      const int64_t value = strtoll(buf, nullptr, 10);
+      if (errno == ERANGE) {
+        return FeMakeDouble(ctx, strtod(buf, nullptr));
+      }
+      return FeMakeInteger(ctx, value);
+    }
+    case NumberFloat:
+      return FeMakeDouble(ctx, strtod(buf, nullptr));
+    case NumberInf:
+      return FeMakeDouble(ctx, buf[0] == '-' ? -HUGE_VAL : HUGE_VAL);
+    case NumberNan:
+      return FeMakeDouble(ctx, NanWithSign(buf[0] == '-'));
+    case NumberSymbol:
+      break;
   }
   // Try to read it as nil:
   if (!strcmp(buf, "nil")) {
@@ -1472,7 +1654,10 @@ static FeObject* native_log(FeContext* ctx, FeObject* arg) {
 // rather than a cast whose behaviour is undefined; NaN and ±Infinity are out
 // of range too.
 static int64_t IntegerRound(FeContext* ctx, double x) {
-  if (!(x >= -0x1p63 && x < 0x1p63)) {
+  // `(double)INT64_MAX` rounds up to exactly 2^63, so `x >= (double)INT64_MAX`
+  // is `x >= 2^63` -- the same bounds as the hex-float `0x1p63` spelling, in
+  // a form the static analyzer does not mis-solve.
+  if (x < (double)INT64_MIN || x >= (double)INT64_MAX) {
     FeHandleError(ctx, "arith-error");
   }
   return (int64_t)x;

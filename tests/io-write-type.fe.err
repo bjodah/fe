@@ -1,2 +1,2 @@
-error: expected string or symbol, got double
+error: expected string or symbol, got integer
 (write-file stdout 42)

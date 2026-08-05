@@ -36,7 +36,24 @@ was written:
 and `(. a)` as `a`.)
 
 Outside a list, `.` is an ordinary symbol, and a leading dot still starts a
-number: `'.` is the symbol `.` and `.5` is `0.5`.
+float: `'.` is the symbol `.` and `.5` is `0.5`.
+
+Number literals follow Emacs' grammar (05A Decision 3, 05D's cut). The reader
+classifies a token first, then converts only the classified text, so what a
+literal *is* is decided by shape, not by whatever `strtod` would accept:
+
+| Written | Reads as | Note |
+| --- | --- | --- |
+| `42`, `+5`, `-5` | integer | optional sign, digits |
+| `1.` | integer `1` | a trailing dot is still an integer (R2) |
+| `.5` | float `0.5` | a leading dot is a float (R3) |
+| `1e3`, `1.e3`, `1.5e+3` | float | digits with a fraction and/or exponent (R5) |
+| `1.0e+INF`, `0.0e+NaN` | nonfinite float | the exact spellings the printer emits, read back |
+| `0x10`, `inf`, `nan`, `1e`, `1.0e+` | symbol | everything else is un-numbered (R6-R8) |
+
+An integer literal that overflows `int64_t` reads as a double -- the
+pre-bignum Emacs behaviour -- recorded as a divergence row against modern
+Emacs' bignums (05A Decision 3).
 
 ## Forms
 
@@ -722,6 +739,30 @@ converts to double. Strings are equal if equivalent, and all other values are
 equal only if they are the same underlying object. `is` is Fe's own broad
 comparator — recorded as such by 05A's Decision 2 — not an Emacs Lisp form.
 
+#### `(eq a b)`
+
+Emacs Lisp's identity operator (05A Decision 2, rows E1-E3, landed 05D):
+`t` if `a` and `b` are the same object, or if both are integers with the same
+value — the fixnum rule Emacs' `(eq 3 3)` depends on. Everything else is
+identity: two separately-read `3.0` floats are two boxed objects, so
+`(eq 3.0 3.0)` is `nil`, and `(eq "a" "a")` is `nil` for the same reason.
+
+```clojure
+fe > (eq 3 3)
+t
+fe > (eq 3.0 3.0)
+nil
+fe > (eq "a" "a")
+nil
+```
+
+#### `(eql a b)`
+
+`eq`, or two same-type numbers equal by value — integers by value, floats by
+their exact bits. `(eql 3 3.0)` is `nil` because the types differ, and
+`(eql 0.0 -0.0)` is `nil` because the sign bit differs; `(eql 1.5 1.5)` is
+`t` (rows E4-E5).
+
 #### `(atom x)`
 
 Returns true if `x` is not a pair, otherwise `nil`.
@@ -739,17 +780,17 @@ are the full tower: both types flow through every arithmetic, comparison,
 equality and math-native path, and each operator preserves integers where
 Emacs preserves them and promotes to float where Emacs promotes.
 
-The reader still produces only floats: `42` reads as the double `42.0`
-(printed `42` by the integral-double shortcut), and no source text can spell
-an integer before the 05D cut. Integers reach the interpreter only from the
-host C API (`FeMakeInteger`), from the tower's integer identities
-(`(+)`/`(-)` are the integer `0`, `(*)` the integer `1`), and from the
-integer-returning math natives (`floor` etc.). Everything a script writes
-with ordinary literals therefore still computes in doubles end to end:
-`(+ 1 2)` is the double `5.0`, printed `5`. Host-made integers flow through
-the tower exactly as if a future reader had spelled them: all-integer
-operands stay integer, and a float operand promotes the rest of the
-computation.
+The reader produces both types since 05D's cut, and the two spellings
+round-trip: `42` reads as an integer and prints `42`; `42.0` reads as a float
+and prints `42.0`. A bare integer spelling never becomes a float, so the
+tower's integer paths are reachable from ordinary source text -- `(/ 7 2)` is
+the integer `3`, `(/ 1 0)` is `arith-error` -- and a float keeps its `.0`, so
+it never impersonates an integer on output. Floats print shortest-round-trip
+(the shortest decimal that reads back to the same double: `0.1` prints
+`0.1`, `(log 8)` prints all its digits) with a decimal point or exponent
+always present, and the nonfinite spellings `1.0e+INF`/`-1.0e+INF`/
+`0.0e+NaN`/`-0.0e+NaN` (05A Decision 4). Host-made integers flow through the
+tower exactly as read ones do.
 
 Integer overflow (in any direction, on any operator) and integer division by
 zero are `arith-error`, never a silent wrap and never a promotion to float.
@@ -863,17 +904,14 @@ truncates toward zero -- integer `7` by integer `2` is `3`, `-7` by `2` is
 `-3` -- and a float operand promotes to float (`(/ 7 2.0)` is `3.5`). With
 one integer argument the answer is the reciprocal, truncated: `(/ 5)` on an
 integer operand is the integer `0`. Integer division by zero is
-`arith-error`. (The integer examples are the tower's rule for integer
-operands; written literals still read as doubles before the 05D cut, so
-`(/ 7 2)` computes `3.5` today.)
+`arith-error`. Since 05D's cut the literals read as integers, so `(/ 7 2)` is
+`3` and `(/ 1 0)` is `arith-error` from source text.
 
 #### `(integerp x)`
 
 Returns `t` if `x` is an integer, else `nil` -- a float, a string, a list,
 anything else is `nil`. Exactly one argument; a leftover argument is
-`wrong-number-of-arguments`. While the reader produces only doubles, the
-integers `integerp` can answer `t` for come from the host API, the tower's
-integer identities, and the integer-returning math natives.
+`wrong-number-of-arguments`. Since 05D's cut every integer literal is one.
 
 #### `(floatp x)`
 

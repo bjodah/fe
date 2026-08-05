@@ -28,14 +28,16 @@
 // from Lisp must recompile anyway -- the tripwire is kg's own
 // `static_assert(FE_API_VERSION == 2)`, which this bump fires.
 //
-// Version 4 (sub-plan 05D of kg's Emacs-subset program) is the numeric cut,
-// and the bump has been pending since 05B: 05A's placement (a) Decision
-// inserted `FeTInteger` into the public `FeType` enum immediately after
-// `FeTDouble`, renumbering every later constant including `FeTPtr`, so a
-// host built against this header is already ABI-incompatible with a core
-// linked before that renumbering even though `FE_API_VERSION` still reads 3
-// here. The version move is deliberately 05D's, not 05B's.
-#define FE_API_VERSION 3
+// Version 4 (sub-plan 05D of kg's Emacs-subset program) is the numeric cut:
+// 05A's placement (a) Decision inserted `FeTInteger` into the public `FeType`
+// enum immediately after `FeTDouble`, renumbering every later constant
+// including `FeTPtr`; `FeMakeInteger`/`FeToInteger` (05B) joined the
+// constructor/accessor pair; and the reader now produces integers from
+// source text, so a host-made and a read number share one meaning. The bump
+// was deliberately deferred to the cut so the whole numeric contract moves as
+// one visible break -- a "compatible" break that silently reinterprets `42`
+// is the worst kind (05D).
+#define FE_API_VERSION 4
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -46,8 +48,14 @@
 // value-cell fallback is deleted -- `#'x` reads as `(function x)`, and
 // `boundp`-of-a-callable changed meaning (the bootstrap callables now live
 // in function cells, so `(boundp 'car)` is nil while `(fboundp 'car)` is t).
-// See doc/language.md and doc/c-api.md.
-#define FE_LANGUAGE_VERSION 3
+// Version 4 (sub-plan 05D) is the numeric cut: integer literals (`42`, `+5`,
+// `1.`) and the Emacs float spellings (`.5`, `1e3`, the nonfinite
+// `1.0e+INF`/`0.0e+NaN` family) read as their own types instead of every
+// number reading as a double, floats print shortest-round-trip with an
+// explicit `.0`, integer division truncates, `(/ 1 0)` is `arith-error`, and
+// `eq`/`eql` are core primitives with Emacs' identity semantics. See
+// doc/language.md and doc/c-api.md.
+#define FE_LANGUAGE_VERSION 4
 
 extern const char* FeVersion;
 

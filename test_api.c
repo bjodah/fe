@@ -100,9 +100,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 3);
-  static_assert(FE_LANGUAGE_VERSION == 3);
-  CHECK(strcmp(FeVersion, "4.0") == 0);
+  static_assert(FE_API_VERSION == 4);
+  static_assert(FE_LANGUAGE_VERSION == 4);
+  CHECK(strcmp(FeVersion, "5.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -579,7 +579,7 @@ static bool TestStringInput(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-syntax.fe", "6", 1), "6"));
   CHECK(ExpectEvaluationError(context, &state, "runtime.fe", "1 (car 2) 3", 11,
-                              "runtime.fe: expected pair, got double"));
+                              "runtime.fe: expected pair, got integer"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-runtime.fe", "7", 1), "7"));
 
@@ -753,7 +753,7 @@ static bool TestExtensionAPI(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "native.fe", "(add-exactly 2 3)",
                                     sizeof("(add-exactly 2 3)") - 1),
-                   "5"));
+                   "5.0"));
   CHECK(ExpectEvaluationError(
       context, &state, "native.fe", "(add-exactly 2 3 4)",
       sizeof("(add-exactly 2 3 4)") - 1, "native.fe: too many arguments"));
@@ -829,7 +829,7 @@ static bool TestRootsAndCalls(void) {
     CHECK(IsRendered(context,
                      FeCall(context, FeGetRoot(pair_root), arguments,
                             sizeof(arguments) / sizeof(arguments[0])),
-                     "((1 2) 3)"));
+                     "((1 2) 3.0)"));
     CHECK(FeSaveGC(context) == call_gc);
   }
   CHECK(IsRendered(
@@ -878,7 +878,7 @@ static bool TestCallWithOptions(void) {
   CHECK(IsRendered(
       context,
       FeCallWithOptions(context, FeGetRoot(root), arguments, 2, &generous),
-      "30"));
+      "30.0"));
 
   // A controlled call restores its internal GC frame, so repeated calls do
   // not grow the stack and the rooted callable survives each one.
@@ -887,7 +887,7 @@ static bool TestCallWithOptions(void) {
     CHECK(IsRendered(
         context,
         FeCallWithOptions(context, FeGetRoot(root), arguments, 2, &generous),
-        "30"));
+        "30.0"));
     CHECK(FeSaveGC(context) == call_gc);
   }
 
@@ -909,7 +909,7 @@ static bool TestCallWithOptions(void) {
                                              sizeof(raise_function) - 1));
   CHECK(ExpectCallWithOptionsError(context, &state, FeGetRoot(raise_root),
                                    nullptr, 0, &generous,
-                                   "expected pair, got double"));
+                                   "expected pair, got integer"));
   CHECK(ExpectCallWithOptionsError(context, &state, FeMakeDouble(context, 1),
                                    nullptr, 0, &generous,
                                    "tried to call non-callable value"));
@@ -963,7 +963,7 @@ static bool TestCallWithOptions(void) {
   CHECK(IsRendered(
       context,
       FeCallWithOptions(context, FeGetRoot(root), arguments, 2, &generous),
-      "30"));
+      "30.0"));
 
   FeReleaseRoot(context, state.root);
   FeReleaseRoot(context, root);
@@ -981,15 +981,15 @@ static bool TestMathNatives(void) {
       context, FeEvaluateString(context, "math.fe", expr, sizeof(expr) - 1), \
       expected))
 
-  CHK("(sin 0)", "0");
-  CHK("(cos 0)", "1");
+  CHK("(sin 0)", "0.0");
+  CHK("(cos 0)", "1.0");
   CHK("(expt 2 8)", "256");
   CHK("(expt 2 10)", "1024");
-  CHK("(sqrt 16)", "4");
-  CHK("(log (exp 1))", "1");
-  CHK("(log 100 10)", "2");
-  CHK("(atan 1)", "0.7853982");
-  CHK("(atan 1 1)", "0.7853982");
+  CHK("(sqrt 16)", "4.0");
+  CHK("(log (exp 1))", "1.0");
+  CHK("(log 100 10)", "2.0");
+  CHK("(atan 1)", "0.7853981633974483");
+  CHK("(atan 1 1)", "0.7853981633974483");
 
   CHK("(floor 7)", "7");
   CHK("(floor 7 2)", "3");
@@ -1348,7 +1348,7 @@ static bool TestSymbolCells(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "cell.fe", "cell-probe",
                                     sizeof("cell-probe") - 1),
-                   "42"));
+                   "42.0"));
   CHECK(SymbolFunction(first) == native);
 
   // A churn loop allocates until the freelist empties, forcing collections;
@@ -1364,7 +1364,7 @@ static bool TestSymbolCells(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "cell.fe", "cell-probe",
                                     sizeof("cell-probe") - 1),
-                   "42"));
+                   "42.0"));
 
   FeCloseContext(context);
   return true;
@@ -1403,15 +1403,14 @@ static bool TestInteger(void) {
 
   // FeToDouble widens, so every current double-taking host read already
   // accepts a host-made integer. The converted double is asserted exactly
-  // through the writer (an integral
-  // double prints bare), which sidesteps -Wfloat-equal.
+  // through the writer (a double prints its `.0`, per 05D's printer).
   CHECK(IsRendered(
       context,
       FeMakeDouble(context, FeToDouble(context, FeMakeInteger(context, 42))),
-      "42"));
+      "42.0"));
   CHECK(IsRendered(context,
                    FeMakeDouble(context, FeToDouble(context, min_integer)),
-                   "-9223372036854775808"));
+                   "-9.223372036854776e+18"));
 
   // The `type_names` slot, which is what `type-of` will return once the
   // reader can produce integers.
@@ -1481,7 +1480,7 @@ static bool TestFunctionCells(void) {
   CHK("(fset s (lambda () 4))", "(lambda nil 4)");
   CHK("(k)", "4");
   // The target is validated as a symbol before the function form evaluates.
-  LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe: expected symbol, got double");
+  LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe: expected symbol, got integer");
 
   // `funcall` takes a value: a closure directly, a lexical value, and a
   // symbol designator resolved through the function cell (04D's cut removed
@@ -1717,7 +1716,7 @@ static bool TestFunctionCells(void) {
   CHECK(!FeIsNil(resolved));
   FeObject* const arg = FeMakeDouble(context, 21);
   FeObject* const* const args = (FeObject* const[]){arg};
-  CHECK(IsRendered(context, FeCall(context, resolved, args, 1), "42"));
+  CHECK(IsRendered(context, FeCall(context, resolved, args, 1), "42.0"));
   // Through the public API the very same cycle is `nil` and no error at all
   // (re-establish x's self-link, which the earlier `(fset 'x nil)` recovery
   // step cleared). This is the one reader of the chain that does not raise:
@@ -1754,7 +1753,7 @@ static bool TestFunctionCells(void) {
 // the function cell only, the bootstrap lives in function cells (`t`, `pi`
 // and `e` excepted), `#'` reads as `(function x)`, the writer prints
 // `(function X)` as `#'X`, and `FeDefineNative` registers into the function
-// cell (the FE_API_VERSION 3 meaning change).
+// cell (the FE_API_VERSION 3 meaning change, superseded by 4 in 05D).
 static bool TestNamespaceCut(void) {
   TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -1804,14 +1803,15 @@ static bool TestNamespaceCut(void) {
   CHK("(quote #'car)", "#'car");
   CHK("(quote (function \"a\\\"b\"))", "#'\"a\\\"b\"");
 
-  // `FeDefineNative` registers into the function cell (FE_API_VERSION 3):
+  // `FeDefineNative` registers into the function cell (since FE_API_VERSION
+  // 3, superseded by 4 in 05D):
   // observable through `symbol-function`, callable in head position, and
   // invisible to `boundp`.
   FeDefineNative(context, "cut-native", OrdinaryNative);
   CHK("(boundp 'cut-native)", "nil");
   CHK("(fboundp 'cut-native)", "t");
   CHK("(symbol-function 'cut-native)", "[native-fn]");
-  CHK("(cut-native)", "42");
+  CHK("(cut-native)", "42.0");
   FeObject* const cut_native = FeMakeSymbol(context, "cut-native");
   CHECK(FeGetType(FeGetFunction(context, cut_native)) == FeTNativeFn);
 
@@ -2232,11 +2232,11 @@ static bool TestNumericTower(void) {
 
   // Mixed promotion: once a double joins, the whole reduction is double.
   CHECK_NUM("+", FeTDouble, "3.5", IntOperand(1), DoubleOperand(2.5));
-  CHECK_NUM("+", FeTDouble, "3", IntOperand(1), DoubleOperand(2.0));
-  CHECK_NUM("*", FeTDouble, "6", IntOperand(2), DoubleOperand(3.0));
+  CHECK_NUM("+", FeTDouble, "3.0", IntOperand(1), DoubleOperand(2.0));
+  CHECK_NUM("*", FeTDouble, "6.0", IntOperand(2), DoubleOperand(3.0));
   CHECK_NUM("/", FeTDouble, "3.5", IntOperand(7), DoubleOperand(2.0));
   CHECK_NUM("/", FeTDouble, "3.5", DoubleOperand(7.0), IntOperand(2));
-  CHECK_NUM("+", FeTDouble, "6", IntOperand(1), DoubleOperand(2.0),
+  CHECK_NUM("+", FeTDouble, "6.0", IntOperand(1), DoubleOperand(2.0),
             IntOperand(3));
 
   // Truncating division, toward zero for both signs; the unary seeds flip to
@@ -2258,7 +2258,7 @@ static bool TestNumericTower(void) {
   CHECK_NUM_ERR("/", "arith-error", IntOperand(1), IntOperand(0));
   CHECK_NUM_ERR("/", "arith-error", IntOperand(-1), IntOperand(0));
   CHECK_NUM_ERR("/", "arith-error", IntOperand(0), IntOperand(0));
-  CHECK_NUM("/", FeTDouble, "inf", IntOperand(1), DoubleOperand(0.0));
+  CHECK_NUM("/", FeTDouble, "1.0e+INF", IntOperand(1), DoubleOperand(0.0));
   CHECK_NUM_ERR("+", "arith-error", IntOperand(INT64_MAX), IntOperand(1));
   CHECK_NUM_ERR("-", "arith-error", IntOperand(INT64_MIN), IntOperand(1));
   CHECK_NUM_ERR("*", "arith-error", IntOperand(INT64_MAX), IntOperand(2));
@@ -2316,7 +2316,7 @@ static bool TestNumericTower(void) {
     FeObject* left = MakeCallForm(context, "sqrt", left_operands, 1);
     FeObject* right = MakeCallForm(context, "sqrt", right_operands, 1);
     FeObject* operands[] = {left, right};
-    FeObject* result =
+    const FeObject* result =
         FeEvaluate(context, MakeCallForm(context, "=", operands, 2));
     CHECK(FeGetType(result) == FeTNil);
     FeRestoreGC(context, gc);
@@ -2352,12 +2352,12 @@ static bool TestNumericTower(void) {
   CHECK_NUM("round", FeTInteger, "-4", DoubleOperand(-3.5));
   CHECK_NUM("expt", FeTInteger, "256", IntOperand(2), IntOperand(8));
   CHECK_NUM("expt", FeTDouble, "0.5", IntOperand(2), IntOperand(-1));
-  CHECK_NUM("expt", FeTDouble, "256", DoubleOperand(2.0), IntOperand(8));
-  CHECK_NUM("expt", FeTDouble, "256", IntOperand(2), DoubleOperand(8.0));
-  CHECK_NUM("sqrt", FeTDouble, "4", IntOperand(16));
-  CHECK_NUM("sqrt", FeTDouble, "4", DoubleOperand(16.0));
-  CHECK_NUM("sin", FeTDouble, "0", IntOperand(0));
-  CHECK_NUM("sin", FeTDouble, "1", DoubleOperand(1.5707963));
+  CHECK_NUM("expt", FeTDouble, "256.0", DoubleOperand(2.0), IntOperand(8));
+  CHECK_NUM("expt", FeTDouble, "256.0", IntOperand(2), DoubleOperand(8.0));
+  CHECK_NUM("sqrt", FeTDouble, "4.0", IntOperand(16));
+  CHECK_NUM("sqrt", FeTDouble, "4.0", DoubleOperand(16.0));
+  CHECK_NUM("sin", FeTDouble, "0.0", IntOperand(0));
+  CHECK_NUM("sin", FeTDouble, "0.9999999999999997", DoubleOperand(1.5707963));
 
   // Context reuse after every error: each `arith-error`/arity path above
   // already re-ran the context check; a fresh reduction still answers.
@@ -2383,6 +2383,125 @@ static bool TestNumericTower(void) {
 
 #undef CHECK_NUM_ERR
 #undef CHECK_NUM
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 05D: the numeric cut, driven through the *reader* at last. Every
+// 05A R/P row is a read-or-print test (`1.` is the integer 1, `.5` the float
+// 0.5, `0x10`/`inf`/`nan`/`1e` symbols, `9007199254740993` exact, `-0.0`
+// round-trips, `42.0` prints `42.0`, the nonfinite spellings read and print),
+// the E rows are `eq`/`eql` per 05A's collision table, and `(/ 7 2)` is the
+// integer 3 through source text at last. Context reuse is checked after each
+// new error.
+static bool TestNumericCut(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Reads `source` and asserts the exact type and rendering.
+#define READS_AS(source, type, expected)                            \
+  do {                                                              \
+    const size_t gc = FeSaveGC(context);                            \
+    size_t offset = 0;                                              \
+    FeObject* object =                                              \
+        FeReadString(context, source, sizeof(source) - 1, &offset); \
+    CHECK(object != nullptr);                                       \
+    CHECK(FeGetType(object) == type);                               \
+    CHECK(IsRendered(context, object, expected));                   \
+    CHECK(offset == sizeof(source) - 1);                            \
+    FeRestoreGC(context, gc);                                       \
+  } while (false)
+#define EVAL_AS(expr, expected)                                             \
+  CHECK(IsRendered(                                                         \
+      context, FeEvaluateString(context, "cut.fe", expr, sizeof(expr) - 1), \
+      expected))
+#define CUT_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "cut.fe", expr, strlen(expr), \
+                              message))
+
+  // R rows: integer = optional sign, digits, optional trailing dot; float =
+  // a fraction and/or an exponent; the nonfinite spellings; everything else
+  // is a symbol.
+  READS_AS("42", FeTInteger, "42");
+  READS_AS("+5", FeTInteger, "5");
+  READS_AS("-5", FeTInteger, "-5");
+  READS_AS("1.", FeTInteger, "1");
+  READS_AS("-0", FeTInteger, "0");
+  READS_AS(".5", FeTDouble, "0.5");
+  READS_AS("42.0", FeTDouble, "42.0");
+  READS_AS("-0.0", FeTDouble, "-0.0");
+  READS_AS("1e3", FeTDouble, "1000.0");
+  READS_AS("1.e3", FeTDouble, "1000.0");
+  READS_AS("0x10", FeTSymbol, "0x10");
+  READS_AS("inf", FeTSymbol, "inf");
+  READS_AS("nan", FeTSymbol, "nan");
+  READS_AS("1e", FeTSymbol, "1e");
+  READS_AS("1.0e+", FeTSymbol, "1.0e+");
+  READS_AS("1.0e+INF", FeTDouble, "1.0e+INF");
+  READS_AS("-1.0e+INF", FeTDouble, "-1.0e+INF");
+  READS_AS("0.0e+NaN", FeTDouble, "0.0e+NaN");
+  READS_AS("-0.0e+NaN", FeTDouble, "-0.0e+NaN");
+
+  // R9: int64 exactness past 2^53, read and printed exactly.
+  READS_AS("9007199254740993", FeTInteger, "9007199254740993");
+
+  // P rows: the printer's `.0` guarantee and shortest-round-trip, through
+  // source text.
+  EVAL_AS("42.0", "42.0");
+  EVAL_AS("0.1", "0.1");
+  EVAL_AS("(/ 1.0 0)", "1.0e+INF");
+  EVAL_AS("(- 0 (/ 1.0 0))", "-1.0e+INF");
+  EVAL_AS("(sqrt -1)", "-0.0e+NaN");
+
+  // The tower through the reader at last: integer division truncates,
+  // integer division by zero errors, mixed arithmetic promotes, and the
+  // predicates answer by tag.
+  EVAL_AS("(/ 7 2)", "3");
+  EVAL_AS("(/ -7 2)", "-3");
+  EVAL_AS("(/ 5)", "0");
+  EVAL_AS("(+ 1 2.0)", "3.0");
+  EVAL_AS("(integerp 42)", "t");
+  EVAL_AS("(integerp 42.0)", "nil");
+  EVAL_AS("(floatp 42.0)", "t");
+  EVAL_AS("(floatp 42)", "nil");
+  CUT_ERR("(/ 1 0)", "cut.fe: arith-error");
+
+  // E rows: `eq` is pointer identity or both-integers-equal; `eql` is `eq`
+  // or same-type numbers equal by bits. Two separately-read float literals
+  // are two boxed objects, so `(eq 3.0 3.0)` is nil; two integers answer t.
+  EVAL_AS("(eq 3 3)", "t");
+  EVAL_AS("(eq 3 4)", "nil");
+  EVAL_AS("(eq 3.0 3.0)", "nil");
+  EVAL_AS("(eq \"a\" \"a\")", "nil");
+  EVAL_AS("(eq 'a 'a)", "t");
+  EVAL_AS("(eql 3 3)", "t");
+  EVAL_AS("(eql 3 3.0)", "nil");
+  EVAL_AS("(eql 1.5 1.5)", "t");
+  EVAL_AS("(eql 0.0 -0.0)", "nil");
+
+  // E arity: `eq`/`eql` are strictly binary like `/=` (05A row C3) -- the
+  // raw arity is rejected before anything evaluates, so a missing or extra
+  // operand is `wrong-number-of-arguments`, never a comparison.
+  CUT_ERR("(eq)", "cut.fe: wrong-number-of-arguments");
+  CUT_ERR("(eq 1)", "cut.fe: wrong-number-of-arguments");
+  CUT_ERR("(eq 1 2 3)", "cut.fe: wrong-number-of-arguments");
+  CUT_ERR("(eql)", "cut.fe: wrong-number-of-arguments");
+  CUT_ERR("(eql 1)", "cut.fe: wrong-number-of-arguments");
+  CUT_ERR("(eql 1 2 3)", "cut.fe: wrong-number-of-arguments");
+
+  // Context reuse after the errors above.
+  EVAL_AS("(+ 1 2)", "3");
+  EVAL_AS("(eq 'a 'a)", "t");
+  EVAL_AS("(eql 1.5 1.5)", "t");
+
+#undef CUT_ERR
+#undef EVAL_AS
+#undef READS_AS
 
   FeCloseContext(context);
   return true;
@@ -2415,12 +2534,12 @@ static bool TestMacroExpansion(void) {
   CHECK(ExpectEvaluationError(context, &state, "expansion.fe",
                               "(fset 'bad (macro () '(car 1))) (bad)",
                               strlen("(fset 'bad (macro () '(car 1))) (bad)"),
-                              "expansion.fe: expected pair, got double"));
+                              "expansion.fe: expected pair, got integer"));
   CHECK(
       ExpectEvaluationError(context, &state, "expander.fe",
                             "(fset 'worse (macro () (car 1))) (worse)",
                             strlen("(fset 'worse (macro () (car 1))) (worse)"),
-                            "expander.fe: expected pair, got double"));
+                            "expander.fe: expected pair, got integer"));
   CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
                    "3"));
 
@@ -2707,7 +2826,7 @@ static bool TestUnwindHostAPI(void) {
   static const char erroring[] = "(with-resource (fn () (car 1)))";
   CHECK(ExpectEvaluationError(context, &state, "host.fe", erroring,
                               sizeof(erroring) - 1,
-                              "host.fe: expected pair, got double"));
+                              "host.fe: expected pair, got integer"));
   CHECK(!resource_state.open);
   CHECK(resource_state.close_count == 1);
 
@@ -2768,7 +2887,7 @@ static bool TestUnwindLisp(void) {
       "(unwind-protect (car 1) (setq run-count (+ run-count 1)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", erroring,
                               sizeof(erroring) - 1,
-                              "unwind.fe: expected pair, got double"));
+                              "unwind.fe: expected pair, got integer"));
   CHK("run-count", "1");
 
   // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
@@ -2841,7 +2960,7 @@ static bool TestUnwindLisp(void) {
                       sizeof(captured)));
   CHECK(failing_cleanup_call.result);
   CHECK(strstr(captured, "cleanup error") != nullptr);
-  CHECK(strstr(captured, "expected pair, got double") != nullptr);
+  CHECK(strstr(captured, "expected pair, got integer") != nullptr);
   CHK("outer-ran", "t");
 
   // Root survival: a lexical binding created in the body -- reachable only
@@ -2904,7 +3023,7 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_cleanup,
       .length = sizeof(runaway_cleanup) - 1,
       .options = &small_cleanup_budget,
-      .expected = "budget.fe: expected pair, got double"};
+      .expected = "budget.fe: expected pair, got integer"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &runaway_cleanup_call, captured,
                       sizeof(captured)));
@@ -3236,7 +3355,7 @@ static bool TestArenaStats(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "ordinary.fe", "(ordinary-native)",
                                     sizeof("(ordinary-native)") - 1),
-                   "42"));
+                   "42.0"));
   CHECK(FeGetArenaStats(context).peak_native_reentry == 0);
   FeObject* reentrant = FeMakeNativeFn(context, ReentrantNative);
   state.reentry_self = FeCreateRoot(context, reentrant);
@@ -3246,7 +3365,7 @@ static bool TestArenaStats(void) {
       IsRendered(context,
                  FeEvaluateString(context, "reentrant.fe", "(reentrant-native)",
                                   sizeof("(reentrant-native)") - 1),
-                 "3"));
+                 "3.0"));
   CHECK(FeGetArenaStats(context).peak_native_reentry == 2);
 
   FeCloseContext(context);
@@ -3333,7 +3452,7 @@ static bool TestEvaluationStackProbe(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(deep 20)",
                                     sizeof("(deep 20)") - 1),
-                   "20"));
+                   "20.0"));
   FeCloseContext(context);
 
   // The permanent gate: a dynamically sized arena, large enough to hold
@@ -3378,7 +3497,7 @@ static bool TestEvaluationStackProbe(void) {
   CHECK(IsRendered(big_context,
                    FeEvaluateString(big_context, "bare.fe", bare_probe,
                                     sizeof(bare_probe) - 1),
-                   "0"));
+                   "0.0"));
   CHECK(stack_probe_last_address != 0);
   const uintptr_t baseline = stack_probe_deepest_address;
   const FeArenaStats before_deep = FeGetArenaStats(big_context);
@@ -3392,7 +3511,9 @@ static bool TestEvaluationStackProbe(void) {
     char label[32];
     (void)snprintf(label, sizeof(label), "deep-%zu.fe", depths[i]);
     char expected[16];
-    (void)snprintf(expected, sizeof(expected), "%zu", depths[i]);
+    // `deep`'s base case is the double `(stack-probe)`'s 0.0, so the whole
+    // sum is a double and renders with its `.0` under 05D's printer.
+    (void)snprintf(expected, sizeof(expected), "%zu.0", depths[i]);
 
     stack_probe_last_address = 0;
     stack_probe_deepest_address = 0;
@@ -3553,7 +3674,7 @@ static bool TestArgumentFrame(void) {
       context,
       FeEvaluateStringWithOptions(context, "arg-native.fe", "(add-exactly 1 2)",
                                   sizeof("(add-exactly 1 2)") - 1, &native_ok),
-      "3"));
+      "3.0"));
 
   // A lambda call adds its own steps on top: closure creation in the head
   // frame, one step per parameter in `ArgsToEnv`, the body's own
@@ -3607,7 +3728,7 @@ static bool TestArgumentFrame(void) {
   static const char bad_arg[] = "(add-exactly 1 (car 2))";
   CHECK(ExpectEvaluationError(context, &state, "arg-error.fe", bad_arg,
                               sizeof(bad_arg) - 1,
-                              "arg-error.fe: expected pair, got double"));
+                              "arg-error.fe: expected pair, got integer"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
@@ -3767,7 +3888,7 @@ static bool TestLambdaBodyFrame(void) {
   static const char bad[] = "((fn () (car 2)))";
   CHECK(ExpectEvaluationError(context, &state, "body-error.fe", bad,
                               sizeof(bad) - 1,
-                              "body-error.fe: expected pair, got double"));
+                              "body-error.fe: expected pair, got integer"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
@@ -3805,7 +3926,7 @@ static bool TestLambdaBodyChain(void) {
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "body-baseline.fe", baseline,
                                     sizeof(baseline) - 1),
-                   "0"));
+                   "0.0"));
   CHECK(stack_probe_last_address != 0);
   CHECK(stack_probe_deepest_address != 0);
   const uintptr_t baseline_address = stack_probe_deepest_address;
@@ -3839,7 +3960,7 @@ static bool TestLambdaBodyChain(void) {
   stack_probe_deepest_address = 0;
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "lambda-chain.fe", source, length),
-                   "0"));
+                   "0.0"));
   CHECK(stack_probe_last_address != 0);
   CHECK(stack_probe_deepest_address != 0);
   const uintptr_t deepest = stack_probe_deepest_address;
@@ -3942,7 +4063,7 @@ static bool TestMacroFrame(void) {
       "(boom)";
   CHECK(ExpectEvaluationError(context, &state, "mid-body.fe", mid_body_error,
                               sizeof(mid_body_error) - 1,
-                              "mid-body.fe: expected pair, got double"));
+                              "mid-body.fe: expected pair, got integer"));
   CHECK(IsRendered(
       context, FeEvaluateString(context, "ran.fe", "ran", sizeof("ran") - 1),
       "t"));
@@ -4028,7 +4149,7 @@ static bool TestNativeReentry(void) {
                    FeEvaluateStringWithOptions(
                        context, "native-reentry.fe", "(reentrant-native)",
                        sizeof("(reentrant-native)") - 1, &options),
-                   "9"));
+                   "9.0"));
   CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
   CHECK(FeGetArenaStats(context).peak_native_reentry == 8);
@@ -4064,7 +4185,7 @@ static bool TestNativeReentry(void) {
                    FeEvaluateStringWithOptions(
                        context, "native-reentry.fe", "(reentrant-native)",
                        sizeof("(reentrant-native)") - 1, &options),
-                   "9"));
+                   "9.0"));
   CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
 
@@ -4079,7 +4200,7 @@ static bool TestNativeReentry(void) {
                    FeEvaluateStringWithOptions(
                        context, "native-reentry.fe", "(reentrant-native)",
                        sizeof("(reentrant-native)") - 1, &deeper),
-                   "17"));
+                   "17.0"));
   CHECK(state.reentry_max_seen == 17);
   // cppcheck-suppress redundantAssignment
   state.reentry_remaining = 17;
@@ -4134,7 +4255,7 @@ static bool TestNativeOwningReentry(void) {
   static const char body[] = "((fn () (owning-reenter) (ordinary-native)))";
   CHECK(IsRendered(
       context, FeEvaluateString(context, "owning.fe", body, sizeof(body) - 1),
-      "42"));
+      "42.0"));
   CHECK(FeGetArenaStats(context).peak_native_reentry == 1);
 
   // The same shape with the owning call removed succeeds identically, so the
@@ -4142,7 +4263,7 @@ static bool TestNativeOwningReentry(void) {
   static const char plain[] = "((fn () (ordinary-native)))";
   CHECK(IsRendered(
       context, FeEvaluateString(context, "owning.fe", plain, sizeof(plain) - 1),
-      "42"));
+      "42.0"));
 
   // A *separate* re-entering native run right after the owning call sees
   // the same numbers `TestNativeReentry` measures standalone: the owning
@@ -4161,7 +4282,7 @@ static bool TestNativeOwningReentry(void) {
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "owning.fe", deep_body, sizeof(deep_body) - 1),
-      "9"));
+      "9.0"));
   CHECK(state.reentry_max_seen == 9);
   CHECK(FeGetArenaStats(context).peak_native_reentry == 8);
 
@@ -4190,10 +4311,10 @@ static bool TestNativeOwningReentry(void) {
       "((fn () (owning-reenter) (car 1) (ordinary-native)))";
   CHECK(ExpectEvaluationError(context, &state, "owning.fe", erroring,
                               sizeof(erroring) - 1,
-                              "owning.fe: expected pair, got double"));
+                              "owning.fe: expected pair, got integer"));
   CHECK(IsRendered(
       context, FeEvaluateString(context, "owning.fe", body, sizeof(body) - 1),
-      "42"));
+      "42.0"));
 
   FeCloseContext(context);
   return true;
@@ -4444,7 +4565,7 @@ static bool TestCleanupRunGC(void) {
   const FeEvalOptions generous_cleanup_budget = {.cleanup_step_limit = 100000};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "cleanup-gc.fe", source, sizeof(source) - 1,
-      &generous_cleanup_budget, "cleanup-gc.fe: expected pair, got double"));
+      &generous_cleanup_budget, "cleanup-gc.fe: expected pair, got integer"));
   CHECK(FeGetArenaStats(context).collection_count > collections_before);
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "check.fe", "cleanup-result", 14),
@@ -4481,11 +4602,11 @@ static bool TestPrimitiveOrder(void) {
   // 2's side effect never runs.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcar-probe")));
   ORDER_ERR("(setcar 1 (do (setq setcar-probe t) 2))",
-            "order.fe: expected pair, got double");
+            "order.fe: expected pair, got integer");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcar-probe")));
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcdr-probe")));
   ORDER_ERR("(setcdr 1 (do (setq setcdr-probe t) 2))",
-            "order.fe: expected pair, got double");
+            "order.fe: expected pair, got integer");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcdr-probe")));
 
   // Arithmetic validates as it walks, unlike `=`'s evaluate-the-whole-list-
@@ -4501,11 +4622,11 @@ static bool TestPrimitiveOrder(void) {
   // its own error is reported during comparison.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   ORDER_ERR("(< 1 2 (do (setq less-probe t) (car 1)))",
-            "order.fe: expected pair, got double");
+            "order.fe: expected pair, got integer");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   CHK("(makunbound 'less-probe)", "less-probe");
   ORDER_ERR("(<= 2 2 (do (setq less-probe t) (car 1)))",
-            "order.fe: expected pair, got double");
+            "order.fe: expected pair, got integer");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   CHK("(makunbound 'less-probe)", "less-probe");
 
@@ -4796,7 +4917,7 @@ int main(void) {
                  TestParameterLists() && TestBinding() && TestSymbolCells() &&
                  TestInteger() && TestFunctionCells() && TestNamespaceCut() &&
                  TestSetqAndSet() && TestNumericEqual() && TestNumericTower() &&
-                 TestUnwindHostAPI() && TestUnwindLisp() &&
+                 TestNumericCut() && TestUnwindHostAPI() && TestUnwindLisp() &&
                  TestUnwindCleanupBudget() && TestFrameLimits() &&
                  TestFrameSubstrate() && TestArenaStats() &&
                  TestEvaluationStackProbe() && TestCallHeadProbe() &&
