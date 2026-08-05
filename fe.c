@@ -373,22 +373,20 @@ static bool IsNearlyEqual(double a, double b, double epsilon) {
 }
 
 // `is`'s cross-type number arm (05A Decision 2, 05C): mathematical value
-// across an integer and a double, preserving `(is 1 1.0)` -> t. The int64
-// converts exactly to double up to 2^53; beyond that the comparison is the
-// value the two numbers share in doubles, the same approximation the
-// arithmetic tower's mixed promotion uses. `-Wfloat-equal` is suppressed for
-// this intentional exact comparison, the way `IsNearlyEqual`'s own `a == b`
-// infinity special case is below.
+// across an integer and a double, preserving `(is 1 1.0)` -> t. The integer
+// converts to double and the pair then goes through the *same*
+// `IsNearlyEqual` tolerance a double/double pair gets, which is the whole of
+// Decision 2 ("mathematical value across int/float, epsilon retained"): a
+// mixed pair may not be stricter than the same two values both spelled as
+// doubles, or `(is 3 (cube-root 27))` and `(is 3.0 (cube-root 27))` answer
+// differently for no reason a caller can see. `eq` and `eql` are the exact
+// comparisons and never come through here -- they are Emacs semantics, where
+// `is` is fe's own broad comparator and its documented contract is the
+// tolerant one. The int64 converts exactly to double up to 2^53; beyond that
+// the comparison is the value the two numbers share in doubles, the same
+// approximation the arithmetic tower's mixed promotion uses.
 static bool IntegerAndDoubleEqual(int64_t i, double d) {
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wfloat-equal"
-#endif
-  const bool equal = (FeDouble)i == d;
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-  return equal;
+  return IsNearlyEqual((FeDouble)i, d, DBL_EPSILON);
 }
 
 bool Equal(FeObject* a, FeObject* b) {

@@ -2364,6 +2364,23 @@ static bool TestNumericTower(void) {
   CHECK_NUM("is", FeTSymbol, "t", IntOperand(3), DoubleOperand(3.0));
   CHECK_NUM("is", FeTNil, "nil", IntOperand(3), IntOperand(4));
   CHECK_NUM("is", FeTSymbol, "t", DoubleOperand(0.0), DoubleOperand(0.0));
+  // The mixed pair carries the *same* tolerance as a double/double pair, in
+  // both orders: 3.0000000000000004 is `(cube-root 27)`, and scripts/math.fe
+  // asserts `(is 3 (cube-root 27))` with the integer spelling on the left.
+  CHECK_NUM("is", FeTSymbol, "t", IntOperand(3),
+            DoubleOperand(3.0000000000000004));
+  CHECK_NUM("is", FeTSymbol, "t", DoubleOperand(3.0000000000000004),
+            IntOperand(3));
+  CHECK_NUM("is", FeTSymbol, "t", DoubleOperand(3.0),
+            DoubleOperand(3.0000000000000004));
+  CHECK_NUM("is", FeTNil, "nil", IntOperand(3), DoubleOperand(3.001));
+  // `eq`/`eql` stay exact over the same pair: they are Emacs' identity and
+  // type-strict value equality, not fe's tolerant `is`.
+  CHECK_NUM("eql", FeTNil, "nil", DoubleOperand(3.0),
+            DoubleOperand(3.0000000000000004));
+  CHECK_NUM("eql", FeTNil, "nil", IntOperand(3),
+            DoubleOperand(3.0000000000000004));
+  CHECK_NUM("eq", FeTNil, "nil", IntOperand(3), DoubleOperand(3.0));
 
   // The predicates answer by tag and never raise on a non-number.
   CHECK_NUM("integerp", FeTSymbol, "t", IntOperand(3));

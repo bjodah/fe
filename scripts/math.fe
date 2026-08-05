@@ -1,7 +1,7 @@
 (assert-is 200 (abs -200))
 (assert-is 200 (abs 200))
 (assert-is 433 (ceiling 432.1))
-(assert-is 3.0 (cube-root 27))
+(assert-is 3 (cube-root 27))
 (assert-is 432 (floor 432.1))
 (assert-is 5 (hypotenuse 3 4))
 (assert-is t (is-finite 42.6))

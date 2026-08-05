@@ -734,10 +734,16 @@ t
 Returns true if the values `a` and `b` are equal in value. Numbers compare
 by mathematical value across the two numeric types, so `(is 3 3.0)` is `t`:
 integers compare exactly, float-vs-float pairs keep Fe's historical epsilon
-tolerance (`IsNearlyEqual`), and a mixed pair compares after the integer
-converts to double. Strings are equal if equivalent, and all other values are
-equal only if they are the same underlying object. `is` is Fe's own broad
-comparator — recorded as such by 05A's Decision 2 — not an Emacs Lisp form.
+tolerance (`IsNearlyEqual`), and a mixed pair converts the integer to double
+and then takes **the same epsilon tolerance** — a mixed pair is never
+stricter than the same two values both spelled as floats, so
+`(is 3 (cube-root 27))` and `(is 3.0 (cube-root 27))` are both `t` even
+though `(cube-root 27)` is `3.0000000000000004`. Strings are equal if
+equivalent, and all other values are equal only if they are the same
+underlying object. `is` is Fe's own broad comparator — recorded as such by
+05A's Decision 2, whose contract is the tolerant one — not an Emacs Lisp
+form; `eq` and `eql` below are the exact comparisons, and they are Emacs
+semantics.
 
 #### `(eq a b)`
 
