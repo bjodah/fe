@@ -605,6 +605,74 @@ with, not any bindings `body` introduced, and objects that environment
 reaches remain valid for the cleanup to use even if `body` triggers
 garbage collection before it exits.
 
+#### `(catch tag body...)`
+
+Emacs Lisp's non-local exit handler (sub-plan 06C): evaluates `tag`, then
+evaluates the `body` forms as an implicit `do`. If a `(throw tag value)`
+anywhere in the body delivers to a matching tag, the catch stops the body
+and returns `value` immediately; otherwise the whole form returns the last
+body form's value. `(catch 'a)` with an empty body is `nil`. A bare
+`(catch)` with no tag at all is `wrong-number-of-arguments`.
+
+```clojure
+fe > (catch 'tag (throw 'tag 7) 99)
+7
+fe > (catch 'a (catch 'a (throw 'a 1)) 2)
+2
+fe > (catch 'a)
+nil
+```
+
+Tags match by `eq`: a catch and a throw agree when the two tags are the
+same object, or both the same integer. Floats, strings and freshly built
+lists are distinct objects, so they do not match by content, and `nil`
+never matches as a tag at all. The innermost catch whose tag matches wins.
+A `throw` that finds no matching catch raises `no-catch`, reported through
+the ordinary error path as the message `no-catch TAG VALUE` until a real
+condition object replaces it (sub-plan 06D).
+
+Nested `catch` forms with distinct tags let a program choose which level a
+throw unwinds to:
+
+```clojure
+fe > (catch 'outer (catch 'inner (throw 'inner 1) 2) 3)
+1
+fe > (catch 'outer (catch 'inner (throw 'outer 1) 2) 3)
+1
+```
+
+`unwind-protect` cleanups registered between a catch and a throw run as the
+throw unwinds past them, innermost first, exactly as they do on an ordinary
+error; the delivered value is the catch's result either way.
+
+```clojure
+fe > (setq log '())
+()
+fe > (catch 'tg
+       (unwind-protect (throw 'tg 'done)
+         (setq log (cons 'inner log))))
+done
+fe > log
+(inner)
+```
+
+#### `(throw tag value)`
+
+Emacs Lisp's non-local exit (sub-plan 06C): an ordinary function, not a
+special form, whose two arguments evaluate normally. It searches the
+innermost live `catch` whose tag is `eq` to `tag` and delivers `value`
+there, abandoning the evaluation between the throw and that catch. A throw
+that finds no matching catch raises `no-catch TAG VALUE` through the
+ordinary error path. Exactly two arguments are required; `(throw)`,
+`(throw 'x)` and `(throw 'x 1 2)` are `wrong-number-of-arguments`.
+
+The throw search does not cross a native re-entry boundary: a native that
+re-enters evaluation from inside a catch and throws is contained to its own
+nested run, so a catch outside that run is not honoured and the throw
+raises `no-catch` inside it. This is a recorded divergence from Emacs,
+which unwinds C frames of its own in the same situation; fe's C activations
+between the runs are live and cannot be abandoned.
+
 ### Functions
 
 #### `(cons car cdr)`

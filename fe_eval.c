@@ -918,6 +918,35 @@ static bool DispatchPrimitive(FeContext* ctx,
       PushEvaluationFrame(ctx, body, frame->env, NULL);
       return false;
     }
+    // `(catch TAG BODY...)` (sub-plan 06C): a special form -- the BODY forms
+    // stay raw, evaluated as an implicit sequential body once the TAG
+    // delivers. The frame becomes `FeFrameCatch`; `rest` holds the raw TAG
+    // and BODY forms, `accumulator` the delivered tag (`&unbound` until
+    // then). A bare `(catch)` has no tag to catch anything with and is
+    // `wrong-number-of-arguments` before anything evaluates, matching Emacs.
+    case PCatch:
+      if (FeIsNil(arguments)) {
+        FeHandleError(ctx, "wrong-number-of-arguments");
+      }
+      frame->kind = FeFrameCatch;
+      frame->rest = arguments;
+      frame->accumulator = &unbound;
+      frame->callee = &unbound;
+      return false;
+    // `(throw TAG VALUE)` (sub-plan 06C): a function whose two arguments
+    // evaluate normally, exact-two-argument raw arity checked before anything
+    // evaluates exactly as `set`/`/=` check theirs -- a wrong count is
+    // `wrong-number-of-arguments`, never a chain or a dropped operand. The
+    // evaluated operands dispatch the mid-stack unwind from
+    // `ResumeEvalList`'s PThrow arm.
+    case PThrow:
+      RequireTwoArguments(ctx, arguments);
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
     case PSetq:
       frame->kind = FeFrameSetq;
       frame->rest = arguments;
@@ -1831,27 +1860,50 @@ static bool ResumePrint(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // would otherwise hand quote-wrapped operands to an arm that never evaluates
 // them.
 static const bool primitive_is_function[PSentinel] = {
-    [PAssert] = true,       [PEnv] = true,
-    [PNumericEqual] = true, [PSet] = true,
-    [PBoundp] = true,       [PMakeUnbound] = true,
-    [PCons] = true,         [PCar] = true,
-    [PCdr] = true,          [PSetCar] = true,
-    [PSetCdr] = true,       [PList] = true,
-    [PNot] = true,          [PIs] = true,
-    [PEq] = true,           [PEql] = true,
-    [PAtom] = true,         [PPrint] = true,
-    [PLess] = true,         [PLessEqual] = true,
-    [PGreater] = true,      [PGreaterEqual] = true,
-    [PNotEqual] = true,     [PIntegerp] = true,
-    [PFloatp] = true,       [PAdd] = true,
-    [PSub] = true,          [PMul] = true,
-    [PDiv] = true,          [PFset] = true,
-    [PDefalias] = true,     [PSymbolFunction] = true,
-    [PSymbolValue] = true,  [PFboundp] = true,
-    [PFmakunbound] = true,  [PFuncall] = true,
+    [PAssert] = true,
+    [PEnv] = true,
+    [PNumericEqual] = true,
+    [PSet] = true,
+    [PBoundp] = true,
+    [PMakeUnbound] = true,
+    [PCons] = true,
+    [PCar] = true,
+    [PCdr] = true,
+    [PSetCar] = true,
+    [PSetCdr] = true,
+    [PList] = true,
+    [PNot] = true,
+    [PIs] = true,
+    [PEq] = true,
+    [PEql] = true,
+    [PAtom] = true,
+    [PPrint] = true,
+    [PLess] = true,
+    [PLessEqual] = true,
+    [PGreater] = true,
+    [PGreaterEqual] = true,
+    [PNotEqual] = true,
+    [PIntegerp] = true,
+    [PFloatp] = true,
+    [PAdd] = true,
+    [PSub] = true,
+    [PMul] = true,
+    [PDiv] = true,
+    [PFset] = true,
+    [PDefalias] = true,
+    [PSymbolFunction] = true,
+    [PSymbolValue] = true,
+    [PFboundp] = true,
+    [PFmakunbound] = true,
+    [PFuncall] = true,
     [PApply] = true,
+    // Sub-plan 06C: `throw` is function-shaped -- its two operands evaluate
+    // normally, exactly as Emacs' `(special-form-p 'throw)` is nil -- while
+    // `catch` is a special form and stays out of this table.
+    [PThrow] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
-    // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`.
+    // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`,
+    // `catch`.
 };
 
 // Whether `fn` is a callable whose operands stay raw -- a macro, or one of
@@ -2052,6 +2104,103 @@ static bool DispatchFuncallApply(FeContext* ctx,
   return false;
 }
 
+// `(catch TAG BODY...)` (sub-plan 06C): the frame's `accumulator` holds the
+// evaluated tag (`&unbound` until the tag sub-expression delivers it), `rest`
+// the raw BODY forms. The tag is pushed as an ordinary sub-expression; once
+// it delivers, the BODY forms are pushed as an implicit sequential body frame
+// -- the sub-plan's "one expression frame for its body region" cost. The
+// body's delivered value is the catch's result, and so is a value a `throw`
+// unwound into this frame's `callee` (`PerformThrow`): the two arrivals are
+// the same delivery, which is why the unwind marks a still-awaiting-tag catch
+// frame's tag phase complete before it sets `callee`.
+static bool ResumeCatch(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
+  if (frame->callee != &unbound) {
+    if (frame->accumulator != &unbound) {
+      *result = frame->callee;
+      frame->callee = &unbound;
+      return true;
+    }
+    // The tag sub-expression delivered.
+    frame->accumulator = frame->callee;
+    frame->callee = &unbound;
+    PushBodyFrame(ctx, frame->env, frame->rest);
+    return false;
+  }
+  PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
+                      NULL);
+  return false;
+}
+
+// The innermost matching catch frame for a throw's tag, or false when the
+// current run (down to its `run_base` floor) holds none. Tag comparison is
+// Emacs' `eq` (`IdentityObjects` with `compare_floats` false): fixnums match
+// equal fixnums and a shared cons matches itself, while floats, strings and
+// freshly-built conses do not -- and `nil` never matches as a tag (a catch
+// whose tag is nil catches nothing, and a throw whose tag is nil matches
+// nothing), per the sub-plan's CT4/CT5 rows.
+static bool FindCatchFrame(const FeContext* ctx, FeObject* tag, size_t* index) {
+  for (size_t i = ctx->frame_stack_index; i-- > ctx->run_base;) {
+    const FeEvalFrame* frame = &ctx->frame_stack[i];
+    if (frame->kind == FeFrameCatch && !FeIsNil(tag) &&
+        !FeIsNil(frame->accumulator) &&
+        IdentityObjects(tag, frame->accumulator, false)) {
+      *index = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+// The mid-stack unwind a `throw` performs once both operands have been
+// evaluated (sub-plan 06C): search down the current run's frame stack for the
+// innermost catch whose tag is `eq`; a throw that finds no catch raises
+// `no-catch TAG VALUE` through the ordinary error path. A found catch is
+// delivered the value -- the drain to the checkpoint, not to zero: cleanups
+// registered above the catch frame run (innermost first) through the same
+// `RunCleanupsDownTo` every completing pair frame uses, the GC stack is
+// restored to the catch frame's own checkpoint, every frame above it is
+// discarded, and the value lands in the catch frame's `callee` for the loop
+// to resume. Returns false so `RunEvaluationLoop` continues at the catch
+// frame instead of completing the throw form, which was just discarded.
+//
+// The delivered value is rooted on the GC stack from before the drain (a
+// cleanup's own allocations may trigger a collection) until it is safe in a
+// frame field, re-pushed across the checkpoint restore the way
+// `RunEvaluationLoop`'s terminus re-roots its result. The in-flight
+// completion is `FeCompletionThrow` for the duration of the drain -- the
+// `CleanupFrameReserve` gate (`AllocateFrame`'s `completion != Normal`)
+// grants a cleanup provoked by frame exhaustion its working frames, exactly
+// as it does for an error drain -- and resets once the value is delivered.
+static bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value) {
+  size_t index;
+  if (!FindCatchFrame(ctx, tag, &index)) {
+    char tag_text[64];
+    char value_text[64];
+    char message[160];
+    (void)FeToString(ctx, tag, tag_text, sizeof(tag_text));
+    (void)FeToString(ctx, value, value_text, sizeof(value_text));
+    Format(message, sizeof(message), "no-catch %s %s", tag_text, value_text);
+    FeHandleError(ctx, message);
+  }
+  FeEvalFrame* const catch_frame = &ctx->frame_stack[index];
+  ctx->completion = FeCompletionThrow;
+  FePushGC(ctx, value);
+  RunCleanupsDownTo(ctx, catch_frame->cleanup_checkpoint);
+  FeRestoreGC(ctx, catch_frame->gc_checkpoint);
+  FePushGC(ctx, value);
+  // A catch whose tag form was itself the throw site is still awaiting the
+  // tag; mark the tag phase complete so the catch frame's resume reads the
+  // delivered value as the body's result rather than as the tag.
+  if (catch_frame->accumulator == &unbound) {
+    catch_frame->accumulator = &nil;
+  }
+  catch_frame->callee = value;
+  ctx->frame_stack_index = index + 1;
+  ctx->call_list = &catch_frame->trace_cell;
+  ctx->completion = FeCompletionNormal;
+  return false;
+}
+
 // `list`, `=`, the chained comparators, `/=`, `set`, `funcall`, `apply`:
 // evaluates the complete raw
 // argument list first --
@@ -2107,6 +2256,12 @@ static bool ResumeEvalList(FeContext* ctx,
     case PFuncall:
     case PApply:
       return DispatchFuncallApply(ctx, frame, list);
+    // `(throw TAG VALUE)` (sub-plan 06C): the two operands are the tag and
+    // the value; the unwind discards this frame and every frame above the
+    // catch it delivers into, so it returns `PerformThrow`'s "continue"
+    // answer rather than completing the pair form.
+    case PThrow:
+      return PerformThrow(ctx, CAR(list), CAR(CDR(list)));
     default: {  // PNumericEqual, PNotEqual, PLess, PLessEqual, PGreater,
                 // PGreaterEqual
       // The chained comparators and `=`/`/=` (05C): adjacent pairs are
@@ -2173,6 +2328,8 @@ static bool ResumeContinuation(FeContext* ctx,
       return ResumePrint(ctx, frame, result);
     case FeFrameEvalList:
       return ResumeEvalList(ctx, frame, result);
+    case FeFrameCatch:
+      return ResumeCatch(ctx, frame, result);
     case FeFrameRelay:
       *result = frame->callee;
       return true;
@@ -2216,6 +2373,7 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
       case FeFrameArith:
       case FeFramePrint:
       case FeFrameEvalList:
+      case FeFrameCatch:
         FeMark(ctx, frame->expr);
         FeMark(ctx, frame->env);
         FeMark(ctx, frame->fn);
@@ -2252,6 +2410,7 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
     case FeFrameArith:
     case FeFramePrint:
     case FeFrameEvalList:
+    case FeFrameCatch:
       return true;
     case FeFrameExpression:
     case FeFrameLambda:
@@ -2309,6 +2468,14 @@ static jmp_buf* BeginRunBarrier(FeContext* ctx, jmp_buf* jump) {
 // Shared by both entry points so there is exactly one loop implementing
 // evaluation, not two near-duplicates that could drift.
 static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
+  // The throw search (sub-plan 06C) needs this run's floor: a catch frame
+  // below `base` belongs to an outer run and must not be matchable from
+  // inside this one (the native re-entry wall). The save/restore lets a
+  // nested run's own loop publish its base while it drives and hand the
+  // floor back when it returns -- `RunEvaluation`/`RunEvaluationBody` each
+  // call this loop, and only one loop is live at a time.
+  const size_t saved_run_base = ctx->run_base;
+  ctx->run_base = base;
   FeObject* result = &nil;
   while (ctx->frame_stack_index > base) {
     FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
@@ -2453,6 +2620,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
       case FeFrameArith:
       case FeFramePrint:
       case FeFrameEvalList:
+      case FeFrameCatch:
         // A special-form or primitive continuation: an operand or implicit
         // body sub-frame above this one delivered its value into `callee`
         // (or, for a freshly set-up frame, `callee` is still the `&unbound`
@@ -2489,6 +2657,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   // recursion depth. Pushing once here keeps the value the caller is about
   // to receive alive without that per-level cost.
   FePushGC(ctx, result);
+  ctx->run_base = saved_run_base;
   return result;
 }
 
@@ -2509,6 +2678,7 @@ static FeObject* RunEvaluation(FeContext* ctx,
                                FeObject** bind) {
   const size_t base = ctx->frame_stack_index;
   const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
+  const size_t saved_run_base = ctx->run_base;
   if (base > 0) {
     EnterNativeReentry(ctx);
   }
@@ -2520,6 +2690,7 @@ static FeObject* RunEvaluation(FeContext* ctx,
     ctx->call_list = &nil;
     ctx->evaluator_catch = saved_catch;
     ctx->native_reentry_depth = saved_native_reentry_depth;
+    ctx->run_base = saved_run_base;
     TransferRunError(ctx, saved_catch);
   }
 
@@ -2564,6 +2735,7 @@ static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* env) {
   const size_t base = ctx->frame_stack_index;
   const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
+  const size_t saved_run_base = ctx->run_base;
   jmp_buf jump;
   jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
 
@@ -2572,6 +2744,7 @@ static FeObject* RunEvaluationBody(FeContext* ctx,
     ctx->call_list = &nil;
     ctx->evaluator_catch = saved_catch;
     ctx->native_reentry_depth = saved_native_reentry_depth;
+    ctx->run_base = saved_run_base;
     TransferRunError(ctx, saved_catch);
   }
 

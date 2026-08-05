@@ -459,6 +459,22 @@ grouped by evaluation *shape*, not by primitive:
   a single operand is `t` without any type check;
   `/=`'s binary arity is rejected at dispatch before this frame is even
   created.
+- `FeFrameCatch` (`(catch TAG BODY...)`, sub-plan 06C) is the one frame kind
+  that does not just *wait* for a delivery -- it is also the destination of
+  a mid-stack unwind. Its `accumulator` holds the evaluated tag (`&unbound`
+  until the tag sub-expression delivers), `rest` the raw BODY forms, and
+  its `gc_checkpoint`/`cleanup_checkpoint` are exactly what a `throw` that
+  matches it restores to: cleanups above it drain through the same
+  `RunCleanupsDownTo` a completing pair frame uses, the GC stack restores to
+  its checkpoint (with the delivered value re-pushed across the restore),
+  every frame above it is discarded, and the value lands in its `callee` for
+  the loop to resume. The body region is one implicit-body frame
+  (`PushBodyFrame`, the sub-plan's "one expression frame" accounting), so
+  the kind adds no new resume logic for the body itself. `throw` is a
+  function-shaped primitive that reuses `FeFrameEvalList`'s evaluate-all
+  machinery for its two operands and then performs the unwind
+  (`PerformThrow`); it gets no frame kind of its own, per the sub-plan's
+  one-new-kind rule.
 
 `PushBodyFrame` pushes a sequential-body frame directly, bypassing the call
 path, for the places a raw form list is evaluated as an implicit body with
@@ -640,13 +656,15 @@ Collection" above.
 
 `doc/unwind-design.md` is the design this section's implementation follows;
 it also records which parts of that design (checkpoints and tokens for a
-rollback-on-error registry, `catch`/`throw`, `condition-case`) are still
-future work. The distinct completion kinds are no longer wholly future work:
-since sub-plan 06B the interrupt path assigns `FeCompletionQuit`, the
-step-limit/frame/re-entry walls assign `FeCompletionBudget`, and every
-ordinary `FeHandleError()` assigns `FeCompletionError`, all readable through
+rollback-on-error registry, `condition-case`) are still future work.
+`catch`/`throw` are no longer future work: since sub-plan 06C the
+distinct completion kinds include the interrupt path assigning
+`FeCompletionQuit`, the step-limit/frame/re-entry walls assigning
+`FeCompletionBudget`, every ordinary `FeHandleError()` assigning
+`FeCompletionError`, and a matching `throw` holding `FeCompletionThrow`
+for the duration of its checkpointed drain -- all readable through
 `FeGetCompletion()`/`FeGetCondition()` (condition nil until 06D). They are a
-parallel host channel -- no Lisp program can observe them -- and quit/budget
+parallel host channel -- no Lisp program can observe the kinds -- and quit/budget
 remain ordinary `longjmp`-to-the-host completions until `condition-case`
 exists.
 
@@ -694,6 +712,34 @@ control resumes at the `setjmp()`. Whichever error, interrupt, or budget
 exhaustion was already unwinding when the cleanup failed is what
 `RunCleanupsDownTo()`'s caller still eventually reports: a cleanup failure
 never replaces it, and the loop moves on to the next entry.
+
+`catch`/`throw` (sub-plan 06C) are the first non-local exit that stops
+*partway* down the frame stack, and they are built on the checkpointed half
+of this machinery. `catch` is a special form whose frame (`FeFrameCatch`)
+carries the GC and cleanup checkpoints `RunEvaluation()` saves for every
+pair form; `throw` is a function-shaped primitive whose two operands
+evaluate through `FeFrameEvalList`. When both operands are in, `PerformThrow`
+searches the frame stack from the top down to the current run's floor
+(`ctx->run_base`, the frame-stack index the innermost
+`RunEvaluation`/`RunEvaluationBody` started from) for the innermost
+`FeFrameCatch` whose tag is `eq` to the throw's -- a search that deliberately
+stops at that floor, so a catch below a nested run's base (the abandoned
+body of an outer run, or an outer run itself when a native re-entered) is
+never matched: the C activations between the runs are live and cannot be
+popped by frame-index assignment. The native re-entry boundary is therefore
+a wall, tested and recorded as a divergence. No matching catch raises
+`no-catch TAG VALUE` through the ordinary error path (draining to zero, like
+every error, until 06D's `condition-case` gives errors a nearer place to
+stop). A matching catch is delivered the value: the completion is
+`FeCompletionThrow` for the duration, `RunCleanupsDownTo(ctx,
+catch->cleanup_checkpoint)` runs the cleanups the throw passes (innermost
+first), the GC stack restores to the catch frame's checkpoint with the
+delivered value re-pushed across it, every frame above the catch is
+discarded, and the value lands in the catch frame's `callee` for the loop
+to resume -- the "drain to the checkpoint of the frame that catches" the
+design document names. `FeHandleError()`'s drain-to-zero is unchanged: an
+*error* still goes to the host; only the throw path uses the checkpointed
+drain.
 
 ## Known Issues
 

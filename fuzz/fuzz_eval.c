@@ -196,6 +196,36 @@ static FeObject* BuildPredicateForm(FeContext* ctx,
   return MakeUnary(ctx, name, BuildExpression(ctx, input, depth + 1));
 }
 
+// Sub-plan 06C's catch/throw, bounded so the grammar's nontermination bound
+// holds: `throw` terminates paths early rather than extending them, so it
+// appears only inside a catch builder and only as that catch's single body
+// form -- the shape that drives the mid-stack unwind most directly. The tag
+// comes from a small fixed set (two interned symbols -- eq by identity -- or
+// an integer, eq by value), and the throw reuses the catch's tag (the match
+// path, whose fresh-allocated-value rooting the forced-GC lanes chase) or a
+// deliberately different one (the no-catch error path). The thrown value is
+// a full expression, so a collection forced while it evaluates finds the
+// delivery still rooted.
+static FeObject* BuildCatchThrow(FeContext* ctx,
+                                 FuzzInput* input,
+                                 unsigned depth) {
+  FeObject* tag;
+  if (FuzzTakeByte(input) % 2 == 0) {
+    tag = MakeUnary(
+        ctx, "quote",
+        FeMakeSymbol(ctx, FuzzTakeByte(input) % 2 == 0 ? "tg0" : "tg1"));
+  } else {
+    tag = BuildNumber(ctx, input);
+  }
+  FeObject* thrown_tag = tag;
+  if (FuzzTakeByte(input) % 4 == 0) {
+    thrown_tag = MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "tg0"));
+  }
+  FeObject* value = BuildExpression(ctx, input, depth + 1);
+  FeObject* thrown = MakeBinary(ctx, "throw", thrown_tag, value);
+  return MakeForm(ctx, "catch", (FeObject*[]){tag, thrown}, 2);
+}
+
 static FeObject* BuildListForm(FeContext* ctx,
                                FuzzInput* input,
                                unsigned depth) {
@@ -446,7 +476,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 30) {
+  switch (FuzzTakeByte(input) % 31) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -524,6 +554,8 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildIdentityForm(ctx, input, depth + 1);
     case 28:
       return BuildComparisonForm(ctx, input);
+    case 29:
+      return BuildCatchThrow(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

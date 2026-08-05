@@ -74,7 +74,9 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PFboundp] = "fboundp",
                                         [PFmakunbound] = "fmakunbound",
                                         [PFuncall] = "funcall",
-                                        [PApply] = "apply"};
+                                        [PApply] = "apply",
+                                        [PCatch] = "catch",
+                                        [PThrow] = "throw"};
 
 typedef struct PrimitiveAlias {
   const char* name;

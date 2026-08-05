@@ -1,0 +1,52 @@
+;; `catch`/`throw` (sub-plan 06C), the first non-local exit that stops
+;; partway down the frame stack: value delivery to the matching catch,
+;; innermost same-tag wins, `eq` tag comparison, the empty-body nil, and
+;; `unwind-protect` cleanups running on the throw path innermost first.
+
+;; CT1: a throw delivers its value to the matching catch, which returns it;
+;; the trailing form is never evaluated.
+(assert-equals 7 (catch 'tag (throw 'tag 7) 99))
+
+;; CT2: the innermost same-tag catch wins -- the outer catch never sees the
+;; throw and returns its own trailing value.
+(assert-equals 2 (catch 'a (catch 'a (throw 'a 1)) 2))
+
+;; CT5: tag comparison is `eq` -- an equal fixnum matches.
+(assert-equals 'hit (catch 5 (throw 5 'hit) 'miss))
+
+;; A catch with an empty body is nil.
+(assert-equals nil (catch 'a))
+
+;; CT5: a shared object as the tag matches by identity.
+(setq shared-tag (list 1))
+(assert-equals 'hit (catch shared-tag (throw shared-tag 'hit) 'miss))
+
+;; Distinct tags select the level: a throw from the inner body to the outer
+;; tag skips the inner catch entirely.
+(assert-equals 'outer
+  (catch 'outer
+    (catch 'inner (throw 'outer 'outer) 'inner-miss)
+    'outer-miss))
+
+;; CT7/U3: cleanups registered between the catch and the throw run as the
+;; throw unwinds, innermost first.
+(setq ct-log '())
+(assert-equals 'done
+  (catch 'tg
+    (unwind-protect
+      (unwind-protect
+        (throw 'tg 'done)
+        (setq ct-log (cons 'inner ct-log)))
+      (setq ct-log (cons 'outer ct-log)))))
+(assert-equals '(outer inner) ct-log)
+
+;; The thrown value is delivered intact even when the abandoned body has
+;; allocated since the value was created.
+(assert-equals '(111 . 222)
+  (catch 'tg
+    (do
+      (setq ct-gc-i 0)
+      (while (< ct-gc-i 2000)
+        (cons ct-gc-i ct-gc-i)
+        (setq ct-gc-i (+ ct-gc-i 1)))
+      (throw 'tg (cons 111 222)))))

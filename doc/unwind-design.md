@@ -7,16 +7,23 @@ Status: **`unwind-protect` and its C-side counterpart are implemented**
 completion kinds and a context-owned frame stack. Only normal and
 ordinary error are reachable through the Lisp-facing machinery; since
 sub-plan 06B the Quit and Budget kinds are also *true at their producers*
-and host-readable through Decision 5's additive accessors, while `throw`
-remains unassigned. An error under an evaluator barrier is
+and host-readable through Decision 5's additive accessors. Sub-plan 06C
+then made `throw` a real completion: `catch`/`throw` are implemented as the
+mid-stack unwind this document's "Nested evaluation and native re-entry"
+section designs -- a `FeFrameCatch` whose checkpoints are the throw's
+destination, a drain to that frame's checkpoint rather than to zero, the
+native re-entry boundary as a tested wall (the C activations between runs
+are live, recorded as a divergence rather than pretended away), and
+`no-catch` as a message through the existing error path until 06D provides
+condition objects. An error under an evaluator barrier is
 copied into context storage, drains the current cleanup registry, then reaches
-the outer public boundary exactly once. `condition-case`, `catch`/`throw`,
+the outer public boundary exactly once. `condition-case`,
 and the token-based rollback-on-error registry sketched
 below for `MakeFile()`-shaped problems are still design only. The rest of
 this document is the original design; where the shipped implementation took
 a narrower or different shape, a note says so inline rather than rewriting
 history. It still exists so the remaining pieces -- `condition-case`,
-`catch`/`throw`, and quit as a distinct *catchable* kind -- are not designed
+and quit as a distinct *catchable* kind -- are not designed
 four times by four separate patches that then have to be reconciled.
 
 **Reconciled 2026-08-05 against the measured oracle (sub-plan 06A of kg's
@@ -218,6 +225,22 @@ then `RunCleanupsDownTo(ctx, catch->cleanup_checkpoint)`, restore the GC
 checkpoint, and discard the frames above -- so this section's "this has to
 change" is half-built, not open design.
 
+**Implemented 2026-08-05 (sub-plan 06C).** The "this has to change" sentence
+above is now true: `catch`/`throw` exist, and the throw path drains to the
+checkpoint of the frame that catches (`FeFrameCatch`, `PerformThrow`, both
+in `fe_eval.c`; `doc/language.md`'s `(catch ...)`/`(throw ...)`,
+`doc/implementation.md`'s "Unwinding And Cleanup"). The search stops at the
+current run's frame-stack floor (`ctx->run_base`), which is the wall this
+section's "Nested evaluation and native re-entry" rules require: a catch
+below a nested run's base is not matchable from inside it, because the C
+activations between the runs are live and cannot be popped by frame-index
+assignment. A throw that finds no catch raises `no-catch TAG VALUE` through
+the ordinary error path -- draining to zero like any error, since until 06D
+an error has nowhere nearer to stop -- and `FeHandleError`'s own
+drain-to-zero is unchanged. 06D's `condition-case` reuses the same catch
+machinery and makes quit a catchable kind; the token-based
+run-only-on-error registry stays open (Fex's resource problem, Phase 9).
+
 **A Lisp cleanup's own forms are themselves a nested evaluator run,** since
 sub-plan 03E's frame machine: `RunOneCleanupEntry` starts one via
 `RunEvaluationBody` in place of the old recursive `DoList`'s one nested
@@ -317,11 +340,12 @@ contract are rewritten by 06D when the measured replace-policy lands.
    on top of one shared LIFO stack rather than sequence numbers -- see "Two
    cleanup registries, one ordering" above for why that was enough.
 4. `catch`/`throw` and `condition-case`, which need the resumable completion
-   kinds and therefore need 1–3 first. **Still open, sequenced.** 06C lands
-   the catch frame and the throw unwind on the checkpointed drain this
-   document already names; 06D lands `condition-case` on the same machinery,
-   the static hierarchy, and Decision 4's cleanup-raise policy, closing the
-   fe workstream.
+   kinds and therefore need 1–3 first. **`catch`/`throw` landed 2026-08-05
+   (sub-plan 06C)** -- the catch frame and the throw unwind on the
+   checkpointed drain this document names, with the no-catch message and the
+   native-reentry wall tested and recorded; 06D lands `condition-case` on the
+   same machinery, the static hierarchy, and Decision 4's cleanup-raise
+   policy, closing the fe workstream.
 
 Per-context extension type descriptors (`doc/c-api.md`'s "Phase 8") depend on
 step 2, because a descriptor's finalizer is a cleanup with the same rules.

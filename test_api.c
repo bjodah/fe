@@ -269,6 +269,30 @@ static FeObject* ReenterCallWithOptions(
                            &options);
 }
 
+// Sub-plan 06C's native re-entry boundary wall, exercised from a native that
+// synchronously starts a nested evaluator run which throws. The nested run's
+// frame-stack floor sits above every catch frame the outer run holds, so the
+// throw search stops at that floor and raises no-catch in the nested run
+// instead of honouring the outer catch -- recorded as a divergence.
+static FeObject* ReenterThrow(FeContext* context,
+                              // cppcheck-suppress constParameterCallback
+                              FeObject* arguments) {
+  (void)arguments;
+  static const char source[] = "(throw 'outer-tag 42)";
+  return FeEvaluateString(context, "nested.fe", source, sizeof(source) - 1);
+}
+
+// The positive control for the wall: a catch entirely inside the nested run
+// is honoured -- re-entry only bounds the search, it does not disable
+// catch/throw within the run that holds the catch.
+static FeObject* ReenterCatchThrow(FeContext* context,
+                                   // cppcheck-suppress constParameterCallback
+                                   FeObject* arguments) {
+  (void)arguments;
+  static const char source[] = "(catch 'inner-tag (throw 'inner-tag 1))";
+  return FeEvaluateString(context, "nested.fe", source, sizeof(source) - 1);
+}
+
 static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
   const double x = FeToDouble(context, FeGetNextArgument(context, &arguments));
   const double y = FeToDouble(context, FeGetNextArgument(context, &arguments));
@@ -3379,6 +3403,212 @@ static bool TestUnwindCleanupBudget(void) {
   return true;
 }
 
+// Sub-plan 06C: `catch`/`throw`, the first non-local exit that stops partway
+// down the frame stack. Every CT row from the sub-plan through the reader:
+// value delivery (CT1), innermost same-tag wins (CT2), an uncaught throw as
+// the `no-catch TAG VALUE` message through the ordinary error path (CT3),
+// `nil` never matching as a tag (CT4), `eq` tag comparison across
+// fixnum/float/string/shared-cons/fresh-cons (CT5), and `unwind-protect`
+// cleanups running on the throw path in innermost-first order (CT7/U3).
+// Plus the native re-entry boundary wall (a throw from a nested run does not
+// honour a catch below its base, recorded as a divergence), `(catch 'a)`'s
+// empty body being nil, the zero-operand and wrong-type degenerates of both
+// forms, a throw under a tight `max_frames` (the unwind allocates no frames),
+// a cleanup's own throw contained by the cleanup isolation barrier, context
+// reuse after no-catch, and forced GC across a throw with a freshly
+// allocated value.
+static bool TestCatchThrow(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                   \
+  CHECK(IsRendered(                                                           \
+      context, FeEvaluateString(context, "catch.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // CT1: a throw delivers its value to the matching catch, which returns it;
+  // the trailing form is never evaluated.
+  CHK("(catch 'tag (throw 'tag 7) 99)", "7");
+
+  // CT2: the innermost same-tag catch wins.
+  CHK("(catch 'a (catch 'a (throw 'a 1)) 2)", "2");
+
+  // CT5 fixnum: an equal fixnum matches (Phase 5's integer `eq` is
+  // load-bearing here).
+  CHK("(catch 5 (throw 5 'hit) 'miss)", "hit");
+
+  // CT5 floats, strings and fresh conses: eq is identity, not content, so
+  // each throw propagates as no-catch.
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe",
+                              "(catch 1.5 (throw 1.5 'hit) 'miss)",
+                              sizeof("(catch 1.5 (throw 1.5 'hit) 'miss)") - 1,
+                              "catch.fe: no-catch 1.5 hit"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "catch.fe", "(catch \"s\" (throw \"s\" 'hit) 'miss)",
+      sizeof("(catch \"s\" (throw \"s\" 'hit) 'miss)") - 1,
+      "catch.fe: no-catch s hit"));
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe",
+                              "(catch (list 1) (throw (list 1) 'hit) 'miss)",
+                              sizeof("(catch (list 1) (throw (list 1) 'hit) "
+                                     "'miss)") -
+                                  1,
+                              "catch.fe: no-catch (1) hit"));
+
+  // CT5 shared cons: the same object as the tag on both sides matches.
+  CHK("(setq shared-tag (list 1))", "(1)");
+  CHK("(catch shared-tag (throw shared-tag 'hit) 'miss)", "hit");
+
+  // CT3: an uncaught throw raises `no-catch TAG VALUE` through the ordinary
+  // error path.
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw 'nowhere 1)",
+                              sizeof("(throw 'nowhere 1)") - 1,
+                              "catch.fe: no-catch nowhere 1"));
+
+  // CT4: nil never matches as a catch tag.
+  CHECK(ExpectEvaluationError(
+      context, &state, "catch.fe", "(catch nil (throw nil 5))",
+      sizeof("(catch nil (throw nil 5))") - 1, "catch.fe: no-catch nil 5"));
+
+  // Distinct tags select the level: a throw from the inner body to the outer
+  // tag skips the inner catch entirely. Pinned by the compat cond-ct2 shape
+  // and the distinct-tag nesting above.
+  CHK("(catch 'outer (catch 'inner (throw 'outer 5) 1) 2)", "5");
+
+  // A throw from inside a catch's *tag* evaluation reaches an outer catch and
+  // discards the inner (still-awaiting-tag) catch frame, which must never
+  // misinterpret the delivered value as its own tag.
+  CHK("(catch 'a (catch (throw 'a 1) 'body))", "1");
+
+  // `(catch 'a)` with an empty body is nil, nothing more.
+  CHK("(catch 'a)", "nil");
+
+  // CT7/U3: `unwind-protect` cleanups run on the throw path, innermost
+  // first, and the catch still returns the thrown value.
+  CHK("(setq log '())", "nil");
+  CHK("(catch 'tg (unwind-protect (unwind-protect (throw 'tg 'done) "
+      "(setq log (cons 'inner log))) (setq log (cons 'outer log))))",
+      "done");
+  CHK("log", "(outer inner)");
+
+  // A throw during a cleanup drain: the cleanup's own throw finds no catch
+  // within the cleanup run (it runs above the saved barrier) and is
+  // contained by the cleanup isolation barrier -- the original error still
+  // reaches the host and the throw becomes a printed diagnostic, the
+  // behavior `RunOneCleanupEntry` pins for any cleanup failure. Decision 4's
+  // match-Emacs policy at 06D rewrites this row.
+  CHK("(setq outer-ran nil)", "nil");
+  static const char cleanup_throw[] =
+      "(unwind-protect"
+      "  (unwind-protect"
+      "    (car 1)"
+      "    (throw 'escape 1))"
+      "  (setq outer-ran t))";
+  EvalCall cleanup_throw_call = {.context = context,
+                                 .state = &state,
+                                 .label = "catch.fe",
+                                 .source = cleanup_throw,
+                                 .length = sizeof(cleanup_throw) - 1,
+                                 .options = nullptr,
+                                 .expected =
+                                     "catch.fe: expected pair, got "
+                                     "integer"};
+  char captured[512];
+  CHECK(CaptureStderr(RunEvalCall, &cleanup_throw_call, captured,
+                      sizeof(captured)));
+  CHECK(cleanup_throw_call.result);
+  CHECK(strstr(captured, "cleanup error") != nullptr);
+  CHECK(strstr(captured, "no-catch escape 1") != nullptr);
+  CHK("outer-ran", "t");
+
+  // Forced GC across a throw: a freshly allocated value thrown out of a body
+  // that collects heavily must survive the unwind and arrive intact.
+  CHK("(catch 'tg (do (setq gc-i 0) (while (< gc-i 2000) (cons gc-i gc-i) "
+      "(setq gc-i (+ gc-i 1))) (throw 'tg (cons 111 222))))",
+      "(111 . 222)");
+
+  // The native re-entry boundary wall (a recorded divergence): a native that
+  // synchronously starts a nested run which throws does not honour a catch
+  // below that run's base -- the C activations between them are live and
+  // cannot be popped by frame-index assignment, so the throw raises no-catch
+  // in the nested run.
+  FeDefineNative(context, "reenter-throw", ReenterThrow);
+  static const char boundary[] = "(catch 'outer-tag (reenter-throw))";
+  CHECK(ExpectEvaluationError(context, &state, "outer.fe", boundary,
+                              sizeof(boundary) - 1,
+                              "nested.fe: no-catch outer-tag 42"));
+
+  // Positive control for the wall: a catch entirely inside the nested run is
+  // honoured, so re-entry only bounds the throw search, it does not disable
+  // catch/throw.
+  FeDefineNative(context, "reenter-catch-throw", ReenterCatchThrow);
+  static const char nested_ok[] = "(reenter-catch-throw)";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "outer.fe", nested_ok, sizeof(nested_ok) - 1),
+      "1"));
+
+  // A throw under a tight `max_frames`: the unwind itself allocates no
+  // frames, so the exact measured peak of the same expression still
+  // succeeds, and one fewer frame refuses it before anything unwinds. On a
+  // fresh context, so `peak_frame_depth` (a cumulative high-water mark) is
+  // the expression's own peak rather than every run above this one's.
+  TestArena frame_arena;
+  FeContext* frame_context =
+      FeOpenContext(frame_arena.bytes, sizeof(frame_arena.bytes));
+  CHECK(frame_context != nullptr);
+  ErrorState frame_state = {.context = frame_context};
+  FeSetUserData(frame_context, &frame_state);
+  FeSetErrorFn(frame_context, HandleError);
+  static const char throw_fixed[] = "(catch 'tg (throw 'tg 42))";
+  CHECK(IsRendered(frame_context,
+                   FeEvaluateString(frame_context, "measure.fe", throw_fixed,
+                                    sizeof(throw_fixed) - 1),
+                   "42"));
+  const size_t peak = FeGetArenaStats(frame_context).peak_frame_depth;
+  const FeEvalOptions exact = {.max_frames = peak};
+  CHECK(IsRendered(
+      frame_context,
+      FeEvaluateStringWithOptions(frame_context, "exact.fe", throw_fixed,
+                                  sizeof(throw_fixed) - 1, &exact),
+      "42"));
+  const FeEvalOptions one_less = {.max_frames = peak - 1};
+  CHECK(ExpectEvaluationOptionsError(
+      frame_context, &frame_state, "toosmall.fe", throw_fixed,
+      sizeof(throw_fixed) - 1, &one_less,
+      "toosmall.fe: evaluation frame limit exceeded"));
+  FeCloseContext(frame_context);
+
+  // The zero-operand and wrong-count degenerates (the Phase 4 lesson): both
+  // forms are arity-checked before anything evaluates.
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(catch)",
+                              sizeof("(catch)") - 1,
+                              "catch.fe: wrong-number-of-arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw)",
+                              sizeof("(throw)") - 1,
+                              "catch.fe: wrong-number-of-arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw 'x)",
+                              sizeof("(throw 'x)") - 1,
+                              "catch.fe: wrong-number-of-arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw 'x 1 2)",
+                              sizeof("(throw 'x 1 2)") - 1,
+                              "catch.fe: wrong-number-of-arguments"));
+
+  // Context reuse after no-catch: an uncaught throw leaves nothing poisoned,
+  // and the completion kind reads Normal again after a normal return.
+  CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "6", 1),
+                   "6"));
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 // Sub-plan 03F: `FeEvalOptions.max_frames` bounds Lisp nesting -- the number
 // of simultaneously live ordinary evaluator frames -- replacing the deleted
 // transitional `evaluation_depth` counter this test used to exercise. Every
@@ -5220,7 +5450,8 @@ int main(void) {
                  TestNativeOwningReentry() && TestResumableFrameGC() &&
                  TestCleanupRunGC() && TestPrimitiveOrder() &&
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
-                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting()
+                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
+                 TestCatchThrow()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

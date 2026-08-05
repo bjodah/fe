@@ -1512,16 +1512,17 @@
      "cond-cc10",
      "cond-cc10-quit",
      "cond-cc10-t",
-     "cond-cc11"
+     "cond-cc11",
+     "cond-ct6"
     ],
     "kg_test": null,
-    "rationale": "Phase 6 (parent plan section 10), implementing slice 06D. 06A Decision 3's scope, pinned as the measured answer table: handlers by symbol, by list and by `t`; nil and non-nil var; the handler body as an implicit progn (cond-cc3); unmatched conditions re-signal unchanged (cond-cc7); the first textually-matching handler wins (cond-cc6); the hierarchy the walk uses is Decision 1's static table (cond-cc5: wrong-type-argument is-a error); quit is catchable only by name or `t`, never by `error` (cond-cc10*, the measured Emacs rule); and `:success` (cond-cc11) is deliberately deferred -- a recorded divergence with its measured answer, new in Emacs 24.1+ and unused by kg's target corpus. fe has no `condition-case` form yet, so every case replays as its current known gap until 06D lands the cut.",
+    "rationale": "Phase 6 (parent plan section 10), implementing slice 06D. 06A Decision 3's scope, pinned as the measured answer table: handlers by symbol, by list and by `t`; nil and non-nil var; the handler body as an implicit progn (cond-cc3); unmatched conditions re-signal unchanged (cond-cc7); the first textually-matching handler wins (cond-cc6); the hierarchy the walk uses is Decision 1's static table (cond-cc5: wrong-type-argument is-a error); quit is catchable only by name or `t`, never by `error` (cond-cc10*, the measured Emacs rule); and `:success` (cond-cc11) is deliberately deferred -- a recorded divergence with its measured answer, new in Emacs 24.1+ and unused by kg's target corpus. cond-ct6 was moved here from the throw row at 06C: it is the condition-case interplay with a throw (an uncaught throw's condition is under `error`), which cannot pass until `condition-case` exists. fe has no `condition-case` form yet, so every case replays as its current known gap until 06D lands the cut.",
     "source_name": null
    },
    {
     "id": "catch",
     "category": "errors-and-non-local-exits",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1535,23 +1536,21 @@
      "cond-ct5-fresh-cons"
     ],
     "kg_test": null,
-    "rationale": "Phase 6, implementing slice 06C. Tag comparison is `eq`, not `eql`/`equal` (cond-ct5-*): an equal fixnum matches, floats and strings do not, a shared cons matches while two fresh conses do not -- Phase 5's integer `eq` is load-bearing here. Value delivery (cond-ct1), innermost same-tag wins (cond-ct2), and `nil` never matches as a tag (cond-ct4). fe has no `catch` form yet; each case replays as a known gap until 06C lands the mid-stack catch frame and its checkpointed drain.",
-    "source_name": null
+    "rationale": "Phase 6, implementing slice 06C (landed 2026-08-05). Tag comparison is `eq`, not `eql`/`equal` (cond-ct5-*): an equal fixnum matches, floats and strings do not, a shared cons matches while two fresh conses do not -- Phase 5's integer `eq` is load-bearing here. Value delivery (cond-ct1), innermost same-tag wins (cond-ct2), and `nil` never matches as a tag (cond-ct4). The catch frame (`FeFrameCatch`) carries the gc/cleanup checkpoints the throw path drains to, and its body region is one implicit-body frame; `no-catch` stays a message rather than a condition until 06D.",
+    "source_name": "catch"
    },
    {
     "id": "throw",
     "category": "errors-and-non-local-exits",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
-     "cond-ct3",
-     "cond-ct6",
-     "cond-ct7"
+     "cond-ct3"
     ],
     "kg_test": null,
-    "rationale": "Phase 6, implementing slice 06C, with the condition-case interplay in 06D. An uncaught throw signals (no-catch TAG VALUE) through the ordinary error path (cond-ct3) and that condition is under `error` (cond-ct6); a throw through unwind-protect runs the cleanup on the way out (cond-ct7, the checkpointed drain on the throw path). Until 06D provides condition objects, fe's no-catch is the message `no-catch TAG VALUE` through the existing error path; the rows stay planned across 06C's implementation and flip at 06D.",
-    "source_name": null
+    "rationale": "Phase 6, implementing slice 06C (landed 2026-08-05). An uncaught throw signals (no-catch TAG VALUE) through the ordinary error path (cond-ct3); the no-catch as a *condition* stays planned until 06D, which is why the cond-ct6 (condition-case interplay) and cond-ct7 (cleanup-on-throw-path, written in Emacs' `progn`) cases now live in the condition-case and unwind-protect-cleanup-policy rows respectively. A throw that matches a catch drains to the catch frame's checkpoint (`RunCleanupsDownTo`), so unwind-protect cleanups on the throw path run in innermost-first order; the native re-entry boundary is a tested wall (a throw from a nested run does not honour a catch below its base). `throw` is function-shaped, exactly two arguments evaluated normally, matching Emacs' `(special-form-p 'throw)` nil.",
+    "source_name": "throw"
    },
    {
     "id": "signal",
@@ -1608,10 +1607,11 @@
      "cond-u1-throw",
      "cond-u1-quit",
      "cond-u2",
-     "cond-u3"
+     "cond-u3",
+     "cond-ct7"
     ],
     "kg_test": null,
-    "rationale": "Phase 6's cleanup-policy rows, implemented across 06C and 06D. A cleanup runs on the error, throw and quit paths alike (cond-u1-*; 06C owns the throw path, 06D the condition-case/quit handlers that contain the others), and nested unwind-protect runs innermost-first (cond-u3, 06D). cond-u2 pins 06A Decision 4's oracle -- a raising cleanup REPLACES the in-flight error, (error \"cleanup\") wins -- which 06D implements, rewriting the three test_api.c stderr assertions and error_fn's never-sees-cleanup-failures contract with it (fe today prints the cleanup failure to stderr and keeps the original; the design doc's \"Emacs discards\" claim is false, measured).",
+    "rationale": "Phase 6's cleanup-policy rows, implemented across 06C and 06D. A cleanup runs on the error, throw and quit paths alike (cond-u1-*; 06C owns the throw path, 06D the condition-case/quit handlers that contain the others), and nested unwind-protect runs innermost-first (cond-u3, 06D). cond-u2 pins 06A Decision 4's oracle -- a raising cleanup REPLACES the in-flight error, (error \"cleanup\") wins -- which 06D implements, rewriting the three test_api.c stderr assertions and error_fn's never-sees-cleanup-failures contract with it (fe today prints the cleanup failure to stderr and keeps the original; the design doc's \"Emacs discards\" claim is false, measured). cond-ct7 was moved here from the throw row at 06C: its checkpointed-drain-on-the-throw-path semantics landed with catch/throw, but the case is written in Emacs' `progn`, which fe does not have, so it cannot pass until 06D (or a progn-capable fe).",
     "source_name": null
    },
    {

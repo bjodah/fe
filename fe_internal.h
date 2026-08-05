@@ -89,6 +89,14 @@ typedef enum Primitive {
   PFmakunbound,
   PFuncall,
   PApply,
+  // Sub-plan 06C of kg's Emacs-subset program (catch and throw): the first
+  // non-local exit that stops partway down the frame stack. `catch` is a
+  // special form (its body region is evaluated as an implicit body); `throw`
+  // is a function-shaped primitive whose two operands evaluate normally
+  // before it unwinds to the innermost matching catch frame (see
+  // `FeFrameCatch` and `PerformThrow`, fe_eval.c).
+  PCatch,
+  PThrow,
   PSentinel
 } Primitive;
 
@@ -366,6 +374,19 @@ typedef enum FeFrameKind {
   // once `rest` is exhausted, exactly as `FeFrameCallArguments` reorders its
   // own).
   FeFrameEvalList,
+  // `(catch TAG BODY...)` (sub-plan 06C): the frame switched from
+  // `FeFrameExpression` when the resolved head is the `catch` primitive.
+  // `rest` holds the raw TAG and BODY forms, `accumulator` the evaluated tag
+  // (`&unbound` marks "awaiting the tag"), and `callee` the delivered body
+  // value -- or, after a `throw` unwinds here, the delivered thrown value
+  // (`PerformThrow` sets `callee` and marks the tag phase complete before the
+  // loop resumes this frame). This is the first frame kind that resumes from
+  // a mid-stack unwind rather than from a normal sub-expression delivery:
+  // the frame's `gc_checkpoint`/`cleanup_checkpoint` are the throw's
+  // destination (`RunCleanupsDownTo(ctx, cleanup_checkpoint)` and
+  // `FeRestoreGC(ctx, gc_checkpoint)`), and its `trace_cell` link is where
+  // the discarded frames' `call_list` chain is restored to.
+  FeFrameCatch,
 } FeFrameKind;
 
 typedef struct FeEvalFrame {
@@ -496,6 +517,16 @@ struct FeContext {
   FeEvalFrame* frame_stack;
   size_t frame_stack_capacity;
   size_t frame_stack_index;
+  // The frame-stack floor of the evaluator run currently being driven by
+  // `RunEvaluationLoop`: the index `RunEvaluation`/`RunEvaluationBody` saved
+  // as `base` when their own run started. Sub-plan 06C's throw search stops
+  // here -- a catch frame below a nested run's floor belongs to an outer run
+  // (or to an abandoned body), and the C activations between them are live,
+  // so a throw must not match one (the native re-entry wall, recorded as a
+  // divergence). Saved and restored by `RunEvaluationLoop` around the loop,
+  // so a nested run's own base is visible while it runs and the outer run's
+  // base is back in force the moment the nested run returns.
+  size_t run_base;
   FeInterruptFn* evaluation_interrupt;
   void* evaluation_userdata;
   size_t evaluation_steps;
