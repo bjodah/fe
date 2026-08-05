@@ -1681,20 +1681,6 @@ static bool ResumeArith(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   return true;
 }
 
-// A one-operand numeric check: the chained comparators' and `=`'s single-
-// operand form still validates its one operand (`(= "a")` is
-// `wrong-type-argument`, not `t`, as in Emacs), and the first element of a
-// longer chain is validated up front even though `GetNumericPair` would only
-// reach it paired with a second. The two-operand `GetNumericPair` remains the
-// tower's one promotion rule; this is only its single-operand arity edge.
-static FeObject* CheckNumeric(FeContext* ctx, FeObject* obj) {
-  const FeType type = FeGetType(obj);
-  if (type != FeTInteger && type != FeTDouble) {
-    FeHandleError(ctx, "wrong-type-argument");
-  }
-  return obj;
-}
-
 // One adjacent-pair comparison for the chained comparators and `=` (05C).
 // Both operands go through `GetNumericPair`, so the promotion rule and the
 // `wrong-type-argument` check are shared with arithmetic; the primitive
@@ -2064,22 +2050,29 @@ static bool ResumeEvalList(FeContext* ctx,
       return DispatchFuncallApply(ctx, frame, list);
     default: {  // PNumericEqual, PNotEqual, PLess, PLessEqual, PGreater,
                 // PGreaterEqual
-      // The chained comparators and `=`/`/=` (05C): every adjacent pair is
-      // validated and compared left to right, without short-circuiting --
-      // once the chain is known to fail, the remaining operands still get
-      // type-checked, exactly as the pre-tower `=` arm's comment required --
-      // and one operand is `t` without comparing anything. The first element
-      // is checked up front so a lone non-number is still
-      // `wrong-type-argument`.
+      // The chained comparators and `=`/`/=` (05C): adjacent pairs are
+      // compared left to right and the loop stops at the first false pair,
+      // which is Emacs' rule -- `arithcompare_driver` returns `nil` the
+      // moment a pair fails, so `(< 2 1 "a")` is `nil` and never looks at
+      // the string, while `(< 1 2 "a")` (true up to the bad operand) does
+      // reach it and is `wrong-type-argument`. Operand *forms* were all
+      // evaluated before this arm ran, so short-circuiting never erases a
+      // side effect; only the type check of an operand past a settled answer
+      // is skipped.
+      //
+      // A single operand is `t` with no type check at all -- `(= "a")`,
+      // `(< t)` and `(= 3)` are all `t` in Emacs, because the pair loop has
+      // no pair to run. The loop below expresses that by construction rather
+      // than by validating `CAR(list)` up front, which is what made fe
+      // answer `wrong-type-argument` where Emacs answers `t`. Zero operands
+      // is `wrong-number-of-arguments`, enforced at dispatch, so `CAR(list)`
+      // here always exists.
       FeObject* prev = CAR(list);
-      (void)CheckNumeric(ctx, prev);
       FeObject* rest = CDR(list);
       const Primitive op = (Primitive)PRIM(frame->fn);
       bool ok = true;
-      while (!FeIsNil(rest)) {
-        if (!NumericSatisfies(ctx, op, prev, CAR(rest))) {
-          ok = false;
-        }
+      while (ok && !FeIsNil(rest)) {
+        ok = NumericSatisfies(ctx, op, prev, CAR(rest));
         prev = CAR(rest);
         rest = CDR(rest);
       }

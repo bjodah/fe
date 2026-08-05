@@ -1,0 +1,6 @@
+{
+	"id": "num-less-short-circuit",
+	"setup": [],
+	"expr": "(list (< 2 1 \"a\") (> 1 2 \"a\") (>= 1 2 \"a\") (<= 2 1 \"a\"))",
+	"note": "05A row C1's short-circuit half: a chain stops at the first false pair, so the non-numeric operand past a settled answer is never type-checked and the answer is nil. Only the *check* is skipped -- every operand form was already evaluated before the comparison ran."
+}

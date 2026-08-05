@@ -806,17 +806,19 @@ types* — `(= 3 3.0)` is `t`. Until sub-plan 02C of the Emacs-subset hard cut,
 `(setq symbol value ...)` above for its replacement.
 
 At least one argument is required: `(=)` is `wrong-number-of-arguments`.
-One argument is `t` without comparing anything; two or more are compared as
-one chain, left to right.
+One argument is `t` without comparing *or type-checking* anything — a chain
+of one has no pair to run, so `(= "a")` and `(= t)` are `t`, matching Emacs.
+Two or more are compared as one chain, left to right.
 
 Ordinary-function semantics, like every other function here and unlike
 `setq`/`set` above: every argument form is evaluated, left to right, before
 any value is type-checked, so a type error in an early operand never erases
-a side effect a later operand's form already had. Every operand is then
-checked to be a number and compared without short-circuiting, even once the
-chain is already known unequal -- a later operand's form has always run and
-been checked by the time `=` returns. A non-number argument is
-`wrong-type-argument`.
+a side effect a later operand's form already had. The adjacent pairs are then
+compared left to right and the loop stops at the first false pair, which is
+Emacs' rule: `(= 1 2 "a")` is `nil`, the answer having been settled before
+the string was reached, while `(= 1 1 "a")` does reach it and is
+`wrong-type-argument`. Only the type *check* is short-circuited; the
+operand's form has already run either way.
 
 ```clojure
 fe > (= 1 1 1)
@@ -825,9 +827,15 @@ fe > (= 1 1 2)
 nil
 fe > (= 1)
 t
+fe > (= "a")
+t
 fe > (=)
 error: wrong-number-of-arguments
 fe > (= 1 "1")
+error: wrong-type-argument
+fe > (= 1 2 "a")
+nil
+fe > (= 1 1 "a")
 error: wrong-type-argument
 ```
 
@@ -847,11 +855,12 @@ nil
 #### `(< a b ...)`
 
 Returns true if its arguments are in strictly increasing numerical order:
-`(< a b c)` is `t` if and only if `a < b` and `b < c`. One argument is `t`;
-no arguments is `wrong-number-of-arguments`. Comparisons use the same
-mathematical-value-across-types rule as `=`, and the same no-short-circuit
-checking: every adjacent pair is compared, so a type error anywhere in the
-chain is still reported.
+`(< a b c)` is `t` if and only if `a < b` and `b < c`. One argument is `t`,
+with no type check (`(< "a")` is `t`); no arguments is
+`wrong-number-of-arguments`. Comparisons use the same
+mathematical-value-across-types rule as `=`, and the same first-false-pair
+short-circuit: `(< 2 1 "a")` is `nil` because the chain already failed, and
+`(< 1 2 "a")` is `wrong-type-argument` because it did not.
 
 #### `(<= a b ...)`
 

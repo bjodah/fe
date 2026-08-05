@@ -1,0 +1,6 @@
+{
+	"id": "num-less-short-circuit-error",
+	"setup": [],
+	"expr": "(< 1 2 \"a\")",
+	"note": "05A row C1/C5, the other side of num-less-short-circuit: the chain is still true when the bad operand is reached, so it *is* compared and the answer is `wrong-type-argument`. Both shapes have to be pinned or a short-circuit implementation that simply stops type-checking would look correct."
+}

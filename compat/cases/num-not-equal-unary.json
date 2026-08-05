@@ -1,0 +1,6 @@
+{
+	"id": "num-not-equal-unary",
+	"setup": [],
+	"expr": "(/= 1)",
+	"note": "05A row C3's other arity edge, and the reason `/=` is not covered by num-comparison-unary-nonnumber: `/=` is strictly binary in Emacs, so one operand is `wrong-number-of-arguments`, not the `t` the chained comparators answer."
+}

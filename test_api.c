@@ -2035,6 +2035,7 @@ static bool TestNumericEqual(void) {
 typedef enum OperandKind {
   OperandInteger,
   OperandDouble,
+  OperandString,
   OperandValue,
 } OperandKind;
 
@@ -2043,6 +2044,7 @@ typedef struct Operand {
   union {
     int64_t i;
     double d;
+    const char* text;
     FeObject* object;
   } value;
 } Operand;
@@ -2055,6 +2057,12 @@ static Operand DoubleOperand(double d) {
   return (Operand){.kind = OperandDouble, .value.d = d};
 }
 
+// A non-number operand the numeric family must reject -- or, in the
+// single-operand and settled-chain forms, must never look at.
+static Operand StringOperand(const char* text) {
+  return (Operand){.kind = OperandString, .value.text = text};
+}
+
 static Operand NilOperand(void) {
   return (Operand){.kind = OperandValue, .value.object = &nil};
 }
@@ -2065,6 +2073,8 @@ static FeObject* MakeOperand(FeContext* context, const Operand* operand) {
       return FeMakeInteger(context, operand->value.i);
     case OperandDouble:
       return FeMakeDouble(context, operand->value.d);
+    case OperandString:
+      return FeMakeString(context, operand->value.text);
     case OperandValue:
       return operand->value.object;
   }
@@ -2322,6 +2332,31 @@ static bool TestNumericTower(void) {
     CHECK(FeGetType(result) == FeTNil);
     FeRestoreGC(context, gc);
   }
+
+  // The comparators' single-operand form is `t` with no type check at all,
+  // Emacs' answer for every one of them (`(= "a")`, `(< t)` -- the pair loop
+  // has no pair to run), and a chain stops at the first false pair, so a
+  // non-number *after* a settled answer is never reached. A non-number
+  // reached while the chain is still true is still `wrong-type-argument`.
+  {
+    static const char* const comparators[] = {"=", "<", "<=", ">", ">="};
+    for (size_t i = 0; i < sizeof(comparators) / sizeof(comparators[0]); i++) {
+      CHECK_NUM(comparators[i], FeTSymbol, "t", StringOperand("a"));
+      CHECK_NUM(comparators[i], FeTSymbol, "t", NilOperand());
+      CHECK_NUM(comparators[i], FeTSymbol, "t", IntOperand(1));
+    }
+  }
+  CHECK_NUM("<", FeTNil, "nil", IntOperand(2), IntOperand(1),
+            StringOperand("a"));
+  CHECK_NUM("=", FeTNil, "nil", IntOperand(1), IntOperand(2),
+            StringOperand("a"));
+  CHECK_NUM(">", FeTNil, "nil", IntOperand(1), IntOperand(2),
+            StringOperand("a"));
+  CHECK_NUM_ERR("<", "wrong-type-argument", IntOperand(1), IntOperand(2),
+                StringOperand("a"));
+  CHECK_NUM_ERR("=", "wrong-type-argument", IntOperand(1), IntOperand(1),
+                StringOperand("a"));
+  CHECK_NUM_ERR("=", "wrong-type-argument", IntOperand(1), StringOperand("1"));
 
   // `is`'s integer arm (05A Decision 2): mathematical value across int/float,
   // exact within integers, epsilon behaviour kept for double/double.

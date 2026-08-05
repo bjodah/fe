@@ -1283,10 +1283,11 @@
    "comparison": "emacs",
    "cases": [
     "num-not-equal",
-    "num-not-equal-arity"
+    "num-not-equal-arity",
+    "num-not-equal-unary"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row C3 (05C, landed): `/=` is an fe core primitive, strictly binary -- three operands are wrong-number-of-arguments (unlike the chained `=`), enforced at dispatch since lambda arity stays lax.",
+   "rationale": "Phase 5, row C3 (05C, landed): `/=` is an fe core primitive, strictly binary -- three operands are wrong-number-of-arguments, and so is one (unlike the chained comparators, whose single-operand form is `t`), enforced at dispatch since lambda arity stays lax.",
    "source_name": null
   },
   {
@@ -1313,6 +1314,35 @@
    ],
    "kg_test": null,
    "rationale": "Phase 5, row C5 (05C, landed): comparison type errors say wrong-type-argument, replacing the expected-double texts on the numeric family. 05A Decision 5.",
+   "source_name": null
+  },
+  {
+   "id": "num-comparison-unary",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-comparison-unary-nonnumber"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, row C1/C5's arity edge, landed after 05D: a single operand is `t` for `=`, `<`, `<=`, `>` and `>=`, with no type check at all, because a chain of one has no adjacent pair to compare. fe validated that one operand up front and answered `wrong-type-argument` where Emacs answers `t`; the check is gone and the comparator loop now expresses the rule by construction. `/=` is the exception and has its own case on the num-not-equal row -- it is binary, so one operand is `wrong-number-of-arguments`.",
+   "source_name": null
+  },
+  {
+   "id": "num-comparison-short-circuit",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-less-short-circuit",
+    "num-less-short-circuit-error",
+    "num-equal-short-circuit",
+    "num-equal-short-circuit-error"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 5, rows C1/C4/C5, landed after 05D: a chained comparison stops at the first false pair, Emacs' `arithcompare_driver` rule, so `(< 2 1 \"a\")` and `(= 1 2 \"a\")` are nil and the string is never type-checked -- while `(< 1 2 \"a\")` and `(= 1 1 \"a\")`, true up to the bad operand, do reach it and are `wrong-type-argument` on both sides. Both shapes are pinned deliberately: an implementation that simply stopped type-checking the tail would satisfy the first pair of cases and fail the second. Only the check short-circuits; every operand *form* was evaluated before the comparison arm ran.",
    "source_name": null
   },
   {

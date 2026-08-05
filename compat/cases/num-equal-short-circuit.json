@@ -1,0 +1,6 @@
+{
+	"id": "num-equal-short-circuit",
+	"setup": [],
+	"expr": "(= 1 2 \"a\")",
+	"note": "05A row C4's short-circuit half: `=` chains the same way `<` does, so an unequal pair settles the answer at nil and the non-numeric third operand is never type-checked."
+}

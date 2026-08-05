@@ -1,0 +1,6 @@
+{
+	"id": "num-comparison-unary-nonnumber",
+	"setup": [],
+	"expr": "(list (= \"a\") (< \"a\") (<= \"a\") (> \"a\") (>= \"a\") (= t))",
+	"note": "05A row C1/C5's arity edge: a single operand is `t` for every one of `=`/`<`/`<=`/`>`/`>=`, with no type check at all -- a chain of one has no adjacent pair to compare, so Emacs never looks at the operand. fe used to answer `wrong-type-argument` here."
+}

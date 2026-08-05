@@ -1,0 +1,6 @@
+{
+	"id": "num-equal-short-circuit-error",
+	"setup": [],
+	"expr": "(= 1 1 \"a\")",
+	"note": "05A row C4/C5, the other side of num-equal-short-circuit: the chain is still true at the third operand, so it is compared and the answer is `wrong-type-argument`."
+}
