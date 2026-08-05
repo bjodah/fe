@@ -448,27 +448,27 @@
   {
    "id": "primitive-integerp",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "num-predicates"
+    "num-predicates-tags"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row T1: `integerp` is an fe core primitive landed by 05C, answering from the tag alone. The num-predicates case it shares cannot flip to supported while it also names kg's `numberp` (05E), so this row's status tracks that case's, not the primitive's availability.",
+   "rationale": "Phase 5, row T1: `integerp` is an fe core primitive landed by 05C, answering from the tag alone and never raising on a non-number. It is pinned by num-predicates-tags, which names only primitives fe has, so the row's status is evidence about `integerp` rather than about a case it shares. It used to name num-predicates and sit at `planned` because that case also asks about kg's `numberp`; num-predicates keeps that case and that status.",
    "source_name": "integerp"
   },
   {
    "id": "primitive-floatp",
    "category": "values-and-equality",
-   "status": "planned",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "num-predicates"
+    "num-predicates-tags"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row T1: `floatp` is an fe core primitive landed by 05C, answering from the tag alone. Like primitive-integerp, its status tracks the shared num-predicates case, which cannot flip while it also names kg's `numberp` (05E).",
+   "rationale": "Phase 5, row T1: `floatp` is an fe core primitive landed by 05C, answering from the tag alone and never raising on a non-number. Pinned by num-predicates-tags alongside primitive-integerp, for the same reason: the shared num-predicates case also asks about kg's `numberp` and cannot flip in fe's corpus, which is a fact about that case, not about this primitive.",
    "source_name": "floatp"
   },
   {
@@ -960,7 +960,7 @@
     "num-type-of-integer-float"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row R1: the numeric split exists -- `42` is an integer and `42.0` a float, the type_names[] slot (05B) fed by the integer reader (05D). The case names `type-of`, which is kg's native (`src/lisp_*.c`), not an fe primitive, so standalone fe answers void-function and the row cannot flip in fe's corpus until 05E, exactly like num-predicates' `numberp`.",
+   "rationale": "Phase 5, row R1: the numeric split exists -- `42` is an integer and `42.0` a float, the type_names[] slot (05B) fed by the integer reader (05D). The case names `type-of`, which is a kg native and not an fe primitive, so the standalone fe binary this corpus drives answers `void-function type-of`: this stays a planned target snapshot in fe's corpus, and the comparison lives in kg's manifest. Two separate things are pending, and only one of them is a gap: the missing primitive is a fact about fe's surface, while the *spelling* is a real divergence -- fe's type_names[FeTDouble] is \"double\" where Emacs' type-of says `float`, so even with a type-of primitive fe would answer (integer double), not (integer float). Renaming the type ripples through every `expected double, got X` message and is not funded here; the integer tag closed the integer half of this row and no more.",
    "source_name": null
   },
   {
@@ -1243,10 +1243,11 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "num-overflow-bignum"
+    "num-overflow-bignum",
+    "num-expt-overflow"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A8, the recorded divergence, now visible at 05D's cut: int64 overflow is an arith-error-style message, never a bignum (modern Emacs prints the bignum 18446744073709551616); use __builtin_*_overflow, never UB (05A Decision 5). With 05D's reader the literal operands are integers, so `(* 4611686018427387904 4)` raises `arith-error` where Emacs answers the bignum -- the divergence row 05A pinned.",
+   "rationale": "Phase 5, row A8, the recorded divergence, now visible at 05D's cut: int64 overflow is an arith-error-style message, never a bignum (modern Emacs prints the bignum 18446744073709551616); use __builtin_*_overflow, never UB (05A Decision 5). With 05D's reader the literal operands are integers, so `(* 4611686018427387904 4)` raises `arith-error` where Emacs answers the bignum -- the divergence row 05A pinned. `expt` diverges the same way and now has its own case: `(expt 2 63)` is `arith-error` here and the bignum 9223372036854775808 in Emacs. It is pinned separately because it reaches the int64 edge through its own per-signature math native rather than through the tower's ckd_mul reduction, so a fix or a change to one does not automatically move the other.",
    "source_name": null
   },
   {
@@ -1463,7 +1464,7 @@
     "num-zerop-wrong-type"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, rows Z1: the kg prelude one-liner over `=` (no fe spend) lands in 05E; the wrong-type case rides ='s 05C error name.",
+   "rationale": "Phase 5, row Z1: `zerop` is kg's prelude one-liner over `=` (no fe spend), and standalone fe has no `zerop` at all, so both cases answer `void-function zerop` and this stays a planned target snapshot in fe's corpus; the comparison lives in kg's manifest. The wrong-type case rides =`'s 05C error name once it is compared there. Nothing in fe can flip this row -- it is not waiting on an fe-side slice.",
    "source_name": null
   },
   {
@@ -1489,7 +1490,7 @@
     "num-int64-literal-overflow"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row A8's reader sibling (05A Decision 3): an integer literal that overflows int64 reads as a double -- the pre-bignum Emacs behaviour -- while modern Emacs reads it as a bignum. 2^64 (= 18446744073709551616) is the canonical example: Emacs prints the bignum 18446744073709551616, fe reads the nearest double and prints its shortest round-trip. The alternative -- a read error -- would punish pasted constants.",
+   "rationale": "Phase 5, row A8's reader sibling (05A Decision 3): an integer literal that overflows int64 reads as a double -- the pre-bignum Emacs behaviour -- while modern Emacs reads it as a bignum. 2^64 (= 18446744073709551616) is the canonical example: Emacs prints the bignum 18446744073709551616, fe reads the nearest double and prints its shortest round-trip. The alternative -- a read error -- would punish pasted constants. The fall-back is bounded by the reader's token buffer, not by magnitude: `ReadAtom`'s `char buf[64]` caps a token at 63 characters, so a literal of 64 or more digits is `symbol too long` and never reaches the classifier at all. 2^64 is 20 digits and is well inside that; a caller who pastes a 64-digit constant gets a reader error rather than a double, and this row does not claim otherwise.",
    "source_name": null
   }
  ]

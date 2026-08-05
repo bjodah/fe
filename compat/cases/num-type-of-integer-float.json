@@ -2,5 +2,5 @@
  "id": "num-type-of-integer-float",
  "setup": [],
  "expr": "(list (type-of 42) (type-of 42.0))",
- "note": "05A, row R1: pins that the numeric split exists -- a bare integer literal and a float literal are different types. Fe today has one FeTNumber double, so standalone Fe answers (double double); the `type_names[]` slot for the new type lands in 05B, and the reader that feeds it integers in 05D."
+ "note": "05A, row R1: pins that the numeric split exists -- a bare integer literal and a float literal are different types. Fe has had two numeric types since 05B, and the reader that feeds them since 05D, so the split itself is done; what this case still asks for is `type-of`, which is a kg native and not an fe primitive, so the standalone fe binary answers `void-function type-of` and the comparison lives in kg's manifest. Note also that fe's own spelling for the float type is `double`, not Emacs' `float`, so even an fe-side `type-of` would answer (integer double) until that name changes -- see the num-type-of rationale."
 }

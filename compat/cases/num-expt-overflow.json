@@ -1,0 +1,6 @@
+{
+	"id": "num-expt-overflow",
+	"setup": [],
+	"expr": "(expt 2 63)",
+	"note": "05A, row A8 applied to `expt`: the integer-signature result overflows int64 at 2^63. Emacs promotes to a bignum and prints 9223372036854775808; fe raises `arith-error`, the same recorded refusal `*` overflow gets. Pinned separately from num-overflow-bignum because `expt` reaches the edge through its own per-signature native, not through the tower's ckd_mul reduction."
+}

@@ -1,0 +1,6 @@
+{
+	"id": "num-predicates-tags",
+	"setup": [],
+	"expr": "(list (integerp 3) (integerp 3.0) (floatp 3.0) (floatp 3) (integerp \"a\") (floatp nil))",
+	"note": "05A, row T1's fe-core half, split out of num-predicates so it names only primitives fe actually has: `integerp` and `floatp` answer from the tag alone and never raise on a non-number. num-predicates keeps the full family including kg's `numberp`, which standalone fe cannot answer at all."
+}
