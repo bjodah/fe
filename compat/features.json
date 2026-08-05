@@ -473,27 +473,27 @@
   {
    "id": "one-namespace-boundp",
    "category": "bindings",
-   "status": "divergent",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "one-namespace-boundp"
    ],
    "kg_test": null,
-   "rationale": "Fe is a Lisp-1 (fe.c: a symbol is `(name . value)`, and GetBound's global path returns CDR(sym) directly); Emacs is a Lisp-2. Phase 4 of the parent plan ('Replace Fe's Lisp-1 name resolution with Lisp-2 value and function namespaces') is what closes this gap; until then `(setq f 7)` followed by `(defun f () 9)` clobber each other in Fe, and this boundp case is the cheapest single-expression demonstration of the same root cause.",
+   "rationale": "The 04D namespace cut, as recorded: the bootstrap moved into function cells and the value-cell call-position fallback was deleted, so the primitive `car`'s value cell is empty and `(boundp 'car)` is nil -- the Lisp-2 answer this snapshot has pinned since 00C. The pre-cut Fe reported t because a single value cell held both the primitive and any value of that name; the cut is what flipped the answer.",
    "source_name": null
   },
   {
    "id": "reader-sharp-quote-identity",
    "category": "reader-and-literals",
-   "status": "divergent",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "reader-sharp-quote-identity"
    ],
    "kg_test": null,
-   "rationale": "fe.c:1411 (ReadAtom's `#` handling) does not implement `#'` as a distinct reader macro; kg's own `function` prelude form (see kg's manifest, owner kg) is a plain identity lambda that only coincidentally acts right when its argument is already a symbol, not a real substitute for the reader-level rewrite. Untracked until Phase 4 or later reader work; no phase is currently funded for it, so this stays `divergent` rather than `planned`.",
+   "rationale": "Sub-plan 04D: `#'x` now reads as `(function x)` -- Read's `#` case routes through the same ReadWrapped construction `quote` uses, with `stray '#''` kept for a bare `#'` -- and the writer prints `(function X)` as `#'X` the way Emacs' printer does, so `(quote #'car)` reads as `(quote (function car))` and prints `#'car`. The pre-cut reader treated `#'` as identity, and its own historical rationale (a stale fe.c line number in the pre-cut tree) described that gap.",
    "source_name": null
   },
   {
@@ -629,7 +629,7 @@
      "lisp2-value-function-coexist"
     ],
     "kg_test": null,
-    "rationale": "Sub-plan 04C, the phase's headline: a symbol holds a value (7) and a function (an fset'd lambda) at once, call position resolves the function cell, bare-symbol evaluation the value cell, and (list f (f)) is (7 9). The bootstrap still lives in value cells, reachable through the transitional call-position fallback 04D deletes.",
+    "rationale": "Sub-plan 04C, the phase's headline: a symbol holds a value (7) and a function (an fset'd lambda) at once, call position resolves the function cell, bare-symbol evaluation the value cell, and (list f (f)) is (7 9). 04D then moved the bootstrap into function cells and deleted the value-cell fallback; this case's comparison is unchanged by the cut.",
     "source_name": null
    },
    {
@@ -687,14 +687,14 @@
    {
     "id": "lisp2-fboundp-primitive",
     "category": "functions-and-macros",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
      "lisp2-fboundp-primitive"
     ],
     "kg_test": null,
-    "rationale": "Phase 4 primitive `fboundp` (04C) asks the function namespace; it exists and answers nil for a fresh name. The primitive `car` still lives in a *value* cell until 04D moves the bootstrap into function cells, so `(fboundp 'car)` is nil here and t after the cut -- the flip is 04D's evidence.",
+    "rationale": "Phase 4 primitive `fboundp` (04C) asks the function namespace; the 04D cut moved the bootstrap into function cells, so the primitive `car`'s function cell is occupied and `(fboundp 'car)` is t, matching the 04A-pinned oracle. The pre-cut answer was nil because `car` still lived in a value cell.",
     "source_name": "fboundp"
    },
    {
@@ -721,7 +721,7 @@
      "lisp2-void-function-value-only"
     ],
     "kg_test": null,
-    "rationale": "Sub-plan 04C call-position semantics: a symbol with a value but an empty function cell is void-function -- call position resolves the function cell first and, when the transitional value-cell fallback yields a non-callable, names the head symbol. Reported as FeHandleError()'s message text (the parent plan's message-level rule until Phase 6), which is how the runner matches the oracle's structured void-function condition.",
+    "rationale": "Sub-plan 04C call-position semantics, sharpened by the 04D cut: call position resolves the function cell and an empty cell is void-function -- naming the head symbol -- even when the value cell is full. Reported as FeHandleError()'s message text (the parent plan's message-level rule until Phase 6), which is how the runner matches the oracle's structured void-function condition.",
     "source_name": null
    },
    {
@@ -740,7 +740,7 @@
    {
     "id": "lisp2-symbol-value",
     "category": "bindings",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -748,7 +748,7 @@
      "lisp2-symbol-value-primitive"
     ],
     "kg_test": null,
-    "rationale": "Phase 4 primitive `symbol-value` (04C) reads the value cell directly; the explicit read of a setq'd name works and agrees, but the case's mirror arm `lisp2-symbol-value-primitive` needs the primitive `car`'s value cell to be empty -- which only happens when 04D moves the bootstrap out of value cells.",
+    "rationale": "Phase 4 primitive `symbol-value` (04C) reads the value cell directly; the explicit read of a setq'd name agrees, and the mirror arm `lisp2-symbol-value-primitive` passed once the 04D cut emptied the primitive `car`'s value cell, so `(symbol-value 'car)` signals void-variable -- the explicit-value-namespace mirror of one-namespace-boundp's nil.",
     "source_name": "symbol-value"
    },
    {
@@ -827,7 +827,7 @@
      "lisp2-function-lambda"
     ],
     "kg_test": null,
-    "rationale": "Sub-plan 04C: `(function (lambda ...))` is a raw-form special form producing a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. The reader's `#'` abbreviation stays identity until 04D (reader-sharp-quote-identity).",
+    "rationale": "Sub-plan 04C: `(function (lambda ...))` is a raw-form special form producing a real closure value -- not a designator -- and `funcall` calls it directly, returning 3. Since the 04D reader change, `#'(lambda ...)` reads as this same form (reader-sharp-quote-identity).",
     "source_name": "function"
    },
    {

@@ -1,4 +1,4 @@
-(setq nth (fn (n lst)
+(fset 'nth (fn (n lst)
   (while (< 0 n)
     (setq n (- n 1))
     (setq lst (cdr lst)))
@@ -6,7 +6,7 @@
 ))
 
 
-(setq rev (fn (lst)
+(fset 'rev (fn (lst)
   (let res nil)
   (while lst
     (setq res (cons (car lst) res))
@@ -16,17 +16,17 @@
 ))
 
 
-(setq map (fn (f lst)
+(fset 'map (fn (f lst)
   (let res nil)
   (while lst
-    (setq res (cons (f (car lst)) res))
+    (setq res (cons (funcall f (car lst)) res))
     (setq lst (cdr lst))
   )
   (rev res)
 ))
 
 
-(setq print-grid (fn (grid)
+(fset 'print-grid (fn (grid)
   (map
     (fn (row)
       (print (map (fn (x) (if (is x 0) '- '#)) row))
@@ -36,12 +36,12 @@
 ))
 
 
-(setq get-cell (fn (grid x y)
+(fset 'get-cell (fn (grid x y)
   (or (nth x (nth y grid)) 0)
 ))
 
 
-(setq next-cell (fn (grid cell x y)
+(fset 'next-cell (fn (grid cell x y)
   (let n (+
     (get-cell grid (- x 1)  (- y 1))
     (get-cell grid (- x 1)  y      )
@@ -62,7 +62,7 @@
 ))
 
 
-(setq next-grid (fn (grid)
+(fset 'next-grid (fn (grid)
   (let y -1)
   (map
     (fn (row)
@@ -81,7 +81,7 @@
 ))
 
 
-(setq life (fn (n grid)
+(fset 'life (fn (n grid)
   (let i 1)
   (while (<= i n)
     (print ">> iteration" i)

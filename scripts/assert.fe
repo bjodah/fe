@@ -1,13 +1,13 @@
-(setq assert-is (fn (expectation value)
+(fset 'assert-is (fn (expectation value)
     (assert (is expectation value))))
 
-(setq assert-nil (fn (value)
+(fset 'assert-nil (fn (value)
     (assert-is nil value)))
 
-(setq assert-not-nil (fn (value)
+(fset 'assert-not-nil (fn (value)
     (assert value)))
 
-(setq equals (fn (a b)
+(fset 'equals (fn (a b)
   (if (and (atom a) (atom b))
     (is a b)
     (do
@@ -17,10 +17,10 @@
         (setq b (cdr b)))
       (and (atom a) (atom b) (is a b))))))
 
-(setq assert-equals (fn (expectation value)
+(fset 'assert-equals (fn (expectation value)
     (assert (equals expectation value))))
 
-(setq assert-not-equals (fn (expectation value)
+(fset 'assert-not-equals (fn (expectation value)
     (assert (not (equals expectation value)))))
 
 (assert-equals 1 1)

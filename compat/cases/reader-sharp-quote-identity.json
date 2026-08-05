@@ -2,5 +2,5 @@
  "id": "reader-sharp-quote-identity",
  "setup": [],
  "expr": "(quote #'car)",
- "note": "fe.c's reader treats `#'` as insignificant and reads `#'car` as the bare symbol `car` (documented in doc/fe-upstream.md). Emacs reads `#'car` as `(function car)`, so quoting it prints differently in each: fe prints the bare symbol, Emacs prints the `function` form."
+ "note": "`#'car` reads as `(function car)`, and fe's writer prints `(function car)` as `#'car` -- the same abbreviation Emacs' printer uses -- so quoting it prints identically in both. The pre-04D reader treated `#'` as identity and printed the bare symbol, which is what recorded this case as a gap."
 }

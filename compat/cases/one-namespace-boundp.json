@@ -2,5 +2,5 @@
  "id": "one-namespace-boundp",
  "setup": [],
  "expr": "(boundp (quote car))",
- "note": "Isolates the one-namespace divergence: `car` names a Fe primitive (a callable), and Fe's single value-cell-per-symbol design makes `boundp` see it as a bound *value* too, so `(boundp 'car)` is t in Fe. Emacs keeps separate value and function cells, `car`'s value cell is empty, and `(boundp 'car)` is nil."
+ "note": "The Lisp-2 baseline, pinned since 00C and reached by the 04D cut: `car` names a Fe primitive, which lives in its function cell; the value cell is empty, so `(boundp 'car)` is nil, exactly what Emacs reports. Pre-04D fe kept the bootstrap in value cells, so `boundp` saw `car` as bound and this case recorded the gap."
 }

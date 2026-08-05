@@ -2,5 +2,5 @@
  "id": "lisp2-symbol-value-primitive",
  "setup": [],
  "expr": "(symbol-value (quote car))",
- "note": "04A: the value cell of the primitive `car` is empty, so `symbol-value` signals void-variable car -- the explicit-value-namespace mirror of one-namespace-boundp's nil. The read itself landed in 04C, but `car` still lives in a value cell until 04D moves the bootstrap."
+ "note": "04A: the value cell of the primitive `car` is empty, so `symbol-value` signals void-variable car -- the explicit-value-namespace mirror of one-namespace-boundp's nil. Landed with the 04D bootstrap move, which emptied the primitive value cells."
 }

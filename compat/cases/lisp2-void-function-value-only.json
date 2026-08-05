@@ -4,5 +4,5 @@
   "(setq v 7)"
  ],
  "expr": "(v)",
- "note": "04A: a symbol with only a value (7) and an empty function cell is a call-position error: void-function v. 04C makes the function cell the thing that is empty -- call position resolves it first and, via the transitional value-cell fallback, names the head symbol when the fallback yields a non-callable."
+  "note": "04A: a symbol with only a value (7) and an empty function cell is a call-position error: void-function v. 04D made the function cell the only call-position namespace, so the empty cell names the head symbol directly."
 }

@@ -4,5 +4,5 @@
   "(setq sv 5)"
  ],
  "expr": "(symbol-value (quote sv))",
- "note": "04A: `symbol-value` reads the value cell directly and returns 5. Landed in 04C; the mirror arm lisp2-symbol-value-primitive still waits on 04D's bootstrap move."
+ "note": "04A: `symbol-value` reads the value cell directly and returns 5. Landed in 04C; the mirror arm lisp2-symbol-value-primitive passed once the 04D cut emptied the primitive value cells."
 }

@@ -435,7 +435,7 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
 // -- lexical environment entries and the global cell share the `CDR(cell)`
 // read/write contract `GetBound` depends on, so wrapping that in an accessor
 // would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
-// the dormant function cell, which nothing in the evaluator reads yet.
+// the independent function cell used by call-position resolution.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
 FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns

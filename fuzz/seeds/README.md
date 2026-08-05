@@ -26,7 +26,7 @@ the defect rather than its hash, and say in the commit which fix it pins.
 - `funcall-apply-redispatch` -- not a crash reproduction but the durable
   half of sub-plan 04C's fuzz gate: 40 phases of allocation-heavy forms
   interleaved with the four funcall/apply redispatch shapes (direct closure,
-  `cons` symbol designator through the value-cell fallback, and `apply`'s
+  `cons` symbol designator through the function cell, and `apply`'s
   spread). The corpus is gitignored and regenerated, so without a tracked
   seed a fresh checkout's `make fuzz-eval-smoke` would not necessarily fill
   the 64 KiB arena while a redispatch is mid-flight; this file forces that

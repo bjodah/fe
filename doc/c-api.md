@@ -13,25 +13,27 @@ break; a host should assert both.
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
 types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-version 2 is the first explicit contract, following sub-plan 02C of the
-Emacs-subset hard cut, which made `setq`/`set` assignment and repurposed `=`
-as numeric equality (see `doc/language.md`). A host that vendors or pins Fe
-should assert both versions it was written against at compile time:
+version 3 is the Lisp-2 contract of the Emacs-subset hard cut: call position
+resolves a symbol's function cell only, `#'` reads as `(function x)`, and the
+bootstrap callables live in function cells, so a primitive name is no longer
+value-bound (see `doc/language.md`). A host that vendors or pins Fe should
+assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 2);
-static_assert(FE_LANGUAGE_VERSION == 2);
+static_assert(FE_API_VERSION == 3);
+static_assert(FE_LANGUAGE_VERSION == 3);
 ```
 
-Sub-plan 04C of kg's Emacs-subset program (the Lisp-2 function namespace,
-added additively) changed neither macro: `FeSetFunction`, `FeGetFunction`
-and `FeIsFBound` joined the public surface, and the nine primitives
-`function`, `fset`, `defalias`, `symbol-function`, `symbol-value`, `fboundp`,
-`fmakunbound`, `funcall` and `apply` joined the language, but every existing
-API and language construct kept its meaning -- call position still reaches
-the bootstrap through a transitional value-cell fallback. 04D is the breaking
-slice: it moves the bootstrap into function cells, deletes the fallback, and
-bumps `FE_API_VERSION` 2 -> 3 and `FE_LANGUAGE_VERSION` 2 -> 3 together.
+Both macros moved 2 -> 3 together in sub-plan 04D of kg's Emacs-subset
+program, the namespace cut: `FeDefineNative` changed meaning (it now writes
+the symbol's *function* cell instead of its value cell), the call-position
+value-cell fallback was deleted, the bootstrap moved into function cells, and
+`#'` became the `(function x)` reader macro; `FeVersion` moves "3.0" -> "4.0"
+with the same break. The 04C additions the cut landed
+on -- `FeSetFunction`, `FeGetFunction`, `FeIsFBound` on the C surface, and the
+primitives `function`, `fset`, `defalias`, `symbol-function`, `symbol-value`,
+`fboundp`, `fmakunbound`, `funcall` and `apply` in the language -- kept their
+meaning; only the fallback that had hidden their target semantics was removed.
 
 `FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
 kg's Emacs-subset program: the frame machine's Lisp-nesting and native
@@ -40,9 +42,11 @@ re-entry bounds are now two separate `FeEvalOptions` fields
 (`frame_capacity`/`peak_frame_depth`/`peak_native_reentry`), replacing the
 single `max_depth`/`peak_evaluation_depth` pair whose *meaning* changed when
 the frame machine replaced the recursive evaluator. `FE_LANGUAGE_VERSION`
-stayed at 2 -- Phase 3 is behaviour-neutral by design; no Lisp-visible
-evaluation result, side effect, ordering, or diagnostic changed below the new
-bounds, only the bounds' own names, defaults, and statistics.
+moved 1 -> 2 earlier, in sub-plan 02C (the `setq`/`set` assignment cut and `=`
+as chained numeric equality), and stayed at 2 through Phase 3 and 04C --
+Phase 3 is behaviour-neutral by design, and 04C added the namespace machinery
+additively, so no Lisp-visible evaluation result, side effect, ordering, or
+diagnostic changed and no call-position answer moved until 04D's cut.
 
 Each macro is bumped for every breaking change in its own axis: a C ABI/API
 break bumps `FE_API_VERSION` without necessarily touching the language, and a
@@ -198,15 +202,14 @@ designator as-is, so a `defalias`-style indirection stays a symbol;
 function-cell twins of `FeSet()`/`FeIsBound()`, which keep their Emacs
 meaning and address the value cell. `FeGetFunction()` resolves a name the way
 call position does: the function cell first, symbol indirection followed
-iteratively (one step charged per hop), and -- until sub-plan 04D's namespace
-cut -- the value cell as a fallback so the bootstrap's callables, still
-living in value cells, stay reachable. It returns `nil` when the name is
-unbound in both namespaces and raises `cyclic-function-indirection` for a
-self-referential chain (`(fset 'x 'x)`). Outside an active evaluation the
-per-hop step charges are no-ops. The Lisp-level spellings are `(fboundp
-'name)`, `(fset 'name ...)`, `(symbol-function 'name)` and `funcall`/`apply`.
-All three functions are additive under `FE_API_VERSION` 2; 04D bumps the
-version when `FeDefineNative`'s meaning moves into the same cell.
+iteratively (one step charged per hop), and -- since sub-plan 04D's namespace
+cut deleted the value-cell fallback -- nothing else. It returns `nil` when the
+name is unbound and raises `cyclic-function-indirection` for a self-referential
+chain (`(fset 'x 'x)`). Outside an active evaluation the per-hop step charges
+are no-ops. The Lisp-level spellings are `(fboundp 'name)`, `(fset 'name ...)`,
+`(symbol-function 'name)` and `funcall`/`apply`. `FeDefineNative` now shares
+the same cell (see below), which is the meaning change 04D's `FE_API_VERSION`
+3 bump names.
 
 ## Reading And Running Source
 
@@ -633,11 +636,12 @@ balancing all temporary GC protection. Native callbacks take a context and a
 list of already-evaluated arguments and return an `FeObject*`. The result must
 never be `nullptr`; use `FeNil(ctx)` to return nil.
 
-Until sub-plan 04D's namespace cut, the native binding lands in the symbol's
-*value* cell -- the bootstrap is still value-namespace, so call position
-reaches it through the transitional fallback. 04D moves `FeDefineNative`'s
-meaning into the function cell (a version bump), observable via
-`(symbol-function 'name)`.
+Since sub-plan 04D's namespace cut, the native binding lands in the symbol's
+*function* cell -- the bootstrap lives there, so call position reaches it
+directly, and `(symbol-function 'name)` observes it. Before the cut the
+binding went to the value cell and call position reached it through the
+transitional fallback; `FeDefineNative`'s new home is the meaning change the
+`FE_API_VERSION` 3 bump carries.
 
 Consume required arguments with `FeGetNextArgument()`, which raises `too few
 arguments` for a missing value. After consuming the supported arguments, call

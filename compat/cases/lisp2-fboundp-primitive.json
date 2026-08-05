@@ -2,5 +2,5 @@
  "id": "lisp2-fboundp-primitive",
  "setup": [],
  "expr": "(fboundp (quote car))",
- "note": "04A: `fboundp` asks the function namespace, and the primitive `car` lives there, so it is t. Fe's `boundp` (primitive-boundp) sees one namespace and reports t for every primitive name; Phase 4 splits the two so `fboundp` has a distinct answer."
+ "note": "04A: `fboundp` asks the function namespace, and the primitive `car` lives there, so it is t. The 04D cut moved the bootstrap into function cells, giving fe the same answer; `(boundp 'car)` (one-namespace-boundp) is nil, the mirror on the value side."
 }

@@ -621,14 +621,14 @@ static bool TestEvaluationControl(void) {
                    "5"));
 
   static const char recursion[] =
-      "(setq recurse (fn (x) (recurse x))) (recurse 1)";
+      "(fset 'recurse (fn (x) (recurse x))) (recurse 1)";
   const FeEvalOptions recursion_options = {.step_limit = 64};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "recursion.fe", recursion, sizeof(recursion) - 1,
       &recursion_options, "recursion.fe: evaluation step limit exceeded"));
 
   static const char macros[] =
-      "(setq expand (macro (x) x)) (expand (expand (expand (expand (expand "
+      "(fset 'expand (macro (x) x)) (expand (expand (expand (expand (expand "
       "(expand (expand (expand 1))))))))";
   const FeEvalOptions macro_options = {.step_limit = 20};
   CHECK(ExpectEvaluationOptionsError(
@@ -693,8 +693,8 @@ static bool TestEvaluationControl(void) {
                                      .cancel_after = 1};
   state.nested_interrupt = &nested_interrupt;
   const size_t gc = FeSaveGC(context);
-  FeSet(context, FeMakeSymbol(context, "reenter"),
-        FeMakeNativeFn(context, ReenterEvaluation));
+  FeSetFunction(context, FeMakeSymbol(context, "reenter"),
+                FeMakeNativeFn(context, ReenterEvaluation));
   FeRestoreGC(context, gc);
   static const char nested[] = "(reenter)";
   const FeEvalOptions outer_options = {.step_limit = 24};
@@ -925,8 +925,8 @@ static bool TestCallWithOptions(void) {
                                      .cancel_after = 1};
   state.nested_interrupt = &nested_interrupt;
   const size_t gc = FeSaveGC(context);
-  FeSet(context, FeMakeSymbol(context, "reenter-call-with-options"),
-        FeMakeNativeFn(context, ReenterCallWithOptions));
+  FeSetFunction(context, FeMakeSymbol(context, "reenter-call-with-options"),
+                FeMakeNativeFn(context, ReenterCallWithOptions));
   FeRestoreGC(context, gc);
   static const char nested[] = "(reenter-call-with-options)";
   const FeEvalOptions outer = {.step_limit = 24};
@@ -1229,7 +1229,10 @@ static bool TestBinding(void) {
   FeObject* absent = FeMakeSymbol(context, "absent");
   CHECK(!FeIsBound(context, absent));
   CHECK(FeIsBound(context, FeMakeSymbol(context, "t")));
-  CHECK(FeIsBound(context, FeMakeSymbol(context, "car")));
+  // Since sub-plan 04D's cut the bootstrap callables live in *function*
+  // cells, so a primitive name's value cell is empty: `FeIsBound` (the value
+  // namespace) says nil while `(fboundp 'car)` says t.
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "car")));
 
   CHECK(ExpectEvaluationError(context, &state, "void.fe", "absent", 6,
                               "void.fe: void-variable absent"));
@@ -1343,11 +1346,10 @@ static bool TestSymbolCells(void) {
   return true;
 }
 
-// Sub-plan 04C: the function namespace, additively. This is the full 04A
-// answer table that is implementable behind the transitional value-cell
-// fallback (04D deletes it): coexistence via fset, funcall on values /
-// designators / lambdas, apply spread and its malformed-tail error, the
-// symbol-function/symbol-value/fboundp readers, the makunbound/fmakunbound
+// Sub-plan 04C/04D: the function namespace. This is the full 04A answer
+// table under the cut's final semantics: coexistence via fset, funcall on
+// values / designators / lambdas, apply spread and its malformed-tail error,
+// the symbol-function/symbol-value/fboundp readers, the makunbound/fmakunbound
 // independence pair, defalias's designator chains and their late binding,
 // the `function` special form, and the cycle that dies with
 // `cyclic-function-indirection` -- plus the public
@@ -1387,21 +1389,21 @@ static bool TestFunctionCells(void) {
   // The target is validated as a symbol before the function form evaluates.
   LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe: expected symbol, got double");
 
-  // `funcall` takes a value: a closure directly, a lexical value, a symbol
-  // designator resolved through the function cell, and -- until 04D's cut --
-  // a bootstrap-style value-cell callable via the fallback.
+  // `funcall` takes a value: a closure directly, a lexical value, and a
+  // symbol designator resolved through the function cell (04D's cut removed
+  // the value-cell fallback, so a value-only name is `void-function`).
   CHK("(funcall (lambda (x) (+ x 1)) 2)", "3");
   CHK("((lambda (g) (funcall g 3)) (lambda (x) (+ x 1)))", "4");
   CHK("(setq g 7)", "7");
   CHK("(fset 'g (lambda () 9))", "(lambda nil 9)");
   CHK("(funcall 'g)", "9");
-  CHK("(setq myfn (lambda (x) (+ x 1)))", "(lambda (x) (+ x 1))");
+  CHK("(fset 'myfn (lambda (x) (+ x 1)))", "(lambda (x) (+ x 1))");
   CHK("(funcall 'myfn 5)", "6");
-  // A value-only designator is not a callable, and an unbound one is
-  // void-function; the context stays reusable after both. A zero-operand
+  // A value-only designator is `void-function` since the cut -- matching the
+  // pinned `lisp2-void-function-value-only` oracle -- and an unbound one is
+  // the same; the context stays reusable after both. A zero-operand
   // funcall/apply is an arity error, never a crash on an empty operand list.
-  LISP2_ERR("(setq v 7) (funcall 'v)",
-            "lisp2.fe: tried to call non-callable value");
+  LISP2_ERR("(setq v 7) (funcall 'v)", "lisp2.fe: void-function v");
   LISP2_ERR("(funcall 'no-such)", "lisp2.fe: void-function no-such");
   LISP2_ERR("(funcall)", "lisp2.fe: wrong-number-of-arguments");
   LISP2_ERR("(apply)", "lisp2.fe: wrong-number-of-arguments");
@@ -1439,13 +1441,13 @@ static bool TestFunctionCells(void) {
   CHK("(symbol-value 'sv)", "5");
   LISP2_ERR("(symbol-value 'nope)", "lisp2.fe: void-variable nope");
 
-  // `fboundp` asks the function cell. The bootstrap still lives in value
-  // cells until 04D, so a primitive name answers nil here -- the compat flip
-  // (`(fboundp 'car)` -> t) is the cut's evidence, not this slice's.
+  // `fboundp` asks the function cell. The 04D cut moved the bootstrap into
+  // function cells, so a primitive name answers t here -- `(boundp 'car)` is
+  // nil, the mirror on the value side (compat `one-namespace-boundp`).
   CHK("(fboundp 'fresh-fn)", "nil");
   CHK("(fset 'ff (lambda () 1))", "(lambda nil 1)");
   CHK("(fboundp 'ff)", "t");
-  CHK("(fboundp 'car)", "nil");
+  CHK("(fboundp 'car)", "t");
 
   // The two unbound operations are disjoint: `makunbound` empties the value
   // cell and leaves the function cell callable; `fmakunbound` the reverse.
@@ -1525,13 +1527,14 @@ static bool TestFunctionCells(void) {
                  FeEvaluateString(context, "api.fe", "(funcall 'api-alias 10)",
                                   sizeof("(funcall 'api-alias 10)") - 1),
                  "11"));
-  // The transitional fallback also serves the API: a value-cell callable is
-  // what FeGetFunction returns until 04D moves it into the function cell.
+  // The cut moved callables into the function cell, which is the namespace
+  // `FeGetFunction` resolves: a value-cell callable is *not* reachable
+  // through the host API, exactly as it is not reachable in call position.
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "api.fe",
-                       "(setq api-value (lambda (x) (* x 2)))",
-                       sizeof("(setq api-value (lambda (x) (* x 2)))") - 1),
+                       "(fset 'api-value (lambda (x) (* x 2)))",
+                       sizeof("(fset 'api-value (lambda (x) (* x 2)))") - 1),
       "(lambda (x) (* x 2))"));
   FeObject* const api_value = FeMakeSymbol(context, "api-value");
   FeObject* const resolved = FeGetFunction(context, api_value);
@@ -1561,6 +1564,82 @@ static bool TestFunctionCells(void) {
   return true;
 }
 
+// Sub-plan 04D: the cut's direct assertions, over and above what
+// TestFunctionCells already pins -- the facts that only exist once the
+// value-cell fallback is deleted. Fe is a Lisp-2 now: call position resolves
+// the function cell only, the bootstrap lives in function cells (`t`, `pi`
+// and `e` excepted), `#'` reads as `(function x)`, the writer prints
+// `(function X)` as `#'X`, and `FeDefineNative` registers into the function
+// cell (the FE_API_VERSION 3 meaning change).
+static bool TestNamespaceCut(void) {
+  TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                 \
+  CHECK(IsRendered(context,                                                 \
+                   FeEvaluateString(context, "cut.fe", expr, strlen(expr)), \
+                   expected))
+#define CUT_ERR(expr, message)                                               \
+  CHECK(ExpectEvaluationError(context, &state, "cut.fe", expr, strlen(expr), \
+                              message))
+
+  // `(boundp 'car)` nil / `(fboundp 'car)` t: the bootstrap moved into
+  // function cells, so the two namespaces give opposite answers for a
+  // primitive name -- the direct assertions behind the `one-namespace-boundp`
+  // and `lisp2-fboundp-primitive` compat flips.
+  CHK("(boundp 'car)", "nil");
+  CHK("(fboundp 'car)", "t");
+  CHK("(boundp 'cons)", "nil");
+  CHK("(fboundp 'cons)", "t");
+  // `t` stays a value, as does a name that has only ever been setq'd.
+  CHK("(boundp 't)", "t");
+  CHK("(setq cut-value 7)", "7");
+  CHK("(boundp 'cut-value)", "t");
+  CHK("(fboundp 'cut-value)", "nil");
+
+  // Value-position use of a primitive name is `void-variable`: the cut left
+  // the primitive value cells empty, so `car` is not a value any more.
+  CUT_ERR("car", "cut.fe: void-variable car");
+  CUT_ERR("(setq x car)", "cut.fe: void-variable car");
+
+  // A lexical binding never shadows call position: `(let car 5)` binds only
+  // the value namespace, and `(car (list 1 2))` still resolves the function
+  // cell (the pinned `lisp2-let-no-function-shadow` answer, spelled with
+  // fe's one-binding `let`).
+  CHK("((lambda () (let car 5) (car (list 1 2))))", "1");
+
+  // `#'x` reads as `(function x)`: the structure, not the printing.
+  CHK("(car (quote #'car))", "function");
+  CHK("(car (cdr (quote #'car)))", "car");
+  CHK("(is #'car 'car)", "t");
+  // And the writer's `#'X` abbreviation round-trips the read.
+  CHK("(quote #'car)", "#'car");
+  CHK("(quote (function \"a\\\"b\"))", "#'\"a\\\"b\"");
+
+  // `FeDefineNative` registers into the function cell (FE_API_VERSION 3):
+  // observable through `symbol-function`, callable in head position, and
+  // invisible to `boundp`.
+  FeDefineNative(context, "cut-native", OrdinaryNative);
+  CHK("(boundp 'cut-native)", "nil");
+  CHK("(fboundp 'cut-native)", "t");
+  CHK("(symbol-function 'cut-native)", "[native-fn]");
+  CHK("(cut-native)", "42");
+  FeObject* const cut_native = FeMakeSymbol(context, "cut-native");
+  CHECK(FeGetType(FeGetFunction(context, cut_native)) == FeTNativeFn);
+
+  // Context reuse after each new error above.
+  CHK("(+ 1 2)", "3");
+
+#undef CUT_ERR
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
 // Sub-plan 02B: core `setq` (a special form) and `set` (ordinary-function
 // semantics) alongside the still-working assignment `=` primitive. The
 // compat corpus (fe/compat/) proves agreement with Emacs on the same
@@ -1762,7 +1841,7 @@ static bool TestMacroExpansion(void) {
   FeSetErrorFn(context, HandleError);
 
   static const char loop[] =
-      "(setq make (macro (a b) (list 'list a b)))"
+      "(fset 'make (macro (a b) (list 'list a b)))"
       "(setq n 0)"
       "(setq acc nil)"
       "(while (< n 200) (setq acc (make n n)) (setq n (+ n 1)))"
@@ -1774,13 +1853,14 @@ static bool TestMacroExpansion(void) {
   // An error raised by the expansion, and one raised while expanding, both
   // leave the context usable.
   CHECK(ExpectEvaluationError(context, &state, "expansion.fe",
-                              "(setq bad (macro () '(car 1))) (bad)",
-                              strlen("(setq bad (macro () '(car 1))) (bad)"),
+                              "(fset 'bad (macro () '(car 1))) (bad)",
+                              strlen("(fset 'bad (macro () '(car 1))) (bad)"),
                               "expansion.fe: expected pair, got double"));
-  CHECK(ExpectEvaluationError(context, &state, "expander.fe",
-                              "(setq worse (macro () (car 1))) (worse)",
-                              strlen("(setq worse (macro () (car 1))) (worse)"),
-                              "expander.fe: expected pair, got double"));
+  CHECK(
+      ExpectEvaluationError(context, &state, "expander.fe",
+                            "(fset 'worse (macro () (car 1))) (worse)",
+                            strlen("(fset 'worse (macro () (car 1))) (worse)"),
+                            "expander.fe: expected pair, got double"));
   CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
                    "3"));
 
@@ -2385,7 +2465,7 @@ static bool TestFrameLimits(void) {
   // that the context is reusable afterward.
   FeObject* native = FeMakeNativeFn(context, ReentrantNative);
   state.reentry_self = FeCreateRoot(context, native);
-  FeSet(context, FeMakeSymbol(context, "reentrant-native"), native);
+  FeSetFunction(context, FeMakeSymbol(context, "reentrant-native"), native);
   state.reentry_remaining = 0;
   state.reentry_cleanup_ran = false;
   state.reentry_current = 0;
@@ -2396,7 +2476,7 @@ static bool TestFrameLimits(void) {
       FeEvaluateString(context, "reset.fe", reset_flag, sizeof(reset_flag) - 1),
       "nil"));
   static const char overflow_with_cleanup[] =
-      "(setq loop (fn (x) (loop x))) "
+      "(fset 'loop (fn (x) (loop x))) "
       "(unwind-protect (do (reentrant-native) (loop 1))"
       "  (setq cleanup-ran t))";
   const FeEvalOptions tight_frames = {.max_frames = 6};
@@ -2416,7 +2496,7 @@ static bool TestFrameLimits(void) {
   // cost has to be covered too: released early, this recursed on the C
   // stack instead of the frame stack and crashed under MSan.
   static const char macro_recursion[] =
-      "(setq m (macro () (list (quote m)))) (m)";
+      "(fset 'm (macro () (list (quote m)))) (m)";
   const FeEvalOptions tight_macro_frames = {.max_frames = 5};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "macro-frames.fe", macro_recursion,
@@ -2425,7 +2505,8 @@ static bool TestFrameLimits(void) {
 
   // The context is reusable after both overflow paths.
   static const char deep[] =
-      "(setq deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep 40)";
+      "(fset 'deep (lambda (n) (if (<= n 0) 0 (+ 1 (deep (- n 1)))))) (deep "
+      "40)";
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "recovered.fe", deep, sizeof(deep) - 1), "40"));
@@ -2446,18 +2527,22 @@ static bool TestFrameSubstrate(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
-  // quote is a value in Fe's one namespace, not reader syntax: rebinding it
-  // makes its argument evaluate. Its primitive value still takes exactly one
-  // raw argument and deliberately ignores extras.
+  // quote takes exactly one raw argument and deliberately ignores extras.
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "quote.fe", "(quote 1 2)",
                                     sizeof("(quote 1 2)") - 1),
                    "1"));
+  // Since 04D's cut, `quote` is a function-cell resident like every other
+  // primitive: rebinding its *value* cell with `setq` no longer affects call
+  // position, so `(quote (+ 1 2))` still special-forms and returns the form
+  // itself, unchanged -- the Lisp-2 rule that a lexical value binding never
+  // shadows a callable (the pre-cut one-namespace behavior made the value
+  // shadow the callable, which is exactly what the cut deleted).
   static const char quote_rebound[] = "(setq quote (fn (x) x)) (quote (+ 1 2))";
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "quote.fe", quote_rebound,
                                     sizeof(quote_rebound) - 1),
-                   "3"));
+                   "(+ 1 2)"));
 
   // The outer `do` frame is the only reference to its pending forms while
   // the loop repeatedly allocates and collects. A resumed final lookup proves
@@ -2494,7 +2579,7 @@ static bool TestFrameSubstrate(void) {
   FeSetUserData(frame_context, &frame_state);
   FeSetErrorFn(frame_context, HandleError);
   static const char recurse[] =
-      "(setq recurse (fn (x) (if (<= x 0) 0 (recurse (- x 1))))) "
+      "(fset 'recurse (fn (x) (if (<= x 0) 0 (recurse (- x 1))))) "
       "(recurse 100)";
   const FeEvalOptions physical_only = {.max_frames = 0};
   CHECK(ExpectEvaluationOptionsError(
@@ -2587,7 +2672,7 @@ static bool TestArenaStats(void) {
   // `peak_native_reentry` off zero -- the one peak nothing above touched --
   // while an ordinary top-level call of the same native does not.
   FeObject* ordinary = FeMakeNativeFn(context, OrdinaryNative);
-  FeSet(context, FeMakeSymbol(context, "ordinary-native"), ordinary);
+  FeSetFunction(context, FeMakeSymbol(context, "ordinary-native"), ordinary);
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "ordinary.fe", "(ordinary-native)",
                                     sizeof("(ordinary-native)") - 1),
@@ -2595,7 +2680,7 @@ static bool TestArenaStats(void) {
   CHECK(FeGetArenaStats(context).peak_native_reentry == 0);
   FeObject* reentrant = FeMakeNativeFn(context, ReentrantNative);
   state.reentry_self = FeCreateRoot(context, reentrant);
-  FeSet(context, FeMakeSymbol(context, "reentrant-native"), reentrant);
+  FeSetFunction(context, FeMakeSymbol(context, "reentrant-native"), reentrant);
   state.reentry_remaining = 2;
   CHECK(
       IsRendered(context,
@@ -2673,7 +2758,7 @@ static bool TestEvaluationStackProbe(void) {
   FeDefineNative(context, "stack-probe", StackProbe);
 
   static const char deep_def[] =
-      "(setq deep (fn (n) (if (<= n 0) (stack-probe) (+ 1 (deep (- n "
+      "(fset 'deep (fn (n) (if (<= n 0) (stack-probe) (+ 1 (deep (- n "
       "1))))))";
   CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
                          sizeof(deep_def) - 1) != nullptr);
@@ -2805,7 +2890,12 @@ static bool TestCallHeadProbe(void) {
   FeSetErrorFn(context, HandleError);
   FeDefineNative(context, "stack-probe", StackProbe);
 
-  static const char loop_def[] = "(setq loop (fn () (do (stack-probe) loop)))";
+  // `loop` is self-returning as a *value* (its body evaluates to the closure
+  // again), while call position needs the function cell -- so since 04D's cut
+  // it is defined in both namespaces: `setq` seeds the value cell the body
+  // returns, and `fset` copies it into the function cell call position reads.
+  static const char loop_def[] =
+      "(setq loop (fn () (do (stack-probe) loop))) (fset 'loop loop)";
   CHECK(FeEvaluateString(context, "loop-def.fe", loop_def,
                          sizeof(loop_def) - 1) != nullptr);
 
@@ -3053,17 +3143,21 @@ static bool TestLambdaBodyFrame(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
-  // Step budget: `((fn (x) (let y 1) (list x y)) 5)` costs the same number
-  // of steps the recursive `DoList` body produced -- one step before every
-  // body form, every parameter walk, and every environment walk (the `let`
-  // adds a level, so the later `list`/`x`/`y` lookups walk one deeper), with
-  // none for the lambda/body frame transitions themselves.
+  // Step budget: `((fn (x) (let y 1) (list x y)) 5)` is exactly 20 steps --
+  // one step before every body form, every parameter walk, and every
+  // environment walk for the *variable references* (`x`, `y` resolve through
+  // `GetBound`, so the `let` adds a level and the later lookups walk one
+  // deeper), with none for the lambda/body frame transitions. Since 04D's
+  // cut the `let`/`list` call heads resolve the function cell directly, so
+  // their heads no longer charge the environment walk the pre-cut value-cell
+  // fallback's `GetBound` did; the 23-step pre-cut count was 3 higher for
+  // exactly those two heads.
   static const char body[] = "((fn (x) (let y 1) (list x y)) 5)";
-  const FeEvalOptions tight = {.step_limit = 22};
+  const FeEvalOptions tight = {.step_limit = 19};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "body.fe", body, sizeof(body) - 1, &tight,
       "body.fe: evaluation step limit exceeded"));
-  const FeEvalOptions ok = {.step_limit = 23};
+  const FeEvalOptions ok = {.step_limit = 20};
   CHECK(IsRendered(context,
                    FeEvaluateStringWithOptions(context, "body.fe", body,
                                                sizeof(body) - 1, &ok),
@@ -3073,12 +3167,17 @@ static bool TestLambdaBodyFrame(void) {
   // environment the following forms see, even when the lambda call itself is
   // an argument to an outer call (so the body frame is not the run's base
   // frame), and a nested lambda's body still sees the outer body's binding.
-  CHECK(IsRendered(
-      context,
-      FeEvaluateString(context, "nested-let.fe",
-                       "((fn (g) (g)) (fn () (let y 1) y))",
-                       sizeof("((fn (g) (g)) (fn () (let y 1) y))") - 1),
-      "1"));
+  // The parameter is called through `funcall` since 04D's cut: a lexical
+  // binding is value-namespace, so calling it in head position (`(g)`) is
+  // `void-function g`, exactly as in Emacs (the pinned
+  // `lisp2-funcall-lexical-value` case calls its lexical value the same way).
+  CHECK(
+      IsRendered(context,
+                 FeEvaluateString(
+                     context, "nested-let.fe",
+                     "((fn (g) (funcall g)) (fn () (let y 1) y))",
+                     sizeof("((fn (g) (funcall g)) (fn () (let y 1) y))") - 1),
+                 "1"));
   CHECK(IsRendered(
       context,
       FeEvaluateString(
@@ -3162,7 +3261,7 @@ static bool TestLambdaBodyChain(void) {
   size_t length = 0;
   for (int i = 0; i < ChainDepth; i++) {
     const int written = snprintf(source + length, sizeof(source) - length,
-                                 "(setq f%d (fn () (f%d))) ", i, i + 1);
+                                 "(fset 'f%d (fn () (f%d))) ", i, i + 1);
     CHECK(written > 0);
     length += (size_t)written;
     CHECK(length < sizeof(source));
@@ -3170,7 +3269,7 @@ static bool TestLambdaBodyChain(void) {
   {
     const int written =
         snprintf(source + length, sizeof(source) - length,
-                 "(setq f%d (fn () (stack-probe))) (f0)", ChainDepth);
+                 "(fset 'f%d (fn () (stack-probe))) (f0)", ChainDepth);
     CHECK(written > 0);
     length += (size_t)written;
     CHECK(length < sizeof(source));
@@ -3222,7 +3321,7 @@ static bool TestMacroFrame(void) {
   // itself. If the argument had been evaluated at binding time the result
   // would be the number 3.
   static const char raw_args[] =
-      "(setq m (macro (x) (list 'quote x))) (m (+ 1 2))";
+      "(fset 'm (macro (x) (list 'quote x))) (m (+ 1 2))";
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "raw.fe", raw_args, sizeof(raw_args) - 1),
@@ -3233,12 +3332,13 @@ static bool TestMacroFrame(void) {
   // recursive `DoList` `&env` out-parameter did, and it shadows without
   // leaking past the macro call.
   static const char body_let[] =
-      "(setq m (macro () (let y 1) (list 'list y y))) (m)";
+      "(fset 'm (macro () (let y 1) (list 'list y y))) (m)";
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "body-let.fe", body_let, sizeof(body_let) - 1),
       "(1 1)"));
-  static const char shadow[] = "(setq y 7) (setq m (macro () (let y 2) y)) (m)";
+  static const char shadow[] =
+      "(setq y 7) (fset 'm (macro () (let y 2) y)) (m)";
   CHECK(IsRendered(
       context,
       FeEvaluateString(context, "shadow.fe", shadow, sizeof(shadow) - 1), "2"));
@@ -3249,7 +3349,7 @@ static bool TestMacroFrame(void) {
   // The expansion is evaluated in the caller environment, not the macro's:
   // `x` here is the lambda's lexical binding, which the expansion's `x`
   // must resolve.
-  static const char caller_env[] = "(setq m (macro () 'x)) ((fn (x) (m)) 42)";
+  static const char caller_env[] = "(fset 'm (macro () 'x)) ((fn (x) (m)) 42)";
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "caller-env.fe", caller_env,
                                     sizeof(caller_env) - 1),
@@ -3261,8 +3361,8 @@ static bool TestMacroFrame(void) {
   // frame transitions or the empty parameter walk, matching what the
   // recursive arm charged.
   CHECK(IsRendered(context,
-                   FeEvaluateString(context, "m.fe", "(setq m (macro () 5))",
-                                    sizeof("(setq m (macro () 5))") - 1),
+                   FeEvaluateString(context, "m.fe", "(fset 'm (macro () 5))",
+                                    sizeof("(fset 'm (macro () 5))") - 1),
                    "(macro nil 5)"));
   const FeEvalOptions tight = {.step_limit = 4};
   CHECK(ExpectEvaluationOptionsError(
@@ -3278,7 +3378,7 @@ static bool TestMacroFrame(void) {
   // extended the body environment, unwinds through the macro frame and the
   // context stays usable; the earlier form's side effect stands.
   static const char mid_body_error[] =
-      "(setq ran nil) (setq boom (macro () (setq ran t) (let x 1) (car 2))) "
+      "(setq ran nil) (fset 'boom (macro () (setq ran t) (let x 1) (car 2))) "
       "(boom)";
   CHECK(ExpectEvaluationError(context, &state, "mid-body.fe", mid_body_error,
                               sizeof(mid_body_error) - 1,
@@ -3311,7 +3411,7 @@ static bool TestMacroFrame(void) {
   ErrorState frame_state = {.context = frame_context};
   FeSetUserData(frame_context, &frame_state);
   FeSetErrorFn(frame_context, HandleError);
-  static const char self_expanding[] = "(setq m (macro () (list 'm))) (m)";
+  static const char self_expanding[] = "(fset 'm (macro () (list 'm))) (m)";
   const FeEvalOptions physical_only = {.max_frames = 0};
   CHECK(ExpectEvaluationOptionsError(
       frame_context, &frame_state, "macro-frames.fe", self_expanding,
@@ -3356,7 +3456,7 @@ static bool TestNativeReentry(void) {
   FeSetErrorFn(context, HandleError);
   FeObject* native = FeMakeNativeFn(context, ReentrantNative);
   state.reentry_self = FeCreateRoot(context, native);
-  FeSet(context, FeMakeSymbol(context, "reentrant-native"), native);
+  FeSetFunction(context, FeMakeSymbol(context, "reentrant-native"), native);
 
   // Success through the allowed bound: `max_native_reentry` 8 admits 8
   // nested re-entries (9 activations total; the deepest returns its own
@@ -3465,11 +3565,11 @@ static bool TestNativeOwningReentry(void) {
   FeSetErrorFn(context, HandleError);
   FeObject* ordinary = FeMakeNativeFn(context, OrdinaryNative);
   state.reentry_owning_target = FeCreateRoot(context, ordinary);
-  FeSet(context, FeMakeSymbol(context, "ordinary-native"), ordinary);
+  FeSetFunction(context, FeMakeSymbol(context, "ordinary-native"), ordinary);
   FeDefineNative(context, "owning-reenter", OwningReenter);
   FeObject* reentrant = FeMakeNativeFn(context, ReentrantNative);
   state.reentry_self = FeCreateRoot(context, reentrant);
-  FeSet(context, FeMakeSymbol(context, "reentrant-native"), reentrant);
+  FeSetFunction(context, FeMakeSymbol(context, "reentrant-native"), reentrant);
 
   static const char body[] = "((fn () (owning-reenter) (ordinary-native)))";
   CHECK(IsRendered(
@@ -3563,7 +3663,7 @@ static bool PrepareGCNative(FeContext* context, ErrorState* state) {
   state->reentry_remaining = 1;
   FeObject* native = FeMakeNativeFn(context, GCNative);
   state->reentry_self = FeCreateRoot(context, native);
-  FeSet(context, FeMakeSymbol(context, "gc-native"), native);
+  FeSetFunction(context, FeMakeSymbol(context, "gc-native"), native);
   return true;
 }
 
@@ -3622,7 +3722,7 @@ static bool TestResumableFrameGC(void) {
       // macro-body: a collection inside a body form must not sweep the
       // pending forms, a `let` binding, or the caller environment.
       {"macro-body",
-       "(setq m (macro () (let v 7) (setq n 0) "
+       "(fset 'm (macro () (let v 7) (setq n 0) "
        "(while (< n 2000) (setq n (+ n 1)) (cons n n)) v)) (m)",
        "7", nullptr},
       // macro-expansion: the macro body produces the collecting `do` form as
@@ -3631,7 +3731,7 @@ static bool TestResumableFrameGC(void) {
       // expansion sub-expression -- isolating the expansion state from the
       // body state.
       {"macro-expansion",
-       "(setq m (macro () (quote (do (setq n 0) "
+       "(fset 'm (macro () (quote (do (setq n 0) "
        "(while (< n 2000) (setq n (+ n 1)) (cons n n)) n)))) (m)",
        "2000", nullptr},
       // native: a collection in the nested evaluation a native starts must
@@ -4056,7 +4156,7 @@ static bool TestGcStackConstantInNesting(void) {
   FeSetErrorFn(context, HandleError);
 
   static const char deep_def[] =
-      "(setq deep (fn (n) (if (<= n 0) 0 (+ 1 (deep (- n 1))))))";
+      "(fset 'deep (fn (n) (if (<= n 0) 0 (+ 1 (deep (- n 1))))))";
   CHECK(FeEvaluateString(context, "deep-def.fe", deep_def,
                          sizeof(deep_def) - 1) != nullptr);
 
@@ -4119,19 +4219,19 @@ int main(void) {
                  TestMathNatives() && TestSerialization() &&
                  TestDottedLists() && TestMacroExpansion() && TestWriter() &&
                  TestParameterLists() && TestBinding() && TestSymbolCells() &&
-                 TestFunctionCells() && TestSetqAndSet() &&
-                 TestNumericEqual() && TestUnwindHostAPI() &&
-                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestFrameLimits() && TestFrameSubstrate() &&
-                 TestArenaStats() && TestEvaluationStackProbe() &&
-                 TestCallHeadProbe() && TestArgumentFrame() &&
-                 TestArgumentProbe() && TestLambdaBodyFrame() &&
-                 TestLambdaBodyChain() && TestMacroFrame() &&
-                 TestNativeReentry() && TestNativeOwningReentry() &&
-                 TestResumableFrameGC() && TestCleanupRunGC() &&
-                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
-                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
-                 TestGcStackConstantInNesting()
+                 TestFunctionCells() && TestNamespaceCut() &&
+                 TestSetqAndSet() && TestNumericEqual() &&
+                 TestUnwindHostAPI() && TestUnwindLisp() &&
+                 TestUnwindCleanupBudget() && TestFrameLimits() &&
+                 TestFrameSubstrate() && TestArenaStats() &&
+                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
+                 TestArgumentFrame() && TestArgumentProbe() &&
+                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
+                 TestMacroFrame() && TestNativeReentry() &&
+                 TestNativeOwningReentry() && TestResumableFrameGC() &&
+                 TestCleanupRunGC() && TestPrimitiveOrder() &&
+                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
+                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

@@ -1,4 +1,4 @@
-(setq reverse (fn (lst)
+(fset 'reverse (fn (lst)
   (let res nil)
   (while lst
     (setq res (cons (car lst) res))

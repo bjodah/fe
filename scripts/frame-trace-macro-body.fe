@@ -1,5 +1,5 @@
 ;; An error while running a macro's own body -- while it is being
 ;; expanded, not while evaluating what it expands to.
-(setq broken-macro (macro (x) (missing-head x)))
+(fset 'broken-macro (macro (x) (missing-head x)))
 (broken-macro 1)
 (print "not reached")

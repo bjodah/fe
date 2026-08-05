@@ -13,6 +13,8 @@ The language offers the following features:
 * Lexically scoped variables
 * Closures
 * Variadic functions
+* Lisp-2 namespaces — each symbol has a value cell and a function cell, call
+  position resolves the function cell, and `#'x` reads as `(function x)`
 * Mark-and-sweep garbage collector
 * Stack traceback on error
 

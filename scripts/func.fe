@@ -1,23 +1,23 @@
-(setq id (fn (x)
+(fset 'id (fn (x)
     x))
 
 (assert-is 5 (id 5))
 (assert-is (id 5) (id (+ 4 1)))
 (assert-equals '(1 2 3 4) (id '(1 2 3 4)))
 
-(setq all (fn (xs &optional predicate)
+(fset 'all (fn (xs &optional predicate)
     (if (not predicate)
-        (setq predicate id))
+        (setq predicate (symbol-function 'id)))
     (let r t)
     (while xs
-        (if (not (predicate (car xs)))
+        (if (not (funcall predicate (car xs)))
             (setq r nil))
         (setq xs (cdr xs)))
     r))
 
 (assert (all '(1 2 3 4)))
 
-(setq is-even (fn (x)
+(fset 'is-even (fn (x)
     (is 0 (% x 2))))
 
 (assert (is-even 4))
@@ -26,22 +26,22 @@
 (assert-nil (is-even 3))
 (assert-nil (is-even 1))
 
-(assert (all '(2 4 6 8) is-even))
-(assert-nil (all '(2 4 6 7) is-even))
+(assert (all '(2 4 6 8) (symbol-function 'is-even)))
+(assert-nil (all '(2 4 6 7) (symbol-function 'is-even)))
 
-(setq any (fn (xs &optional predicate)
+(fset 'any (fn (xs &optional predicate)
     (if (not predicate)
-        (setq predicate id))
+        (setq predicate (symbol-function 'id)))
     (let r nil)
     (while xs
-        (if (predicate (car xs))
+        (if (funcall predicate (car xs))
             (setq r t))
         (setq xs (cdr xs)))
     r))
 
 (assert (any '(1 2 3 4)))
-(assert (any '(1 2 3 4) is-even))
-(assert-nil (any '(3 5 7 9) is-even))
+(assert (any '(1 2 3 4) (symbol-function 'is-even)))
+(assert-nil (any '(3 5 7 9) (symbol-function 'is-even)))
 (assert-nil (any '(nil nil nil)))
 (assert (any '(nil nil nil 4)))
 
@@ -63,5 +63,5 @@
 (assert-equals '(1 (2 3)) ((fn (a &optional b &rest r) (list a (cons b r))) 1 2 3))
 
 ;; Macros take their parameters the same way.
-(setq rest-macro (macro (a &rest r) (cons 'list (cons a r))))
+(fset 'rest-macro (macro (a &rest r) (cons 'list (cons a r))))
 (assert-equals '(1 2 3) (rest-macro 1 2 3))

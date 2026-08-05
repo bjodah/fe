@@ -194,8 +194,8 @@ static FeObject* BuildMutation(FeContext* ctx,
 // not sweep a value the relay frame is still building the call from -- so
 // these shapes build the boundary on purpose rather than leaving the grammar
 // to reach it by accident. Half the shapes pass a direct closure, half a
-// `cons` symbol designator, which also walks the resolver's value-cell
-// fallback (the bootstrap stays value-namespace until 04D).
+// `cons` symbol designator, which resolves through the function cell -- the
+// callables' home since the 04D namespace cut.
 static FeObject* BuildFuncallForm(FeContext* ctx,
                                   FuzzInput* input,
                                   unsigned depth) {
@@ -239,6 +239,114 @@ static FeObject* BuildApplyForm(FeContext* ctx,
       3);
 }
 
+// Sub-plan 04D's `fset`: the function cell is written and call position
+// reads it back in the same generated form, so the name is re-filled every
+// time it appears and an earlier form's `fmakunbound` (or a later form's own
+// re-`fset`) can never unpin the call this form makes.
+static FeObject* BuildFsetForm(FeContext* ctx,
+                               FuzzInput* input,
+                               unsigned depth) {
+  FeObject* parameter = FeMakeSymbol(ctx, "x");
+  FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+  FeObject* body = MakeBinary(ctx, "cons", parameter,
+                              BuildExpression(ctx, input, depth + 1));
+  FeObject* fn = MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
+  FeObject* assign = MakeBinary(
+      ctx, "fset", MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "f")), fn);
+  FeObject* call =
+      FeMakeList(ctx,
+                 (FeObject*[]){FeMakeSymbol(ctx, "f"),
+                               BuildExpression(ctx, input, depth + 1)},
+                 2);
+  return MakeForm(ctx, "do", (FeObject*[]){assign, call}, 2);
+}
+
+// Sub-plan 04D designator chains: `defalias` points a fresh name at another
+// fresh name whose function cell an `fset` filled, and call position follows
+// the two-hop chain. The self-alias arm (`(defalias 'x 'x)`) covers the
+// cyclic-function-indirection error path, which must stay a caught error
+// rather than a hang.
+static FeObject* BuildDefaliasForm(FeContext* ctx,
+                                   FuzzInput* input,
+                                   unsigned depth) {
+  FeObject* parameter = FeMakeSymbol(ctx, "x");
+  FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+  FeObject* body = MakeBinary(ctx, "cons", parameter,
+                              BuildExpression(ctx, input, depth + 1));
+  FeObject* fn = MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
+  FeObject* target = FeMakeSymbol(ctx, "b");
+  FeObject* alias = FeMakeSymbol(ctx, "a");
+  FeObject* fset = MakeBinary(ctx, "fset", MakeUnary(ctx, "quote", target), fn);
+  FeObject* defalias =
+      MakeBinary(ctx, "defalias", MakeUnary(ctx, "quote", alias),
+                 FuzzTakeByte(input) % 2 == 0 ? MakeUnary(ctx, "quote", target)
+                                              : MakeUnary(ctx, "quote", alias));
+  FeObject* call = FeMakeList(
+      ctx, (FeObject*[]){alias, BuildExpression(ctx, input, depth + 1)}, 2);
+  return MakeForm(ctx, "do", (FeObject*[]){fset, defalias, call}, 3);
+}
+
+// Sub-plan 04D's `function`, the raw-form special form `#'x` reads as: a
+// lambda wrapped in `function` produces the closure `funcall` then invokes,
+// and a bare symbol is the designator itself, resolved through the function
+// cell on the call.
+static FeObject* BuildFunctionForm(FeContext* ctx,
+                                   FuzzInput* input,
+                                   unsigned depth) {
+  if (FuzzTakeByte(input) % 2 == 0) {
+    FeObject* parameter = FeMakeSymbol(ctx, "x");
+    FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+    FeObject* body = MakeBinary(ctx, "cons", parameter,
+                                BuildExpression(ctx, input, depth + 1));
+    FeObject* function =
+        MakeUnary(ctx, "function",
+                  MakeForm(ctx, "lambda", (FeObject*[]){parameters, body}, 2));
+    return MakeForm(
+        ctx, "funcall",
+        (FeObject*[]){function, BuildExpression(ctx, input, depth + 1)}, 2);
+  }
+  return MakeForm(
+      ctx, "funcall",
+      (FeObject*[]){MakeUnary(ctx, "function", FeMakeSymbol(ctx, "cons")),
+                    BuildExpression(ctx, input, depth + 1),
+                    BuildExpression(ctx, input, depth + 1)},
+      3);
+}
+
+// Sub-plan 04D's `fmakunbound` under a live callable: the function cell is
+// filled, then emptied, then called, so the follow-up resolves to
+// void-function. Half the shapes route the call through a `defalias`
+// designator chain first, so resolution walks past the emptied cell.
+static FeObject* BuildFmakunboundForm(FeContext* ctx,
+                                      FuzzInput* input,
+                                      unsigned depth) {
+  FeObject* parameter = FeMakeSymbol(ctx, "x");
+  FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+  FeObject* body = MakeBinary(ctx, "cons", parameter,
+                              BuildExpression(ctx, input, depth + 1));
+  FeObject* fn = MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
+  FeObject* name = FeMakeSymbol(ctx, "k");
+  FeObject* fset = MakeBinary(ctx, "fset", MakeUnary(ctx, "quote", name), fn);
+  FeObject* fmakunbound =
+      MakeUnary(ctx, "fmakunbound", MakeUnary(ctx, "quote", name));
+  if (FuzzTakeByte(input) % 2 == 0) {
+    FeObject* call = FeMakeList(
+        ctx, (FeObject*[]){name, BuildExpression(ctx, input, depth + 1)}, 2);
+    return MakeForm(ctx, "do", (FeObject*[]){fset, fmakunbound, call}, 3);
+  }
+  FeObject* alias = FeMakeSymbol(ctx, "ak");
+  FeObject* defalias =
+      MakeBinary(ctx, "defalias", MakeUnary(ctx, "quote", alias),
+                 MakeUnary(ctx, "quote", name));
+  FeObject* call = FeMakeList(
+      ctx, (FeObject*[]){alias, BuildExpression(ctx, input, depth + 1)}, 2);
+  return MakeForm(
+      ctx, "do",
+      (FeObject*[]){fset, defalias,
+                    MakeForm(ctx, "do", (FeObject*[]){fmakunbound, call}, 2)},
+      3);
+}
+
 static FeObject* BuildExpression(FeContext* ctx,
                                  FuzzInput* input,
                                  unsigned depth) {
@@ -247,7 +355,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 22) {
+  switch (FuzzTakeByte(input) % 26) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -312,6 +420,14 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildFuncallForm(ctx, input, depth);
     case 20:
       return BuildApplyForm(ctx, input, depth);
+    case 21:
+      return BuildFsetForm(ctx, input, depth);
+    case 22:
+      return BuildDefaliasForm(ctx, input, depth);
+    case 23:
+      return BuildFunctionForm(ctx, input, depth);
+    case 24:
+      return BuildFmakunboundForm(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

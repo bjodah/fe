@@ -430,23 +430,21 @@ static FeObject* CheckNumericEqualOperand(FeContext* ctx, FeObject* obj) {
   FeHandleError(ctx, "tried to call non-callable value");
 }
 
-// Sub-plan 04C's shared function-designator resolver: a function cell may
+// Sub-plan 04C/04D's shared function-designator resolver: a function cell may
 // hold another symbol (the `defalias` indirection), and every reader of the
 // chain -- call position, `funcall`/`apply`, `FeGetFunction` -- follows it
 // through here so the rule cannot drift between the sites. One step is
 // charged per symbol hop, so a chain that never ends still dies on the step
 // budget, and a cycle is named `cyclic-function-indirection` by two-pointer
 // detection rather than left to exhaust the budget (`(fset 'x 'x)` is the
-// canonical case). When the chain dies in an empty function cell the
-// *last link's* value cell is consulted instead -- the transitional
-// fallback 04D deletes, which is what keeps the bootstrap primitives and
-// `fn`-aliased closures, still living in value cells, reachable until the
-// cut. `dead` receives the last link symbol on that empty-cell path, so a
-// caller can raise `void-function NAME` at the right name. A non-symbol
+// canonical case). Since 04D's cut the chain dies in an empty function cell
+// with `&unbound` -- the transitional value-cell fallback is gone, so a
+// callable stored only in the value namespace is *not* reachable in call
+// position. `dead` receives the last link symbol on that empty-cell path, so
+// a caller can raise `void-function NAME` at the right name. A non-symbol
 // value is already resolved and is returned unchanged.
 static FeObject* ResolveFunctionCallable(FeContext* ctx,
                                          FeObject* fn,
-                                         FeObject* env,
                                          FeObject** dead) {
   FeObject* slow = fn;
   FeObject* fast = fn;
@@ -454,15 +452,8 @@ static FeObject* ResolveFunctionCallable(FeContext* ctx,
   while (FeGetType(slow) == FeTSymbol) {
     FeObject* const cell = SymbolFunction(slow);
     if (cell == &unbound) {
-      // 04D deletion site: the transitional value-cell fallback. Call
-      // position and funcall/apply both need the bootstrap, which 04C leaves
-      // in value cells; 04D moves it into the function cell and deletes this
-      // branch (and `env`, which only the fallback's lexical walk uses).
-      FeObject* const fallback = CDR(GetBound(ctx, slow, env));
-      if (fallback == &unbound) {
-        *dead = slow;
-      }
-      return fallback;
+      *dead = slow;
+      return &unbound;
     }
     if (FeGetType(cell) != FeTSymbol) {
       return cell;
@@ -487,25 +478,27 @@ static FeObject* ResolveFunctionCallable(FeContext* ctx,
 
 // A symbol in call position (the `FeFrameExpression` symbol-head arm, and
 // only there -- variable reference still goes through `GetBound` directly).
-// The function cell is consulted first, through
-// `ResolveFunctionCallable`'s designator chain and 04D-deleted value-cell
-// fallback; the one upfront `EvaluationStep` is the charge the fallback path
-// shared with the pre-04C head resolution, so an unbound cell costs exactly
-// what `CDR(GetBound(head, env))` used to and the step pins hold.
-static FeObject* ResolveCallHead(FeContext* ctx,
-                                 FeObject* head,
-                                 FeObject* env) {
+// The function cell is consulted, through `ResolveFunctionCallable`'s
+// designator chain, and an unbound cell means the name is not callable; the
+// one upfront `EvaluationStep` is the charge the pre-04C head resolution
+// shared with `CDR(GetBound(head, env))`, so the step pins hold. A lexical
+// binding never shadows call position: `(let ((car 5)) (car x))` still
+// resolves `car`'s function cell, per the pinned 04A snapshot.
+static FeObject* ResolveCallHead(FeContext* ctx, FeObject* head) {
   EvaluationStep(ctx);
   FeObject* dead;
-  return ResolveFunctionCallable(ctx, head, env, &dead);
+  return ResolveFunctionCallable(ctx, head, &dead);
 }
 
 // The head of a call is resolved on the frame stack rather than through
 // `Evaluate` so that an unassigned name is `void-function`, as in Emacs Lisp,
-// even though Fe has one namespace and would otherwise say `void-variable`. A
-// symbol head resolves synchronously in `RunEvaluation`'s expression branch;
-// a computed head is pushed as a sub-expression and the frame resumes as
-// `FeFrameCallHead` once its value is known.
+// and -- since 04D's cut -- a name with only a value binding is the same
+// error: call position sees the function cell and nothing else, so the old
+// fiction of reporting `void-function` for a name Fe *did* have a value for
+// is a fact now. A symbol head resolves synchronously in
+// `RunEvaluation`'s expression branch; a computed head is pushed as a
+// sub-expression and the frame resumes as `FeFrameCallHead` once its value
+// is known.
 
 // Forward-declared so `DispatchResolvedCall`, which every resolved-call path
 // (symbol head and computed head alike) funnels through, can reach it before
@@ -1549,11 +1542,11 @@ static FeObject* MakeCallForm(FeContext* ctx,
 // partially built list still rooted, the 03F rule.
 static FeObject* SpreadApplyArgs(FeContext* ctx,
                                  FeEvalFrame* frame,
-                                 FeObject* list,
-                                 FeObject* last,
+                                 const FeObject* list,
+                                 const FeObject* last,
                                  FeObject* spread) {
   frame->accumulator = &nil;
-  for (FeObject* p = CDR(list); p != last; p = CDR(p)) {
+  for (const FeObject* p = CDR(list); p != last; p = CDR(p)) {
     frame->accumulator = FeCons(ctx, CAR(p), frame->accumulator);
   }
   for (FeObject* p = spread; !FeIsNil(p); p = CDR(p)) {
@@ -1629,8 +1622,7 @@ static bool ResumeEvalList(FeContext* ctx,
       // alive).
       frame->accumulator = list;
       FeObject* dead = &nil;
-      FeObject* const callable =
-          ResolveFunctionCallable(ctx, CAR(list), &nil, &dead);
+      FeObject* const callable = ResolveFunctionCallable(ctx, CAR(list), &dead);
       if (callable == &unbound) {
         HandleVoidSymbol(ctx, dead, "void-function");
       }
@@ -1903,7 +1895,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
             PushEvaluationFrame(ctx, head, frame_env, NULL);
             continue;
           }
-          FeObject* fn = ResolveCallHead(ctx, head, frame_env);
+          FeObject* fn = ResolveCallHead(ctx, head);
           if (fn == &unbound) {
             HandleNonCallable(ctx, head);
           }
@@ -2151,13 +2143,13 @@ FeObject* FeEvaluate(FeContext* ctx, FeObject* obj) {
 
 FeObject* FeGetFunction(FeContext* ctx, FeObject* sym) {
   // The host's way to resolve a callable name the way call position does
-  // (04C): the function cell first, defalias indirection followed, and --
-  // until 04D's cut -- the value cell as the fallback that keeps bootstrap
-  // callables reachable. Unbound in both namespaces is `nil`; a cycle raises
-  // `cyclic-function-indirection`. Outside an active evaluation the per-hop
-  // `EvaluationStep` charges are no-ops.
+  // (04C/04D): the function cell, defalias indirection followed. A name with
+  // no function binding -- even one whose value cell holds a callable -- is
+  // `nil`, since 04D deleted the transitional value-cell fallback; a cycle
+  // raises `cyclic-function-indirection`. Outside an active evaluation the
+  // per-hop `EvaluationStep` charges are no-ops.
   FeObject* dead;
-  FeObject* const fn = ResolveFunctionCallable(ctx, sym, &nil, &dead);
+  FeObject* const fn = ResolveFunctionCallable(ctx, sym, &dead);
   return fn == &unbound ? FeNil(ctx) : fn;
 }
 

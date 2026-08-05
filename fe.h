@@ -9,23 +9,36 @@
 #include <stdio.h>
 
 // The embedding contract: the C functions, types, and callback signatures
-// below. A Lisp-only change such as FE_LANGUAGE_VERSION 2's
-// assignment/numeric-equality cut does not move this. Version 2 (sub-plan
-// 03F of kg's Emacs-subset program) is the frame machine's bound rename:
+// below. A Lisp-only change such as FE_LANGUAGE_VERSION 3's
+// call-position/reader cut does not move this. Version 2 (sub-plan
+// 03F of kg's Emacs-subset program) was the frame machine's bound rename:
 // `FeEvalOptions.max_depth` split into `max_frames` and
 // `max_native_reentry`, and `FeArenaStats.peak_evaluation_depth` split into
 // `frame_capacity`, `peak_frame_depth` and `peak_native_reentry`. Every host
-// that set the old fields gets a compile error, which is the point -- their
+// that set the old fields gets a compile error, which was the point -- their
 // *meaning* changed, not just their name, so silently keeping the old
-// spelling would be the wrong kind of compatibility.
-#define FE_API_VERSION 2
+// spelling would have been the wrong kind of compatibility.
+//
+// Version 3 (sub-plan 04D of kg's Emacs-subset program) is the Lisp-2
+// namespace cut: `FeDefineNative` now registers into a symbol's function
+// cell instead of its value cell, and `FeSetFunction`/`FeGetFunction`/
+// `FeIsFBound` (added in 04C under version 2) are part of the same visible
+// contract. A host that called `FeDefineNative` for names it then called
+// from Lisp must recompile anyway -- the tripwire is kg's own
+// `static_assert(FE_API_VERSION == 2)`, which this bump fires.
+#define FE_API_VERSION 3
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
-// 02C of the Emacs-subset hard cut) is the first explicit contract: `setq`
+// 02C of the Emacs-subset hard cut) was the first explicit contract: `setq`
 // and `set` are assignment, and `=` is chained numeric equality, matching
-// Emacs Lisp. See doc/language.md and doc/c-api.md.
-#define FE_LANGUAGE_VERSION 2
+// Emacs Lisp. Version 3 (sub-plan 04D) is the Lisp-2 namespace cut: a symbol
+// in call position resolves through its function cell only -- the
+// value-cell fallback is deleted -- `#'x` reads as `(function x)`, and
+// `boundp`-of-a-callable changed meaning (the bootstrap callables now live
+// in function cells, so `(boundp 'car)` is nil while `(fboundp 'car)` is t).
+// See doc/language.md and doc/c-api.md.
+#define FE_LANGUAGE_VERSION 3
 
 extern const char* FeVersion;
 
@@ -271,21 +284,25 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
 [[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 [[nodiscard]] bool FeIsBound(FeContext* ctx, FeObject* sym);
-// The Lisp-2 function namespace (sub-plan 04C of kg's Emacs-subset program).
-// `FeSet`/`FeIsBound` above keep their Emacs meaning -- the value namespace;
-// these three address the function cell instead. `FeSetFunction` writes the
-// cell (the object or symbol designator is stored as-is, so a `defalias`-style
-// indirection stays a symbol). `FeIsFBound` asks whether the cell holds
-// anything. `FeGetFunction` resolves the cell the way call-position lookup
-// does -- following defalias symbol indirection iteratively, and, until
-// sub-plan 04D's cut, falling back to the value cell so bootstrap callables,
-// which still live there, stay reachable; it returns `nil` when the name is
-// unbound in both namespaces, and raises `cyclic-function-indirection` for a
-// self-referential chain. Additive under `FE_API_VERSION` 2; 04D bumps the
-// version when `FeDefineNative`'s meaning moves into the same cell.
+// The Lisp-2 function namespace (sub-plans 04C/04D of kg's Emacs-subset
+// program). `FeSet`/`FeIsBound` above keep their Emacs meaning -- the value
+// namespace; these three address the function cell instead. `FeSetFunction`
+// writes the cell (the object or symbol designator is stored as-is, so a
+// `defalias`-style indirection stays a symbol). `FeIsFBound` asks whether the
+// cell holds anything. `FeGetFunction` resolves the cell the way call-position
+// lookup does -- following defalias symbol indirection iteratively; it returns
+// `nil` when the name has no function binding (04D deleted the transitional
+// value-cell fallback, so a value-cell callable is *not* resolvable through
+// it), and raises `cyclic-function-indirection` for a self-referential chain.
 void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn);
 [[nodiscard]] FeObject* FeGetFunction(FeContext* ctx, FeObject* sym);
 [[nodiscard]] bool FeIsFBound(FeContext* ctx, FeObject* sym);
+// Registers `fn` under `name` so that call position resolves it. Since
+// sub-plan 04D's cut (FE_API_VERSION 3) this writes the symbol's *function*
+// cell, the same cell `FeSetFunction`/`FeGetFunction` address and the one
+// Lisp call-position resolution reads; before the cut it wrote the value
+// cell. A name registered here is `(fboundp 'name)` t and `(boundp 'name)`
+// nil.
 void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn);
 
 [[nodiscard]] FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg);

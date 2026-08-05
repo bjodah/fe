@@ -129,11 +129,17 @@ spelling; both names are bound to the same primitive, and functions print as
 `(lambda ...)`.
 
 ```clojure
-fe > (setq square (lambda (n) (* n n)))
+fe > (fset 'square (lambda (n) (* n n)))
 (lambda (n) (* n n))
 fe > (square 4)
 16
 ```
+
+A lambda in head position is legal and stays as-is: `((lambda (n) (* n n)) 4)`
+is `16`. To name a function, install it in the name's function cell with
+`(fset 'name (lambda ...))` or `(defalias 'name ...)`; a `setq`'d lambda is a
+value and is `void-function` in call position, since call position resolves
+only the function cell.
 
 ##### Parameter lists
 
@@ -186,7 +192,7 @@ For example, we could define a macro named `++` to increment a numeric value by
 1:
 
 ```clojure
-(setq ++
+(fset '++
   (macro (sym)
   (list 'setq sym (list '+ sym 1))))
 ```
@@ -250,9 +256,8 @@ fe > (quote wow)
 wow
 fe > (hello world)
 error: void-function hello  ;; A name in head position is resolved through
-                            ;; its function cell -- or, until the namespace
-                            ;; cut, its value cell -- and reported as a
-                            ;; missing function.
+                            ;; its function cell and reported as a missing
+                            ;; function when that cell is empty.
 fe > (quote (hello world))
 (hello world)
 ```
@@ -269,7 +274,7 @@ fe > '(hello world)
 
 #### Reader macros
 
-Four more prefixes are syntactic sugar for ordinary forms. Only the reader
+Five more prefixes are syntactic sugar for ordinary forms. Only the reader
 knows about them; the host or a prelude has to supply `quasiquote`, `unquote`
 and `unquote-splicing`, which the core does not define.
 
@@ -279,15 +284,20 @@ and `unquote-splicing`, which the core does not define.
 | `` `x `` | `(quasiquote x)` |
 | `,x` | `(unquote x)` |
 | `,@x` | `(unquote-splicing x)` |
-| `#'x` | `x` |
+| `#'x` | `(function x)` |
 
 `` ` `` and `,` are symbol delimiters, so no symbol may contain them. `#` is
 not: it is an ordinary symbol character, and only the two-character sequence
-`#'` is a reader macro. Emacs Lisp's function quote `#'x` still reads as plain
-`x` here -- the reader-level rewrite that makes it read as `(function x)` is
-sub-plan 04D's; until then `#'x`, bare `x`, and `(function x)` all name the
-same symbol designator, so the identity reading is behaviourally harmless for
-the symbols a Lisp-2 program actually calls.
+`#'` is a reader macro. Emacs Lisp's function quote `#'x` reads as
+`(function x)` (sub-plan 04D); a bare `#'` with nothing following is the
+error `stray '#''`.
+
+```clojure
+fe > (quote #'car)
+#'car
+fe > (funcall #'car (list 1 2))
+1
+```
 
 #### The two namespaces
 
@@ -307,11 +317,24 @@ fe > (list f (f))
 (7 9)
 ```
 
-Until the namespace cut (sub-plan 04D), a symbol whose function cell is empty
-falls back to its value cell in call position, which is how the bootstrap's
-callables, still living in value cells, stay reachable; 04D deletes that
-fallback, moves the bootstrap into function cells, and makes an empty
-function cell `void-function NAME` even when the value cell is full.
+A name in call position resolves through its function cell *only*: since the
+namespace cut (sub-plan 04D), the bootstrap's callables live in function cells
+and the transitional value-cell fallback is gone, so an empty function cell is
+`void-function NAME` even when the value cell is full. The two namespaces are
+independently visible: `(boundp 'car)` is `nil` (the primitive's value cell is
+empty) while `(fboundp 'car)` is `t`, and a lexical value binding of a
+primitive's name does not shadow it in call position:
+
+```clojure
+fe > (boundp 'car)
+nil
+fe > (fboundp 'car)
+t
+fe > (let car 5)
+nil
+fe > (car (list 1 2))
+1
+```
 
 #### `(boundp symbol)`
 
@@ -372,6 +395,17 @@ fe > (setq g 7)
 fe > (fset 'g (lambda () 9))
 (lambda nil 9)
 fe > (funcall 'g)
+9
+```
+
+A callable held as a *value* -- a lambda parameter or a `setq`'d variable, for
+instance -- is called with `funcall`, since call position resolves the
+function cell, not the value cell:
+
+```clojure
+fe > (fset 'apply-to-3 (fn (f) (funcall f 3)))
+(lambda (f) (funcall f 3))
+fe > (apply-to-3 (lambda (x) (* x x)))
 9
 ```
 
@@ -451,9 +485,9 @@ Reads `symbol`'s global value cell directly. An empty cell is
 
 `t` if `symbol`'s function cell holds anything, else `nil`. Unlike `boundp`,
 it never consults the value cell and never errors: an unbound name is `nil`.
-Until the namespace cut, the bootstrap primitives live in value cells, so
-`(fboundp 'car)` is `nil`; 04D moves them into the function cell and the
-answer flips to `t`.
+Since the namespace cut moved the bootstrap into function cells,
+`(fboundp 'car)` is `t`; the mirror question on the value side,
+`(boundp 'car)`, is `nil`.
 
 #### `(fmakunbound symbol)`
 

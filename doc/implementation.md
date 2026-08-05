@@ -101,25 +101,27 @@ nor has to mark it, and `FeMark` treats it as a leaf. Nothing returns it: Lisp
 cannot reach a value cell (`(cdr sym)` is a type error, and `(env)` yields
 symbols whose printed form is their name), and the value cell's reader —
 symbol evaluation — turns it into `void-variable NAME`. Since sub-plan 04C,
-call position is no longer a second reader of the value cell: it resolves the
-function cell first, and the value cell is consulted only by the transitional
-fallback that keeps the value-namespace bootstrap callable until 04D. It is
+call position is not a second reader of the value cell — it resolves the
+function cell — and 04D's namespace cut deleted the transitional value-cell
+fallback, so the value cell has exactly one reader. It is
 tagged `FeTFree` so that an escape aborts in
 the writer rather than impersonating a value.
 
 ## Sub-plan 04C: the function namespace
 
-The namespace split is deliberately transitional. The evaluator's one shared
-function-designator resolver, `ResolveFunctionCallable`, walks a function
-cell's symbol indirection chain iteratively — charging one `EvaluationStep`
-per hop, and naming a cycle `cyclic-function-indirection` with two-pointer
-detection rather than leaving it to exhaust the step budget — and when the
-chain dies in an empty function cell falls back to the *last link's* value
-cell. That fallback is the whole point of the slice: every bootstrap
-callable still lives in a value cell, so without it call position,
-`funcall`/`apply`, and `FeGetFunction` would all lose `car`, `+`, the `fn`
-alias, and every native. 04D deletes the fallback, moves the bootstrap into
-function cells, and the resolver shrinks. The one upfront `EvaluationStep`
+The namespace split reached its final form with sub-plan 04D's cut. The
+evaluator's one shared function-designator resolver, `ResolveFunctionCallable`,
+walks a function cell's symbol indirection chain iteratively — charging one
+`EvaluationStep` per hop, and naming a cycle `cyclic-function-indirection`
+with two-pointer detection rather than leaving it to exhaust the step budget —
+and reports `void-function NAME` when the chain dies in an empty function cell.
+Sub-plan 04C shipped the same resolver with a value-cell fallback after the
+last link, because every bootstrap callable still lived in a value cell; 04D
+moved the bootstrap — the primitives, the `fn` alias, and the math natives
+registered through `FeDefineNative` — into function cells (leaving `t`, `pi`
+and `e` as values) and deleted the fallback, so `car`, `+`, and every native
+resolve through the function cell like any other callable, and
+`FeDefineNative` itself writes the same cell. The one upfront `EvaluationStep`
 in `ResolveCallHead` is the charge the pre-04C head resolution made, so an
 unbound cell costs exactly what `CDR(GetBound(head, env))` used to and the
 step pins hold.
@@ -144,6 +146,19 @@ the EvalList frame's `accumulator` and, across the redispatch, the relay
 frame's fields, so a collection forced by the *called body* finds every value
 still live (`test_api.c`'s resumable-frame GC table drives collections across
 `funcall` and `apply` calls).
+
+### The reader and writer at the cut
+
+Two more 04D changes live in fe.c's reader and writer rather than in the
+evaluator. The reader's `#` case no longer returns the following form as-is:
+when the byte after `#` is `'`, it builds `(function X)` through the same
+`ReadWrapped` construction `quote` uses, keeping the `stray '#''` diagnostic
+for a bare `#'`; `#` otherwise stays an ordinary symbol character. The writer
+prints the exact `(function X)` pair as `#'X` -- the abbreviation Emacs' own
+printer uses, and the shape the `function` special form accepts -- while
+`(function)` and `(function X . tail)` still print as ordinary pairs, which is
+what makes the `reader-sharp-quote-identity` comparison match. Neither touches
+the frame machine or the object layout.
 
 ## Garbage Collection
 

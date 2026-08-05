@@ -21,7 +21,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "3.0";
+const char* FeVersion = "4.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -102,11 +102,11 @@ FeObject nil = {.car = {.c = FeTNil << GcMarkBit | OtherCell},
 // The value of a symbol that has never been assigned. Like `nil` it is a
 // static object outside the arena, so the collector neither sweeps it nor has
 // to mark it, and `FeMark` treats it as a leaf. It is never returned to Lisp or
-// to a host: the only place it lives is a symbol's value cell and the dormant
-// function cell of a fresh symbol (`CDR(sym)` is `((name . function) .
-// value)`, sub-plan 04B), which Lisp cannot reach (`(cdr sym)` is a type
-// error) and which every reader of a value cell turns into `void-variable`.
-// It is tagged `FeTFree` so that an escape aborts in the writer instead of
+// to a host: the only place it lives is a fresh symbol's value cell and
+// function cell (`CDR(sym)` is `((name . function) . value)`, sub-plan 04B),
+// which Lisp cannot reach (`(cdr sym)` is a type error) and which every
+// reader of either cell turns into `void-variable`/`void-function`. It is
+// tagged `FeTFree` so that an escape aborts in the writer instead of
 // impersonating a value.
 FeObject unbound = {.car = {.c = FeTFree << GcMarkBit | OtherCell},
                     .cdr = {.o = NULL}};
@@ -468,7 +468,7 @@ FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
   }
   // Create new object, push to symbol_list and return. A symbol's cdr is one
   // cons: `((name . function) . value)` (sub-plan 04B). The function cell is
-  // dormant, initialized to `&unbound` and written only through
+  // initialized to `&unbound` and written only through
   // `SetSymbolFunction`; the name moves one pair down so the binding cell --
   // the cdr of the outer pair -- is unchanged, which is what keeps the whole
   // value path (`GetBound`, `FeSet`, `FeIsBound`, `ResumeSetq`) untouched.
@@ -488,10 +488,13 @@ FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn) {
 }
 
 void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn) {
+  // Sub-plan 04D (FE_API_VERSION 3): the function cell, not the value cell.
+  // Call position resolves the function cell only since the cut, so a native
+  // registered here is reachable as `(name ...)`; `(boundp 'name)` is nil.
   const size_t gc = FeSaveGC(ctx);
   FeObject* symbol = FeMakeSymbol(ctx, name);
   FeObject* native = FeMakeNativeFn(ctx, fn);
-  FeSet(ctx, symbol, native);
+  SetSymbolFunction(symbol, native);
   FeRestoreGC(ctx, gc);
 }
 
@@ -685,6 +688,20 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
       break;
 
     case FeTPair:
+      // `(function X)` prints as `#'X`, the reader macro's abbreviation --
+      // the writer half of sub-plan 04D's `#'` change, and the exact shape
+      // the pinned `reader-sharp-quote-identity` snapshot compares against.
+      // The abbreviation fires only for the single-element proper form, the
+      // one the `function` special form accepts; `(function X . tail)` and
+      // `(function)` print as ordinary pairs, as they are.
+      if (IsNamedSymbol(CAR(obj), "function")) {
+        FeObject* const form = CDR(obj);
+        if (FeGetType(form) == FeTPair && FeIsNil(CDR(form))) {
+          EmitString(w, "#'");
+          WriteObject(w, CAR(form), 1, depth - 1);
+          break;
+        }
+      }
       Emit(w, '(');
       WriteElements(w, obj, depth - 1);
       Emit(w, ')');
@@ -866,10 +883,12 @@ bool FeIsBound(FeContext* ctx, FeObject* sym) {
   return CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil)) != &unbound;
 }
 
-// Sub-plan 04C: the function namespace's public surface. `FeSetFunction` and
-// `FeIsFBound` are the cell accessors (`FeGetFunction` lives in fe_eval.c
+// Sub-plan 04C/04D: the function namespace's public surface. `FeSetFunction`
+// and `FeIsFBound` are the cell accessors (`FeGetFunction` lives in fe_eval.c
 // with the evaluator, because following the designator chain charges the
-// step budget and can raise `cyclic-function-indirection`).
+// step budget and can raise `cyclic-function-indirection`). Since 04D's cut
+// the bootstrap lives in function cells too, so these reach what call
+// position resolves.
 void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn) {
   SetSymbolFunction(CheckType(ctx, sym, FeTSymbol), fn);
 }
@@ -883,8 +902,9 @@ bool FeIsFBound(FeContext* ctx, FeObject* sym) {
 // private layout goes through these. The value path deliberately has no
 // accessor of its own: its unit of currency is the binding cell, and lexical
 // environment entries and the global cell share the `CDR(cell)` read/write
-// contract `GetBound` depends on. The function cell is dormant -- written by
-// `SetSymbolFunction`, read by nothing until Phase 4's lookup slices -- and
+// contract `GetBound` depends on. The function cell is the Lisp-2 callable
+// home (written by `FeSetFunction`/`FeDefineNative`, read by call position,
+// `funcall`/`apply`, `symbol-function` and `FeGetFunction`), and
 // `SymbolName`/`SymbolBindingCell` read through a `const FeObject*` because
 // `GetStringObject`/`IsNamedSymbol` do.
 FeObject* SymbolName(const FeObject* sym) {
@@ -905,7 +925,8 @@ void SetSymbolFunction(FeObject* sym, FeObject* fn) {
 
 static FeObject rparen;
 
-// Reader macros — 'x, `x, ,x, ,@x and #'x — all expand to `(NAME form)`.
+// Reader macros — 'x, `x, ,x, ,@x and #'x — all expand to `(NAME form)`;
+// `#'`'s NAME is `function` (sub-plan 04D).
 static FeObject* ReadWrapped(FeContext* ctx,
                              FeReadFn fn,
                              void* udata,
@@ -1050,15 +1071,13 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
     }
 
     // `#` is an ordinary symbol character, so only `#'` is a reader macro.
-    // Fe has one namespace, so Emacs Lisp's `#'x` is simply `x`.
+    // Since sub-plan 04D's Lisp-2 cut, `#'x` reads as `(function x)` -- the
+    // same `ReadWrapped` construction every other reader macro uses, so a
+    // missing operand keeps the `stray '#''` diagnostic.
     case '#': {
       const char next = fn(ctx, udata);
       if (next == '\'') {
-        FeObject* v = FeRead(ctx, fn, udata);
-        if (v == NULL) {
-          FeHandleError(ctx, "stray '#''");
-        }
-        return v;
+        return ReadWrapped(ctx, fn, udata, "function", "stray '#''");
       }
       ctx->nextchr = next;
       return ReadAtom(ctx, fn, udata, chr);
@@ -1520,20 +1539,23 @@ static FeContext* OpenContext(void* arena, size_t size) {
   ctx->t = FeMakeSymbol(ctx, "t");
   FeSet(ctx, ctx->t, ctx->t);
 
-  // Register the built-in primitives:
+  // Register the built-in primitives (sub-plan 04D's cut): every callable --
+  // the primitives, the `fn` alias, and the math natives registered through
+  // `FeDefineNative` below -- lands in the *function* cell, the only cell
+  // call position resolves since the cut. `t`, `pi` and `e` stay values.
   const size_t save = FeSaveGC(ctx);
   for (Primitive i = PAssert; i < PSentinel; i++) {
     FeObject* v = MakeObject(ctx);
     SetType(v, FeTPrimitive);
     PRIM(v) = (char)i;
-    FeSet(ctx, FeMakeSymbol(ctx, primitive_names[i]), v);
+    SetSymbolFunction(FeMakeSymbol(ctx, primitive_names[i]), v);
     FeRestoreGC(ctx, save);
   }
   for (size_t i = 0; i < COUNT(primitive_aliases); i++) {
     const Primitive p = primitive_aliases[i].primitive;
     FeObject* canonical = FeMakeSymbol(ctx, primitive_names[p]);
-    FeSet(ctx, FeMakeSymbol(ctx, primitive_aliases[i].name),
-          CDR(SymbolBindingCell(canonical)));
+    SetSymbolFunction(FeMakeSymbol(ctx, primitive_aliases[i].name),
+                      SymbolFunction(canonical));
     FeRestoreGC(ctx, save);
   }
 
