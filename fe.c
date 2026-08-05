@@ -1648,19 +1648,44 @@ static FeObject* native_log(FeContext* ctx, FeObject* arg) {
 // The rounding family's integer conversion (05A rows M3/M4, 05C): the double
 // is already rounded per the function (`floor`, `ceil`, `nearbyint`,
 // `trunc`) and the answer is the int64 that rounded value names -- Emacs'
-// integer return type for `floor`/`ceiling`/`round`/`truncate`. A value
-// outside int64's range has no integer answer in a no-bignums program, the
-// same refusal as int64 overflow (05A Decision 5), so it is `arith-error`
-// rather than a cast whose behaviour is undefined; NaN and ±Infinity are out
-// of range too.
+// integer return type for `floor`/`ceiling`/`round`/`truncate`. A value with
+// no integer answer in a no-bignums program -- outside int64's range, either
+// infinity, or NaN -- is the same refusal as int64 overflow (05A Decision
+// 5), an `arith-error` rather than a cast whose behaviour is undefined.
+// Emacs' own name for the nonfinite and out-of-range cases is
+// `overflow-error`, not `arith-error`; `overflow-error`'s condition chain
+// includes `arith-error`, so at fe's message level -- one free-text name
+// until Phase 6's condition system -- `arith-error` is the honest single
+// name to carry, and it is also what Emacs raises for this family's
+// zero-divisor form below.
 static int64_t IntegerRound(FeContext* ctx, double x) {
-  // `(double)INT64_MAX` rounds up to exactly 2^63, so `x >= (double)INT64_MAX`
-  // is `x >= 2^63` -- the same bounds as the hex-float `0x1p63` spelling, in
-  // a form the static analyzer does not mis-solve.
-  if (x < (double)INT64_MIN || x >= (double)INT64_MAX) {
+  // A negated in-range test, not `x < MIN || x >= MAX`: every comparison
+  // against NaN is false, so the positive spelling lets NaN through to a
+  // conversion C leaves undefined (UBSan reports it, and the value produced
+  // was INT64_MIN). `(double)INT64_MAX` rounds up to exactly 2^63, so
+  // `x < (double)INT64_MAX` is `x < 2^63` -- the same bounds as the
+  // hex-float `0x1p63` spelling, in a form the static analyzer does not
+  // mis-solve.
+  if (!(x >= (double)INT64_MIN && x < (double)INT64_MAX)) {
     FeHandleError(ctx, "arith-error");
   }
   return (int64_t)x;
+}
+
+// The rounding family's two-argument divisor: `(floor x d)` is Emacs'
+// `arith-error` when `d` is zero, of either numeric type and of either sign,
+// and the refusal has to come *before* the division rather than out of
+// `IntegerRound`. `0 / 0.0` is NaN, and while `IntegerRound` now refuses
+// that too, it would be refusing the wrong thing -- a divide by zero, not an
+// unrepresentable rounded value -- and `5 / 0.0` is an infinity, which the
+// pre-check keeps from being reported as a range failure. `fpclassify`
+// rather than `d == 0` so no `-Wfloat-equal` suppression is needed for what
+// is a classification, not a comparison.
+static double RoundingQuotient(FeContext* ctx, double x, double d) {
+  if (fpclassify(d) == FP_ZERO) {
+    FeHandleError(ctx, "arith-error");
+  }
+  return x / d;
 }
 
 static FeObject* native_floor(FeContext* ctx, FeObject* arg) {
@@ -1670,7 +1695,8 @@ static FeObject* native_floor(FeContext* ctx, FeObject* arg) {
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeInteger(ctx, IntegerRound(ctx, floor(x / d)));
+  return FeMakeInteger(ctx,
+                       IntegerRound(ctx, floor(RoundingQuotient(ctx, x, d))));
 }
 
 static FeObject* native_ceiling(FeContext* ctx, FeObject* arg) {
@@ -1680,7 +1706,8 @@ static FeObject* native_ceiling(FeContext* ctx, FeObject* arg) {
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeInteger(ctx, IntegerRound(ctx, ceil(x / d)));
+  return FeMakeInteger(ctx,
+                       IntegerRound(ctx, ceil(RoundingQuotient(ctx, x, d))));
 }
 
 static FeObject* native_round(FeContext* ctx, FeObject* arg) {
@@ -1690,7 +1717,8 @@ static FeObject* native_round(FeContext* ctx, FeObject* arg) {
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeInteger(ctx, IntegerRound(ctx, nearbyint(x / d)));
+  return FeMakeInteger(
+      ctx, IntegerRound(ctx, nearbyint(RoundingQuotient(ctx, x, d))));
 }
 
 static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
@@ -1700,7 +1728,8 @@ static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
   }
   double d = FeToDouble(ctx, FeGetNextArgument(ctx, &arg));
   FeRequireNoArguments(ctx, arg);
-  return FeMakeInteger(ctx, IntegerRound(ctx, trunc(x / d)));
+  return FeMakeInteger(ctx,
+                       IntegerRound(ctx, trunc(RoundingQuotient(ctx, x, d))));
 }
 
 static size_t GetCoreObjectCount(void) {

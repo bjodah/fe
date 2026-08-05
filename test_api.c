@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <math.h>
 #include <setjmp.h>
 #include <stdckdint.h>
 #include <stdint.h>
@@ -2358,6 +2359,53 @@ static bool TestNumericTower(void) {
   CHECK_NUM("sqrt", FeTDouble, "4.0", DoubleOperand(16.0));
   CHECK_NUM("sin", FeTDouble, "0.0", IntOperand(0));
   CHECK_NUM("sin", FeTDouble, "0.9999999999999997", DoubleOperand(1.5707963));
+
+  // The rounding family's unrepresentable inputs: NaN and both infinities
+  // have no integer answer, and the conversion C would perform on them is
+  // undefined (the NaN case was the one that reached `(int64_t)x` and
+  // returned INT64_MIN; UBSan reports it). Emacs says `overflow-error`,
+  // whose condition chain includes `arith-error`, which is the single name
+  // fe's message level can carry. `CheckNumericError` re-checks the context
+  // after every one of these, so context reuse after each error is covered
+  // by the same call.
+  static const char* const rounding[] = {"floor", "ceiling", "round",
+                                         "truncate"};
+  for (size_t i = 0; i < sizeof(rounding) / sizeof(rounding[0]); i++) {
+    CHECK(CheckNumericError(context, &state, rounding[i],
+                            (const Operand[]){DoubleOperand((double)NAN)}, 1,
+                            "arith-error"));
+    CHECK(CheckNumericError(context, &state, rounding[i],
+                            (const Operand[]){DoubleOperand((double)INFINITY)},
+                            1, "arith-error"));
+    CHECK(CheckNumericError(context, &state, rounding[i],
+                            (const Operand[]){DoubleOperand(-(double)INFINITY)},
+                            1, "arith-error"));
+    // The two-argument degenerate: a zero divisor of either type is
+    // `arith-error` before the division, so `(floor 0 0)` never reaches the
+    // NaN conversion and `(floor 5 0)` is refused as a divide by zero rather
+    // than as an out-of-range infinity.
+    CHECK(CheckNumericError(context, &state, rounding[i],
+                            (const Operand[]){IntOperand(0), IntOperand(0)}, 2,
+                            "arith-error"));
+    CHECK(CheckNumericError(context, &state, rounding[i],
+                            (const Operand[]){IntOperand(5), IntOperand(0)}, 2,
+                            "arith-error"));
+    CHECK(
+        CheckNumericError(context, &state, rounding[i],
+                          (const Operand[]){IntOperand(5), DoubleOperand(-0.0)},
+                          2, "arith-error"));
+    // A nonfinite *divisor* is not degenerate: the quotient is a signed zero
+    // and the answer is the integer 0, Emacs' answer for `(floor 1 -1.0e+INF)`
+    // too.
+    CHECK(CheckNumericForm(
+        context, rounding[i],
+        (const Operand[]){IntOperand(1), DoubleOperand(-(double)INFINITY)}, 2,
+        FeTInteger, "0"));
+  }
+  // Context reuse once more after the whole battery, from source text.
+  CHECK(CheckNumericForm(context, "floor",
+                         (const Operand[]){DoubleOperand(7.5)}, 1, FeTInteger,
+                         "7"));
 
   // Context reuse after every error: each `arith-error`/arity path above
   // already re-ran the context check; a fresh reduction still answers.
