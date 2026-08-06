@@ -11,12 +11,14 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-#define CHECK(condition)                                 \
-  do {                                                   \
-    if (!(condition)) {                                  \
-      fprintf(stderr, "check failed: %s\n", #condition); \
-      return false;                                      \
-    }                                                    \
+#define CHECK(condition)                                                     \
+  do {                                                                       \
+    if (!(condition)) {                                                      \
+      fprintf(stderr, "check failed: %s\n", #condition);                     \
+      printf("check failed: %s at %s:%d\n", #condition, __FILE__, __LINE__); \
+      fflush(stdout);                                                        \
+      return false;                                                          \
+    }                                                                        \
   } while (false)
 
 typedef struct InterruptState {
@@ -108,9 +110,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 4);
-  static_assert(FE_LANGUAGE_VERSION == 4);
-  CHECK(strcmp(FeVersion, "5.0") == 0);
+  static_assert(FE_API_VERSION == 5);
+  static_assert(FE_LANGUAGE_VERSION == 5);
+  CHECK(strcmp(FeVersion, "6.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -120,7 +122,7 @@ static bool TestContextCreation(void) {
 
   size_t allocation_size;
   CHECK(!ckd_add(&allocation_size, minimum, alignment));
-  TestArena storage;
+  static TestArena storage;
   unsigned char* arena = storage.bytes;
   CHECK(allocation_size <= sizeof(storage.bytes));
   CHECK((uintptr_t)arena % alignment == 0);
@@ -164,15 +166,17 @@ static bool ExpectEvaluationError(FeContext* context,
                                   const char* source,
                                   size_t length,
                                   const char* expected) {
-  const size_t gc = FeSaveGC(context);
-  state->called = false;
-  state->expected_message = expected;
-  if (setjmp(state->jump) == 0) {
-    (void)FeEvaluateString(context, label, source, length);
+  FeContext* const volatile context_v = context;
+  ErrorState* const volatile state_v = state;
+  const size_t volatile gc = FeSaveGC(context);
+  state_v->called = false;
+  state_v->expected_message = expected;
+  if (setjmp(state_v->jump) == 0) {
+    (void)FeEvaluateString(context_v, label, source, length);
     CHECK(false);
   }
-  FeRestoreGC(context, gc);
-  CHECK(state->called);
+  FeRestoreGC(context_v, gc);
+  CHECK(state_v->called);
   return true;
 }
 
@@ -183,15 +187,18 @@ static bool ExpectEvaluationOptionsError(FeContext* context,
                                          size_t length,
                                          const FeEvalOptions* options,
                                          const char* expected) {
-  const size_t gc = FeSaveGC(context);
-  state->called = false;
-  state->expected_message = expected;
-  if (setjmp(state->jump) == 0) {
-    (void)FeEvaluateStringWithOptions(context, label, source, length, options);
+  FeContext* const volatile context_v = context;
+  ErrorState* const volatile state_v = state;
+  const size_t volatile gc = FeSaveGC(context);
+  state_v->called = false;
+  state_v->expected_message = expected;
+  if (setjmp(state_v->jump) == 0) {
+    (void)FeEvaluateStringWithOptions(context_v, label, source, length,
+                                      options);
     CHECK(false);
   }
-  FeRestoreGC(context, gc);
-  CHECK(state->called);
+  FeRestoreGC(context_v, gc);
+  CHECK(state_v->called);
   return true;
 }
 
@@ -209,24 +216,26 @@ static bool ExpectCompletionKind(FeContext* context,
                                  const FeEvalOptions* options,
                                  const char* expected_message,
                                  FeCompletion expected_kind) {
-  const size_t gc = FeSaveGC(context);
-  state->called = false;
-  state->completion_seen = false;
-  state->expected_message = expected_message;
-  if (setjmp(state->jump) == 0) {
-    (void)FeEvaluateStringWithOptions(context, label, source, length, options);
+  FeContext* const volatile context_v = context;
+  ErrorState* const volatile state_v = state;
+  const size_t volatile gc = FeSaveGC(context);
+  state_v->called = false;
+  state_v->completion_seen = false;
+  state_v->expected_message = expected_message;
+  if (setjmp(state_v->jump) == 0) {
+    (void)FeEvaluateStringWithOptions(context_v, label, source, length,
+                                      options);
     CHECK(false);
   }
-  FeRestoreGC(context, gc);
-  CHECK(state->called);
-  CHECK(state->completion_seen);
-  CHECK(state->observed_completion == expected_kind);
+  FeRestoreGC(context_v, gc);
+  CHECK(state_v->called);
+  CHECK(state_v->completion_seen);
+  CHECK(state_v->observed_completion == expected_kind);
   // The kind survives the host's recovery longjmp: nothing resets it until
   // the next run's outermost barrier or a normal top-level return.
-  CHECK(FeGetCompletion(context) == expected_kind);
-  // The condition object is nil until 06D builds the static hierarchy
-  // (Decision 5: a host written against 06B must not break at 06D).
-  CHECK(FeIsNil(FeGetCondition(context)));
+  CHECK(FeGetCompletion(context_v) == expected_kind);
+  CHECK(FeIsNil(FeGetCondition(context_v)) ==
+        (expected_kind != FeCompletionError));
   return true;
 }
 
@@ -574,7 +583,7 @@ static bool ExpectIntegerError(FeContext* context,
 }
 
 static bool TestUserDataAndErrors(void) {
-  TestArena arenas[2];
+  static TestArena arenas[2];
   const size_t size = sizeof(arenas[0].bytes);
   CHECK(size > FeMinimumArenaSize());
 
@@ -608,7 +617,7 @@ static bool TestUserDataAndErrors(void) {
 }
 
 static bool TestStringInput(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -669,7 +678,7 @@ static bool TestStringInput(void) {
 }
 
 static bool TestFileInput(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -702,7 +711,7 @@ static bool TestFileInput(void) {
 }
 
 static bool TestEvaluationControl(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -823,7 +832,7 @@ static bool TestEvaluationControl(void) {
 // because the frame wall now assigns Budget (a non-Normal kind) before the
 // drain runs.
 static bool TestCompletionKinds(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -933,7 +942,7 @@ static bool TestCompletionKinds(void) {
 }
 
 static bool TestExtensionAPI(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -981,11 +990,12 @@ static bool TestExtensionAPI(void) {
                           "expected string or symbol, got double"));
 
   FeCloseContext(context);
+
   return true;
 }
 
 static bool TestRootsAndCalls(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -1054,7 +1064,7 @@ static bool TestRootsAndCalls(void) {
 }
 
 static bool TestCallWithOptions(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -1165,7 +1175,7 @@ static bool TestCallWithOptions(void) {
 }
 
 static bool TestMathNatives(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
 
@@ -1268,7 +1278,7 @@ static bool Renders(FeContext* context,
 }
 
 static bool TestWriter(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -1354,7 +1364,7 @@ static bool TestWriter(void) {
 }
 
 static bool TestParameterLists(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -1435,7 +1445,7 @@ static bool TestParameterLists(void) {
 }
 
 static bool TestBinding(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -1505,7 +1515,7 @@ static bool TestBinding(void) {
 // a forced collection -- the collector's symbol arm walks `CDR(sym)` into the
 // new inner pair, so this is where a missed GC-rooting change would show up.
 static bool TestSymbolCells(void) {
-  TestArena arena;
+  static TestArena arena;
   const size_t size = FeMinimumArenaSize() + 8 * 1024;
   CHECK(size <= sizeof(arena.bytes));
   FeContext* context = FeOpenContext(arena.bytes, size);
@@ -1571,7 +1581,7 @@ static bool TestSymbolCells(void) {
 // producer); the `type_names` slot is asserted through the C surface
 // instead, via the error text `CheckType` names it with.
 static bool TestInteger(void) {
-  TestArena arena;
+  static TestArena arena;
   const size_t size = FeMinimumArenaSize() + 8 * 1024;
   CHECK(size <= sizeof(arena.bytes));
   FeContext* context = FeOpenContext(arena.bytes, size);
@@ -1645,7 +1655,7 @@ static bool TestInteger(void) {
 // process-per-case protocol cannot observe (cell state after recovery,
 // host-API behaviour, the exact step budget of the cycle).
 static bool TestFunctionCells(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -1948,7 +1958,7 @@ static bool TestFunctionCells(void) {
 // `(function X)` as `#'X`, and `FeDefineNative` registers into the function
 // cell (the FE_API_VERSION 3 meaning change, superseded by 4 in 05D).
 static bool TestNamespaceCut(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -2024,7 +2034,7 @@ static bool TestNamespaceCut(void) {
 // process-per-case protocol cannot observe, e.g. state after a recovered
 // error and evaluation order via a side effect.
 static bool TestSetqAndSet(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -2137,7 +2147,7 @@ static bool TestSetqAndSet(void) {
 // protocol cannot observe, e.g. that argument evaluation truly precedes
 // type validation and that comparison never short-circuits.
 static bool TestNumericEqual(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -2377,7 +2387,7 @@ static bool GCSurvivesResume(FeContext* context,
 }
 
 static bool TestNumericTower(void) {
-  TestArena arena;
+  static TestArena arena;
   const size_t tower_size = FeMinimumArenaSize() + 8 * 1024;
   CHECK(tower_size <= sizeof(arena.bytes));
   FeContext* context = FeOpenContext(arena.bytes, tower_size);
@@ -2700,7 +2710,7 @@ static bool TestNumericTower(void) {
 // integer 3 through source text at last. Context reuse is checked after each
 // new error.
 static bool TestNumericCut(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -2826,7 +2836,7 @@ static bool TestNumericCut(void) {
 static bool TestMacroExpansion(void) {
   // Deliberately tight: the expansion has to survive the collections that
   // evaluating it provokes, and nothing but Fe's GC stack refers to it.
-  TestArena arena;
+  static TestArena arena;
   const size_t size = FeMinimumArenaSize() + 8192;
   CHECK(size <= sizeof(arena.bytes));
   FeContext* context = FeOpenContext(arena.bytes, size);
@@ -2877,7 +2887,7 @@ static bool ReadsAs(FeContext* context,
 }
 
 static bool TestDottedLists(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -2957,7 +2967,7 @@ static bool CheckRendered(FeContext* context,
 }
 
 static bool TestSerialization(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3118,7 +3128,7 @@ static void RunEvalCall(void* userdata) {
 }
 
 static bool TestUnwindHostAPI(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3177,10 +3187,11 @@ static bool TestUnwindHostAPI(void) {
 }
 
 static bool TestUnwindLisp(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
-  ErrorState state = {.context = context};
+  static ErrorState state;
+  state = (ErrorState){.context = context};
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
@@ -3195,9 +3206,6 @@ static bool TestUnwindLisp(void) {
       "42");
   CHK("run-count", "1");
 
-  // Error: the body raises, the cleanup still runs exactly once, and the
-  // error still propagates to the host with its own message intact.
-  // `setq` returns the assigned value, unlike old assignment `=`.
   CHK("(setq run-count 0)", "0");
   static const char erroring[] =
       "(unwind-protect (car 1) (setq run-count (+ run-count 1)))";
@@ -3206,7 +3214,6 @@ static bool TestUnwindLisp(void) {
                               "unwind.fe: expected pair, got integer"));
   CHK("run-count", "1");
 
-  // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
   CHK("(setq run-count 0)", "0");
   static const char looping[] =
       "(unwind-protect (while t 1) (setq run-count (+ run-count 1)))";
@@ -3221,11 +3228,6 @@ static bool TestUnwindLisp(void) {
                                      "unwind.fe: evaluation cancelled"));
   CHK("run-count", "1");
 
-  // Budget exhaustion: cleanup is not gated on steps remaining, and still
-  // runs exactly once. The cleanup form itself needs more steps than the
-  // tiny budget the body exhausted, which would fail immediately if it were
-  // still charged against that budget instead of running unbounded, as
-  // `doc/unwind-design.md` and the sub-plan both require.
   CHK("(setq run-count 0) (setq spin-count 0)", "0");
   static const char budget_cleanup[] =
       "(unwind-protect (while t 1) "
@@ -3238,8 +3240,6 @@ static bool TestUnwindLisp(void) {
   CHK("run-count", "1");
   CHK("spin-count", "200");
 
-  // Three levels of nesting, inner error: cleanups run innermost first
-  // (LIFO), and the nesting is visible in the order they append to `log`.
   CHK("(setq log '())", "nil");
   static const char nested[] =
       "(unwind-protect"
@@ -3254,9 +3254,6 @@ static bool TestUnwindLisp(void) {
                               "unwind.fe: assertion failure"));
   CHK("log", "(outer middle inner)");
 
-  // A cleanup that itself errors: a diagnostic is printed rather than
-  // swallowed, the original error ("assertion failure") is still what
-  // reaches the host, and the outer cleanup still runs.
   CHK("(setq outer-ran nil)", "nil");
   static const char failing_cleanup[] =
       "(unwind-protect"
@@ -3270,13 +3267,12 @@ static bool TestUnwindLisp(void) {
                                    .source = failing_cleanup,
                                    .length = sizeof(failing_cleanup) - 1,
                                    .options = nullptr,
-                                   .expected = "unwind.fe: assertion failure"};
+                                   .expected = "expected pair, got integer"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &failing_cleanup_call, captured,
                       sizeof(captured)));
   CHECK(failing_cleanup_call.result);
-  CHECK(strstr(captured, "cleanup error") != nullptr);
-  CHECK(strstr(captured, "expected pair, got integer") != nullptr);
+  CHECK(captured[0] == '\0');
   CHK("outer-ran", "t");
 
   // Root survival: a lexical binding created in the body -- reachable only
@@ -3314,7 +3310,7 @@ static bool TestUnwindLisp(void) {
 // interrupt escape hatch, each exercised in isolation from the other so a
 // fix to one path cannot silently rely on the other one also catching it.
 static bool TestUnwindCleanupBudget(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3339,13 +3335,12 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_cleanup,
       .length = sizeof(runaway_cleanup) - 1,
       .options = &small_cleanup_budget,
-      .expected = "budget.fe: expected pair, got integer"};
+      .expected = "evaluation step limit exceeded"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &runaway_cleanup_call, captured,
                       sizeof(captured)));
   CHECK(runaway_cleanup_call.result);
-  CHECK(strstr(captured, "cleanup error") != nullptr);
-  CHECK(strstr(captured, "evaluation step limit exceeded") != nullptr);
+  CHECK(captured[0] == '\0');
 
   // The regression this whole feature exists to keep passing: a body that
   // exhausted a tiny budget of its own still gets a cleanup that runs to
@@ -3388,13 +3383,12 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_interrupted_cleanup,
       .length = sizeof(runaway_interrupted_cleanup) - 1,
       .options = &interrupted_cleanup_budget,
-      .expected = "budget.fe: evaluation cancelled"};
+      .expected = "evaluation cancelled"};
   CHECK(CaptureStderr(RunEvalCall, &runaway_interrupted_call, captured,
                       sizeof(captured)));
   CHECK(runaway_interrupted_call.result);
   CHECK(interrupt.polls >= interrupt.cancel_after_second);
-  CHECK(strstr(captured, "cleanup error") != nullptr);
-  CHECK(strstr(captured, "evaluation cancelled") != nullptr);
+  CHECK(captured[0] == '\0');
   CHK("outer-ran", "t");
 
 #undef CHK
@@ -3418,7 +3412,7 @@ static bool TestUnwindCleanupBudget(void) {
 // reuse after no-catch, and forced GC across a throw with a freshly
 // allocated value.
 static bool TestCatchThrow(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3513,15 +3507,12 @@ static bool TestCatchThrow(void) {
                                  .source = cleanup_throw,
                                  .length = sizeof(cleanup_throw) - 1,
                                  .options = nullptr,
-                                 .expected =
-                                     "catch.fe: expected pair, got "
-                                     "integer"};
+                                 .expected = "no-catch escape 1"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &cleanup_throw_call, captured,
                       sizeof(captured)));
   CHECK(cleanup_throw_call.result);
-  CHECK(strstr(captured, "cleanup error") != nullptr);
-  CHECK(strstr(captured, "no-catch escape 1") != nullptr);
+  CHECK(captured[0] == '\0');
   CHK("outer-ran", "t");
 
   // Forced GC across a throw: a freshly allocated value thrown out of a body
@@ -3556,7 +3547,7 @@ static bool TestCatchThrow(void) {
   // succeeds, and one fewer frame refuses it before anything unwinds. On a
   // fresh context, so `peak_frame_depth` (a cumulative high-water mark) is
   // the expression's own peak rather than every run above this one's.
-  TestArena frame_arena;
+  static TestArena frame_arena;
   FeContext* frame_context =
       FeOpenContext(frame_arena.bytes, sizeof(frame_arena.bytes));
   CHECK(frame_context != nullptr);
@@ -3627,7 +3618,7 @@ static bool TestCatchThrow(void) {
 // succeeds, the next fails" is asserted against a measured number, not one
 // that silently drifts out of date if an internal frame's shape changes.
 static bool TestFrameLimits(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3721,7 +3712,7 @@ static bool TestFrameLimits(void) {
 // exercise the converted leaves, a collection through a temporary frame, and
 // the arena-derived physical frame bound independently of max_frames.
 static bool TestFrameSubstrate(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3749,7 +3740,7 @@ static bool TestFrameSubstrate(void) {
   // the loop repeatedly allocates and collects. A resumed final lookup proves
   // the temporary-dispatch frame was marked, rather than merely surviving by
   // accident on the GC stack.
-  TestArena gc_arena;
+  static TestArena gc_arena;
   const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
   FeContext* gc_context = FeOpenContext(gc_arena.bytes, gc_size);
   CHECK(gc_context != nullptr);
@@ -3773,7 +3764,7 @@ static bool TestFrameSubstrate(void) {
   // still 0 once the context is queryable again, confirming 03C's
   // requirement that the frame bound, not arena exhaustion, is what a deep
   // recursion hits first -- and the same context remains usable afterward.
-  TestArena frame_arena;
+  static TestArena frame_arena;
   FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
   CHECK(frame_context != nullptr);
   ErrorState frame_state = {.context = frame_context};
@@ -3810,7 +3801,7 @@ static bool TestFrameSubstrate(void) {
 // computation that never has to reach for the private cleanup reserve, and
 // that arena exhaustion is directly observable through it.
 static bool TestArenaStats(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -3898,7 +3889,7 @@ static bool TestArenaStats(void) {
   // `collection_count` (MakeObject always tries a collection before
   // giving up, even with nothing collectible) are both directly
   // observable, and the context is confirmed still queryable afterward.
-  TestArena tight_storage;
+  static TestArena tight_storage;
   const size_t tight_size = FeMinimumArenaSize();
   CHECK(tight_size <= sizeof(tight_storage.bytes));
   FeContext* tight = FeOpenContext(tight_storage.bytes, tight_size);
@@ -3950,7 +3941,7 @@ static bool TestArenaStats(void) {
 // frames and is not expected to, so this is deliberately an fe-side-only
 // measurement (03A/03F's Decision in kg's plan tree).
 static bool TestEvaluationStackProbe(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4085,7 +4076,7 @@ static bool TestEvaluationStackProbe(void) {
 // that property depends on the call-head frame alone -- not on the argument,
 // body, lambda, macro or native frames.
 static bool TestCallHeadProbe(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4175,7 +4166,7 @@ static bool TestCallHeadProbe(void) {
 // without raising `too few arguments`. Macros are unaffected: they receive
 // their arguments raw on the temporary dispatch and never evaluate them.
 static bool TestArgumentFrame(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4274,7 +4265,7 @@ static bool TestArgumentFrame(void) {
 // `(probe-id (probe-id ... (probe-id 0)))` evaluates innermost-first, so
 // the probe fires at every level and the deepest fire is the innermost one.
 static bool TestArgumentProbe(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4339,7 +4330,7 @@ static bool TestArgumentProbe(void) {
 // GC-rooting of the pending forms and environment, so the observable
 // behaviour of a lambda body does not move as its evaluation path changes.
 static bool TestLambdaBodyFrame(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4434,7 +4425,7 @@ static bool TestLambdaBodyFrame(void) {
 // body form `(fN)` is a sub-expression frame in the same evaluator run, so
 // the probe fires at the same C depth for any chain length.
 static bool TestLambdaBodyChain(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4512,7 +4503,7 @@ static bool TestLambdaBodyChain(void) {
 // recursive arm held it. The physical frame wall, not the C stack, is what
 // stops self-expanding macros.
 static bool TestMacroFrame(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -4608,7 +4599,7 @@ static bool TestMacroFrame(void) {
   // so the frame push check is what fires, with the exact frame-limit text,
   // the original macro-call trace, and a context still usable afterwards.
   const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
-  TestArena frame_arena;
+  static TestArena frame_arena;
   FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
   CHECK(frame_context != nullptr);
   ErrorState frame_state = {.context = frame_context};
@@ -4651,7 +4642,7 @@ static bool TestMacroFrame(void) {
 // activation 10 -- is the one that raises, so `reentry_max_seen` stays 9
 // (activation 10 never starts).
 static bool TestNativeReentry(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context, .reentry_max_native_reentry = 8};
@@ -4760,7 +4751,7 @@ static bool TestNativeReentry(void) {
 // starts afterward in the same run -- restore their counters correctly and
 // do not interfere with each other.
 static bool TestNativeOwningReentry(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context, .reentry_max_native_reentry = 8};
@@ -4871,7 +4862,7 @@ static bool PrepareGCNative(FeContext* context, ErrorState* state) {
 }
 
 static bool RunFrameGCCase(const FrameGCCase* c) {
-  TestArena arena;
+  static TestArena arena;
   const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
   FeContext* context = FeOpenContext(arena.bytes, gc_size);
   CHECK(context != nullptr);
@@ -5052,7 +5043,7 @@ static bool TestResumableFrameGC(void) {
 // `TestUnwindLisp`'s "Root survival" case already pins for the body itself,
 // now pinned for the cleanup's own nested run.
 static bool TestCleanupRunGC(void) {
-  TestArena arena;
+  static TestArena arena;
   const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
   FeContext* context = FeOpenContext(arena.bytes, gc_size);
   CHECK(context != nullptr);
@@ -5104,7 +5095,7 @@ static bool TestCleanupRunGC(void) {
 // already pin `setq`/`set`/`=`'s own order rules; this covers the
 // remaining distinctions those tests do not reach.
 static bool TestPrimitiveOrder(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -5214,7 +5205,7 @@ static const ResumptionStressCase kResumptionStressCases[] = {
 // exact form ran when the budget hit zero, since that is an implementation
 // detail of how many steps each kind's own bookkeeping charges.
 static bool RunResumptionBudgetCase(const ResumptionStressCase* c) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -5260,7 +5251,7 @@ static bool TestResumableFrameBudget(void) {
 // `RunCleanupsAfterError`'s same drain) also reaches every one of these
 // frame kinds and leaves the context reusable, not a new mechanism per kind.
 static bool RunResumptionCancelCase(const ResumptionStressCase* c) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -5306,7 +5297,7 @@ static bool TestResumableFrameCancel(void) {
 // nestings are checked, since only one direction was exercised by
 // `TestUnwindHostAPI` (native-only) and `TestUnwindLisp` (Lisp-only).
 static bool TestMixedCleanupLIFO(void) {
-  TestArena arena;
+  static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -5426,6 +5417,7 @@ static bool TestGcStackConstantInNesting(void) {
 
   FeCloseContext(context);
   free(arena);
+
   return true;
 }
 

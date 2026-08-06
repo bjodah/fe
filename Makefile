@@ -422,7 +422,7 @@ coverage: coverage-clean
 
 coverage-clean:
 	rm -rf $(COVERAGE_DIR)
-	find . -maxdepth 1 \( -name '*.gcda' -o -name '*.gcno' \) -delete
+	find . \( -name '*.gcda' -o -name '*.gcno' \) -delete
 
 # compat/ is the Emacs-oracle differential corpus (00b-oracle-and-differential-
 # corpus.md).  `compat` never touches Emacs: it checks the manifest against

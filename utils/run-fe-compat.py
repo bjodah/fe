@@ -34,6 +34,7 @@ oracle/<id>.json, and no such snapshot is expected to exist.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -60,8 +61,9 @@ def run_fe_case(fe_bin, case, timeout):
 		tmp_path = tmp.name
 	try:
 		try:
-			proc = subprocess.run([fe_bin, tmp_path],
-					      capture_output=True, timeout=timeout)
+			env = {**os.environ, "FE_STRUCTURED_ERRORS": "1"}
+			proc = subprocess.run([fe_bin, tmp_path], capture_output=True,
+					      timeout=timeout, env=env)
 		except subprocess.TimeoutExpired:
 			return {"kind": "timeout", "seconds": timeout}, None
 	finally:
@@ -76,6 +78,13 @@ def run_fe_case(fe_bin, case, timeout):
 		return {"kind": "value", "printed": printed}, None
 
 	stderr = proc.stderr.decode("utf-8", "replace")
+	for line in stderr.splitlines():
+		if line.startswith("condition: "):
+			condition = line[len("condition: "):]
+			if condition == "quit":
+				return {"kind": "quit"}, None
+			return {"kind": "condition", "condition_source": "structured",
+					"condition": condition}, None
 	message = stderr
 	for line in stderr.splitlines():
 		if line.startswith("error: "):

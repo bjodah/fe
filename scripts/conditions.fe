@@ -1,0 +1,32 @@
+;; Conditions: handlers receive the constructed condition, hierarchy matching
+;; is transitive, a running handler is bypassed, and cleanup errors replace.
+(assert-equals '(error "boom")
+  (condition-case e (error "boom") (error e)))
+(assert-equals '(arith-error 7)
+  (condition-case e (signal 'arith-error '(7)) (arith-error e)))
+(assert-equals 'caught
+  (condition-case nil (car 5) (error 'caught)))
+(assert-equals '(wrong-type-argument listp 5)
+  (condition-case e (car 5) (wrong-type-argument e)))
+(assert-equals '(wrong-type-argument symbolp 5)
+  (condition-case e (fboundp 5) (wrong-type-argument e)))
+(assert-equals 'quit
+  (condition-case nil (signal 'quit nil) (quit 'quit)))
+(assert-equals 'multi
+  (condition-case nil (/ 1 0) ((wrong-type-argument arith-error) 'multi)))
+(assert-equals 'transitive
+  (condition-case nil (signal 'overflow-error nil) (arith-error 'transitive)))
+(assert-equals '(error "value 7")
+  (condition-case e (error "value %d" 7) (error e)))
+(assert-equals '(error "cleanup")
+  (condition-case e (unwind-protect (error "orig") (error "cleanup")) (error e)))
+(assert-equals 'outer
+  (condition-case nil
+    (condition-case nil (error "body") (error (error "handler")))
+    (error 'outer)))
+(assert-equals '(error "% text text")
+  (condition-case e (error "%% %s %S" "text" "text") (error e)))
+(assert-equals 'format-error
+  (condition-case nil (error "%") (error 'format-error)))
+(assert-equals 'format-error
+  (condition-case nil (error "%x" 1) (error 'format-error)))

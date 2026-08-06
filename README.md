@@ -19,6 +19,8 @@ The language offers the following features:
 * Variadic functions
 * Lisp-2 namespaces — each symbol has a value cell and a function cell, call
   position resolves the function cell, and `#'x` reads as `(function x)`
+* Structured conditions: `signal`, `error`, and `condition-case`, with a
+  static error hierarchy and cleanup-safe unwinding
 * Mark-and-sweep garbage collector
 * Stack traceback on error
 

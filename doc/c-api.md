@@ -578,12 +578,9 @@ than open-ended even if every cleanup on a full registry misbehaves. A host
 that cannot afford that pause sets `cleanup_step_limit` lower; one running
 cleanups that legitimately do more work sets it higher.
 
-A cleanup that itself raises -- Lisp or C -- does not reach `error_fn`: that
-callback's contract (below) is to transfer control away and never return,
-which would abandon every cleanup still pending behind it. Instead its
-message is printed to `stderr` and the remaining cleanups, inner to outer,
-still run. Whichever error, interrupt, or budget exhaustion was actually
-unwinding when the cleanup failed is still what `error_fn` eventually sees.
+A cleanup that itself raises replaces the completion being unwound. Remaining
+cleanups still run inner to outer, and `error_fn` receives the replacement
+condition rather than the abandoned completion.
 
 ### Completion kinds
 
@@ -611,9 +608,9 @@ compiles and behaves as before without edits. The kind is always valid --
 it is assigned before the cleanup drain and before `error_fn` runs, and it
 stays readable after the host's recovery `longjmp` until the next run's
 outermost barrier or a normal top-level return resets it to
-`FeCompletionNormal`. `FeGetCondition()` returns the completion's condition
-object, which is `nil` until the static condition hierarchy lands; a host
-written against this API must handle that value before 06D provides one.
+`FeCompletionNormal`. `FeGetCondition()` returns the completion's
+`(SYMBOL . DATA)` object. It is `nil` for budget exhaustion and when arena
+exhaustion prevents constructing an error object.
 
 The kind also has one internal effect a host can rely on: while a
 non-Normal completion is draining, a cleanup's own frame pushes get the

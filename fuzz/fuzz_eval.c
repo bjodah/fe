@@ -226,6 +226,22 @@ static FeObject* BuildCatchThrow(FeContext* ctx,
   return MakeForm(ctx, "catch", (FeObject*[]){tag, thrown}, 2);
 }
 
+static FeObject* BuildConditionCase(FeContext* ctx,
+                                    FuzzInput* input,
+                                    unsigned depth) {
+  FeObject* condition =
+      MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "arith-error"));
+  FeObject* data = MakeUnary(ctx, "quote", &nil);
+  FeObject* signal = MakeBinary(ctx, "signal", condition, data);
+  FeObject* handler =
+      FeMakeList(ctx,
+                 (FeObject*[]){FeMakeSymbol(ctx, "arith-error"),
+                               BuildExpression(ctx, input, depth + 1)},
+                 2);
+  return MakeForm(ctx, "condition-case", (FeObject*[]){&nil, signal, handler},
+                  3);
+}
+
 static FeObject* BuildListForm(FeContext* ctx,
                                FuzzInput* input,
                                unsigned depth) {
@@ -476,7 +492,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 31) {
+  switch (FuzzTakeByte(input) % 32) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -556,6 +572,8 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildComparisonForm(ctx, input);
     case 29:
       return BuildCatchThrow(ctx, input, depth);
+    case 30:
+      return BuildConditionCase(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

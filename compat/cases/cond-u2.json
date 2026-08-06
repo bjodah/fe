@@ -2,5 +2,5 @@
 	"id": "cond-u2",
 	"setup": [],
 	"expr": "(condition-case e (unwind-protect (error \"orig\") (error \"cleanup\")) (error e))",
-	"note": "U2: a raising cleanup REPLACES the in-flight error -- Emacs answers (error \"cleanup\"), not (error \"orig\"). This is the oracle for 06A Decision 4's policy (fe today prints the cleanup failure to stderr and keeps the original; the design doc's 'Emacs discards' claim is false, measured). Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D."
+	"note": "U2: a raising cleanup replaces the in-flight error -- Emacs answers (error \"cleanup\"), not (error \"orig\"). Fe follows that policy with the replacement condition visible to an enclosing handler or host."
 }

@@ -14,17 +14,15 @@ section designs -- a `FeFrameCatch` whose checkpoints are the throw's
 destination, a drain to that frame's checkpoint rather than to zero, the
 native re-entry boundary as a tested wall (the C activations between runs
 are live, recorded as a divergence rather than pretended away), and
-`no-catch` as a message through the existing error path until 06D provides
-condition objects. An error under an evaluator barrier is
-copied into context storage, drains the current cleanup registry, then reaches
-the outer public boundary exactly once. `condition-case`,
-and the token-based rollback-on-error registry sketched
-below for `MakeFile()`-shaped problems are still design only. The rest of
-this document is the original design; where the shipped implementation took
-a narrower or different shape, a note says so inline rather than rewriting
-history. It still exists so the remaining pieces -- `condition-case`,
-and quit as a distinct *catchable* kind -- are not designed
-four times by four separate patches that then have to be reconciled.
+`no-catch` as a structured error condition. `condition-case` handles ordinary
+conditions by unwinding to its matching frame, while quit needs a `quit` or
+`t` clause and budget remains uncatchable. An uncaught error under an evaluator
+barrier drains the current cleanup registry, then reaches the outer public
+boundary exactly once. Only the token-based rollback-on-error registry sketched
+below for `MakeFile()`-shaped problems remains design work. The rest of this
+document is the original design; where the shipped implementation took a
+narrower or different shape, a note says so inline rather than rewriting
+history.
 
 **Reconciled 2026-08-05 against the measured oracle (sub-plan 06A of kg's
 `2026-08-03-elisp-subset-and-fe-evaluator` plan set).** One claim below is
@@ -99,13 +97,12 @@ the error callback.
 (`fe.h`), the interrupt path assigns Quit and the step-limit/frame/re-entry
 walls assign Budget (all four through a private `RaiseCompletion` sibling of
 `FeHandleError`, whose signature is unchanged), every ordinary raise stays
-Error, and a host reads the kind with `FeGetCompletion(ctx)` and the (nil,
-until 06D) condition with `FeGetCondition(ctx)` -- Decision 5's additive
-accessors. The kinds are a parallel channel only: no Lisp program can observe
-them (`catch` and `condition-case` do not exist yet), quit and budget remain
-ordinary `longjmp`-to-the-host completions, and the completion resets to
-Normal at the outermost barrier and after a normal top-level return exactly as
-before.
+Error, and a host reads the kind with `FeGetCompletion(ctx)` and the condition
+with `FeGetCondition(ctx)` -- Decision 5's additive accessors. Since 06D,
+Lisp observes ordinary conditions through `condition-case`; quit needs an
+explicit `quit` or `t` clause and budget remains an ordinary `longjmp` to the
+host. The completion resets to Normal at the outermost barrier and after a
+normal top-level return exactly as before.
 
 `quit` and `budget` must not be catchable by ordinary Lisp handlers. Emacs Lisp
 made `condition-case` unable to catch quit by default for good reasons and
@@ -235,11 +232,10 @@ section's "Nested evaluation and native re-entry" rules require: a catch
 below a nested run's base is not matchable from inside it, because the C
 activations between the runs are live and cannot be popped by frame-index
 assignment. A throw that finds no catch raises `no-catch TAG VALUE` through
-the ordinary error path -- draining to zero like any error, since until 06D
-an error has nowhere nearer to stop -- and `FeHandleError`'s own
-drain-to-zero is unchanged. 06D's `condition-case` reuses the same catch
-machinery and makes quit a catchable kind; the token-based
-run-only-on-error registry stays open (Fex's resource problem, Phase 9).
+the ordinary error path; an enclosing `condition-case` can handle it before
+the cleanup drain reaches the host. `condition-case` reuses the same
+checkpoint machinery, while the token-based run-only-on-error registry stays
+open (Fex's resource problem, Phase 9).
 
 **A Lisp cleanup's own forms are themselves a nested evaluator run,** since
 sub-plan 03E's frame machine: `RunOneCleanupEntry` starts one via
@@ -300,21 +296,10 @@ point is that handlers can rely on Emacs semantics and the divergence is
 observable from Lisp (`condition-case` around a failing cleanup); 06D
 implements it.
 
-**What shipped instead, for now (superseded by Decision 4 at 06D):**
-discarding was this section's original reading, but the callback that reaches
-is not `error_fn` -- a cleanup's own failure is printed to `stderr` directly
-from inside `FeHandleError()` (`RunOneCleanupEntry()` in `fe.c`), and
-`error_fn` never learns a cleanup failed at all. Completion kinds now have a
-distinct value for the drain that is in flight (`FeGetCompletion()`, 06B), but
-"a cleanup failed" still is not one -- the in-flight kind is preserved by
-design, so a cleanup that runs out of its own steps mid-drain does not
-overwrite the Error/Quit/Budget the drain is for. Tested per this section's
-requirement: `test_api.c`'s `TestUnwindLisp()`
-captures `stderr` around a failing nested cleanup and asserts both the
-diagnostic and that the outer cleanup still ran. The three assertions pinning
-the `stderr` text (the `CHECK(strstr(captured, "cleanup error") ...)` family,
-`test_api.c:3086, :3155, :3204`) and `error_fn`'s never-sees-cleanup-failures
-contract are rewritten by 06D when the measured replace-policy lands.
+**Shipped in 06D:** a cleanup failure restores the outer evaluator state and
+raises its new structured condition. It replaces the prior completion, runs
+the remaining cleanup entries, and is visible to an enclosing `condition-case`
+or `error_fn`; it is never printed as an auxiliary stderr diagnostic.
 
 ## Order of work
 

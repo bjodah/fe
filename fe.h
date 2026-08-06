@@ -37,7 +37,7 @@
 // was deliberately deferred to the cut so the whole numeric contract moves as
 // one visible break -- a "compatible" break that silently reinterprets `42`
 // is the worst kind (05D).
-#define FE_API_VERSION 4
+#define FE_API_VERSION 5
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -55,7 +55,7 @@
 // explicit `.0`, integer division truncates, `(/ 1 0)` is `arith-error`, and
 // `eq`/`eql` are core primitives with Emacs' identity semantics. See
 // doc/language.md and doc/c-api.md.
-#define FE_LANGUAGE_VERSION 4
+#define FE_LANGUAGE_VERSION 5
 
 extern const char* FeVersion;
 
@@ -258,11 +258,8 @@ void FeSetStrictArity(FeContext* ctx, bool strict);
 // itself is unchanged, so every existing host compiles and behaves as before
 // without edits.
 [[nodiscard]] FeCompletion FeGetCompletion(const FeContext* ctx);
-// The completion's condition object, nil until sub-plan 06D builds the static
-// condition hierarchy. Documented here so a host written against 06B -- which
-// must only ever see nil -- does not break when 06D starts returning real
-// condition objects: a host that needs a condition must handle nil before
-// 06D provides one.
+// The completion's `(SYMBOL . DATA)` condition object. It is nil when the
+// completion cannot construct an object, such as arena exhaustion.
 [[nodiscard]] FeObject* FeGetCondition(const FeContext* ctx);
 
 [[nodiscard]] FeType FeGetType(const FeObject* obj);

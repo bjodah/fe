@@ -1001,6 +1001,31 @@ anything else is `nil`. Exactly one argument; a leftover argument is
 Returns `t` if `x` is a float, else `nil`. Exactly one argument; a leftover
 argument is `wrong-number-of-arguments`.
 
+#### `(condition-case variable body handler...)`, `(signal condition data)`, and `(error format ...)`
+
+`condition-case` returns `body`'s normal value or runs the first matching
+handler. A handler receives the condition object, a cons whose car is the
+condition symbol and whose cdr is its data, bound to `variable` (or no binding
+for `nil`), and its forms are an implicit `do`. `error` catches ordinary
+conditions including `wrong-type-argument` and `arith-error`; hierarchy
+matching is transitive (`overflow-error` is a `range-error`, an
+`arith-error`, and an `error`). `quit` is separate and requires a `quit` or
+`t` handler. An error raised by a handler bypasses that active handler and
+searches an enclosing one. `signal` evaluates its two operands and raises
+`(condition . data)`. Unknown condition symbols raise `(error "Invalid error
+symbol" SYMBOL)`. `error` formats its message at signal time and raises an
+`error` condition. Its supported directives are `%%`, `%d` (integer), `%s`
+(a string without quotes, any other object printed), and `%S` (an object
+printed with Fe's normal object writer); width, precision, flags, and every
+other directive are rejected with an `error` condition.
+
+```clojure
+fe > (condition-case e (signal 'arith-error '(7)) (error e))
+(arith-error 7)
+fe > (condition-case nil (signal 'quit nil) (quit 'stopped))
+stopped
+```
+
 #### Math functions
 
 The math natives follow per-function return types, as in Emacs Lisp:

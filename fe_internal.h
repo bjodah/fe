@@ -97,6 +97,9 @@ typedef enum Primitive {
   // `FeFrameCatch` and `PerformThrow`, fe_eval.c).
   PCatch,
   PThrow,
+  PConditionCase,
+  PSignal,
+  PError,
   PSentinel
 } Primitive;
 
@@ -387,6 +390,7 @@ typedef enum FeFrameKind {
   // `FeRestoreGC(ctx, gc_checkpoint)`), and its `trace_cell` link is where
   // the discarded frames' `call_list` chain is restored to.
   FeFrameCatch,
+  FeFrameConditionCase,
 } FeFrameKind;
 
 typedef struct FeEvalFrame {
@@ -596,7 +600,9 @@ struct FeContext {
   // installed only for the duration of RunEvaluation(), and errors copy
   // their text and trace below before jumping to it.
   jmp_buf* evaluator_catch;
+  jmp_buf* condition_catch;
   FeObject* evaluator_error_trace;
+  FeObject* condition;
   // The kind of the completion currently being drained -- Normal otherwise.
   // Assigned by `RaiseCompletion` (fe_eval.c) for every barrier-backed raise,
   // reset by the outermost run's barrier and by a normal top-level return.
@@ -649,5 +655,10 @@ bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options);
 void EndEvaluationControl(FeContext* ctx, bool owns_control);
 void EvaluationStep(FeContext* ctx);
 void FeMarkEvaluatorRoots(FeContext* ctx);
+[[noreturn]] void RaiseCondition(FeContext* ctx,
+                                 FeCompletion kind,
+                                 const char* name,
+                                 FeObject* data,
+                                 const char* message);
 
 #endif

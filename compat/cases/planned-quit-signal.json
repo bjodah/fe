@@ -2,5 +2,5 @@
 	"id": "planned-quit-signal",
 	"setup": [],
 	"expr": "(signal 'quit nil)",
-	"note": "Proves the Emacs runner's condition-case distinguishes quit from an ordinary error. Fe has no signal primitive yet (Phase 6's condition system), so its side reports a void-function condition; features.json marks this feature 'planned' so the disagreement is recorded as a known, expected gap rather than a regression."
+	"note": "Proves the Emacs runner's condition-case distinguishes quit from an ordinary error. Fe's `signal` produces the corresponding structured quit completion."
 }

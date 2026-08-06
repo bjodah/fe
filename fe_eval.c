@@ -62,6 +62,145 @@ void EndEvaluationControl(FeContext* ctx, bool owns_control) {
 static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* forms,
                                    FeObject* env);
+[[noreturn]] static void RaiseCompletion(FeContext* ctx,
+                                         FeCompletion kind,
+                                         const char* msg);
+
+typedef struct ConditionParent {
+  const char* name;
+  const char* parent;
+} ConditionParent;
+
+static const ConditionParent condition_parents[] = {
+    {"error", nullptr},
+    {"wrong-type-argument", "error"},
+    {"wrong-number-of-arguments", "error"},
+    {"void-variable", "error"},
+    {"void-function", "error"},
+    {"args-out-of-range", "error"},
+    {"arith-error", "error"},
+    {"range-error", "arith-error"},
+    {"overflow-error", "range-error"},
+    {"file-error", "error"},
+    {"cyclic-function-indirection", "error"},
+    {"invalid-function", "error"},
+    {"no-catch", "error"},
+    {"evaluation-stack-exhaustion", "error"},
+    {"arena-exhaustion", "error"},
+};
+
+static bool IsConditionSymbol(const FeObject* symbol) {
+  if (IsNamedSymbol(symbol, "quit")) {
+    return true;
+  }
+  for (size_t i = 0;
+       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
+    if (IsNamedSymbol(symbol, condition_parents[i].name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static const ConditionParent* FindConditionParent(const FeObject* symbol) {
+  for (size_t i = 0;
+       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
+    if (IsNamedSymbol(symbol, condition_parents[i].name)) {
+      return &condition_parents[i];
+    }
+  }
+  return nullptr;
+}
+
+static const ConditionParent* FindConditionParentByName(const char* name) {
+  for (size_t i = 0;
+       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
+    if (name != nullptr && strcmp(name, condition_parents[i].name) == 0) {
+      return &condition_parents[i];
+    }
+  }
+  return nullptr;
+}
+
+static bool ConditionMatches(const FeObject* condition,
+                             const FeObject* spec,
+                             FeCompletion kind) {
+  if (IsNamedSymbol(spec, "t")) {
+    return true;
+  }
+  if (FeGetType(spec) != FeTSymbol || FeGetType(condition) != FeTPair) {
+    return false;
+  }
+  if (kind == FeCompletionQuit) {
+    return IsNamedSymbol(spec, "quit");
+  }
+  for (const ConditionParent* entry = FindConditionParent(CAR(condition));
+       entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
+    if (IsNamedSymbol(spec, entry->name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool HandlerMatches(const FeObject* condition,
+                           const FeObject* spec,
+                           FeCompletion kind) {
+  if (FeGetType(spec) != FeTPair) {
+    return ConditionMatches(condition, spec, kind);
+  }
+  while (!FeIsNil(spec)) {
+    if (ConditionMatches(condition, CAR(spec), kind)) {
+      return true;
+    }
+    spec = CDR(spec);
+  }
+  return false;
+}
+
+static bool FindConditionHandler(const FeContext* ctx,
+                                 FeCompletion kind,
+                                 size_t* index,
+                                 FeObject** clause) {
+  if (kind == FeCompletionBudget) {
+    return false;
+  }
+  for (size_t i = ctx->frame_stack_index; i-- > ctx->run_base;) {
+    FeEvalFrame* frame = &ctx->frame_stack[i];
+    if (frame->kind != FeFrameConditionCase || frame->fn == &unbound) {
+      continue;
+    }
+    for (FeObject* handlers = frame->rest; FeGetType(handlers) == FeTPair;
+         handlers = CDR(handlers)) {
+      FeObject* candidate = CAR(handlers);
+      if (FeGetType(candidate) == FeTPair &&
+          HandlerMatches(ctx->condition, CAR(candidate), kind)) {
+        *index = i;
+        *clause = candidate;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void ValidateConditionHandlers(FeContext* ctx, FeObject* handlers) {
+  while (!FeIsNil(handlers)) {
+    if (FeGetType(handlers) != FeTPair || FeGetType(CAR(handlers)) != FeTPair) {
+      FeHandleError(ctx, "invalid condition handler");
+    }
+    FeObject* spec = CAR(CAR(handlers));
+    if (FeGetType(spec) != FeTSymbol) {
+      while (!FeIsNil(spec)) {
+        if (FeGetType(spec) != FeTPair || FeGetType(CAR(spec)) != FeTSymbol) {
+          FeHandleError(ctx, "invalid condition handler");
+        }
+        spec = CDR(spec);
+      }
+    }
+    handlers = CDR(handlers);
+  }
+}
 
 static void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
   if (ctx->cleanup_stack_index == CleanupStackSize) {
@@ -95,30 +234,43 @@ static void SaveCleanupErrorMessage(FeContext* ctx, const char* msg) {
 // unwinding takes priority: it is what every remaining entry, and finally
 // the host, still sees.
 static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
+  FeContext* const volatile ctx_v = ctx;
+  const FeCleanupEntry* const volatile entry_v = entry;
   jmp_buf local_jump;
-  jmp_buf* const saved_catch = ctx->cleanup_catch;
-  jmp_buf* const saved_evaluator_catch = ctx->evaluator_catch;
-  const size_t saved_frame_stack_index = ctx->frame_stack_index;
-  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
-  FeObject* const saved_call_list = ctx->call_list;
-  ctx->cleanup_catch = &local_jump;
+  jmp_buf* const volatile saved_catch = ctx_v->cleanup_catch;
+  jmp_buf* const volatile saved_evaluator_catch = ctx_v->evaluator_catch;
+  const size_t volatile saved_frame_stack_index = ctx_v->frame_stack_index;
+  const size_t volatile saved_native_reentry_depth =
+      ctx_v->native_reentry_depth;
+  const size_t volatile saved_run_base = ctx_v->run_base;
+  FeObject* const volatile saved_call_list = ctx_v->call_list;
+  jmp_buf* const volatile saved_condition_catch = ctx_v->condition_catch;
+  ctx_v->cleanup_catch = &local_jump;
   if (setjmp(local_jump) == 0) {
-    if (entry->kind == FeCleanupNative) {
-      entry->as.native.fn(ctx, entry->as.native.data);
+    if (entry_v->kind == FeCleanupNative) {
+      entry_v->as.native.fn(ctx_v, entry_v->as.native.data);
     } else {
-      RunEvaluationBody(ctx, entry->as.lisp.forms, entry->as.lisp.env);
+      RunEvaluationBody(ctx_v, entry_v->as.lisp.forms, entry_v->as.lisp.env);
     }
   } else {
-    fprintf(stderr, "fe: unwind-protect cleanup error: %s\n",
-            ctx->cleanup_error_message);
+    ctx_v->cleanup_catch = saved_catch;
+    ctx_v->evaluator_catch = saved_evaluator_catch;
+    ctx_v->native_reentry_depth = saved_native_reentry_depth;
+    ctx_v->run_base = saved_run_base;
+    ctx_v->condition_catch = saved_condition_catch;
+    ctx_v->frame_stack_index = saved_frame_stack_index;
+    ctx_v->call_list = saved_call_list;
+    RaiseCompletion(ctx_v, FeCompletionError, ctx_v->cleanup_error_message);
   }
-  ctx->cleanup_catch = saved_catch;
+  ctx_v->cleanup_catch = saved_catch;
   // A cleanup error longjmps directly here, bypassing the nested
   // RunEvaluation() that installed its own barrier. Do not leave that
   // automatic jmp_buf, its frames, or its trace link live in the context.
-  ctx->evaluator_catch = saved_evaluator_catch;
-  ctx->frame_stack_index = saved_frame_stack_index;
+  ctx_v->evaluator_catch = saved_evaluator_catch;
+  ctx_v->frame_stack_index = saved_frame_stack_index;
   ctx->native_reentry_depth = saved_native_reentry_depth;
+  ctx->run_base = saved_run_base;
+  ctx->condition_catch = saved_condition_catch;
   ctx->call_list = saved_call_list;
 }
 
@@ -271,6 +423,22 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 
   ctx->completion = kind;
 
+  size_t handler_index;
+  FeObject* handler;
+  if (FindConditionHandler(ctx, kind, &handler_index, &handler)) {
+    FeEvalFrame* const frame = &ctx->frame_stack[handler_index];
+    FePushGC(ctx, ctx->condition);
+    RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    FePushGC(ctx, ctx->condition);
+    frame->fn = handler;
+    frame->callee = ctx->condition;
+    ctx->frame_stack_index = handler_index + 1;
+    ctx->call_list = &frame->trace_cell;
+    ctx->completion = FeCompletionNormal;
+    longjmp(*ctx->condition_catch, 1);
+  }
+
   // A fresh, bounded budget, not the exhausted or cancelled one the body
   // was running under and not no budget at all: see `RunCleanupsAfterError`.
   RunCleanupsAfterError(ctx, &cleanup_budget);
@@ -283,7 +451,21 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 // sites means. The signature is pinned (kg calls it directly); the four wall
 // sites that need a different kind call `RaiseCompletion` directly instead.
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
-  RaiseCompletion(ctx, FeCompletionError, msg);
+  // An exhausted arena cannot allocate its own condition object. Preserve the
+  // existing non-allocating fatal path instead of recursing through MakeObject.
+  if (FeIsNil(ctx->free_list)) {
+    ctx->condition = &nil;
+    RaiseCompletion(ctx, FeCompletionError, msg);
+  }
+  RaiseCondition(ctx, FeCompletionError, "error",
+                 FeMakeList(ctx, (FeObject*[]){FeMakeString(ctx, msg)}, 1),
+                 msg);
+}
+
+[[noreturn]] static void RaiseNamedError(FeContext* ctx,
+                                         const char* name,
+                                         const char* message) {
+  RaiseCondition(ctx, FeCompletionError, name, &nil, message);
 }
 
 // Decision 5's (sub-plan 06A) additive host surface. The kind is always
@@ -297,13 +479,28 @@ FeCompletion FeGetCompletion(const FeContext* ctx) {
   return ctx->completion;
 }
 
-// The condition object, nil until 06D builds the static hierarchy. The
-// parameter is unused today but fixed by Decision 5's accessor shape; keep it
-// so a host written against this slice does not change its call sites when
-// 06D starts returning real condition objects.
+// The condition object is nil only for completions that cannot construct one,
+// such as arena exhaustion; otherwise it is the current `(SYMBOL . DATA)`.
 FeObject* FeGetCondition(const FeContext* ctx) {
-  (void)ctx;
-  return &nil;
+  return ctx->condition;
+}
+
+[[noreturn]] void RaiseCondition(FeContext* ctx,
+                                 FeCompletion kind,
+                                 const char* name,
+                                 FeObject* data,
+                                 const char* message) {
+  if (FeIsNil(ctx->free_list)) {
+    ctx->condition = &nil;
+    RaiseCompletion(ctx, kind, message);
+  }
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* symbol = FeMakeSymbol(ctx, name);
+  FePushGC(ctx, symbol);
+  FePushGC(ctx, data);
+  ctx->condition = FeCons(ctx, symbol, data);
+  FeRestoreGC(ctx, gc);
+  RaiseCompletion(ctx, kind, message);
 }
 
 bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
@@ -435,7 +632,8 @@ static FeObject* ArgsToEnv(FeContext* ctx,
     arg = FeCdr(ctx, arg);
   }
   if (strict && !FeIsNil(arg)) {
-    FeHandleError(ctx, "wrong-number-of-arguments");
+    RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments", &nil,
+                   "wrong-number-of-arguments");
   }
   return env;
 }
@@ -470,7 +668,7 @@ static NumericPair GetNumericPair(FeContext* ctx, FeObject* a, FeObject* b) {
                          .a_d = FeToDouble(ctx, a),
                          .b_d = FeToDouble(ctx, b)};
   }
-  FeHandleError(ctx, "wrong-type-argument");
+  RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
 }
 
 // `=` (`PNumericEqual` in `ResumeEvalList`): numeric equality over both
@@ -501,7 +699,8 @@ static NumericPair GetNumericPair(FeContext* ctx, FeObject* a, FeObject* b) {
   char message[64];
   (void)FeToString(ctx, symbol, name, sizeof(name));
   Format(message, sizeof(message), "%s %s", kind, name);
-  FeHandleError(ctx, message);
+  RaiseCondition(ctx, FeCompletionError, kind,
+                 FeMakeList(ctx, (FeObject*[]){symbol}, 1), message);
 }
 
 // `(foo 1)` where `foo` has no function value names the culprit, the way
@@ -518,7 +717,8 @@ static NumericPair GetNumericPair(FeContext* ctx, FeObject* a, FeObject* b) {
 // (`cycle` null), and `&unbound` plus a flag for one that is not.
 static FeObject* ReportFunctionCycle(FeContext* ctx, bool* cycle) {
   if (cycle == nullptr) {
-    FeHandleError(ctx, "cyclic-function-indirection");
+    RaiseNamedError(ctx, "cyclic-function-indirection",
+                    "cyclic-function-indirection");
   }
   *cycle = true;
   return &unbound;
@@ -804,7 +1004,8 @@ static void CompleteImplicitBodyFrame(FeContext* ctx,
 static void RequireTwoArguments(FeContext* ctx, const FeObject* arguments) {
   if (FeGetType(arguments) != FeTPair || FeGetType(CDR(arguments)) != FeTPair ||
       !FeIsNil(CDR(CDR(arguments)))) {
-    FeHandleError(ctx, "wrong-number-of-arguments");
+    RaiseNamedError(ctx, "wrong-number-of-arguments",
+                    "wrong-number-of-arguments");
   }
 }
 
@@ -926,7 +1127,8 @@ static bool DispatchPrimitive(FeContext* ctx,
     // `wrong-number-of-arguments` before anything evaluates, matching Emacs.
     case PCatch:
       if (FeIsNil(arguments)) {
-        FeHandleError(ctx, "wrong-number-of-arguments");
+        RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments",
+                       &nil, "wrong-number-of-arguments");
       }
       frame->kind = FeFrameCatch;
       frame->rest = arguments;
@@ -947,6 +1149,33 @@ static bool DispatchPrimitive(FeContext* ctx,
       frame->accumulator = &nil;
       frame->callee = &unbound;
       return false;
+    case PSignal:
+    case PError:
+      if (PRIM(fn) == PSignal) {
+        RequireTwoArguments(ctx, arguments);
+      }
+      frame->kind = FeFrameEvalList;
+      frame->fn = fn;
+      frame->rest = arguments;
+      frame->accumulator = &nil;
+      frame->callee = &unbound;
+      return false;
+    case PConditionCase: {
+      FeObject* variable = FeGetNextArgument(ctx, &arguments);
+      if (!FeIsNil(variable) && FeGetType(variable) != FeTSymbol) {
+        RaiseCondition(ctx, FeCompletionError, "wrong-type-argument", &nil,
+                       "wrong-type-argument");
+      }
+      FeObject* body = FeGetNextArgument(ctx, &arguments);
+      ValidateConditionHandlers(ctx, arguments);
+      frame->kind = FeFrameConditionCase;
+      frame->fn = &nil;
+      frame->accumulator = variable;
+      frame->rest = arguments;
+      frame->callee = &unbound;
+      PushEvaluationFrame(ctx, body, frame->env, NULL);
+      return false;
+    }
     case PSetq:
       frame->kind = FeFrameSetq;
       frame->rest = arguments;
@@ -977,7 +1206,8 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PGreater:
     case PGreaterEqual:
       if (FeIsNil(arguments)) {
-        FeHandleError(ctx, "wrong-number-of-arguments");
+        RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments",
+                       &nil, "wrong-number-of-arguments");
       }
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
@@ -1019,7 +1249,8 @@ static bool DispatchPrimitive(FeContext* ctx,
       // error before anything evaluates (`(funcall)`/`(apply)`), matching
       // Emacs' wrong-number-of-arguments for both.
       if (FeIsNil(arguments)) {
-        FeHandleError(ctx, "wrong-number-of-arguments");
+        RaiseNamedError(ctx, "wrong-number-of-arguments",
+                        "wrong-number-of-arguments");
       }
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
@@ -1401,15 +1632,17 @@ static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
     return true;
   }
   if (FeGetType(frame->rest) != FeTPair) {
-    FeHandleError(ctx, "wrong-number-of-arguments");
+    RaiseNamedError(ctx, "wrong-number-of-arguments",
+                    "wrong-number-of-arguments");
   }
   FeObject* const target = CAR(frame->rest);
   if (FeGetType(target) != FeTSymbol) {
-    FeHandleError(ctx, "wrong-type-argument");
+    RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
   }
   frame->rest = CDR(frame->rest);
   if (FeGetType(frame->rest) != FeTPair) {
-    FeHandleError(ctx, "wrong-number-of-arguments");
+    RaiseNamedError(ctx, "wrong-number-of-arguments",
+                    "wrong-number-of-arguments");
   }
   frame->accumulator = target;
   PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
@@ -1665,13 +1898,13 @@ static FeObject* SeedArith(FeContext* ctx,
     if (primitive == PSub && only_operand) {
       int64_t negated;
       if (ckd_sub(&negated, 0, INTEGER(operand))) {
-        FeHandleError(ctx, "arith-error");
+        RaiseNamedError(ctx, "arith-error", "arith-error");
       }
       return FeMakeInteger(ctx, negated);
     }
     if (primitive == PDiv && only_operand) {
       if (INTEGER(operand) == 0) {
-        FeHandleError(ctx, "arith-error");
+        RaiseNamedError(ctx, "arith-error", "arith-error");
       }
       return FeMakeInteger(ctx, 1 / INTEGER(operand));
     }
@@ -1708,22 +1941,22 @@ static FeObject* CombineNumeric(FeContext* ctx,
     switch ((char)primitive) {
       case PAdd:
         if (ckd_add(&result, p.a_i, p.b_i)) {
-          FeHandleError(ctx, "arith-error");
+          RaiseNamedError(ctx, "arith-error", "arith-error");
         }
         return FeMakeInteger(ctx, result);
       case PSub:
         if (ckd_sub(&result, p.a_i, p.b_i)) {
-          FeHandleError(ctx, "arith-error");
+          RaiseNamedError(ctx, "arith-error", "arith-error");
         }
         return FeMakeInteger(ctx, result);
       case PMul:
         if (ckd_mul(&result, p.a_i, p.b_i)) {
-          FeHandleError(ctx, "arith-error");
+          RaiseNamedError(ctx, "arith-error", "arith-error");
         }
         return FeMakeInteger(ctx, result);
       default:  // PDiv
         if (p.b_i == 0 || (p.a_i == INT64_MIN && p.b_i == -1)) {
-          FeHandleError(ctx, "arith-error");
+          RaiseNamedError(ctx, "arith-error", "arith-error");
         }
         return FeMakeInteger(ctx, p.a_i / p.b_i);
     }
@@ -2131,6 +2364,30 @@ static bool ResumeCatch(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   return false;
 }
 
+static bool ResumeConditionCase(FeContext* ctx,
+                                FeEvalFrame* frame,
+                                FeObject** result) {
+  if (FeIsNil(frame->fn)) {
+    *result = frame->callee;
+    return true;
+  }
+  if (frame->fn == &unbound) {
+    *result = frame->callee;
+    return true;
+  }
+  FeObject* const clause = frame->fn;
+  // A condition from handler forms must bypass this active handler.
+  frame->fn = &unbound;
+  FeObject* env = frame->env;
+  if (!FeIsNil(frame->accumulator)) {
+    env = Bind(ctx, env, frame->accumulator, frame->callee);
+  }
+  frame->env = env;
+  frame->callee = &unbound;
+  PushBodyFrame(ctx, env, CDR(clause));
+  return false;
+}
+
 // The innermost matching catch frame for a throw's tag, or false when the
 // current run (down to its `run_base` floor) holds none. Tag comparison is
 // Emacs' `eq` (`IdentityObjects` with `compare_floats` false): fixnums match
@@ -2180,7 +2437,8 @@ static bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value) {
     (void)FeToString(ctx, tag, tag_text, sizeof(tag_text));
     (void)FeToString(ctx, value, value_text, sizeof(value_text));
     Format(message, sizeof(message), "no-catch %s %s", tag_text, value_text);
-    FeHandleError(ctx, message);
+    RaiseCondition(ctx, FeCompletionError, "no-catch",
+                   FeMakeList(ctx, (FeObject*[]){tag, value}, 2), message);
   }
   FeEvalFrame* const catch_frame = &ctx->frame_stack[index];
   ctx->completion = FeCompletionThrow;
@@ -2199,6 +2457,75 @@ static bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value) {
   ctx->call_list = &catch_frame->trace_cell;
   ctx->completion = FeCompletionNormal;
   return false;
+}
+
+static void AppendErrorText(FeContext* ctx,
+                            char* message,
+                            size_t* length,
+                            const char* text) {
+  while (*text != '\0') {
+    if (*length + 1 >= 1024) {
+      FeHandleError(ctx, "error message too long");
+    }
+    message[(*length)++] = *text++;
+  }
+}
+
+static void FormatErrorMessage(FeContext* ctx,
+                               const FeObject* format,
+                               FeObject* values,
+                               char message[1024]) {
+  const size_t format_length = FeStringByteLength(ctx, format);
+  if (format_length >= 1024) {
+    FeHandleError(ctx, "error message too long");
+  }
+  char source[1024];
+  (void)FeCopyStringBytes(ctx, format, source, format_length);
+  source[format_length] = '\0';
+  size_t length = 0;
+  for (size_t i = 0; i < format_length; i++) {
+    const char byte = source[i];
+    if (byte != '%') {
+      AppendErrorText(ctx, message, &length, (char[]){byte, '\0'});
+      continue;
+    }
+    if (i + 1 == format_length) {
+      FeHandleError(ctx, "unsupported error format directive");
+    }
+    i++;
+    if (source[i] == '%') {
+      AppendErrorText(ctx, message, &length, "%");
+      continue;
+    }
+    FeObject* value = FeGetNextArgument(ctx, &values);
+    char rendered[128];
+    switch (source[i]) {
+      case 'd':
+        Format(rendered, sizeof(rendered), "%lld",
+               (long long)FeToInteger(ctx, value));
+        break;
+      case 's':
+        if (FeGetType(value) == FeTString) {
+          const size_t value_length = FeStringByteLength(ctx, value);
+          if (value_length >= sizeof(rendered)) {
+            FeHandleError(ctx, "error message too long");
+          }
+          (void)FeCopyStringBytes(ctx, value, rendered, value_length);
+          rendered[value_length] = '\0';
+        } else {
+          (void)FeToString(ctx, value, rendered, sizeof(rendered));
+        }
+        break;
+      case 'S':
+        (void)FeToString(ctx, value, rendered, sizeof(rendered));
+        break;
+      default:
+        FeHandleError(ctx, "unsupported error format directive");
+    }
+    AppendErrorText(ctx, message, &length, rendered);
+  }
+  FeRequireNoArguments(ctx, values);
+  message[length] = '\0';
 }
 
 // `list`, `=`, the chained comparators, `/=`, `set`, `funcall`, `apply`:
@@ -2247,7 +2574,7 @@ static bool ResumeEvalList(FeContext* ctx,
       FeObject* const symbol = CAR(list);
       FeObject* const value = CAR(CDR(list));
       if (FeGetType(symbol) != FeTSymbol) {
-        FeHandleError(ctx, "wrong-type-argument");
+        RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
       }
       FeSet(ctx, symbol, value);
       *result = value;
@@ -2262,6 +2589,48 @@ static bool ResumeEvalList(FeContext* ctx,
     // answer rather than completing the pair form.
     case PThrow:
       return PerformThrow(ctx, CAR(list), CAR(CDR(list)));
+    case PSignal: {
+      FeObject* const name = CAR(list);
+      if (FeGetType(name) != FeTSymbol) {
+        FeObject* data = FeMakeList(
+            ctx, (FeObject*[]){FeMakeSymbol(ctx, "symbolp"), name}, 2);
+        RaiseCondition(ctx, FeCompletionError, "wrong-type-argument", data,
+                       "wrong-type-argument");
+      }
+      char symbol[64];
+      const size_t symbol_length = FeStringByteLength(ctx, SymbolName(name));
+      if (symbol_length >= sizeof(symbol)) {
+        FeHandleError(ctx, "Invalid error symbol");
+      }
+      (void)FeCopyStringBytes(ctx, SymbolName(name), symbol, symbol_length);
+      symbol[symbol_length] = '\0';
+      if (!IsConditionSymbol(name)) {
+        FeObject* data = FeMakeList(
+            ctx, (FeObject*[]){FeMakeString(ctx, "Invalid error symbol"), name},
+            2);
+        RaiseCondition(ctx, FeCompletionError, "error", data,
+                       "Invalid error symbol");
+      }
+      RaiseCondition(
+          ctx,
+          IsNamedSymbol(name, "quit") ? FeCompletionQuit : FeCompletionError,
+          symbol, CAR(CDR(list)), symbol);
+    }
+    case PError: {
+      if (FeIsNil(list)) {
+        RaiseCondition(ctx, FeCompletionError, "error", &nil, "error");
+      }
+      const FeObject* const format = CAR(list);
+      if (FeGetType(format) != FeTString) {
+        RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
+      }
+      char message[1024];
+      FormatErrorMessage(ctx, format, CDR(list), message);
+      RaiseCondition(
+          ctx, FeCompletionError, "error",
+          FeMakeList(ctx, (FeObject*[]){FeMakeString(ctx, message)}, 1),
+          message);
+    }
     default: {  // PNumericEqual, PNotEqual, PLess, PLessEqual, PGreater,
                 // PGreaterEqual
       // The chained comparators and `=`/`/=` (05C): adjacent pairs are
@@ -2330,6 +2699,8 @@ static bool ResumeContinuation(FeContext* ctx,
       return ResumeEvalList(ctx, frame, result);
     case FeFrameCatch:
       return ResumeCatch(ctx, frame, result);
+    case FeFrameConditionCase:
+      return ResumeConditionCase(ctx, frame, result);
     case FeFrameRelay:
       *result = frame->callee;
       return true;
@@ -2374,6 +2745,7 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
       case FeFramePrint:
       case FeFrameEvalList:
       case FeFrameCatch:
+      case FeFrameConditionCase:
         FeMark(ctx, frame->expr);
         FeMark(ctx, frame->env);
         FeMark(ctx, frame->fn);
@@ -2411,6 +2783,7 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
     case FeFramePrint:
     case FeFrameEvalList:
     case FeFrameCatch:
+    case FeFrameConditionCase:
       return true;
     case FeFrameExpression:
     case FeFrameLambda:
@@ -2458,6 +2831,7 @@ static jmp_buf* BeginRunBarrier(FeContext* ctx, jmp_buf* jump) {
   ctx->evaluator_catch = jump;
   if (saved == nullptr) {
     ctx->completion = FeCompletionNormal;
+    ctx->condition = &nil;
   }
   return saved;
 }
@@ -2474,9 +2848,14 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   // nested run's own loop publish its base while it drives and hand the
   // floor back when it returns -- `RunEvaluation`/`RunEvaluationBody` each
   // call this loop, and only one loop is live at a time.
-  const size_t saved_run_base = ctx->run_base;
+  const size_t volatile saved_run_base = ctx->run_base;
+  jmp_buf condition_jump;
+  jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
   ctx->run_base = base;
+  // cppcheck-suppress autoVariables
+  ctx->condition_catch = &condition_jump;
   FeObject* result = &nil;
+  (void)setjmp(condition_jump);
   while (ctx->frame_stack_index > base) {
     FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
     FeObject* const expr = frame->expr;
@@ -2621,6 +3000,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
       case FeFramePrint:
       case FeFrameEvalList:
       case FeFrameCatch:
+      case FeFrameConditionCase:
         // A special-form or primitive continuation: an operand or implicit
         // body sub-frame above this one delivered its value into `callee`
         // (or, for a freshly set-up frame, `callee` is still the `&unbound`
@@ -2658,6 +3038,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   // to receive alive without that per-level cost.
   FePushGC(ctx, result);
   ctx->run_base = saved_run_base;
+  ctx->condition_catch = saved_condition_catch;
   return result;
 }
 
@@ -2677,18 +3058,20 @@ static FeObject* RunEvaluation(FeContext* ctx,
                                FeObject* env,
                                FeObject** bind) {
   const size_t base = ctx->frame_stack_index;
-  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
-  const size_t saved_run_base = ctx->run_base;
+  const size_t volatile saved_native_reentry_depth = ctx->native_reentry_depth;
+  const size_t volatile saved_run_base = ctx->run_base;
+  jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
   if (base > 0) {
     EnterNativeReentry(ctx);
   }
   jmp_buf jump;
-  jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
+  jmp_buf* const volatile saved_catch = BeginRunBarrier(ctx, &jump);
 
   if (setjmp(jump) != 0) {
     ctx->frame_stack_index = base;
     ctx->call_list = &nil;
     ctx->evaluator_catch = saved_catch;
+    ctx->condition_catch = saved_condition_catch;
     ctx->native_reentry_depth = saved_native_reentry_depth;
     ctx->run_base = saved_run_base;
     TransferRunError(ctx, saved_catch);
@@ -2697,6 +3080,7 @@ static FeObject* RunEvaluation(FeContext* ctx,
   PushEvaluationFrame(ctx, obj, env, bind);
   FeObject* const result = RunEvaluationLoop(ctx, base);
   ctx->evaluator_catch = saved_catch;
+  ctx->condition_catch = saved_condition_catch;
   ctx->native_reentry_depth = saved_native_reentry_depth;
   if (saved_catch == nullptr) {
     // This run owned the outermost barrier, so its ordinary return reaches
@@ -2733,16 +3117,18 @@ static FeObject* RunEvaluation(FeContext* ctx,
 static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* forms,
                                    FeObject* env) {
-  const size_t base = ctx->frame_stack_index;
-  const size_t saved_native_reentry_depth = ctx->native_reentry_depth;
-  const size_t saved_run_base = ctx->run_base;
+  const size_t volatile base = ctx->frame_stack_index;
+  const size_t volatile saved_native_reentry_depth = ctx->native_reentry_depth;
+  const size_t volatile saved_run_base = ctx->run_base;
+  jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
   jmp_buf jump;
-  jmp_buf* const saved_catch = BeginRunBarrier(ctx, &jump);
+  jmp_buf* const volatile saved_catch = BeginRunBarrier(ctx, &jump);
 
   if (setjmp(jump) != 0) {
     ctx->frame_stack_index = base;
     ctx->call_list = &nil;
     ctx->evaluator_catch = saved_catch;
+    ctx->condition_catch = saved_condition_catch;
     ctx->native_reentry_depth = saved_native_reentry_depth;
     ctx->run_base = saved_run_base;
     TransferRunError(ctx, saved_catch);
@@ -2751,6 +3137,7 @@ static FeObject* RunEvaluationBody(FeContext* ctx,
   PushBodyFrame(ctx, env, forms);
   FeObject* const result = RunEvaluationLoop(ctx, base);
   ctx->evaluator_catch = saved_catch;
+  ctx->condition_catch = saved_condition_catch;
   ctx->native_reentry_depth = saved_native_reentry_depth;
   return result;
 }

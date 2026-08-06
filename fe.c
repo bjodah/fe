@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "5.0";
+const char* FeVersion = "6.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -76,7 +76,10 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PFuncall] = "funcall",
                                         [PApply] = "apply",
                                         [PCatch] = "catch",
-                                        [PThrow] = "throw"};
+                                        [PThrow] = "throw",
+                                        [PConditionCase] = "condition-case",
+                                        [PSignal] = "signal",
+                                        [PError] = "error"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -212,12 +215,45 @@ static const char* GetTypeName(FeType type) {
   return type < COUNT(type_names) ? type_names[type] : "unknown";
 }
 
+static const char* TypePredicate(FeType type) {
+  switch (type) {
+    case FeTPair:
+      return "listp";
+    case FeTDouble:
+      return "numberp";
+    case FeTInteger:
+      return "integerp";
+    case FeTSymbol:
+      return "symbolp";
+    case FeTString:
+      return "stringp";
+    case FeTFn:
+    case FeTMacro:
+    case FeTPrimitive:
+    case FeTNativeFn:
+      return "functionp";
+    case FeTPtr:
+      return "user-ptr-p";
+    case FeTFree:
+    case FeTNil:
+    case FeTFex0:
+    case FeTFex1:
+    case FeTFex2:
+    case FeTSentinel:
+      return "objectp";
+  }
+  return "objectp";
+}
+
 FeObject* CheckType(FeContext* ctx, FeObject* obj, FeType type) {
   if (FeGetType(obj) != type) {
     char message[64];
     Format(message, sizeof(message), "expected %s, got %s", GetTypeName(type),
            GetTypeName(FeGetType(obj)));
-    FeHandleError(ctx, message);
+    FeObject* items[] = {FeMakeSymbol(ctx, TypePredicate(type)), obj};
+    FeObject* data = FeMakeList(ctx, items, COUNT(items));
+    RaiseCondition(ctx, FeCompletionError, "wrong-type-argument", data,
+                   message);
   }
   return obj;
 }
@@ -321,6 +357,7 @@ static void CollectGarbage(FeContext* ctx) {
   FeMark(ctx, ctx->evaluation_result);
   FeMark(ctx, ctx->call_result);
   FeMark(ctx, ctx->root_list);
+  FeMark(ctx, ctx->condition);
   FeMarkEvaluatorRoots(ctx);
   MarkCleanupRoots(ctx);
 
@@ -1601,12 +1638,14 @@ static int64_t IntegerPower(FeContext* ctx, int64_t base, int64_t exponent) {
   while (e > 0) {
     if (e & 1) {
       if (ckd_mul(&result, result, factor)) {
-        FeHandleError(ctx, "arith-error");
+        RaiseCondition(ctx, FeCompletionError, "arith-error", &nil,
+                       "arith-error");
       }
     }
     e >>= 1;
     if (e > 0 && ckd_mul(&factor, factor, factor)) {
-      FeHandleError(ctx, "arith-error");
+      RaiseCondition(ctx, FeCompletionError, "arith-error", &nil,
+                     "arith-error");
     }
   }
   return result;
@@ -1674,7 +1713,7 @@ static int64_t IntegerRound(FeContext* ctx, double x) {
   // hex-float `0x1p63` spelling, in a form the static analyzer does not
   // mis-solve.
   if (!(x >= (double)INT64_MIN && x < (double)INT64_MAX)) {
-    FeHandleError(ctx, "arith-error");
+    RaiseCondition(ctx, FeCompletionError, "arith-error", &nil, "arith-error");
   }
   return (int64_t)x;
 }
@@ -1690,7 +1729,7 @@ static int64_t IntegerRound(FeContext* ctx, double x) {
 // is a classification, not a comparison.
 static double RoundingQuotient(FeContext* ctx, double x, double d) {
   if (fpclassify(d) == FP_ZERO) {
-    FeHandleError(ctx, "arith-error");
+    RaiseCondition(ctx, FeCompletionError, "arith-error", &nil, "arith-error");
   }
   return x / d;
 }
@@ -1846,6 +1885,7 @@ static FeContext* OpenContext(void* arena, size_t size) {
 
   // Initialize the lists:
   ctx->call_list = &nil;
+  ctx->condition = &nil;
   ctx->free_list = &nil;
   ctx->symbol_list = &nil;
   ctx->evaluation_result = &nil;

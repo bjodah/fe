@@ -656,17 +656,21 @@ Collection" above.
 
 `doc/unwind-design.md` is the design this section's implementation follows;
 it also records which parts of that design (checkpoints and tokens for a
-rollback-on-error registry, `condition-case`) are still future work.
+rollback-on-error registry is still future work. Conditions are static
+`(SYMBOL . DATA)` objects: `condition-case` validates its clauses before its
+body runs, then unwinds to the first matching clause and evaluates its body in
+an environment optionally binding the condition. `error` is the parent of the
+registered ordinary error symbols; `quit` is separate and only matches `quit`
+or `t`; budget completion is never catchable.
 `catch`/`throw` are no longer future work: since sub-plan 06C the
 distinct completion kinds include the interrupt path assigning
 `FeCompletionQuit`, the step-limit/frame/re-entry walls assigning
 `FeCompletionBudget`, every ordinary `FeHandleError()` assigning
 `FeCompletionError`, and a matching `throw` holding `FeCompletionThrow`
 for the duration of its checkpointed drain -- all readable through
-`FeGetCompletion()`/`FeGetCondition()` (condition nil until 06D). They are a
-parallel host channel -- no Lisp program can observe the kinds -- and quit/budget
-remain ordinary `longjmp`-to-the-host completions until `condition-case`
-exists.
+`FeGetCompletion()`/`FeGetCondition()` (the condition is nil only when it
+cannot be constructed). They are a parallel host channel; Lisp observes
+catchable errors through `condition-case`, while budget remains uncatchable.
 
 Lisp `unwind-protect` and the host's `FeProtectWithCleanup()` share one
 registry, `FeContext.cleanup_stack`: a fixed-size array of entries, each
@@ -728,9 +732,9 @@ body of an outer run, or an outer run itself when a native re-entered) is
 never matched: the C activations between the runs are live and cannot be
 popped by frame-index assignment. The native re-entry boundary is therefore
 a wall, tested and recorded as a divergence. No matching catch raises
-`no-catch TAG VALUE` through the ordinary error path (draining to zero, like
-every error, until 06D's `condition-case` gives errors a nearer place to
-stop). A matching catch is delivered the value: the completion is
+`no-catch TAG VALUE` through the ordinary error path; an enclosing
+`condition-case` may catch it before cleanups drain to zero. A matching catch
+is delivered the value: the completion is
 `FeCompletionThrow` for the duration, `RunCleanupsDownTo(ctx,
 catch->cleanup_checkpoint)` runs the cleanups the throw passes (innermost
 first), the GC stack restores to the catch frame's checkpoint with the

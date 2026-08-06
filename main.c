@@ -46,6 +46,16 @@ static void ReleaseInterpreter(void) {
 }
 
 static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
+  if (getenv("FE_STRUCTURED_ERRORS") != nullptr &&
+      FeGetCompletion(ctx) == FeCompletionQuit) {
+    fputs("condition: quit\n", stderr);
+  } else if (getenv("FE_STRUCTURED_ERRORS") != nullptr &&
+             !FeIsNil(FeGetCondition(ctx))) {
+    char condition[1024];
+    (void)FeToString(ctx, FeCar(ctx, FeGetCondition(ctx)), condition,
+                     sizeof(condition));
+    fprintf(stderr, "condition: %s\n", condition);
+  }
   fprintf(stderr, "error: %s\n", message);
   while (!FeIsNil(stack)) {
     char fn[1024];
