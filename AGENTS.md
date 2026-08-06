@@ -100,6 +100,13 @@ the deliberate errors.
 - The complexity limits in `Makefile` are ratchets, not aspirational numbers.
   Refactor code that exceeds them; change a limit only when reviewed structural
   growth makes that unavoidable.
+- `.ci/pmccabe-baseline.json` is a per-symbol ratchet on top of those funded
+  totals, and `make pmccabe-baseline` records *improvements*. It refuses to
+  rewrite the file when that would raise an individual symbol, even inside the
+  funded envelopes; banking an increase needs
+  `make pmccabe-baseline PMCCABE_BASELINE_ARGS=--allow-regressions`, and the
+  reason belongs in the commit message. State the per-symbol deltas there
+  either way.
 - Maintain direct includes. The IWYU stage is authoritative, and POSIX feature
   macros belong in build flags rather than individual source files.
 - Preserve public API compatibility unless a breaking change is explicitly

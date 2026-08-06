@@ -431,12 +431,18 @@ pmccabe-check:
 			--max-new-function $(PMCCABE_NEW_FUNCTION_MAX) \
 			--baseline $(PMCCABE_BASELINE)
 
+# Records improvements.  A rewrite that would raise an individual symbol is
+# refused unless PMCCABE_BASELINE_ARGS=--allow-regressions says so
+# deliberately, because "the funded envelopes still hold" is not the same
+# claim as "no symbol got worse" and the second one used to be banked in
+# silence.
 pmccabe-baseline:
 	$(PMCCABE) $(PMCCABE_PATHS) | \
 		python3 utils/check_pmccabe_complexity.py \
 			--max-function $(PMCCABE_FUNCTION_COMPLEXITY_MAX) \
 			--max-total $(PMCCABE_TOTAL_MAX) \
 			--max-new-function $(PMCCABE_NEW_FUNCTION_MAX) \
+			$(PMCCABE_BASELINE_ARGS) \
 			--write-baseline $(PMCCABE_BASELINE)
 
 coverage: coverage-clean
