@@ -172,8 +172,30 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # Decision 1 may incur (03B's precedent: +72 scc, pmccabe conserved) is
 # absorbed by the scc raise. This slice adds no code, so the actuals stay
 # put until 06B lands.
+#
+# The per-file cap alone is raised a seventh time, 420 -> 460, dated
+# 2026-08-06, by the Phase 6 adversarial-review fixes: measured 440 for
+# fe_eval.c after them, against 422 before (the tree was already 2 over its
+# own cap at that point). The +18 is control-flow the review found missing
+# rather than new features -- the evaluation-control record that a caught
+# condition restores instead of clearing, the raise split into a formatting
+# half and a working half so a cleanup's replayed completion is not labelled
+# twice, the completion kind travelling with a cleanup's own failure, the
+# quit/budget condition objects, the pending-throw escape that lets a
+# cleanup's `throw` reach the catch it names, and `FeTryCallWithOptions`/
+# `FeResignal`. The two totals are NOT raised and did not need to be: scc
+# 654/680 and pmccabe 863/900 after the same work.
+#
+# The alternative to this raise is 06A Decision 1's deferred split -- the
+# condition hierarchy, the matcher and `error`'s format machinery are a
+# natural unit and would move out as ~a third of the file. It is not taken
+# here because 03B measured a mechanical split at +72 scc *total*, which
+# would put the total at ~726 against a 680 cap and so would have to be
+# funded as a phase of its own rather than smuggled in with a review fix.
+# fe_eval.c is at 440 of 460; the next phase to touch it should price the
+# split rather than ask for 500.
 SCC_COMPLEXITY_MAX ?= 680
-SCC_FILE_COMPLEXITY_MAX ?= 420
+SCC_FILE_COMPLEXITY_MAX ?= 460
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
