@@ -1,0 +1,39 @@
+;; Sub-plan 09B: an exhausted arena signals a condition like any other one.
+;; `(error ...)` catches it, so does the name the hierarchy already reserves
+;; for it, and the object the handler is given says which exhaustion it was.
+;; Before 09B every one of these forms escaped except the `(t ...)` case: the
+;; raise could not allocate the condition object, so it signalled nil and the
+;; matcher answered false for every named handler.
+;;
+;; The chain is a `let`-local in every case here, so it is unreachable the
+;; instant the handler's frame is entered and the handler is free to allocate
+;; -- which is what lets these forms return a value at all. The default 1 MiB
+;; arena makes each round about 56 000 conses; a small `-s` gets the same
+;; answers sooner:
+;;
+;;   ./fe -s 70000 scripts/assert.fe scripts/exhaustion.fe
+(assert-equals 'caught
+  (condition-case nil
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (error 'caught)))
+(assert-equals 'by-name
+  (condition-case nil
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (arena-exhaustion 'by-name)))
+(assert-equals '(arena-exhaustion)
+  (condition-case e
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (error e)))
+(assert-equals 'caught-t
+  (condition-case nil
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (t 'caught-t)))
+
+;; The uncaught tail, in the same shape `conditions.fe` uses: an unrelated
+;; condition name is still not a match, so this one reaches the host and
+;; `tests/exhaustion.fe.err` records what an uncaught exhaustion looks like on
+;; its way out of the standalone interpreter.
+(print "exhaustion: all caught cases passed")
+(condition-case nil
+  (let ((l nil)) (while t (setq l (cons 1 l))))
+  (arith-error 'not-this-handler))

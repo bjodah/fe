@@ -377,6 +377,13 @@ static void CollectGarbage(FeContext* ctx) {
   FeMark(ctx, ctx->native_identity);
   FeMark(ctx, ctx->pending_throw_tag);
   FeMark(ctx, ctx->pending_throw_value);
+  // The pre-built exhaustion conditions (09B). They are reachable from
+  // `condition` only while one of them is the completion in flight, and the
+  // whole point of them is to be raiseable from a state where nothing can be
+  // allocated -- so they are roots in their own right, for the life of the
+  // context.
+  FeMark(ctx, ctx->arena_exhaustion_condition);
+  FeMark(ctx, ctx->evaluation_stack_exhaustion_condition);
   FeMarkEvaluatorRoots(ctx);
   MarkCleanupRoots(ctx);
 
@@ -2270,6 +2277,15 @@ static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
                        IntegerRound(ctx, trunc(RoundingQuotient(ctx, x, d))));
 }
 
+// The names of the two conditions `FeOpenContext` pre-builds so that arena
+// exhaustion and GC-root-stack overflow can be *signalled* from a state that
+// cannot allocate (sub-plan 09B). Both are already rows of `fe_eval.c`'s
+// static hierarchy with `error` as their parent, which is what makes
+// `(condition-case e BIG (error ...))` catch them.
+static const char ArenaExhaustionName[] = "arena-exhaustion";
+static const char EvaluationStackExhaustionName[] =
+    "evaluation-stack-exhaustion";
+
 static size_t GetCoreObjectCount(void) {
   static const char* math_names[] = {
       "sin", "cos", "tan",   "asin",    "acos",  "atan",     "expt", "sqrt",
@@ -2285,6 +2301,12 @@ static size_t GetCoreObjectCount(void) {
   for (size_t i = 0; i < COUNT(math_names); i++) {
     count += 1 + GetSymbolObjectCount(math_names[i]);
   }
+  // The two pre-built exhaustion conditions: each is an interned symbol plus
+  // the one pair that makes it a condition object (09B). Counting them here
+  // is what keeps `FeMinimumArenaSize()` honest -- a context opened at the
+  // minimum must still be able to build them.
+  count += 1 + GetSymbolObjectCount(ArenaExhaustionName);
+  count += 1 + GetSymbolObjectCount(EvaluationStackExhaustionName);
   return count;
 }
 
@@ -2389,6 +2411,8 @@ static FeContext* OpenContext(void* arena, size_t size) {
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;
   ctx->root_list = &nil;
+  ctx->arena_exhaustion_condition = &nil;
+  ctx->evaluation_stack_exhaustion_condition = &nil;
 
   // Populate the free_list:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -2401,6 +2425,16 @@ static FeContext* OpenContext(void* arena, size_t size) {
   // Initialize the objects:
   ctx->t = FeMakeSymbol(ctx, "t");
   CDR(SymbolBindingCell(ctx->t)) = ctx->t;
+
+  // The two conditions the raise paths signal when they cannot allocate
+  // (09B). Built here, once, while the arena is still empty, and reachable
+  // from `CollectGarbage` for the rest of the context's life. `FeMakeSymbol`
+  // roots its result on the symbol list before `FeCons` can collect, so no
+  // explicit GC-stack save is needed around either pair.
+  ctx->arena_exhaustion_condition =
+      FeCons(ctx, FeMakeSymbol(ctx, ArenaExhaustionName), &nil);
+  ctx->evaluation_stack_exhaustion_condition =
+      FeCons(ctx, FeMakeSymbol(ctx, EvaluationStackExhaustionName), &nil);
 
   // Register the built-in primitives (sub-plan 04D's cut): every callable --
   // the primitives, the `fn` alias, and the math natives registered through
@@ -2453,6 +2487,8 @@ void FeCloseContext(FeContext* ctx) {
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;
   ctx->root_list = &nil;
+  ctx->arena_exhaustion_condition = &nil;
+  ctx->evaluation_stack_exhaustion_condition = &nil;
   ctx->frame_stack_index = 0;
   CollectGarbage(ctx);
 }

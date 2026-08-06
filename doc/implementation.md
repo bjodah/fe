@@ -305,17 +305,50 @@ in flight may spend the rest -- `AllocateFrame`'s `CleanupFrameReserve`,
 applied to the other bounded stack -- because reporting the overflow is
 itself a rooting operation: the raise protects the condition object across
 the cleanup drain, and a cleanup entry evaluates Lisp of its own. The raise
-carries the nil condition object arena exhaustion uses rather than building
-one, since building one would allocate, which would push, which is what
-overflowed.
+carries `(evaluation-stack-exhaustion)`, one of the two condition objects
+`FeOpenContext()` builds once and roots for the context's life (below),
+rather than building one here: building one would allocate, which would
+push, which is what overflowed.
 
-"Arena exhausted", where a raise gives up on building a condition object at
-all, means `ArenaCanAllocate()`: the free list is empty *and* a collection
-cannot refill it. A bare free-list test answers a narrower question -- whether
-the list happens to be empty at this instant, which is true after any
-allocation that took the last cell -- and reading that as exhaustion silently
-replaced the condition object with nil, which matches no handler, so a
-`condition-case` could be escaped by its own body under memory pressure.
+"Arena exhausted", where a raise cannot build a condition object, means
+`ArenaCanAllocate()`: the free list is empty *and* a collection cannot refill
+it. A bare free-list test answers a narrower question -- whether the list
+happens to be empty at this instant, which is true after any allocation that
+took the last cell -- and reading that as exhaustion silently replaced the
+condition object with nil, which matches no handler, so a `condition-case`
+could be escaped by its own body under memory pressure.
+
+That last sentence was the *whole* story until sub-plan 09B, for genuine
+exhaustion as well as for the boundary case: a raise that could not allocate
+set `ctx->condition` to nil, and `ConditionMatches()` -- which has to walk a
+pair to reach the hierarchy -- then answered false for every named handler,
+so `(condition-case e BIG (error ...))` did not catch an out-of-memory and
+only `(t ...)` did. `FeOpenContext()` now interns and conses two condition
+objects before any host code runs, and `CollectGarbage()` marks both as roots
+in their own right for the context's whole life, so signalling either
+allocates nothing:
+
+- `ctx->arena_exhaustion_condition` is `(arena-exhaustion)`. `FeHandleError()`
+  signals it when `ArenaCanAllocate()` is false, and `RaiseCondition()` falls
+  back to it when a *named* Error condition cannot be built for the same
+  reason -- the handler learns that the raise became an exhaustion rather
+  than learning nothing. The message text is the raise's own either way.
+- `ctx->evaluation_stack_exhaustion_condition` is
+  `(evaluation-stack-exhaustion)`, signalled by `RaiseGcStackOverflow()`.
+
+Both names are already rows of the static hierarchy with `error` as their
+parent, so `(error ...)` catches either and each is catchable by name.
+`RaiseCondition()`'s fallback is deliberately restricted to
+`FeCompletionError`: a quit raised from an exhausted arena keeps the nil
+object, because `ConditionMatches()` decides a quit by completion kind before
+it looks at the object's shape and an interrupt is not an exhaustion.
+`GetCoreObjectCount()` counts both names and both pairs, so
+`FeMinimumArenaSize()` still describes an arena that can open.
+
+Both objects are shared, and `setcar`/`setcdr` on a caught condition would
+therefore change what every later exhaustion signals. Both carry nil data for
+exactly that reason, and nothing in fe writes to them after
+`FeOpenContext()`.
 
 Sub-plan 03F replaced the single, transitional `max_depth`/
 `evaluation_depth` pair -- itself a stand-in the frame machine's own

@@ -91,6 +91,24 @@ because the shape before it was unreachable by construction:
   cleanup that itself throws -- the 06D policy where the second throw
   replaces the first and has to be re-issued in the enclosing context.
 
+Phase 9's exhaustion arm (09B) is the same story once more. Every other form
+this grammar builds is bounded by `MaxDepth`, and the harness restores the GC
+stack between forms, so all of it is collectable again by the next one:
+measured before the arm existed, **zero** of 1500 random inputs of 16..128
+bytes reached an arena exhaustion at all, and neither did a 4096-byte one, so
+the catchable-exhaustion path 09B built was unreachable from this lane.
+`BuildExhaustionForm` emits
+`(condition-case VAR (let ((l nil)) (while t (setq l (cons 1 l)))) (SPEC ...))`
+with SPEC drawn from `t`, `error`, `arena-exhaustion` and `arith-error` -- the
+three handlers that must match and one that must not, so the escape path is
+generated too. With the arm, 178 of the same 1500 inputs reach it.
+
+That loop is the one place this grammar admits a `while` (see the exclusion
+list below), and the exclusion is not weakened by it: the loop terminates only
+by exhausting the arena, and the arena is a fixed `FuzzArenaSize`, so the
+iteration count is bounded by the object slots it holds -- a few hundred, not
+by the input -- with the harness's own `MaxEvaluationSteps` behind that.
+
 The atom pool includes `t`, `:fuzz-keyword`, and the ordinary `:` symbol;
 binding targets independently choose `t`, `nil`, the keyword, or `x`. This
 makes protected `setq`/`let` writes and keyword self-evaluation reachable
@@ -98,8 +116,9 @@ rather than relying on incidental symbol generation.
 
 `fuzz/seeds/eval` carries one hand-built seed per group
 (`error-format-directives`, `condition-case-handlers`,
-`catch-throw-cleanup-gap`, `strict-arity`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints
-the forms each one builds.
+`catch-throw-cleanup-gap`, `strict-arity`,
+`exhaustion-under-condition-case`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED`
+prints the forms each one builds.
 
 The evaluator grammar's lambda builder covers zero, one, and two required
 parameters, `&optional`, `&rest`, malformed declarations, and deliberate
@@ -107,7 +126,8 @@ under/over-arity calls. Macro calls use the same builder and receive raw forms.
 
 The grammar deliberately excludes:
 
-- `while` and recursive or self-referential definitions
+- `while` and recursive or self-referential definitions, except the one
+  arena-bounded loop the exhaustion arm above needs
 - output primitives
 - I/O, process, regex, time, and other extensions
 - cyclic pair construction

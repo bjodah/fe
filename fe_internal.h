@@ -629,6 +629,24 @@ struct FeContext {
   jmp_buf* condition_catch;
   FeObject* evaluator_error_trace;
   FeObject* condition;
+  // The two conditions a raise must be able to signal when there is no
+  // memory left to build one (sub-plan 09B). Both are ordinary
+  // `(NAME . nil)` pairs, interned and consed once by `FeOpenContext` and
+  // rooted for the context's whole life by `CollectGarbage`, so raising
+  // either allocates nothing at all. Before they existed the raise paths set
+  // `condition` to nil instead, and `ConditionMatches` -- which has to walk a
+  // pair to reach the hierarchy -- then answered false for every *named*
+  // handler, so `(condition-case e BIG (error ...))` could not catch an
+  // out-of-memory and only `(t ...)` could. `GetCoreObjectCount` counts both
+  // names and both pairs, so the minimum arena still holds them.
+  //
+  // They are shared objects: a handler that mutates the condition it caught
+  // with `setcar`/`setcdr` would change what every later exhaustion signals.
+  // Both carry nil data for exactly that reason -- there is nothing in them
+  // worth reading destructively -- and nothing in fe writes to them after
+  // `FeOpenContext`.
+  FeObject* arena_exhaustion_condition;
+  FeObject* evaluation_stack_exhaustion_condition;
   // The native currently being invoked.  This is published only for the
   // duration of the callback so the generic argument helpers can construct
   // the same wrong-number condition as Lisp calls.

@@ -687,8 +687,32 @@ error carries the condition that was signalled (`(wrong-type-argument listp
 5)`, `(error "boom")`); a quit -- including a real host interrupt, not only
 `(signal 'quit nil)` -- carries `(quit)`; a budget completion carries `nil`,
 because fe's own ceilings are not Emacs conditions and have nothing to
-construct. It is also `nil` when arena exhaustion prevents constructing an
-object at all.
+construct.
+
+An exhausted arena cannot build a condition object, and used to answer `nil`
+for that reason -- which meant `condition-case` could match it with `(t ...)`
+and nothing else. Since sub-plan 09B it carries one of two objects
+`FeOpenContext()` interns and conses once, before any host code runs, and
+roots for the context's whole life:
+
+- `(arena-exhaustion)` -- the object list is full and a collection cannot
+  refill it. Every `out of memory` raise carries it, and so does any *named*
+  condition that could not be built because the arena was full: the handler
+  is told truthfully that the raise became an exhaustion rather than being
+  handed nothing. The raise's own message is unchanged.
+- `(evaluation-stack-exhaustion)` -- the GC root stack overflowed.
+
+Both are `error`'s children in the condition hierarchy, so
+`(condition-case e BIG (error ...))` catches either, and each is also
+catchable by its own name. A quit raised while the arena is full still
+carries `nil`: `condition-case` decides a quit by completion *kind* before it
+looks at the object, so `(quit ...)` catches it either way, and an interrupt
+is not an exhaustion.
+
+Both objects are shared. A handler that mutates the condition it caught with
+`setcar`/`setcdr` would change what every later exhaustion signals; both
+carry `nil` data for exactly that reason, and nothing in fe writes to them
+after `FeOpenContext()`.
 
 The object lives in the context (`ctx->condition`) and is a GC root for as
 long as it is there, so it stays valid across the cleanup drain, inside
@@ -807,8 +831,9 @@ error: expected pair, got integer
 character. A quit is the one special case: it prints `condition: quit` and
 no `data:` line, because a quit is a completion kind a host may need to tell
 apart from every condition, not a condition to be inspected. A completion
-with no condition object at all (budget exhaustion, arena exhaustion) prints
-neither line, only `error:`. The variable changes nothing else: the `error:`
+with no condition object at all (budget exhaustion) prints
+neither line, only `error:`; an arena or GC-stack exhaustion prints its own
+`condition:`/`data:` lines like any other error. The variable changes nothing else: the `error:`
 line and the call trace are printed exactly as they are without it, and the
 exit status is unchanged.
 

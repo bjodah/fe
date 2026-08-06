@@ -628,12 +628,16 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 // sites means. The signature is pinned (kg calls it directly); the four wall
 // sites that need a different kind call `RaiseCompletion` directly instead.
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
-  // An exhausted arena cannot allocate its own condition object. Preserve the
-  // existing non-allocating fatal path instead of recursing through MakeObject.
-  // `ArenaCanAllocate` -- not a bare free-list test -- is what "exhausted"
-  // means here; see its own comment.
+  // An exhausted arena cannot allocate its own condition object, so it
+  // signals the one `FeOpenContext` already built: `(arena-exhaustion)`,
+  // whose parent in the hierarchy is `error`. Before 09B this set the field
+  // to nil, and `ConditionMatches` -- which must walk a pair to reach the
+  // hierarchy -- then answered false for every named handler, so an
+  // out-of-memory escaped `(condition-case e BIG (error ...))` entirely and
+  // only `(t ...)` could contain it. `ArenaCanAllocate` -- not a bare
+  // free-list test -- is what "exhausted" means here; see its own comment.
   if (!ArenaCanAllocate(ctx)) {
-    ctx->condition = &nil;
+    ctx->condition = ctx->arena_exhaustion_condition;
     RaiseCompletion(ctx, FeCompletionError, msg);
   }
   RaiseCondition(ctx, FeCompletionError, "error",
@@ -675,13 +679,18 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 // (`FeHandleError` -> `FeMakeString` -> `MakeObject` -> `FePushGC`) re-enters
 // the overflow check and recurses until the C stack dies -- which is how a
 // 1500-argument `&rest` call reached SIGSEGV instead of an error. This
-// completion therefore carries the nil condition object arena exhaustion
-// already uses, and nothing on the way to `RaiseCompletion` allocates.
+// completion therefore carries `(evaluation-stack-exhaustion)`, the second
+// condition `FeOpenContext` interned and consed once (09B) precisely so that
+// signalling it costs no allocation at all; nothing on the way to
+// `RaiseCompletion` allocates either. Before 09B the field was set to nil
+// here, which made the overflow catchable only by `(t ...)`.
 //
 // `GcStackReserve` slots stay free for the unwind itself, so the raise below
-// can root what it needs. Past them there is nothing left to unwind with and
-// no way to widen a fixed array, so that case takes the same host-notify-and-
-// abort exit `RaiseCompletion` takes when no barrier can catch at all.
+// can root what it needs -- and it now needs strictly less than it did, since
+// the condition object it signals already exists. Past the reserve there is
+// nothing left to unwind with and no way to widen a fixed array, so that case
+// takes the same host-notify-and-abort exit `RaiseCompletion` takes when no
+// barrier can catch at all.
 [[noreturn]] void RaiseGcStackOverflow(FeContext* ctx) {
   if (ctx->gc_stack_index >= GcStackSize) {
     if (ctx->error_fn != nullptr) {
@@ -689,7 +698,7 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     }
     abort();
   }
-  ctx->condition = &nil;
+  ctx->condition = ctx->evaluation_stack_exhaustion_condition;
   RaiseCompletion(ctx, FeCompletionError, "GC stack overflow");
 }
 
@@ -758,9 +767,18 @@ FeObject* FeGetCondition(const FeContext* ctx) {
   // and nothing else refers to, and both `ArenaCanAllocate`'s collection and
   // `FeMakeSymbol`'s can sweep it otherwise.
   FePushGC(ctx, data);
+  // Under memory pressure a *named* condition cannot be built, so an Error
+  // falls back to the pre-built `(arena-exhaustion)` rather than to nil
+  // (09B): the handler then sees a truthful "this became an out-of-memory"
+  // instead of an object it cannot match on at all. Quit keeps the nil
+  // object, and needs no fallback: `ConditionMatches` decides quit by
+  // completion *kind* before it ever looks at the object's shape, so
+  // `(quit ...)` still catches, and claiming an interrupt was an arena
+  // exhaustion would be the one thing worse than saying nothing.
   if (!ArenaCanAllocate(ctx)) {
     FeRestoreGC(ctx, gc);
-    ctx->condition = &nil;
+    ctx->condition =
+        kind == FeCompletionError ? ctx->arena_exhaustion_condition : &nil;
     RaiseCompletion(ctx, kind, message);
   }
   FeObject* symbol = FeMakeSymbol(ctx, name);

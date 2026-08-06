@@ -427,6 +427,59 @@ static FeObject* BuildErrorForm(FeContext* ctx,
   return form;
 }
 
+// Sub-plan 09B's exhaustion-under-condition-case shape. Nothing else in this
+// grammar can fill the arena: every generated form is bounded by `MaxDepth`,
+// and the harness restores the GC stack between forms, so all of it is
+// collectable again by the next one. Measured before this builder existed:
+// **zero** arena-exhaustion raises across 600 random inputs of 32..512 bytes
+// and one 4096-byte input -- the whole catchable-exhaustion path 09B builds
+// was structurally unreachable from this lane, which is what 09A Decision 6
+// asks this slice to fix.
+//
+// The body is `(let ((l nil)) (while t (setq l (cons 1 l))))`: a loop that
+// terminates only by exhausting the arena. That does not breach the
+// harness's standing "no nontermination" bound, because the arena is a fixed
+// `FuzzArenaSize` and the loop is therefore bounded by the number of object
+// slots it holds -- a few hundred iterations, not by the input -- and by the
+// harness's own `MaxEvaluationSteps` besides. The chain is a `let`-local, so
+// it is unreachable the moment a handler frame is entered and a handler that
+// allocates can still run.
+//
+// The handler spec is drawn from all four interesting answers: `t` (the only
+// one that caught before 09B), `error` (the parent in the hierarchy),
+// `arena-exhaustion` (the name itself), and `arith-error` (a name that must
+// still *not* match, so the escape path is generated too).
+static FeObject* BuildExhaustionForm(FeContext* ctx,
+                                     FuzzInput* input,
+                                     unsigned depth) {
+  static const char* const specs[] = {"t", "error", "arena-exhaustion",
+                                      "arith-error"};
+  FeObject* variable = &nil;
+  if (FuzzTakeByte(input) % 2 == 0) {
+    variable = FeMakeSymbol(ctx, "e");
+  }
+  FeObject* bindings =
+      FeMakeList(ctx,
+                 (FeObject*[]){FeMakeList(
+                     ctx, (FeObject*[]){FeMakeSymbol(ctx, "l"), &nil}, 2)},
+                 1);
+  FeObject* push = MakeBinary(
+      ctx, "setq", FeMakeSymbol(ctx, "l"),
+      MakeBinary(ctx, "cons", FeMakeInteger(ctx, 1), FeMakeSymbol(ctx, "l")));
+  FeObject* loop = MakeBinary(ctx, "while", FeMakeSymbol(ctx, "t"), push);
+  FeObject* body = MakeBinary(ctx, "let", bindings, loop);
+  FeObject* handler = FeMakeList(
+      ctx,
+      (FeObject*[]){
+          FeMakeSymbol(
+              ctx,
+              specs[FuzzTakeByte(input) % (sizeof(specs) / sizeof(specs[0]))]),
+          BuildExpression(ctx, input, depth + 1)},
+      2);
+  return MakeForm(ctx, "condition-case", (FeObject*[]){variable, body, handler},
+                  3);
+}
+
 static FeObject* BuildListForm(FeContext* ctx,
                                FuzzInput* input,
                                unsigned depth) {
@@ -721,7 +774,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 34) {
+  switch (FuzzTakeByte(input) % 35) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -807,6 +860,8 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildErrorForm(ctx, input, depth);
     case 32:
       return BuildArityForm(ctx, input, depth);
+    case 33:
+      return BuildExhaustionForm(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

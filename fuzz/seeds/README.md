@@ -51,6 +51,17 @@ the defect rather than its hash, and say in the commit which fix it pins.
   steers the grammar somewhere else entirely, and every counter stayed at
   zero.
 
+- `exhaustion-under-condition-case` -- Phase 9 sub-plan 09B's seed, in the
+  same tradition: 25 bytes that walk `BuildExhaustionForm`'s four handler
+  specs in order. Replaying it without mutation raises arena exhaustion five
+  times and catches it four -- once by `t`, once by `error`, twice by
+  `arena-exhaustion` (with and without a bound handler variable) -- and the
+  fifth form's `arith-error` handler deliberately does not match, so the
+  escape path runs too. Before the builder existed the shape was
+  unreachable: zero of 1500 random inputs raised an exhaustion at all
+  (see `doc/FUZZING.md`), which is why this is a reachability seed rather
+  than a crash reproduction.
+
   Not every bucket has a dedicated seed: the empty and single-required
   parameter lists are what the pre-Phase-7 grammar generated unconditionally
   and are reached by any mutation, so they get no file of their own.

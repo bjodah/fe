@@ -1158,6 +1158,28 @@ native re-entry wall -- are a *budget* completion, which nothing catches,
 set. An error raised by a handler bypasses that active handler and searches
 an enclosing one.
 
+Running out of memory is an ordinary condition too. An exhausted object
+arena raises `arena-exhaustion` and an overflowed GC root stack raises
+`evaluation-stack-exhaustion`; both name `error` as their parent, so
+`(condition-case e BIG (error 'caught))` catches either, and each is
+catchable by its own name. Both objects are built once when the context
+opens and carry no data, because raising one has to cost no allocation at
+all -- that is the whole point of them. A *named* condition that cannot be
+built because the arena is full arrives as `arena-exhaustion` rather than as
+nothing, so a handler is told what the raise became; the message text stays
+the raise's own. A quit raised from an exhausted arena still has no
+condition object, and still needs a `quit` or `t` handler, because a quit is
+matched by completion kind rather than by the object. Whether a handler can
+*do* anything under exhaustion is a separate question: a handler that
+allocates while the data that filled the arena is still reachable -- a
+global, say -- raises again, and that second raise unwinds to the next
+enclosing handler, or to the host when there is none.
+
+```clojure
+fe > (condition-case e (let ((l nil)) (while t (setq l (cons 1 l)))) (error e))
+(arena-exhaustion)
+```
+
 A condition does not cross an evaluator run that a host native started.
 When a native re-enters evaluation (`FeCall`, `FeEvaluate*`), the nested run
 has its own frame-stack floor, and neither `condition-case` handlers nor

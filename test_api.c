@@ -6573,18 +6573,18 @@ static ErrorState pressure_state;
   FeHandleError(ctx, "deliberate failure while full");
 }
 
-[[noreturn]] static FeObject* FillThenQuit(FeContext* ctx,
-                                           // cppcheck-suppress
-                                           // constParameterCallback
-                                           FeObject* arguments) {
+[[noreturn]] static FeObject* FillThenQuit(
+    FeContext* ctx,
+    // cppcheck-suppress constParameterCallback
+    FeObject* arguments) {
   FeRequireNoArguments(ctx, arguments);
   FillArenaThenRaise(ctx, true);
 }
 
-[[noreturn]] static FeObject* FillThenError(FeContext* ctx,
-                                            // cppcheck-suppress
-                                            // constParameterCallback
-                                            FeObject* arguments) {
+[[noreturn]] static FeObject* FillThenError(
+    FeContext* ctx,
+    // cppcheck-suppress constParameterCallback
+    FeObject* arguments) {
   FeRequireNoArguments(ctx, arguments);
   FillArenaThenRaise(ctx, false);
 }
@@ -6657,54 +6657,74 @@ static bool ExpectPressureEscapes(const char* source,
 }
 
 static bool TestExhaustionCatchability(void) {
-  // Row 1 -- arena objects. `(t ...)` catches; `(error ...)` and the name
-  // the hierarchy already reserves for it do not.
+  // Row 1 -- arena objects. `(error ...)` catches, the hierarchy's own name
+  // for it catches, and `(t ...)` still catches.
   CHECK(ExpectPressureCaught(
       "(condition-case nil " LocalExhaustion " (t (quote caught)))", "caught"));
-  CHECK(ExpectPressureEscapes("(condition-case nil " LocalExhaustion
-                              " (error (quote caught)))",
-                              "pressure.fe:1: out of memory"));
-  CHECK(ExpectPressureEscapes("(condition-case nil " LocalExhaustion
-                              " (arena-exhaustion (quote caught)))",
-                              "pressure.fe:1: out of memory"));
-  // The degraded object itself, read from Lisp: the handler variable is
-  // bound to nil, not to `(arena-exhaustion)`.
+  CHECK(ExpectPressureCaught("(condition-case nil " LocalExhaustion
+                             " (error (quote caught)))",
+                             "caught"));
+  CHECK(ExpectPressureCaught("(condition-case nil " LocalExhaustion
+                             " (arena-exhaustion (quote caught)))",
+                             "caught"));
+  // The condition object itself, read from Lisp.
   CHECK(ExpectPressureCaught("(condition-case e " LocalExhaustion " (t e))",
-                             "nil"));
+                             "(arena-exhaustion)"));
+  CHECK(ExpectPressureCaught("(condition-case e " LocalExhaustion " (error e))",
+                             "(arena-exhaustion)"));
+  // A handler naming an *unrelated* condition still does not match, so the
+  // fallback is a real hierarchy answer and not a "catch everything" switch.
+  CHECK(ExpectPressureEscapes("(condition-case nil " LocalExhaustion
+                              " (arith-error (quote caught)))",
+                              "pressure.fe:1: out of memory"));
 
   // Row 2 -- the GC root stack, provoked directly from a native so the
-  // overflow report is what is under test. Same answer: `(t ...)` only, and
-  // the object is nil.
+  // overflow report is what is under test. Its own name is the second
+  // pre-built condition, and `error` -- its parent -- catches it too.
   CHECK(
       ExpectPressureCaught("(condition-case nil (push-roots) (t (quote "
                            "caught)))",
                            "caught"));
+  CHECK(ExpectPressureCaught(
+      "(condition-case nil (push-roots) (error (quote caught)))", "caught"));
+  CHECK(
+      ExpectPressureCaught("(condition-case nil (push-roots) "
+                           "(evaluation-stack-exhaustion (quote caught)))",
+                           "caught"));
+  CHECK(ExpectPressureCaught("(condition-case e (push-roots) (t e))",
+                             "(evaluation-stack-exhaustion)"));
   CHECK(ExpectPressureEscapes(
-      "(condition-case nil (push-roots) (error (quote caught)))",
+      "(condition-case nil (push-roots) (arena-exhaustion (quote caught)))",
       "pressure.fe:1: GC stack overflow"));
-  CHECK(ExpectPressureCaught("(condition-case e (push-roots) (t e))", "nil"));
 
-  // Row 3 -- a *named* raise that happens while the arena is full. Its own
-  // name is lost with the object, so it too is `(t ...)`-only today.
+  // Row 3 -- a *named* raise that happens while the arena is full. The name
+  // it asked for cannot be built, so it arrives as the out-of-memory
+  // fallback rather than as nil: `(error ...)` catches it and the object
+  // says truthfully what it became. The message is still the raise's own.
   CHECK(ExpectPressureCaught("(condition-case e (fill-then-error) (t e))",
-                             "nil"));
+                             "(arena-exhaustion)"));
+  CHECK(ExpectPressureCaught("(condition-case e (fill-then-error) (error e))",
+                             "(arena-exhaustion)"));
   CHECK(ExpectPressureEscapes(
-      "(condition-case nil (fill-then-error) (error (quote caught)))",
+      "(condition-case nil (fill-then-error) (arith-error (quote caught)))",
       "pressure.fe:1: deliberate failure while full"));
 
   // Row 8 -- quit, raised from the same exhausted state. `ConditionMatches`
   // decides quit by completion kind *before* it looks at the object, so this
-  // one is catchable by name even though the object is nil. 09B must not
-  // change either half of that.
+  // one is catchable by name while the object stays nil: an interrupt is not
+  // an arena exhaustion and must not claim to be one. 09B changed neither
+  // half.
   CHECK(ExpectPressureCaught(
       "(condition-case nil (fill-then-quit) (quit (quote caught)))", "caught"));
   CHECK(ExpectPressureCaught("(condition-case e (fill-then-quit) (quit e))",
                              "nil"));
+  CHECK(ExpectPressureEscapes(
+      "(condition-case nil (fill-then-quit) (error (quote caught)))",
+      "pressure.fe:1: evaluation cancelled"));
 
   // Rows 4-6 -- Budget. `FindConditionHandler` refuses the whole search for
   // a Budget completion, so not even `(t ...)` catches a step-limit wall
-  // (09A Decision 2: this is pinned so 09B asserts it rather than "fixes"
-  // it).
+  // (09A Decision 2: pinned so 09B asserts it rather than "fixes" it).
   static TestArena budget_storage;
   FeContext* const budget_context =
       FeOpenContext(budget_storage.bytes, sizeof(budget_storage.bytes));
@@ -6720,6 +6740,110 @@ static bool TestExhaustionCatchability(void) {
       sizeof(budget_source) - 1, &tiny_budget,
       "budget.fe:1: evaluation step limit exceeded"));
   FeCloseContext(budget_context);
+  return true;
+}
+
+// Sub-plan 09B's handler re-entry rule, pinned rather than invented: when the
+// handler that caught an exhaustion hits one of its own, the second raise is
+// an ordinary nested raise. It unwinds to the *next* enclosing handler, and
+// to the host when none remains.
+//
+// The body here builds its chain into a **global**, which is the whole
+// difference from `TestExhaustionCatchability`: the chain stays rooted while
+// the handler runs, so a handler that allocates cannot succeed. A handler
+// that allocates nothing still runs to completion in that state, which is
+// what the outer clause below relies on.
+#define GlobalExhaustion "(do (setq g nil) (while t (setq g (cons 1 g))))"
+
+static bool TestExhaustionHandlerReentry(void) {
+  // One handler, and it allocates: nothing is left to catch the re-raise, so
+  // it reaches the host -- as an out-of-memory, since that is what the
+  // handler hit.
+  CHECK(ExpectPressureEscapes("(condition-case nil " GlobalExhaustion
+                              " (error (cons 1 2)))",
+                              "pressure.fe:1: out of memory"));
+  // Two handlers: the inner one re-raises out of itself and the outer one
+  // takes it. The outer handler allocates nothing, which is exactly why it
+  // can still run against a permanently full arena.
+  CHECK(ExpectPressureCaught(
+      "(condition-case nil (condition-case nil " GlobalExhaustion
+      " (error (cons 1 2))) "
+      "(error (quote outer)))",
+      "outer"));
+  // The outer handler matches it *by name*, which is how this pins that the
+  // re-raise carries the pre-built exhaustion condition rather than a nil
+  // object: a nil object would fall through `arena-exhaustion` and escape.
+  // (The condition cannot be read into a variable here -- binding one is an
+  // allocation, and this arena is pinned by design -- so the name is the
+  // observation.)
+  CHECK(ExpectPressureCaught(
+      "(condition-case nil (condition-case nil " GlobalExhaustion
+      " (error (cons 1 2))) "
+      "(arena-exhaustion (quote outer-by-name)))",
+      "outer-by-name"));
+  // A handler that allocates nothing catches at the first level even with the
+  // arena permanently pinned: the re-entry rule is about handlers that
+  // allocate, not about handlers as such.
+  CHECK(ExpectPressureCaught("(condition-case nil " GlobalExhaustion
+                             " (error (quote caught)))",
+                             "caught"));
+  return true;
+}
+
+// Sub-plan 09B: a context that has *caught* an exhaustion is a working
+// context. The pre-built conditions are permanent roots, so signalling one
+// costs no slots; the run's own data is reclaimed by the collection the
+// unwind makes possible; and the same context catches the next exhaustion
+// exactly as it caught the first.
+static bool TestCaughtExhaustionSession(void) {
+  static TestArena storage;
+  const size_t size = FeMinimumArenaSize() + PressureArenaExtra;
+  CHECK(size <= sizeof(storage.bytes));
+  FeContext* const context = FeOpenContext(storage.bytes, size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context, .expected_message = "unused"};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  const FeArenaStats before = FeGetArenaStats(context);
+  CHECK(before.allocation_failures == 0);
+
+  static const char caught[] =
+      "(condition-case e " LocalExhaustion " (error e))";
+  for (size_t round = 0; round < 3; round++) {
+    CHECK(IsRendered(
+        context,
+        FeEvaluateString(context, "session.fe", caught, sizeof(caught) - 1),
+        "(arena-exhaustion)"));
+    const FeArenaStats after = FeGetArenaStats(context);
+    // Every round really did exhaust the arena, and every round handed the
+    // slots back: the chain was unreachable the moment the handler ran.
+    CHECK(after.allocation_failures == round + 1);
+    CHECK(after.total_slots == before.total_slots);
+    CHECK(after.free_slots > 0);
+    // Ordinary evaluation in between, including one that forces collections
+    // of its own.
+    CHECK(IsRendered(
+        context,
+        FeEvaluateString(context, "after.fe", "(+ 1 2)", sizeof("(+ 1 2)") - 1),
+        "3"));
+    static const char collecting[] =
+        "(let ((n 0)) (while (< n 2000) (setq n (+ n 1)) (cons n n)) n)";
+    CHECK(IsRendered(context,
+                     FeEvaluateString(context, "collect.fe", collecting,
+                                      sizeof(collecting) - 1),
+                     "2000"));
+    CHECK(FeGetArenaStats(context).collection_count > after.collection_count);
+  }
+
+  // The pre-built conditions survived every one of those collections: they
+  // are roots in `CollectGarbage`, not objects that happened to be reachable
+  // from the last raise.
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "final.fe", caught, sizeof(caught) - 1),
+      "(arena-exhaustion)"));
+  FeCloseContext(context);
   return true;
 }
 
@@ -6748,6 +6872,8 @@ int main(void) {
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
                  TestLongArgumentLists() && TestNativeArityRecord() &&
                  TestExhaustionCatchability() &&
+                 TestExhaustionHandlerReentry() &&
+                 TestCaughtExhaustionSession() &&
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion()

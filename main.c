@@ -19,6 +19,18 @@
 
 static const char* InterpreterVersion = "1.0";
 
+// The escaping-raise trace is one line per live evaluator frame, and a raise
+// from deep inside a recursion has as many frames as the arena could hold: an
+// out-of-memory in a self-recursive `cons` chain printed 316 lines on a
+// 300 KB arena and grows with arena size, burying the message the reader
+// actually needs underneath its own stack. The printer already refuses to
+// walk deeper than 256 levels into a single object for the same reason; this
+// applies the same number across the trace, and reports how many frames it
+// dropped rather than stopping in silence. Sub-plan 09A Decision 5: the
+// 1024-byte per-form truncation `FeToString` below applies stays as it is --
+// that is truncation, not failure.
+enum { MaxPrintedTraceFrames = 256 };
+
 static jmp_buf top_level;
 
 static FeContext* live_context;
@@ -45,6 +57,25 @@ static void ReleaseInterpreter(void) {
   }
 }
 
+// The escaping raise's call trace, innermost frame first, bounded per
+// `MaxPrintedTraceFrames`.
+static void PrintErrorTrace(FeContext* ctx, FeObject* stack) {
+  for (size_t printed = 0; !FeIsNil(stack); printed++) {
+    if (printed == MaxPrintedTraceFrames) {
+      size_t remaining = 0;
+      for (FeObject* rest = stack; !FeIsNil(rest); rest = FeCdr(ctx, rest)) {
+        remaining++;
+      }
+      fprintf(stderr, "... %zu more frames\n", remaining);
+      return;
+    }
+    char fn[1024];
+    (void)FeToString(ctx, FeCar(ctx, stack), fn, sizeof(fn));
+    fprintf(stderr, "%s\n", fn);
+    stack = FeCdr(ctx, stack);
+  }
+}
+
 static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
   if (getenv("FE_STRUCTURED_ERRORS") != nullptr &&
       FeGetCompletion(ctx) == FeCompletionQuit) {
@@ -63,12 +94,7 @@ static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
     fprintf(stderr, "data: %s\n", data);
   }
   fprintf(stderr, "error: %s\n", message);
-  while (!FeIsNil(stack)) {
-    char fn[1024];
-    (void)FeToString(ctx, FeCar(ctx, stack), fn, sizeof(fn));
-    fprintf(stderr, "%s\n", fn);
-    stack = FeCdr(ctx, stack);
-  }
+  PrintErrorTrace(ctx, stack);
 }
 
 [[noreturn]] static void HandleError(FeContext* ctx,
