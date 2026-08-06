@@ -1017,9 +1017,14 @@ searches an enclosing one. `signal` evaluates its two operands and raises
 `(condition . data)`. Unknown condition symbols raise `(error "Invalid error
 symbol" SYMBOL)`. `error` formats its message at signal time and raises an
 `error` condition. Its supported directives are `%%`, `%d` (integer), `%s`
-(a string without quotes, any other object printed), and `%S` (an object
-printed with Fe's normal object writer); width, precision, flags, and every
-other directive are rejected with an `error` condition.
+and `%S`. `%s` is Emacs' `princ` and `%S` its `prin1`, and the difference
+runs all the way down: `(error "%s" "str")` is `(error "str")` while
+`(error "%S" "str")` is `(error "\"str\"")`, and inside a list too --
+`(error "%s" (list 1 "x"))` is `(error "(1 x)")` against `%S`'s
+`(error "(1 \"x\")")`. Width, precision, flags, and every other directive
+are rejected with an `error` condition. Arguments the format string never
+consumes are ignored, and `(error)` with no format string at all is
+`wrong-number-of-arguments`.
 
 ```clojure
 fe > (condition-case e (signal 'arith-error '(7)) (error e))

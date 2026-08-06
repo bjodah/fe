@@ -673,6 +673,14 @@ typedef struct Writer {
   void* udata;
   size_t bytes;
   size_t nodes;
+  // The `qt` every *nested* object is written with. The public writers pin
+  // it at 1, which is Fe's historical shape: the top-level `qt` argument
+  // decides whether a bare string is quoted, and everything inside a list is
+  // quoted regardless. `RenderObject` is the one entry point that propagates
+  // its own `qt` all the way down instead, which is what Emacs' `princ`
+  // (`qt` 0 everywhere) and `prin1` (`qt` 1 everywhere) are, and what
+  // `error`'s `%s` and `%S` directives need.
+  int nested_qt;
   bool complete;
 } Writer;
 
@@ -775,12 +783,12 @@ static void WriteElements(Writer* w, FeObject* obj, size_t depth) {
   FeObject* slow = obj;
   bool move_slow = false;
   while (true) {
-    WriteObject(w, CAR(obj), 1, depth);
+    WriteObject(w, CAR(obj), w->nested_qt, depth);
     FeObject* next = CDR(obj);
     if (FeGetType(next) != FeTPair) {
       if (!FeIsNil(next)) {
         EmitString(w, " . ");
-        WriteObject(w, next, 1, depth);
+        WriteObject(w, next, w->nested_qt, depth);
       }
       return;
     }
@@ -816,7 +824,7 @@ static void WriteClosure(Writer* w, FeObject* obj, size_t depth) {
     WriteElements(w, obj, depth);
   } else if (!FeIsNil(obj)) {
     EmitString(w, " . ");
-    WriteObject(w, obj, 1, depth);
+    WriteObject(w, obj, w->nested_qt, depth);
   }
   Emit(w, ')');
 }
@@ -865,7 +873,7 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
         FeObject* const form = CDR(obj);
         if (FeGetType(form) == FeTPair && FeIsNil(CDR(form))) {
           EmitString(w, "#'");
-          WriteObject(w, CAR(form), 1, depth - 1);
+          WriteObject(w, CAR(form), w->nested_qt, depth - 1);
           break;
         }
       }
@@ -921,6 +929,7 @@ bool FeWriteWithOptions(FeContext* ctx,
       .udata = udata,
       .bytes = OptionOr(o->max_bytes, DefaultWriteMaxBytes),
       .nodes = OptionOr(o->max_nodes, DefaultWriteMaxNodes),
+      .nested_qt = 1,
       .complete = true,
   };
   WriteObject(&w, obj, qt, OptionOr(o->max_depth, DefaultWriteMaxDepth));
@@ -952,6 +961,34 @@ static void WriteBuffer(FeContext*, void* udata, char chr) {
     *s->string++ = chr;
     s->size--;
   }
+}
+
+// `FeToString`, but applying `qt` at every level instead of only the top:
+// `qt` 0 is Emacs' `princ` (no string quoting anywhere) and 1 its `prin1`
+// (quoting everywhere), the two renderings `error`'s `%s` and `%S`
+// directives are defined as. Internal, because the public `FeToString` and
+// `FeWrite` keep the shape their callers already depend on.
+size_t RenderObject(FeContext* ctx,
+                    FeObject* obj,
+                    char* dst,
+                    size_t size,
+                    int qt) {
+  if (size == 0) {
+    return 0;
+  }
+  SizedString s = {.string = dst, .size = size - 1};
+  Writer w = {
+      .ctx = ctx,
+      .fn = WriteBuffer,
+      .udata = &s,
+      .bytes = size,
+      .nodes = DefaultWriteMaxNodes,
+      .nested_qt = qt,
+      .complete = true,
+  };
+  WriteObject(&w, obj, qt, DefaultWriteMaxDepth);
+  *s.string = '\0';
+  return size - s.size - 1;
 }
 
 size_t FeToString(FeContext* ctx, FeObject* obj, char* dst, size_t size) {

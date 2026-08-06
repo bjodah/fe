@@ -676,6 +676,12 @@ bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options);
 void EndEvaluationControl(FeContext* ctx, bool owns_control);
 void EvaluationStep(FeContext* ctx);
 void FeMarkEvaluatorRoots(FeContext* ctx);
+// Defined in fe.c beside `FeToString`; see its comment there.
+size_t RenderObject(FeContext* ctx,
+                    FeObject* obj,
+                    char* dst,
+                    size_t size,
+                    int qt);
 [[noreturn]] void RaiseCondition(FeContext* ctx,
                                  FeCompletion kind,
                                  const char* name,

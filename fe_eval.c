@@ -2702,6 +2702,11 @@ static void FormatErrorMessage(FeContext* ctx,
         Format(rendered, sizeof(rendered), "%lld",
                (long long)FeToInteger(ctx, value));
         break;
+      // `%s` is Emacs' `princ` and `%S` its `prin1`, and the difference is
+      // *recursive*: `(error "%s" (list 1 "x"))` is `(1 x)` and
+      // `(error "%S" "str")` is `"str"`, both measured against 31.0.90.
+      // `FeToString` splits the difference (unquoted at the top, quoted
+      // inside), which is neither of them.
       case 's':
         if (FeGetType(value) == FeTString) {
           const size_t value_length = FeStringByteLength(ctx, value);
@@ -2711,18 +2716,19 @@ static void FormatErrorMessage(FeContext* ctx,
           (void)FeCopyStringBytes(ctx, value, rendered, value_length);
           rendered[value_length] = '\0';
         } else {
-          (void)FeToString(ctx, value, rendered, sizeof(rendered));
+          (void)RenderObject(ctx, value, rendered, sizeof(rendered), 0);
         }
         break;
       case 'S':
-        (void)FeToString(ctx, value, rendered, sizeof(rendered));
+        (void)RenderObject(ctx, value, rendered, sizeof(rendered), 1);
         break;
       default:
         FeHandleError(ctx, "unsupported error format directive");
     }
     AppendErrorText(ctx, message, &length, rendered);
   }
-  FeRequireNoArguments(ctx, values);
+  // Arguments the format string never consumed are ignored, not an error:
+  // `(error "x" 1 2)` is `(error "x")` in Emacs.
   message[length] = '\0';
 }
 
@@ -2815,8 +2821,12 @@ static bool ResumeEvalList(FeContext* ctx,
           symbol, CAR(CDR(list)), symbol);
     }
     case PError: {
+      // `(error)` with no format string at all is
+      // `(wrong-number-of-arguments error 0)` in Emacs, not an `error`
+      // condition whose message is the word "error".
       if (FeIsNil(list)) {
-        RaiseCondition(ctx, FeCompletionError, "error", &nil, "error");
+        RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments",
+                       &nil, "wrong-number-of-arguments");
       }
       const FeObject* const format = CAR(list);
       if (FeGetType(format) != FeTString) {

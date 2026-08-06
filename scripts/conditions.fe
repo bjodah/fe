@@ -24,8 +24,21 @@
   (condition-case nil
     (condition-case nil (error "body") (error (error "handler")))
     (error 'outer)))
-(assert-equals '(error "% text text")
+;; `%s` is Emacs' `princ` and `%S` its `prin1`, all the way down: a string
+;; keeps its quotes under `%S` and loses them under `%s`, at the top level
+;; and inside a list alike (measured against Emacs 31.0.90).
+(assert-equals '(error "% text \"text\"")
   (condition-case e (error "%% %s %S" "text" "text") (error e)))
+(assert-equals '(error "(1 x)")
+  (condition-case e (error "%s" (list 1 "x")) (error e)))
+(assert-equals '(error "(1 \"x\")")
+  (condition-case e (error "%S" (list 1 "x")) (error e)))
+;; Arguments the format string never consumes are ignored.
+(assert-equals '(error "x")
+  (condition-case e (error "x" 1 2) (error e)))
+;; `(error)` with no format string is a wrong-number-of-arguments condition.
+(assert-equals 'wna
+  (condition-case nil (error) (wrong-number-of-arguments 'wna)))
 (assert-equals 'format-error
   (condition-case nil (error "%") (error 'format-error)))
 (assert-equals 'format-error
