@@ -17,12 +17,16 @@ enum {
 static FeObject* BuildExpression(FeContext* ctx,
                                  FuzzInput* input,
                                  unsigned depth);
+static FeObject* BuildBindingForm(FeContext* ctx,
+                                  FuzzInput* input,
+                                  unsigned depth,
+                                  const char* binding);
 
 static FeObject* MakeForm(FeContext* ctx,
                           const char* name,
                           FeObject** arguments,
                           size_t count) {
-  FeObject* items[4];
+  FeObject* items[8];
   items[0] = FeMakeSymbol(ctx, name);
   for (size_t i = 0; i < count; i++) {
     items[i + 1] = arguments[i];
@@ -222,24 +226,176 @@ static FeObject* BuildCatchThrow(FeContext* ctx,
     thrown_tag = MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "tg0"));
   }
   FeObject* value = BuildExpression(ctx, input, depth + 1);
-  FeObject* thrown = MakeBinary(ctx, "throw", thrown_tag, value);
-  return MakeForm(ctx, "catch", (FeObject*[]){tag, thrown}, 2);
+  FeObject* body = MakeBinary(ctx, "throw", thrown_tag, value);
+  // What sits between the throw and its catch is the whole point of the
+  // mid-stack unwind, and the original grammar put nothing there: the throw
+  // was the catch's only body form, so the drain always had zero frames and
+  // zero cleanup entries to walk. These five arms make the gap real -- plain
+  // evaluator frames the unwind must discard, an `unwind-protect` whose
+  // cleanup must run on the way past, and (the 06D policy) a cleanup that
+  // itself throws, which has to be re-issued in the enclosing context
+  // because its catch lies below the cleanup run's own floor.
+  switch (FuzzTakeByte(input) % 5) {
+    case 0:
+      break;
+    case 1:
+      // Argument frames above the throw.
+      body = MakeForm(
+          ctx, "list",
+          (FeObject*[]){BuildExpression(ctx, input, depth + 1), body}, 2);
+      break;
+    case 2:
+      // A branch frame, so the throw unwinds out of a partially evaluated
+      // special form rather than out of a call.
+      body = MakeForm(ctx, "if",
+                      (FeObject*[]){FeMakeSymbol(ctx, "t"), body,
+                                    BuildExpression(ctx, input, depth + 1)},
+                      3);
+      break;
+    case 3:
+      // One cleanup entry between the throw and the catch.
+      body = MakeBinary(ctx, "unwind-protect", body,
+                        BuildBindingForm(ctx, input, depth + 1, "setq"));
+      break;
+    default: {
+      // A cleanup that throws while a throw is already unwinding: the
+      // second one replaces the first if its tag matches a live catch, and
+      // is `no-catch` otherwise.
+      FeObject* cleanup = MakeBinary(ctx, "throw", thrown_tag,
+                                     BuildExpression(ctx, input, depth + 1));
+      body = MakeBinary(ctx, "unwind-protect", body, cleanup);
+      break;
+    }
+  }
+  return MakeForm(ctx, "catch", (FeObject*[]){tag, body}, 2);
+}
+
+// The condition symbols the grammar signals and handles, all registered in
+// fe's static hierarchy so `signal` accepts them; `quit` is here because it
+// is the one condition an `(error ...)` handler must *not* catch, and
+// `no-catch` because the catch/throw arm produces it for real.
+static const char* const condition_names[] = {
+    "arith-error", "wrong-type-argument", "void-variable", "no-catch", "quit",
+    "error",
+};
+
+static const char* PickCondition(FuzzInput* input) {
+  return condition_names[FuzzTakeByte(input) % (sizeof(condition_names) /
+                                                sizeof(condition_names[0]))];
+}
+
+// One handler clause: `(SPEC BODY)`, where SPEC is a symbol, a two-element
+// list of symbols, or `t`. The original grammar emitted one shape only --
+// `(arith-error BODY)` against a signalled `arith-error` -- so the matcher
+// was fuzzed on its always-true path alone: the list arm, the `t` arm, the
+// hierarchy walk and the unmatched re-signal were all unreachable by
+// construction.
+static FeObject* BuildHandlerClause(FeContext* ctx,
+                                    FuzzInput* input,
+                                    unsigned depth) {
+  FeObject* spec;
+  switch (FuzzTakeByte(input) % 4) {
+    case 0:
+      spec = FeMakeSymbol(ctx, "t");
+      break;
+    case 1:
+      spec = FeMakeList(ctx,
+                        (FeObject*[]){FeMakeSymbol(ctx, PickCondition(input)),
+                                      FeMakeSymbol(ctx, PickCondition(input))},
+                        2);
+      break;
+    default:
+      spec = FeMakeSymbol(ctx, PickCondition(input));
+      break;
+  }
+  return FeMakeList(
+      ctx, (FeObject*[]){spec, BuildExpression(ctx, input, depth + 1)}, 2);
 }
 
 static FeObject* BuildConditionCase(FeContext* ctx,
                                     FuzzInput* input,
                                     unsigned depth) {
-  FeObject* condition =
-      MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "arith-error"));
-  FeObject* data = MakeUnary(ctx, "quote", &nil);
-  FeObject* signal = MakeBinary(ctx, "signal", condition, data);
-  FeObject* handler =
-      FeMakeList(ctx,
-                 (FeObject*[]){FeMakeSymbol(ctx, "arith-error"),
-                               BuildExpression(ctx, input, depth + 1)},
-                 2);
-  return MakeForm(ctx, "condition-case", (FeObject*[]){&nil, signal, handler},
-                  3);
+  // The variable: nil (no binding) or `e`, which the handler body may then
+  // read, so the binding and the condition object it holds are live.
+  FeObject* variable = &nil;
+  if (FuzzTakeByte(input) % 2 == 0) {
+    variable = FeMakeSymbol(ctx, "e");
+  }
+  // The body: a `signal` of an arbitrary registered condition (so the
+  // handler often does *not* match and the condition re-signals past this
+  // frame), or an arbitrary expression, which reaches the real raise sites.
+  FeObject* body;
+  if (FuzzTakeByte(input) % 2 == 0) {
+    body = MakeBinary(
+        ctx, "signal",
+        MakeUnary(ctx, "quote", FeMakeSymbol(ctx, PickCondition(input))),
+        MakeUnary(ctx, "quote", BuildDatum(ctx, input, depth + 1)));
+  } else {
+    body = BuildExpression(ctx, input, depth + 1);
+  }
+  FeObject* first = BuildHandlerClause(ctx, input, depth);
+  if (FuzzTakeByte(input) % 2 == 0) {
+    return MakeForm(ctx, "condition-case", (FeObject*[]){variable, body, first},
+                    3);
+  }
+  // Two clauses: handler selection is textual order among matching specs,
+  // and a clause that never matches has to be walked past.
+  FeObject* second = BuildHandlerClause(ctx, input, depth);
+  return MakeForm(ctx, "condition-case",
+                  (FeObject*[]){variable, body, first, second}, 4);
+}
+
+// `error`'s format-string parser and its fixed 1024-byte message buffer had
+// no fuzz coverage at all, which made them the most attack-shaped new code
+// in the phase with the least evidence behind it. The format strings are a
+// fixed set rather than fuzzer bytes on purpose: the interesting states are
+// the directive parser's, not the alphabet's -- every supported directive,
+// the escape, a directive at the very end of the string with no letter
+// after it, an unsupported letter, and a run of directives long enough that
+// the rendered result presses the message buffer. Arguments are ordinary
+// expressions, so a directive can meet any value the rest of the grammar can
+// build, including one whose rendering is far longer than the directive.
+static const char* const error_formats[] = {
+    "",
+    "plain",
+    "%%",
+    "%s",
+    "%S",
+    "%d",
+    "%s %S %d",
+    "%",
+    "%x",
+    "a%sb%Sc%dd",
+    "%s%s%s%s%s%s%s%s",
+    "%S%S%S%S%S%S%S%S",
+};
+
+static FeObject* BuildErrorForm(FeContext* ctx,
+                                FuzzInput* input,
+                                unsigned depth) {
+  FeObject* format = FeMakeString(
+      ctx, error_formats[FuzzTakeByte(input) %
+                         (sizeof(error_formats) / sizeof(error_formats[0]))]);
+  FeObject* arguments[4];
+  arguments[0] = format;
+  const size_t count = FuzzTakeByte(input) % 3;
+  for (size_t i = 0; i < count; i++) {
+    arguments[i + 1] = BuildExpression(ctx, input, depth + 1);
+  }
+  FeObject* form = MakeForm(ctx, "error", arguments, count + 1);
+  if (FuzzTakeByte(input) % 2 == 0) {
+    // Caught, so the run continues past it and the same input keeps
+    // building forms; the handler also exercises the condition object the
+    // formatted message was stored in.
+    FeObject* handler =
+        FeMakeList(ctx,
+                   (FeObject*[]){FeMakeSymbol(ctx, "error"),
+                                 BuildExpression(ctx, input, depth + 1)},
+                   2);
+    return MakeForm(ctx, "condition-case",
+                    (FeObject*[]){FeMakeSymbol(ctx, "e"), form, handler}, 3);
+  }
+  return form;
 }
 
 static FeObject* BuildListForm(FeContext* ctx,
@@ -492,7 +648,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 32) {
+  switch (FuzzTakeByte(input) % 33) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -574,6 +730,8 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildCatchThrow(ctx, input, depth);
     case 30:
       return BuildConditionCase(ctx, input, depth);
+    case 31:
+      return BuildErrorForm(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

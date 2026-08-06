@@ -34,6 +34,38 @@ integer/double mix and (05D) the `eq`/`eql` identity pair. Macro bodies expand
 to a list, to `nil`, to `t`, to a symbol, or to a number, so the target reaches
 the atom expansions as well as the structural one.
 
+Phase 6's non-local exits are steered the same way, and each arm exists
+because the shape before it was unreachable by construction:
+
+- `error` had no coverage at all, which made its directive parser and its
+  fixed 1024-byte message buffer the most attack-shaped code in the phase
+  with the least evidence behind it. The format strings are a fixed table
+  rather than fuzzer bytes, on purpose: the interesting states are the
+  parser's, not the alphabet's -- every supported directive, the escape, a
+  `%` at the very end with no letter after it, an unsupported letter, and a
+  run of directives long enough to press the buffer. Arguments are ordinary
+  expressions, so a directive can meet any value the grammar can build.
+- `condition-case` used to emit one always-matching shape: `nil` variable,
+  a bare `arith-error` spec, and a body that signalled exactly
+  `arith-error`. The matcher was therefore fuzzed on its true branch alone.
+  The variable is now `nil` or a bound `e`, the spec is a symbol, a
+  two-symbol list, or `t`, there may be a second clause, and the body
+  signals any registered condition (including `quit`, which an `error`
+  handler must *not* catch) or is a full expression -- so the hierarchy
+  walk, the textual-order selection and the unmatched re-signal are all
+  reachable.
+- `catch`/`throw` used to put the throw directly in the catch's body, so
+  the mid-stack unwind always had zero frames and zero cleanup entries to
+  walk. Five arms now fill that gap: nothing, argument frames, a branch
+  frame, an `unwind-protect` whose cleanup must run on the way past, and a
+  cleanup that itself throws -- the 06D policy where the second throw
+  replaces the first and has to be re-issued in the enclosing context.
+
+`fuzz/seeds/eval` carries one hand-built seed per group
+(`error-format-directives`, `condition-case-handlers`,
+`catch-throw-cleanup-gap`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints
+the forms each one builds.
+
 The grammar deliberately excludes:
 
 - `while` and recursive or self-referential definitions
