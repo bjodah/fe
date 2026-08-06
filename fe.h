@@ -87,11 +87,23 @@
 // parameter lists raise `invalid-function` instead of prose errors. Fe's
 // dotted-tail and bare-symbol rest spellings are unaffected.
 // See doc/language.md and doc/c-api.md.
-// Version 7 protects `t`, `nil` and keyword symbols from value or function
-// assignment, and makes keywords self-evaluating. Programs that assigned `t`
-// now signal `setting-constant`; `:foo` no longer needs quoting.
-// Fe 8.0 adds strict reader diagnostics, UTF-8 character literals, radix
-// integers, and source-line diagnostics without changing either macro.
+// Version 7 is the whole of Phase 8's language contract, both of its slices
+// under one bump. It protects `t`, `nil` and keyword symbols (including `:`
+// itself) from value or function assignment and makes keywords
+// self-evaluating: programs that assigned `t` now signal `setting-constant`,
+// and `:foo` no longer needs quoting. It also makes the reader strict, and
+// that half breaks programs too -- a previously readable one may no longer
+// read at all. A bare `#` and every `#`-initial symbol are gone (Fe's own
+// scripts/concatenate.fe named a function `#`); `[...]`, `#:`, `#s(...)` and
+// symbol escapes such as `a\ b` are named read errors rather than symbols;
+// an unknown string escape errors where the backslash used to be dropped;
+// and a string escape must land in one byte, so `"\0"` and `"\400"` error
+// where they used to truncate the string silently. What it adds is the
+// measured Emacs subset: UTF-8 character literals with the `\C-`/`\M-`
+// modifiers, greedy `\x`, radix integers, and one-based source lines on
+// evaluated-file and evaluated-string diagnostics. One language bump for the
+// phase, covering the reader break as well as the constants: 8.0's release
+// version moves, both compatibility macros stay where 08B put them.
 #define FE_LANGUAGE_VERSION 7
 
 extern const char* FeVersion;

@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-escaped-space",
+	"setup": [],
+	"expr": "\"\\ \"",
+	"note": "A backslash followed by a space in a string body."
+}

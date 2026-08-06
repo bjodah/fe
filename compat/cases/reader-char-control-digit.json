@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-digit",
+	"setup": [],
+	"expr": "?\\C-1",
+	"note": "Same rule over a digit."
+}

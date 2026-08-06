@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-hex-leading-zeros",
+	"setup": [],
+	"expr": "?\\x0041",
+	"note": "Leading zeros are digits like any other, so this is four digits and not `41`."
+}

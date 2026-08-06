@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-octal",
+	"setup": [],
+	"expr": "?\\101",
+	"note": "An octal escape in a character literal."
+}

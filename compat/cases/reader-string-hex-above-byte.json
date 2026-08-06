@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-hex-above-byte",
+	"setup": [],
+	"expr": "(aref \"\\x41f\" 0)",
+	"note": "A hexadecimal escape above 255 in a string body, read back as its character code."
+}

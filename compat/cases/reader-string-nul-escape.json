@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-nul-escape",
+	"setup": [],
+	"expr": "\"\\0a\"",
+	"note": "An escape decoding to NUL inside a string body."
+}

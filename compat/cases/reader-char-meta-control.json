@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-meta-control",
+	"setup": [],
+	"expr": "?\\M-\\C-a",
+	"note": "Meta and control together."
+}

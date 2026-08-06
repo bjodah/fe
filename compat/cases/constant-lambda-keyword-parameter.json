@@ -1,0 +1,6 @@
+{
+	"id": "constant-lambda-keyword-parameter",
+	"setup": [],
+	"expr": "((lambda (:kw) :kw) 5)",
+	"note": "A lambda parameter named by a keyword."
+}

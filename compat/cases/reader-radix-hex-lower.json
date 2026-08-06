@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-hex-lower",
+	"setup": [],
+	"expr": "#xff",
+	"note": "Lowercase hexadecimal digits."
+}

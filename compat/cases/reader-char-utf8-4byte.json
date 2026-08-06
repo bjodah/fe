@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-utf8-4byte",
+	"setup": [],
+	"expr": "?𐀀",
+	"note": "A four-byte UTF-8 sequence in a character literal."
+}

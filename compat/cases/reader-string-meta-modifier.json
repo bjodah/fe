@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-meta-modifier",
+	"setup": [],
+	"expr": "\"\\M-a\"",
+	"note": "The meta modifier inside a string body."
+}

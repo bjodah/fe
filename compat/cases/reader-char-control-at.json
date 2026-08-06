@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-at",
+	"setup": [],
+	"expr": "?\\C-@",
+	"note": "Control-@ is NUL."
+}

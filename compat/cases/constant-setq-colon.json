@@ -1,0 +1,6 @@
+{
+	"id": "constant-setq-colon",
+	"setup": [],
+	"expr": "(setq : 1)",
+	"note": "`:` is a constant, so assigning it raises setting-constant with the symbol as data."
+}

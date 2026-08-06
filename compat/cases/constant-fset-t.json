@@ -1,0 +1,6 @@
+{
+	"id": "constant-fset-t",
+	"setup": [],
+	"expr": "(fset 't (lambda () 1))",
+	"note": "A function-cell write to `t`."
+}

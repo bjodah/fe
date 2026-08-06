@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-super-modifier",
+	"setup": [],
+	"expr": "?\\s-a",
+	"note": "Emacs' super modifier, whose prefix is also the space escape."
+}

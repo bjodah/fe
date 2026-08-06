@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-unknown-escape",
+	"setup": [],
+	"expr": "\"\\q\"",
+	"note": "An escape spelling that is in no escape table."
+}

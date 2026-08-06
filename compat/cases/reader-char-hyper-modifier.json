@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-hyper-modifier",
+	"setup": [],
+	"expr": "?\\H-a",
+	"note": "Emacs' hyper modifier."
+}

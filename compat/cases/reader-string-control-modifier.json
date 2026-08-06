@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-control-modifier",
+	"setup": [],
+	"expr": "\"\\C-a\"",
+	"note": "A character modifier inside a string body."
+}

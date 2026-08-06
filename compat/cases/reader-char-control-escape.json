@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-escape",
+	"setup": [],
+	"expr": "?\\C-\\n",
+	"note": "The control rule applies to the value of a nested escape."
+}

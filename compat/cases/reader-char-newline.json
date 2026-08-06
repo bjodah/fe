@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-newline",
+	"setup": [],
+	"expr": "?\\n",
+	"note": "The newline escape in a character literal."
+}

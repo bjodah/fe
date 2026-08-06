@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-raw-byte",
+	"setup": [],
+	"expr": "\"\\377\"",
+	"note": "An octal escape at the top of the byte range."
+}

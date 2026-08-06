@@ -1,0 +1,6 @@
+{
+	"id": "reader-record-literal",
+	"setup": [],
+	"expr": "#s(a 1)",
+	"note": "Emacs' record read syntax."
+}

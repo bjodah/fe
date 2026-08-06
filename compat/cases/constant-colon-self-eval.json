@@ -1,0 +1,6 @@
+{
+	"id": "constant-colon-self-eval",
+	"setup": [],
+	"expr": ":",
+	"note": "`:` self-evaluates like every other keyword."
+}

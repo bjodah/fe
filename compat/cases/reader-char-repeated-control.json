@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-repeated-control",
+	"setup": [],
+	"expr": "?\\C-\\C-a",
+	"note": "The control modifier applied twice."
+}

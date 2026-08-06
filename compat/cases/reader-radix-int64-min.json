@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-int64-min",
+	"setup": [],
+	"expr": "#x-8000000000000000",
+	"note": "INT64_MIN, the one magnitude that only fits once the sign is applied."
+}

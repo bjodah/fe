@@ -587,7 +587,7 @@
     "reader-char-literal-unsupported"
    ],
    "kg_test": null,
-   "rationale": "08C implements UTF-8 character literals and the measured modifier forms; the former unsupported-reader rationale is retired.",
+   "rationale": "08C implements UTF-8 character literals (two-, three- and four-byte sequences) and the `\\C-`/`\\M-` modifier chain, so the former unsupported-reader rationale is retired. The accepted set is compared by reader-character-literals and reader-character-modifiers; the modifier spellings Fe still does not implement are named rejections recorded under reader-character-modifiers-unsupported, not silent misreads.",
    "source_name": null
   },
   {
@@ -1852,40 +1852,314 @@
    "rationale": "07B narrows print to one or more values, but Fe deliberately retains its multi-value stdout policy rather than Emacs buffer output. primitive-print-two keeps its `(let ((standard-output ...)) ...)` sink: Emacs' `print` writes to `standard-output`, so without the sink the oracle shim emits a second line and utils/run-emacs-oracle.py fails for the whole corpus. Fe's answer to that expression is a `let` arity error rather than a print result, which is part of the same recorded divergence -- Fe's print arity itself is pinned by primitive-print-zero, primitive-print-three and scripts/arity.fe.",
    "source_name": null
   },
-   {
-    "id": "phase7-primitive-signal-arity",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-signal-one"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
-    "source_name": null
-   },
-   {
-    "id": "constants-and-keywords",
-    "category": "bindings",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "constant-setq-t",
-     "constant-setq-nil",
-     "constant-setq-keyword",
-     "constant-lambda-t-shadow",
-     "constant-keyword-self-eval",
-     "constant-keywordp",
-     "constant-keywordp-symbol",
-      "constant-keyword-eq",
-      "constant-let-bindings-t",
-      "constant-let-bindings-nil"
-    ],
-    "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
-    "rationale": "Phase 8, 08B Table C: constants are protected, keywords self-evaluate and keywordp reports the intern-time property.",
-    "source_name": "keywordp"
-    }
-  ]
+  {
+   "id": "phase7-primitive-signal-arity",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-signal-one"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
+   "source_name": null
+  },
+  {
+   "id": "constants-and-keywords",
+   "category": "bindings",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "constant-setq-t",
+    "constant-setq-nil",
+    "constant-setq-keyword",
+    "constant-lambda-t-shadow",
+    "constant-keyword-self-eval",
+    "constant-keywordp",
+    "constant-keywordp-symbol",
+    "constant-keyword-eq",
+    "constant-let-bindings-t",
+    "constant-let-bindings-nil",
+    "constant-keywordp-colon",
+    "constant-colon-self-eval",
+    "constant-setq-colon"
+   ],
+   "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
+   "rationale": "Phase 8, 08B Table C: constants are protected, keywords self-evaluate and keywordp reports the intern-time property. `:` on its own is a keyword too, measured against Emacs 31.0.90 rather than guessed -- 08B's own text asked for the measurement and the implementation assumed a minimum name length of 2, leaving `:` an ordinary unbound symbol.",
+   "source_name": "keywordp"
+  },
+  {
+   "id": "reader-character-literals",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-char-plain",
+    "reader-char-newline",
+    "reader-char-tab",
+    "reader-char-escape",
+    "reader-char-backslash",
+    "reader-char-space",
+    "reader-char-delete",
+    "reader-char-utf8-2byte",
+    "reader-char-utf8-3byte",
+    "reader-char-utf8-4byte",
+    "reader-char-octal",
+    "reader-char-octal-nul",
+    "reader-char-hex",
+    "reader-char-hex-greedy",
+    "reader-char-hex-leading-zeros"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "reader-character-modifiers",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-char-control",
+    "reader-char-control-upper",
+    "reader-char-control-at",
+    "reader-char-control-underscore",
+    "reader-char-control-question",
+    "reader-char-control-percent",
+    "reader-char-control-digit",
+    "reader-char-control-non-ascii",
+    "reader-char-control-escape",
+    "reader-char-meta",
+    "reader-char-meta-control",
+    "reader-char-control-meta"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "reader-radix-integers",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-radix-hex",
+    "reader-radix-hex-lower",
+    "reader-radix-octal",
+    "reader-radix-binary",
+    "reader-radix-negative",
+    "reader-radix-int64-max",
+    "reader-radix-int64-min"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "reader-string-escapes",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-string-hex",
+    "reader-string-hex-leading-zeros",
+    "reader-string-octal",
+    "reader-string-space"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "reader-string-byte-limit",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-string-nul-escape",
+    "reader-string-octal-above-byte",
+    "reader-string-hex-above-byte"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "A Fe string is a byte string, built by appending at strlen, so a string escape has to land in one byte. Emacs holds a NUL like any other character and reads `\"\\400\"` as U+0100 and `\"\\x41f\"` as U+041F. Before 08C's repair Fe wrote (char)value into that buffer: a decoded NUL was a silent no-op that shifted the rest of the string down -- `(list \"\\0a\" \"a\\0b\")` answered `(\"a\" \"ab\")` -- and anything above 255 was truncated into the same hole. All three are named read errors now, which is the rule the reader already applied to a literal NUL byte in the source text. Matching Emacs instead would need a length-carrying string representation and a multibyte character type, neither of which is funded here. The character-literal forms of the same escapes agree with Emacs exactly (reader-char-hex-greedy, reader-char-octal-nul); it is only a string body that is byte-limited."
+  },
+  {
+   "id": "reader-string-strict-escapes",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-string-unknown-escape",
+    "reader-string-escaped-space",
+    "reader-string-named-character",
+    "reader-string-line-continuation"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Emacs is permissive about escapes it does not know: `\"\\q\"` is \"q\" (the backslash is dropped), `\"\\ \"` and a backslash-newline continuation both produce nothing, and `\"\\N{U+41}\"` is \"A\". Fe rejects each by name. 08C's plan text made this choice explicitly -- an init-file dialect earns strictness -- and the reason is that silently dropping a backslash is how a typo in a regexp or a path becomes a wrong string instead of a diagnostic. `\\N{...}` additionally needs a Unicode name table Fe does not carry; its `U+` form is a second spelling of `\\x`."
+  },
+  {
+   "id": "reader-string-modifiers",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-string-control-modifier",
+    "reader-string-meta-modifier"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Emacs allows character modifiers inside a string body, folding `\"\\C-a\"` to the control character and storing `\"\\M-a\"` as the raw byte 0341 in a unibyte string. Fe implements the modifier chain for `?` literals only: in a string body `\\C` reaches the escape table, finds nothing and errors. Half-implementing it would be worse than not -- the 2^27 meta bit has no byte representation, so accepting `\"\\M-a\"` would mean inventing Emacs' unibyte high-bit convention on top of a byte string that already cannot hold a character above 255 (reader-string-byte-limit)."
+  },
+  {
+   "id": "reader-string-raw-byte-printing",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-string-raw-byte"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Both sides read `\"\\377\"` to the same thing -- the byte 0377 -- and disagree only in the printed record: Emacs' prin1 re-escapes it as \\377 for a unibyte string, Fe's writer emits the raw byte. A printer divergence, the same class as writer-bounded-output, recorded here because the octal escape family is otherwise compared as supported."
+  },
+  {
+   "id": "reader-hash-syntax-unsupported",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-uninterned-symbol",
+    "reader-vector-literal",
+    "reader-record-literal",
+    "reader-empty-symbol"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Emacs reads `#:sym` as an uninterned symbol, `[1 2 3]` as a vector, `#s(a 1)` as a record, and `##` as the symbol with the empty name. Fe has none of those types and one symbol table, so each is a named read error. Before 08C they were silent misreads: `#:sym` read as the symbol `#:sym`, which is eq to nothing Emacs would produce, and `[1 2 3]` read as bracket-bearing symbols. This is also where the release's one reader break lives: a bare `#` and `#`-initial symbols are no longer readable, which forced Fe's own scripts/concatenate.fe to stop naming a function `#`."
+  },
+  {
+   "id": "reader-symbol-escape",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-symbol-escape"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Emacs reads `a\\ b` as the single symbol whose name is \"a b\", so `(cdr '(a\\ b))` is nil. Fe has no symbol-escape syntax, which 08C's plan recorded as deliberately out of scope. The reject arm had to be widened to earn that record: a backslash was refused only at a token's first character, so `(a\\ b)` read as the two symbols `a` and `b` and cdr answered `(b)` -- a silent misread of the list's length, not of a symbol name."
+  },
+  {
+   "id": "reader-character-range",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-char-hex-above-unicode"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Emacs' character range runs past U+10FFFF into its own raw-byte space, so `?\\x110000` is 1114112 there. Fe bounds a character at U+10FFFF, the same bound its UTF-8 decoder already enforces, and names the overflow. The band between the two bounds is the whole divergence; below it, `\\x` agrees with Emacs digit for digit (reader-char-hex-greedy)."
+  },
+  {
+   "id": "reader-radix-overflow",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-radix-overflow-double"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "The radix sibling of num-int64-literal-overflow (05A Decision 3). Modern Emacs answers the bignum 18446744073709551615; Fe has no bignums and falls back to the nearest double, 1.8446744073709552e+19, through the same overflow flag the decimal reader uses. The two ends of the int64 window itself are compared as supported (reader-radix-int64-max, reader-radix-int64-min)."
+  },
+  {
+   "id": "reader-character-modifiers-unsupported",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-char-caret-modifier",
+    "reader-char-super-modifier",
+    "reader-char-shift-modifier",
+    "reader-char-alt-modifier",
+    "reader-char-hyper-modifier",
+    "reader-char-repeated-control"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Fe implements the two character modifiers 08A measured, `\\C-` and `\\M-`, and rejects the rest by name: `?\\^a` (Emacs' second spelling of control, 1), `?\\s-a` (super, 8388705), `?\\S-a` (shift, 33554529), `?\\A-a` (alt, 4194401), `?\\H-a` (hyper, 16777313), and a repeated modifier such as `?\\C-\\C-a` (67108865, the rule applied twice). The super row is the one that earns this entry: `\\s` is also the space escape, so `'(?\\s-a)` used to read as `(32 -a)` -- one form silently read as two -- rather than being rejected. A repeated modifier in an init file is far likelier a typo than an intent, so that one stays refused on purpose rather than for lack of funding."
+  },
+  {
+   "id": "reader-character-delimiter",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-char-undelimited"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "source_name": null,
+   "rationale": "Both sides reject `?ab`, and the verdict is the point: Emacs raises invalid-read-syntax, Fe raises its own named read error, so the condition symbols disagree while the answer does not. Recorded because before 08C's repair Fe read it as the character 97 followed by the symbol `b` -- one form read as two, the same defect class as `?\\1a` and `?\\s-a`."
+  },
+  {
+   "id": "constant-function-cell-writes",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "constant-fset-t",
+    "constant-defalias-keyword"
+   ],
+   "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
+   "source_name": "fset",
+   "rationale": "Emacs protects only the value cell: `(fset 't ...)` succeeds and returns the function, and `(defalias ':k 'car)` answers `:k`. Fe extends setting-constant to function-cell writes for nil, t and keywords, which 08B's Table C chose deliberately. Nothing is lost: `t` and a keyword never resolve as a call head in Fe's evaluator, so a function stored there would be unreachable, and leaving the write to succeed would mean a symbol that is constant in one namespace and not the other."
+  },
+  {
+   "id": "constant-lambda-parameters",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "constant-lambda-nil-parameter",
+    "constant-lambda-keyword-parameter"
+   ],
+   "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
+   "source_name": null,
+   "rationale": "Measured, all three rows, where 08B measured only one. Emacs binds every constant name in a lambda list and the body really sees the argument: `((lambda (t) t) 5)`, `((lambda (nil) nil) 5)` and `((lambda (:kw) :kw) 5)` are all 5. Fe follows Emacs for `t` (constant-lambda-t-shadow, supported) and refuses the other two. `nil` is not a name any Fe environment can hold -- it is a distinct object, not a symbol in the table -- so matching Emacs there would mean changing what nil is. A keyword's self-evaluation is an intern-time property of the symbol, and letting a lexical binding shadow it would make `:kw` mean different things in different scopes, which is the thing 08B set out to stop."
+  },
+  {
+   "id": "constant-let-lambda-list-keyword",
+   "category": "bindings",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "constant-let-lambda-list-keyword"
+   ],
+   "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
+   "source_name": null,
+   "rationale": "Emacs binds a variable literally named `&rest` and answers 2. Fe compiles a `let` binding list into a lambda application, so the name reached the parameter decoder and bound one value to a rest parameter: `(let ((&rest 1) (x 2)) x)` answered `(1 2)`. Fe now raises `lambda-list keyword in let binding` rather than meaning something else. Only `&optional` and `&rest` are refused -- any other `&`-prefixed name binds normally in both, so `(let ((&foo 1)) &foo)` is 1 either side."
+  }
+ ]
 }

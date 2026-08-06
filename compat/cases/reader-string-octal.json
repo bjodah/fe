@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-octal",
+	"setup": [],
+	"expr": "(list \"\\101\")",
+	"note": "An octal escape in a string body."
+}

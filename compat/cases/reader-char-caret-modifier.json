@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-caret-modifier",
+	"setup": [],
+	"expr": "?\\^a",
+	"note": "Emacs' second spelling of the control modifier."
+}

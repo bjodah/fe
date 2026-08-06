@@ -1,0 +1,6 @@
+{
+	"id": "constant-let-lambda-list-keyword",
+	"setup": [],
+	"expr": "(let ((&rest 1) (x 2)) x)",
+	"note": "A lambda-list keyword in a let binding list."
+}

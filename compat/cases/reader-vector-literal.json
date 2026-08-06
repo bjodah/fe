@@ -1,0 +1,6 @@
+{
+	"id": "reader-vector-literal",
+	"setup": [],
+	"expr": "[1 2 3]",
+	"note": "Emacs' vector read syntax."
+}

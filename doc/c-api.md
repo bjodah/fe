@@ -29,10 +29,26 @@ static_assert(FE_API_VERSION == 6);
 static_assert(FE_LANGUAGE_VERSION == 7);
 ```
 
-Fe 8.0 keeps both compatibility macros unchanged. It is a reader and
-diagnostic release: unsupported syntax now errors instead of being misread,
-character and radix literals are supported, and evaluated source errors carry a
-one-based line number.
+Fe 8.0 keeps both compatibility macros unchanged, and that is a deliberate
+choice rather than a claim that nothing moved. `FE_LANGUAGE_VERSION` went 6 ->
+7 for Phase 8, and 7 covers the whole phase: the protected constants and
+self-evaluating keywords *and* the strict reader, which is one bump for one
+phase rather than two for two slices of it.
+
+The reader half does change what an existing program means, so a host pinning
+version 7 should read it as a break and not only as an addition. A bare `#`
+and every `#`-initial symbol no longer read -- Fe's own
+`scripts/concatenate.fe` named a function `#` and had to be renamed --
+`[...]`, `#:`, `#s(...)` and symbol escapes such as `a\ b` are named read
+errors instead of symbols, an unknown string escape errors where the
+backslash used to be dropped silently, and a string escape must land in one
+byte, so `"\0"` and `"\400"` error where they used to truncate the string.
+What the release adds is the measured Emacs subset: UTF-8 character literals
+with the `\C-`/`\M-` modifiers, greedy variable-width `\x`, radix integers,
+and a one-based line number on evaluated-file and evaluated-string
+diagnostics. `doc/language.md` states the accepted and rejected syntax in
+full, and `compat/features.json` records every deliberate divergence from
+Emacs with the oracle's own answer beside it.
 
 Both macros moved 3 -> 4 together in sub-plan 05D of kg's Emacs-subset
 program, the numeric cut: 05A's placement (a) Decision had inserted

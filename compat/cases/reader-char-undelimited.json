@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-undelimited",
+	"setup": [],
+	"expr": "(list ?ab)",
+	"note": "A character literal not followed by a delimiter."
+}

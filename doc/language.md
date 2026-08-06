@@ -5,17 +5,49 @@
 ### Reader Literals
 
 The reader accepts character literals as integers: `?a` is `97`, UTF-8 input is
-decoded to its Unicode codepoint, and the measured control/meta forms include
-`?\C-a` (`1`) and `?\M-a` (`134217825`). String escapes use the same strict
-table: `\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`, `\e`, `\d`, `\s`, `\\`,
-`\"`, exactly two hexadecimal digits after `\x`, and one to three octal
-digits. Unknown or incomplete escapes are read errors.
+decoded to its Unicode codepoint (`?é` is `233`), and a literal ends at a
+delimiter, so `?ab` and `?\1a` are read errors rather than a character
+followed by a leftover token.
+
+`\C-` and `\M-` are the two character modifiers Fe implements, in either
+order and over a nested escape. The control rule is Emacs' own, measured over
+the whole printable ASCII range: `?\C-?` is `127` (DEL), `@`..`_` and
+`a`..`z` fold to their ASCII control code (`?\C-a` is `1`), and every other
+character -- punctuation, digits, space, non-ASCII -- keeps its value with the
+2^26 control bit set (`?\C-%` is `67108901`, `?\C-é` is `67109097`).
+`\M-` sets the 2^27 bit, so `?\M-a` is `134217825`. Emacs' other modifier
+spellings are named read errors here, not misreads: `\^` (its second spelling
+of control), `\S-`, `\s-`, `\A-`, `\H-`, and a repeated modifier such as
+`?\C-\C-a`.
+
+String escapes use the same table: `\a`, `\b`, `\t`, `\n`, `\v`, `\f`,
+`\r`, `\e`, `\d`, `\s`, `\\`, `\"`, `\x` followed by hexadecimal digits,
+and one to three octal digits. `\x` is greedy and variable-width, as in
+Emacs: `?\x41f` is `1055` and `?\x0041` is `65`, not `65` with an `f` left
+over and `4` with a `1` left over. A character is bounded at U+10FFFF and a
+larger `\x` value is a read error. Unknown or incomplete escapes are read
+errors, which is stricter than Emacs -- `"\q"` is `"q"` there and an error
+here -- and so are `\ `, backslash-newline continuation, `\N{...}`, and the
+character modifiers inside a string body.
+
+A Fe string is a byte string, so a string escape must land in one byte:
+`"\0"`, `"\x00"`, `"\400"` and `"\x41f"` are read errors. Emacs stores a
+NUL and reads the last two as U+0100 and U+041F; the divergence is deliberate
+and recorded, because writing those values into a NUL-terminated buffer
+silently truncated the string instead (`(list "\0a" "a\0b")` answered
+`("a" "ab")`). The same escapes in a character literal, which produces an
+integer, agree with Emacs exactly.
 
 Signed radix integers use `#x`, `#o`, and `#b`, for hexadecimal, octal, and
 binary respectively. An overflowing integer follows Fe's pre-bignum policy and
 becomes a double. Unsupported reader syntax is rejected rather than becoming a
-symbol: vectors (`[...]`), `#:`, other `#` dispatches, and symbol escapes are
-not part of Fe's subset.
+symbol: vectors (`[...]`), `#:`, `#s(...)`, a bare `#` and every other `#`
+dispatch, and symbol escapes (`a\ b`) are not part of Fe's subset. The `#`
+rejection is a break with earlier Fe: a `#`-initial symbol used to read, and
+Fe's own `scripts/concatenate.fe` named a function `#`.
+
+Every one of these is recorded in `compat/features.json`, with the measured
+Emacs answer checked in beside it under `compat/oracle/`.
 
 When reading a file or evaluated string, diagnostics identify the one-based
 line containing the top-level form, including runtime errors raised while that

@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-int64-max",
+	"setup": [],
+	"expr": "#x7fffffffffffffff",
+	"note": "The largest magnitude that stays an integer here."
+}

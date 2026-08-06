@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-tab",
+	"setup": [],
+	"expr": "?\\t",
+	"note": "The tab escape in a character literal."
+}

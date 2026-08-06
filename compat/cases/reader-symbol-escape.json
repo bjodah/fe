@@ -1,0 +1,6 @@
+{
+	"id": "reader-symbol-escape",
+	"setup": [],
+	"expr": "(cdr '(a\\ b))",
+	"note": "Emacs' symbol-escape syntax inside a token."
+}

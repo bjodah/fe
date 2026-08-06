@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-alt-modifier",
+	"setup": [],
+	"expr": "?\\A-a",
+	"note": "Emacs' alt modifier."
+}

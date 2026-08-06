@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-meta",
+	"setup": [],
+	"expr": "?\\M-a",
+	"note": "The meta modifier sets the 2^27 bit."
+}

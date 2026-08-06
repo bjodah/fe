@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-shift-modifier",
+	"setup": [],
+	"expr": "?\\S-a",
+	"note": "Emacs' shift modifier."
+}

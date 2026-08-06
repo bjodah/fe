@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-meta",
+	"setup": [],
+	"expr": "?\\C-\\M-a",
+	"note": "The same pair in the other order, which is the same character."
+}

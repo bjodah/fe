@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-octal-above-byte",
+	"setup": [],
+	"expr": "(aref \"\\400\" 0)",
+	"note": "An octal escape above 255 in a string body, read back as its character code."
+}

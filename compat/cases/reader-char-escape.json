@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-escape",
+	"setup": [],
+	"expr": "?\\e",
+	"note": "The ESC escape in a character literal."
+}

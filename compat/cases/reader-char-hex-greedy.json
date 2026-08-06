@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-hex-greedy",
+	"setup": [],
+	"expr": "?\\x41f",
+	"note": "Hexadecimal escapes are greedy and variable-width: three digits are one character."
+}

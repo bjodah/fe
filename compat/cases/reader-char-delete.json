@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-delete",
+	"setup": [],
+	"expr": "?\\d",
+	"note": "The DEL escape in a character literal."
+}

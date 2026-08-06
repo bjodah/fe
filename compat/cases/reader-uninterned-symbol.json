@@ -1,0 +1,6 @@
+{
+	"id": "reader-uninterned-symbol",
+	"setup": [],
+	"expr": "#:sym",
+	"note": "Emacs' uninterned-symbol read syntax."
+}

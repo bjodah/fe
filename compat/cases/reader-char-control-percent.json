@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-percent",
+	"setup": [],
+	"expr": "?\\C-%",
+	"note": "A character with no ASCII control equivalent keeps its value with the 2^26 control bit."
+}

@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-hex",
+	"setup": [],
+	"expr": "(list \"\\x41\")",
+	"note": "A hexadecimal escape in a string body; the list wrapper is only so both sides print the string with its quotes."
+}

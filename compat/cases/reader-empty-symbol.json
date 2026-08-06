@@ -1,0 +1,6 @@
+{
+	"id": "reader-empty-symbol",
+	"setup": [],
+	"expr": "##",
+	"note": "Emacs' empty-name symbol."
+}

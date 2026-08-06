@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-octal-nul",
+	"setup": [],
+	"expr": "?\\0",
+	"note": "The NUL character literal, which is an ordinary integer here."
+}

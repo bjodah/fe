@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-hex",
+	"setup": [],
+	"expr": "#x10",
+	"note": "A hexadecimal radix integer."
+}

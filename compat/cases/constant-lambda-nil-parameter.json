@@ -1,0 +1,6 @@
+{
+	"id": "constant-lambda-nil-parameter",
+	"setup": [],
+	"expr": "((lambda (nil) nil) 5)",
+	"note": "A lambda parameter named nil."
+}

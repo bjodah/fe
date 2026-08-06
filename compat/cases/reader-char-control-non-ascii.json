@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-non-ascii",
+	"setup": [],
+	"expr": "?\\C-é",
+	"note": "The 2^26 control bit over a non-ASCII character."
+}

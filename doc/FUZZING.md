@@ -15,6 +15,36 @@ classify-then-convert lexer must get right: integers, floats, trailing/leading
 dots, exponents, the nonfinite spellings (`1.0e+INF`, `0.0e+NaN`), and the
 tokens that must stay symbols (`0x10`, `inf`, `nan`, `1e`).
 
+Phase 8's reader adds 21 more entries, for the two things it has to get right:
+the accepted literals (`?`, `?\C-a`, `?\M-a`, `?\C-?`, `#x`, `#o`, `#b`,
+`\x41`, `\x0041`, `\101`, `\e`, `\d`, `\s`) and the prefixes of the
+spellings it must reject rather than misread (`?\s-`, `?\x`, `\400`, `\0`,
+`a\ b`, `##`, `[1 2]`, `#:s`). The point of the second group is that a reject
+arm which is never reached is not evidence of anything: an unreachable arm and
+a wrong arm look identical in a coverage report of zero.
+
+Measured, one 45-second run of `fuzz_reader` on this box with this dict and
+`scripts/` as extra seeds -- 295050 executions, 6414 exec/s, 2694 new units,
+peak RSS 186 MB -- and every corpus file then replayed through `./fe`, counting
+its first diagnostic:
+
+```text
+21  ? literal without delimiter        3  \x
+15  malformed radix integer            3  symbol escape
+ 5  unknown escape                     2  \x character out of range
+ 5  invalid UTF-8 character            2  vector brackets
+ 5  character above 255 in string      2  ? at end of input
+ 1  \s character modifier              1  NUL character in string
+ 1  malformed character modifier       1  duplicate character modifier
+ 1  #                                  1  symbol too long (63-byte limit)
+```
+
+That is every named reject arm the reader has except the `\S-`, `\A-` and
+`\H-` modifier spellings, which share `\s-`'s code path and differ only in
+the letter the message names. The count is "corpus files whose *first*
+diagnostic was this arm", so it understates: a file that fails earlier for
+another reason hides whatever came after it.
+
 The harness uses a fresh 64 KiB arena for each input. Invalid syntax, excessive
 nesting, long symbols, and arena exhaustion are expected Fe errors and recover
 through the normal error-handler path. A sanitizer failure, abort outside that

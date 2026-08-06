@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control",
+	"setup": [],
+	"expr": "?\\C-a",
+	"note": "The control modifier over a lowercase letter folds to the ASCII control code."
+}

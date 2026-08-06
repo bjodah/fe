@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-octal",
+	"setup": [],
+	"expr": "#o17",
+	"note": "An octal radix integer."
+}

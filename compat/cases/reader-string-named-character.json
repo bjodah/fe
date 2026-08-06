@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-named-character",
+	"setup": [],
+	"expr": "\"\\N{U+41}\"",
+	"note": "Emacs' named/numbered character escape."
+}

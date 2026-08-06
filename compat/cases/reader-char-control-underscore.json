@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-underscore",
+	"setup": [],
+	"expr": "?\\C-_",
+	"note": "The top of the folding range."
+}

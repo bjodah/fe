@@ -1,0 +1,6 @@
+{
+	"id": "constant-defalias-keyword",
+	"setup": [],
+	"expr": "(defalias ':k 'car)",
+	"note": "A defalias onto a keyword."
+}

@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-binary",
+	"setup": [],
+	"expr": "#b101",
+	"note": "A binary radix integer."
+}

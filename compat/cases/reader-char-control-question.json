@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-question",
+	"setup": [],
+	"expr": "?\\C-?",
+	"note": "Control-? is DEL (127), not 31: `value & 0x1f` was wrong here."
+}

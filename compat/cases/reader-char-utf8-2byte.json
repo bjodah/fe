@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-utf8-2byte",
+	"setup": [],
+	"expr": "?é",
+	"note": "A two-byte UTF-8 sequence reads as its codepoint, not its first byte."
+}

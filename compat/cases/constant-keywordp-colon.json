@@ -1,0 +1,6 @@
+{
+	"id": "constant-keywordp-colon",
+	"setup": [],
+	"expr": "(keywordp :)",
+	"note": "`:` on its own is a keyword; 08B guessed a minimum name length of 2 instead of measuring."
+}

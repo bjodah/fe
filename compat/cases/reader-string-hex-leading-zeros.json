@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-hex-leading-zeros",
+	"setup": [],
+	"expr": "(list \"\\x0041\")",
+	"note": "The greedy hexadecimal rule inside a string body."
+}

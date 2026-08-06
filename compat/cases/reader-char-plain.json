@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-plain",
+	"setup": [],
+	"expr": "?a",
+	"note": "A plain ASCII character literal reads as its codepoint."
+}

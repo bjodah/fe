@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-overflow-double",
+	"setup": [],
+	"expr": "#xFFFFFFFFFFFFFFFF",
+	"note": "A radix integer past the int64 window."
+}

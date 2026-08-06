@@ -1,0 +1,6 @@
+{
+	"id": "reader-string-space",
+	"setup": [],
+	"expr": "(list \"\\s\")",
+	"note": "The space escape in a string body."
+}

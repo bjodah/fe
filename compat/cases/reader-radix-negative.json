@@ -1,0 +1,6 @@
+{
+	"id": "reader-radix-negative",
+	"setup": [],
+	"expr": "#x-10",
+	"note": "A signed radix integer."
+}

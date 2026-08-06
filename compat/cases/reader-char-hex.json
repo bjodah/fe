@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-hex",
+	"setup": [],
+	"expr": "?\\x41",
+	"note": "A two-digit hexadecimal escape."
+}

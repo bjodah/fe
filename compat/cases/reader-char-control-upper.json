@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-control-upper",
+	"setup": [],
+	"expr": "?\\C-A",
+	"note": "The control modifier over an uppercase letter folds the same way."
+}

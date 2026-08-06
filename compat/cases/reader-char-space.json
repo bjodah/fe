@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-space",
+	"setup": [],
+	"expr": "?\\s",
+	"note": "The space escape, which is also the prefix of Emacs' super modifier."
+}

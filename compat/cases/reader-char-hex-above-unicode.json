@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-hex-above-unicode",
+	"setup": [],
+	"expr": "?\\x110000",
+	"note": "A hexadecimal character escape above U+10FFFF."
+}

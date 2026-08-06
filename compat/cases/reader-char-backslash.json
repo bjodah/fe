@@ -1,0 +1,6 @@
+{
+	"id": "reader-char-backslash",
+	"setup": [],
+	"expr": "?\\\\",
+	"note": "An escaped backslash in a character literal."
+}
