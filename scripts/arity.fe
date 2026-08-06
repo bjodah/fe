@@ -5,4 +5,21 @@
 (print ((lambda (a &rest r) (list a r)) 1))
 (print ((macro (x) x) 7))
 (print (condition-case e ((lambda (x) x)) (wrong-number-of-arguments e)))
+;; A closure constructor needs a parameter list, not a body: `(lambda (x))` is
+;; a closure and calling it answers nil, exactly as in Emacs.
+(print ((lambda (x)) 1))
+(print ((macro (x)) 1))
+;; Every primitive reports a wrong count the same way, identity and count
+;; included -- there is no second, prose-only spelling for a subset of them.
+(print (condition-case e (car 1 2) (wrong-number-of-arguments e)))
+(print (condition-case e (boundp 'car 'extra) (wrong-number-of-arguments e)))
+(print (condition-case e (setq missing-value) (wrong-number-of-arguments e)))
+;; An improper argument list is a type error about its tail, not an arity one.
+(print (condition-case e (car 1 . 2) (wrong-type-argument e)))
+;; `apply` takes one operand or more; one operand is a callable with no final
+;; list, which is the proper-list error rather than an arity error.
+(print (condition-case e (apply 'list) (error 'not-arity)))
+(print (apply 'list 1 '(2 3)))
+;; `signal` accepts one or two operands, and `env` exactly zero.
+(print (condition-case e (signal 'error) (error e)))
 ((lambda (1) 5) 2)

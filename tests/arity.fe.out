@@ -3,3 +3,12 @@ t
 (1 nil)
 7
 (wrong-number-of-arguments (lambda (x) x) 0)
+nil
+nil
+(wrong-number-of-arguments car 2)
+(wrong-number-of-arguments boundp 2)
+(wrong-number-of-arguments setq 1)
+(wrong-type-argument listp 2)
+not-arity
+(1 2 3)
+(error)
