@@ -34,5 +34,23 @@ the defect rather than its hash, and say in the commit which fix it pins.
   operand buffer in the EvalList frame's `accumulator` and the relay frame's
   fields -- the 04C instance of the class 03F's `cons-second-operand-gc`
   found, which is why the plan gates this slice on the fuzz lane.
-- `strict-arity` -- drives the lambda-list builder through required,
-  optional, rest, malformed, and mismatched call shapes.
+- `strict-arity-optional`, `strict-arity-rest`, `strict-arity-malformed`,
+  `strict-arity-primitive`, `strict-arity-native`,
+  `strict-arity-native-too-few` -- Phase 7's coverage seeds, one per shape
+  the strict-arity work added, in the `funcall-apply-redispatch` tradition:
+  not crash reproductions, but inputs that force a gitignored, freshly
+  regenerated corpus to reach these constructs on every smoke run.
+  Each was found by instrumenting the builders with temporary counters and
+  searching for an input that reaches its shape; replaying them without
+  mutation reaches, respectively, `&optional` parameter lists (3 calls),
+  `&rest` (3), the malformed `(&rest y x)` list (2), the primitive
+  over/under-arity form for `cdr`/`not`/`native-arity` with 1, 2 and 3
+  operands, the host native's "too many arguments" raise, and its "too few
+  arguments" raise. The single `strict-arity` file they replace reached
+  **none** of them: its 13 bytes spell the ASCII text "strict-arity", which
+  steers the grammar somewhere else entirely, and every counter stayed at
+  zero.
+
+  Not every bucket has a dedicated seed: the empty and single-required
+  parameter lists are what the pre-Phase-7 grammar generated unconditionally
+  and are reached by any mutation, so they get no file of their own.

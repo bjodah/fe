@@ -449,12 +449,16 @@ static FeObject* BuildFunctionCall(FeContext* ctx,
   FeObject* body = MakeBinary(ctx, "cons", parameter,
                               BuildExpression(ctx, input, depth + 1));
   FeObject* function = MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
-  FeObject* arguments[3];
+  // Written in place and read only up to `count`, the shape every other
+  // builder here uses: the previous version copied `arguments[0..2]` into
+  // `items` unconditionally, reading indeterminate pointers whenever the
+  // call had fewer than three arguments.
+  FeObject* items[4];
+  items[0] = function;
   const size_t count = FuzzTakeByte(input) % 4;
   for (size_t i = 0; i < count; i++) {
-    arguments[i] = BuildExpression(ctx, input, depth + 1);
+    items[i + 1] = BuildExpression(ctx, input, depth + 1);
   }
-  FeObject* items[4] = {function, arguments[0], arguments[1], arguments[2]};
   return FeMakeList(ctx, items, count + 1);
 }
 
@@ -489,12 +493,37 @@ static FeObject* BuildMacroCall(FeContext* ctx,
   FeObject* parameters = BuildLambdaParameters(ctx, input);
   FeObject* body = BuildMacroBody(ctx, input, parameter);
   FeObject* macro = MakeForm(ctx, "macro", (FeObject*[]){parameters, body}, 2);
-  FeObject* arguments[3];
+  // Same in-place construction as `BuildFunctionCall`, for the same reason.
+  FeObject* items[4];
+  items[0] = macro;
   const size_t count = FuzzTakeByte(input) % 4;
   for (size_t i = 0; i < count; i++) {
-    arguments[i] = BuildDatum(ctx, input, depth + 1);
+    items[i + 1] = BuildDatum(ctx, input, depth + 1);
   }
-  FeObject* items[4] = {macro, arguments[0], arguments[1], arguments[2]};
+  return FeMakeList(ctx, items, count + 1);
+}
+
+// 07B item 9's "primitive fixed/minimum over/under-arity forms", plus the
+// host-native helpers that read the per-call `(FUNCTION NARGS)` record. The
+// name set spans every arity shape the table has -- exact one (`car`, `cdr`,
+// `not`, `quote`), exact two (`cons`, `eq`), minimum (`if`) -- and
+// `native-arity` is the registered native that consumes one argument and
+// rejects the rest, so `FeGetNextArgument`'s "too few arguments" and
+// `FeRequireNoArguments`'s "too many arguments" are both reachable from the
+// grammar. Nothing here writes to stdout or can fail to terminate, so the
+// harness's standing bounds hold.
+static FeObject* BuildArityForm(FeContext* ctx,
+                                FuzzInput* input,
+                                unsigned depth) {
+  static const char* const names[] = {"car",   "cdr", "cons", "not",
+                                      "quote", "if",  "eq",   "native-arity"};
+  FeObject* items[4];
+  items[0] = FeMakeSymbol(
+      ctx, names[FuzzTakeByte(input) % (sizeof(names) / sizeof(names[0]))]);
+  const size_t count = FuzzTakeByte(input) % 4;
+  for (size_t i = 0; i < count; i++) {
+    items[i + 1] = BuildExpression(ctx, input, depth + 1);
+  }
   return FeMakeList(ctx, items, count + 1);
 }
 
@@ -681,7 +710,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 33) {
+  switch (FuzzTakeByte(input) % 34) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -765,9 +794,22 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildConditionCase(ctx, input, depth);
     case 31:
       return BuildErrorForm(ctx, input, depth);
+    case 32:
+      return BuildArityForm(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }
+}
+
+// The grammar's one host native: it takes exactly one argument through the
+// public helpers, so both of them raise from the fuzz lane and the arity
+// record they read is exercised under the harness's forced collections.
+static FeObject* FuzzArityNative(FeContext* ctx,
+                                 // cppcheck-suppress constParameterCallback
+                                 FeObject* arguments) {
+  FeObject* const first = FeGetNextArgument(ctx, &arguments);
+  FeRequireNoArguments(ctx, arguments);
+  return first;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
@@ -783,6 +825,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     // is now an error rather than nil.
     static const char preamble[] = "(setq x nil)";
     (void)FeEvaluateString(ctx, "preamble", preamble, sizeof(preamble) - 1);
+    FeDefineNative(ctx, "native-arity", FuzzArityNative);
     FuzzInput input = {.data = data, .size = size, .offset = 0};
     while (input.offset < input.size) {
       const size_t gc = FeSaveGC(ctx);
