@@ -1,0 +1,6 @@
+{
+	"id": "constant-keyword-self-eval",
+	"setup": [],
+	"expr": ":foo",
+	"note": "Keywords self-evaluate at intern time."
+}

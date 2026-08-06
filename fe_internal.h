@@ -68,6 +68,7 @@ typedef enum Primitive {
   PNotEqual,
   PIntegerp,
   PFloatp,
+  PKeywordp,
   PAdd,
   PSub,
   PMul,
@@ -506,6 +507,8 @@ bool Equal(FeObject* a, FeObject* b);
 // in fe.c beside `Equal`; the evaluator's `eq`/`eql` primitives call it.
 bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats);
 bool IsNamedSymbol(const FeObject* v, const char* name);
+bool IsKeywordSymbol(const FeObject* v);
+bool IsConstantSymbol(const FeObject* v);
 void __attribute((format(printf, 3, 4))) Format(char* result,
                                                 size_t size,
                                                 const char* format,

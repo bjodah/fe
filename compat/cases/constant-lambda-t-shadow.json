@@ -1,0 +1,6 @@
+{
+	"id": "constant-lambda-t-shadow",
+	"setup": [],
+	"expr": "((lambda (t) t) 1)",
+	"note": "The pinned lexical oracle permits a lambda parameter named t."
+}

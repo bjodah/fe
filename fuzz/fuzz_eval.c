@@ -127,7 +127,7 @@ static FeObject* BuildString(FeContext* ctx, FuzzInput* input) {
 }
 
 static FeObject* BuildAtom(FeContext* ctx, FuzzInput* input) {
-  switch (FuzzTakeByte(input) % 5) {
+  switch (FuzzTakeByte(input) % 7) {
     case 0:
       return &nil;
     case 1:
@@ -135,6 +135,10 @@ static FeObject* BuildAtom(FeContext* ctx, FuzzInput* input) {
     case 2:
       return FeMakeSymbol(ctx, "x");
     case 3:
+      return FeMakeSymbol(ctx, ":fuzz-keyword");
+    case 4:
+      return FeMakeSymbol(ctx, ":");
+    case 5:
       return BuildString(ctx, input);
     default:
       return BuildNumber(ctx, input);
@@ -437,7 +441,12 @@ static FeObject* BuildBindingForm(FeContext* ctx,
                                   unsigned depth,
                                   const char* binding) {
   FeObject* value = BuildExpression(ctx, input, depth + 1);
-  FeObject* assign = MakeBinary(ctx, binding, FeMakeSymbol(ctx, "x"), value);
+  const uint8_t target_choice = FuzzTakeByte(input) % 4;
+  FeObject* target = target_choice == 0   ? FeMakeSymbol(ctx, "t")
+                     : target_choice == 1 ? FeMakeSymbol(ctx, ":fuzz-keyword")
+                     : target_choice == 2 ? &nil
+                                          : FeMakeSymbol(ctx, "x");
+  FeObject* assign = MakeBinary(ctx, binding, target, value);
   return MakeBinary(ctx, "do", assign, FeMakeSymbol(ctx, "x"));
 }
 

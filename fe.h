@@ -87,7 +87,10 @@
 // parameter lists raise `invalid-function` instead of prose errors. Fe's
 // dotted-tail and bare-symbol rest spellings are unaffected.
 // See doc/language.md and doc/c-api.md.
-#define FE_LANGUAGE_VERSION 6
+// Version 7 protects `t`, `nil` and keyword symbols from value or function
+// assignment, and makes keywords self-evaluating. Programs that assigned `t`
+// now signal `setting-constant`; `:foo` no longer needs quoting.
+#define FE_LANGUAGE_VERSION 7
 
 extern const char* FeVersion;
 

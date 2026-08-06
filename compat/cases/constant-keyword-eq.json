@@ -1,0 +1,6 @@
+{
+	"id": "constant-keyword-eq",
+	"setup": [],
+	"expr": "(eq :a ':a)",
+	"note": "Interning makes quoted and unquoted keyword spellings identical."
+}

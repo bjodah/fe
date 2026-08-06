@@ -61,6 +61,11 @@ because the shape before it was unreachable by construction:
   cleanup that itself throws -- the 06D policy where the second throw
   replaces the first and has to be re-issued in the enclosing context.
 
+The atom pool includes `t`, `:fuzz-keyword`, and the ordinary `:` symbol;
+binding targets independently choose `t`, `nil`, the keyword, or `x`. This
+makes protected `setq`/`let` writes and keyword self-evaluation reachable
+rather than relying on incidental symbol generation.
+
 `fuzz/seeds/eval` carries one hand-built seed per group
 (`error-format-directives`, `condition-case-handlers`,
 `catch-throw-cleanup-gap`, `strict-arity`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints

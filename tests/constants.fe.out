@@ -1,0 +1,11 @@
+:type
+t
+nil
+t
+nil
+(setting-constant t)
+(setting-constant nil)
+(setting-constant :type)
+(setting-constant t)
+(setting-constant nil)
+2

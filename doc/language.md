@@ -57,11 +57,41 @@ Emacs' bignums (05A Decision 3).
 
 ## Forms
 
+### Constants And Keywords
+
+`t`, `nil`, and every symbol whose name begins with `:` and has at least one
+more character are constants. Keywords are self-evaluating, so `:type` and
+`':type` produce the same interned symbol; `:` alone is an ordinary symbol.
+`(keywordp VALUE)` recognizes keywords and returns `nil` for ordinary symbols.
+
+Value and function-cell writes through `setq`, `set`, `let`, `fset`, and
+`defalias` signal `setting-constant` with the target symbol as condition data.
+`makunbound` and `fmakunbound` refuse the same targets. The condition is a child
+of `error`, so `(condition-case e ... (setting-constant e))` catches it.
+Lexical lambda parameters are the measured exception: a parameter named `t`
+may shadow the global constant and may be assigned locally.
+
+```clojure
+fe > :type
+:type
+fe > (keywordp :type)
+t
+fe > (condition-case e (setq t nil) (setting-constant e))
+(setting-constant t)
+fe > ((lambda (t) (setq t 2)) 1)
+2
+```
+
 ### Special Forms
 
-#### `(let symbol value)`
+#### `(let ((symbol value) ...) body...)`
 
-Creates a new binding of `symbol` to the value `value` in the current environment.
+Creates simultaneous lexical bindings, evaluating every initializer in the
+surrounding environment, then evaluates the body and returns its last value.
+A bare symbol binding, such as `(let (flag) flag)`, binds `nil`. `t`, `nil`,
+and keywords are rejected as binding targets with `setting-constant` before
+any initializer runs. Fe also retains the historical `(let symbol value)`
+two-argument form, which creates a binding and returns `nil`.
 
 #### `(setq symbol value ...)`
 

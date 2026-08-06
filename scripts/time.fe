@@ -1,3 +1,3 @@
-(setq t (get-time))
-(assert (is-finite (car t)))
-(assert (is-finite (car (cdr t))))
+(setq time-value (get-time))
+(assert (is-finite (car time-value)))
+(assert (is-finite (car (cdr time-value))))

@@ -58,6 +58,15 @@ layout goes through the named accessors (`SymbolName`, `SymbolBindingCell`,
 Phase-4 lookup slices can change resolution without touching the
 representation readers. Symbols are interned.
 
+The value cell of a newly interned symbol whose name begins with `:` and has
+more than one byte points back to the symbol itself, making keywords
+self-evaluating without an evaluator special case. `t` is initialized the same
+way. `IsConstantSymbol` is the single name-property test used by value and
+function mutation paths; `setting-constant` carries a one-element data list
+with the rejected object. Lambda parameter construction is the deliberate
+exception for `t`, while ordinary `let` binding-list construction validates all
+targets before evaluating any initializer.
+
 ### Numbers
 
 Numbers store an `FeDouble` in the `cdr` part of the `object`. By default

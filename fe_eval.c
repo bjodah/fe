@@ -145,6 +145,7 @@ static const ConditionParent condition_parents[] = {
     {"file-error", "error"},
     {"cyclic-function-indirection", "error"},
     {"invalid-function", "error"},
+    {"setting-constant", "error"},
     {"no-catch", "error"},
     {"evaluation-stack-exhaustion", "error"},
     {"arena-exhaustion", "error"},
@@ -845,10 +846,190 @@ static FeObject* Bind(FeContext* ctx,
   return FeCons(ctx, FeCons(ctx, name, value), env);
 }
 
+[[noreturn]] static void RaiseSettingConstant(FeContext* ctx,
+                                              FeObject* symbol) {
+  RaiseCondition(ctx, FeCompletionError, "setting-constant",
+                 FeMakeList(ctx, (FeObject*[]){symbol}, 1), "setting-constant");
+}
+
+static FeObject* BindValue(FeContext* ctx,
+                           FeObject* env,
+                           FeObject* name,
+                           FeObject* value) {
+  if (FeIsNil(name) || IsConstantSymbol(name)) {
+    RaiseSettingConstant(ctx, name);
+  }
+  CheckType(ctx, name, FeTSymbol);
+  return Bind(ctx, env, name, value);
+}
+
+static FeObject* BindLambda(FeContext* ctx,
+                            FeObject* env,
+                            FeObject* name,
+                            FeObject* value) {
+  // Lexical Emacs lambdas permit `t` to shadow the global constant.
+  if ((FeIsNil(name) || IsConstantSymbol(name)) && !IsNamedSymbol(name, "t")) {
+    RaiseSettingConstant(ctx, name);
+  }
+  return Bind(ctx, env, name, value);
+}
+
+static bool HasLexicalBinding(FeObject* env, const FeObject* name) {
+  while (!FeIsNil(env)) {
+    const FeObject* cell = CAR(env);
+    if (CAR(cell) == name) {
+      return true;
+    }
+    env = CDR(env);
+  }
+  return false;
+}
+
+static void ValidateSetqTarget(FeContext* ctx,
+                               FeObject* env,
+                               FeObject* target) {
+  if (FeIsNil(target) ||
+      (IsConstantSymbol(target) &&
+       !(IsNamedSymbol(target, "t") && HasLexicalBinding(env, target)))) {
+    RaiseSettingConstant(ctx, target);
+  }
+  if (FeGetType(target) != FeTSymbol) {
+    RaiseWrongType(ctx, "symbolp", target);
+  }
+}
+
+static FeObject* SetEvaluatedValue(FeContext* ctx,
+                                   FeObject* symbol,
+                                   FeObject* value) {
+  if (FeIsNil(symbol) || IsConstantSymbol(symbol)) {
+    RaiseSettingConstant(ctx, symbol);
+  }
+  if (FeGetType(symbol) != FeTSymbol) {
+    RaiseWrongType(ctx, "symbolp", symbol);
+  }
+  FeSet(ctx, symbol, value);
+  return value;
+}
+
+static void ValidateValueTarget(FeContext* ctx, FeObject* target) {
+  if (FeIsNil(target) || IsConstantSymbol(target)) {
+    RaiseSettingConstant(ctx, target);
+  }
+  CheckType(ctx, target, FeTSymbol);
+}
+
+static void RejectConstantTarget(FeContext* ctx, FeObject* target) {
+  if (FeIsNil(target) || IsConstantSymbol(target)) {
+    RaiseSettingConstant(ctx, target);
+  }
+}
+
+static FeObject* MakeClosure(FeContext* ctx,
+                             FeObject* env,
+                             FeObject* arguments,
+                             FeType type);
+
+static FeObject* LetBindingTarget(FeContext* ctx, FeObject* binding) {
+  if (FeGetType(binding) == FeTSymbol || FeIsNil(binding)) {
+    return binding;
+  }
+  if (FeGetType(binding) != FeTPair || FeIsNil(CDR(binding)) ||
+      !FeIsNil(CDR(CDR(binding)))) {
+    RaiseWrongType(ctx, "listp", binding);
+  }
+  return CAR(binding);
+}
+
+static FeObject* LetBindingValue(FeContext* ctx, FeObject* binding) {
+  if (FeGetType(binding) == FeTSymbol || FeIsNil(binding)) {
+    return &nil;
+  }
+  LetBindingTarget(ctx, binding);
+  return CAR(CDR(binding));
+}
+
+static FeObject* ReverseList(FeObject* list) {
+  FeObject* result = &nil;
+  while (!FeIsNil(list)) {
+    FeObject* next = CDR(list);
+    CDR(list) = result;
+    result = list;
+    list = next;
+  }
+  return result;
+}
+
+static void ValidateLetBindings(FeContext* ctx, FeObject* bindings) {
+  while (!FeIsNil(bindings)) {
+    if (FeGetType(bindings) != FeTPair) {
+      RaiseWrongType(ctx, "listp", bindings);
+    }
+    ValidateValueTarget(ctx, LetBindingTarget(ctx, CAR(bindings)));
+    bindings = CDR(bindings);
+  }
+}
+
+static void StartBindingLet(FeContext* ctx,
+                            FeEvalFrame* frame,
+                            FeObject* bindings,
+                            FeObject* body) {
+  FeObject* parameters = &nil;
+  FeObject* values = &nil;
+  ValidateLetBindings(ctx, bindings);
+  for (FeObject* rest = bindings; !FeIsNil(rest); rest = CDR(rest)) {
+    FeObject* binding = CAR(rest);
+    parameters = FeCons(ctx, LetBindingTarget(ctx, binding), parameters);
+    values = FeCons(ctx, LetBindingValue(ctx, binding), values);
+  }
+  parameters = ReverseList(parameters);
+  values = ReverseList(values);
+  FeObject* lambda_arguments = FeCons(ctx, parameters, body);
+  FeObject* closure = MakeClosure(ctx, frame->env, lambda_arguments, FeTFn);
+  frame->kind = FeFrameCallArguments;
+  frame->fn = closure;
+  frame->rest = values;
+  frame->accumulator = &nil;
+  frame->callee = &unbound;
+}
+
+static FeObject* CallIdentity(FeObject* expr, FeObject* fn);
+static size_t CountRawArguments(FeContext* ctx, FeObject* arguments);
+
+static bool DispatchLet(FeContext* ctx,
+                        FeEvalFrame* frame,
+                        FeObject* fn,
+                        FeObject** frame_bind,
+                        FeObject* arguments,
+                        FeObject** result) {
+  FeObject* const target = FeGetNextArgument(ctx, &arguments);
+  if (FeGetType(target) == FeTPair || FeIsNil(target)) {
+    StartBindingLet(ctx, frame, target, arguments);
+    return false;
+  }
+  const size_t count = CountRawArguments(ctx, CDR(frame->expr));
+  if (count != 2) {
+    RaiseWrongNumber(ctx, CallIdentity(frame->expr, fn), count);
+  }
+  ValidateValueTarget(ctx, target);
+  if (frame_bind == NULL) {
+    *result = &nil;
+    return true;
+  }
+  frame->kind = FeFrameLet;
+  frame->accumulator = target;
+  frame->rest = arguments;
+  frame->callee = &unbound;
+  return false;
+}
+
+static bool IsParameterName(const FeObject* name) {
+  return FeIsNil(name) || FeGetType(name) == FeTSymbol;
+}
+
 static void ValidateParameterName(FeContext* ctx,
                                   const FeObject* name,
                                   bool optional) {
-  if (FeGetType(name) != FeTSymbol ||
+  if (!IsParameterName(name) ||
       (optional && IsNamedSymbol(name, "&optional"))) {
     RaiseNamedError(ctx, "invalid-function", "invalid-function");
   }
@@ -900,7 +1081,7 @@ static FeObject* ArgsToEnv(FeContext* ctx,
   while (!FeIsNil(prm)) {
     EvaluationStep(ctx);
     if (FeGetType(prm) != FeTPair) {
-      return Bind(ctx, env, prm, arg);
+      return BindLambda(ctx, env, prm, arg);
     }
     FeObject* name = CAR(prm);
     prm = CDR(prm);
@@ -915,15 +1096,12 @@ static FeObject* ArgsToEnv(FeContext* ctx,
       if (!FeIsNil(CDR(prm))) {
         RaiseNamedError(ctx, "invalid-function", "invalid-function");
       }
-      return Bind(ctx, env, CAR(prm), arg);
-    }
-    if (FeGetType(name) != FeTSymbol) {
-      RaiseNamedError(ctx, "invalid-function", "invalid-function");
+      return BindLambda(ctx, env, CAR(prm), arg);
     }
     if (!optional && FeIsNil(arg)) {
       RaiseWrongNumber(ctx, function, argc);
     }
-    env = Bind(ctx, env, name, FeIsNil(arg) ? &nil : FeCar(ctx, arg));
+    env = BindLambda(ctx, env, name, FeIsNil(arg) ? &nil : FeCar(ctx, arg));
     if (!FeIsNil(arg)) {
       arg = FeCdr(ctx, arg);
     }
@@ -1335,7 +1513,7 @@ typedef struct PrimitiveArity {
 static const PrimitiveArity primitive_arities[PSentinel] = {
     [PAssert] = {1, 1},
     [PEnv] = {0, 0},
-    [PLet] = {2, 2},
+    [PLet] = {1, SIZE_MAX},
     [PNumericEqual] = {1, SIZE_MAX},
     [PSetq] = {0, SIZE_MAX},
     [PSet] = {2, 2},
@@ -1369,6 +1547,7 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PNotEqual] = {2, 2},
     [PIntegerp] = {1, 1},
     [PFloatp] = {1, 1},
+    [PKeywordp] = {1, 1},
     [PAdd] = {0, SIZE_MAX},
     [PSub] = {0, SIZE_MAX},
     [PMul] = {0, SIZE_MAX},
@@ -1483,19 +1662,8 @@ static bool DispatchPrimitive(FeContext* ctx,
     // `frame_bind` (e.g. `let` used as an ordinary argument or a lone `if`
     // branch) means the value form is never evaluated, matching the
     // recursive arm's `if (newenv) { ... EVAL_ARG() ... }`.
-    case PLet: {
-      FeObject* const target =
-          CheckType(ctx, FeGetNextArgument(ctx, &arguments), FeTSymbol);
-      if (frame_bind == NULL) {
-        *result = &nil;
-        return true;
-      }
-      frame->kind = FeFrameLet;
-      frame->accumulator = target;
-      frame->rest = arguments;
-      frame->callee = &unbound;
-      return false;
-    }
+    case PLet:
+      return DispatchLet(ctx, frame, fn, frame_bind, arguments, result);
     // `(if COND THEN ELSE...)`, as in Emacs Lisp: the trailing forms are an
     // implicit body. The condition and the consequent are both required, and
     // the arity table has already refused `(if)` and `(if COND)`.
@@ -1651,6 +1819,7 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PFmakunbound:
     case PIntegerp:
     case PFloatp:
+    case PKeywordp:
       frame->kind = FeFrameUnary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1994,7 +2163,8 @@ static bool ResumeAndOr(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // extends `*bind`, and the result is always nil.
 static bool ResumeLet(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (frame->callee != &unbound) {
-    *frame->bind = Bind(ctx, frame->env, frame->accumulator, frame->callee);
+    *frame->bind =
+        BindValue(ctx, frame->env, frame->accumulator, frame->callee);
     frame->callee = &unbound;
     *result = &nil;
     return true;
@@ -2026,6 +2196,7 @@ static bool ResumeLet(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 
 static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (frame->callee != &unbound) {
+    ValidateSetqTarget(ctx, frame->env, frame->accumulator);
     CDR(GetBound(ctx, frame->accumulator, frame->env)) = frame->callee;
     *result = frame->callee;
     frame->callee = &unbound;
@@ -2040,9 +2211,7 @@ static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
     RaiseSetqFormCount(ctx, frame);
   }
   FeObject* const target = CAR(frame->rest);
-  if (FeGetType(target) != FeTSymbol) {
-    RaiseWrongType(ctx, "symbolp", target);
-  }
+  ValidateSetqTarget(ctx, frame->env, target);
   frame->rest = CDR(frame->rest);
   if (FeGetType(frame->rest) != FeTPair) {
     RaiseSetqFormCount(ctx, frame);
@@ -2139,16 +2308,24 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       FeRequireNoArguments(ctx, frame->rest);
       *result = FeMakeBool(ctx, FeGetType(value) == FeTDouble);
       break;
+    case PKeywordp:
+      FeRequireNoArguments(ctx, frame->rest);
+      *result = FeMakeBool(ctx, IsKeywordSymbol(value));
+      break;
     case PFmakunbound: {
+      RejectConstantTarget(ctx, value);
       FeObject* const sym = CheckType(ctx, value, FeTSymbol);
       FeRequireNoArguments(ctx, frame->rest);
+      RejectConstantTarget(ctx, sym);
       SetSymbolFunction(sym, &unbound);
       *result = sym;
       break;
     }
     default: {  // PMakeUnbound
+      RejectConstantTarget(ctx, value);
       FeObject* const sym = CheckType(ctx, value, FeTSymbol);
       FeRequireNoArguments(ctx, frame->rest);
+      RejectConstantTarget(ctx, sym);
       CDR(GetBound(ctx, sym, frame->env)) = &unbound;
       *result = sym;
       break;
@@ -2186,7 +2363,7 @@ static bool ResumeBinary(FeContext* ctx,
       // validate-first ordering.
       case PFset:
       case PDefalias:
-        first = CheckType(ctx, first, FeTSymbol);
+        ValidateValueTarget(ctx, first);
         break;
       default:
         break;
@@ -2783,7 +2960,7 @@ static bool ResumeConditionCase(FeContext* ctx,
   frame->fn = &unbound;
   FeObject* env = frame->env;
   if (!FeIsNil(frame->accumulator)) {
-    env = Bind(ctx, env, frame->accumulator, frame->callee);
+    env = BindValue(ctx, env, frame->accumulator, frame->callee);
   }
   frame->env = env;
   frame->callee = &unbound;
@@ -3002,11 +3179,7 @@ static bool ResumeEvalList(FeContext* ctx,
     case PSet: {
       FeObject* const symbol = CAR(list);
       FeObject* const value = CAR(CDR(list));
-      if (FeGetType(symbol) != FeTSymbol) {
-        RaiseWrongType(ctx, "symbolp", symbol);
-      }
-      FeSet(ctx, symbol, value);
-      *result = value;
+      *result = SetEvaluatedValue(ctx, symbol, value);
       break;
     }
     case PFuncall:

@@ -111,7 +111,7 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 6);
-  static_assert(FE_LANGUAGE_VERSION == 6);
+  static_assert(FE_LANGUAGE_VERSION == 7);
   CHECK(strcmp(FeVersion, "7.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
@@ -2138,6 +2138,97 @@ static bool TestNamespaceCut(void) {
   FeCloseContext(context);
   return true;
 }
+// Sub-plan 08B: constants are protected at every value/function write seam,
+// while keywords self-evaluate from their interned value cell.
+static bool TestConstantsAndKeywords(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                              \
+  CHECK(IsRendered(                                                      \
+      context,                                                           \
+      FeEvaluateString(context, "constants.fe", expr, sizeof(expr) - 1), \
+      expected))
+#define ERR(expr, condition)                                           \
+  do {                                                                 \
+    CHECK(ExpectEvaluationError(context, &state, "constants.fe", expr, \
+                                strlen(expr),                          \
+                                "constants.fe: setting-constant"));    \
+    CHECK(IsRendered(context, FeGetCondition(context), condition));    \
+  } while (false)
+
+  CHK(":foo", ":foo");
+  CHK("(eq :a ':a)", "t");
+  CHK("(keywordp :foo)", "t");
+  CHK("(keywordp 'foo)", "nil");
+  CHK("(keywordp ':)", "nil");
+  ERR("(setq t nil)", "(setting-constant t)");
+  ERR("(setq nil 1)", "(setting-constant nil)");
+  ERR("(setq :foo 1)", "(setting-constant :foo)");
+  ERR("(set 't 1)", "(setting-constant t)");
+  ERR("(let ((t 1)) t)", "(setting-constant t)");
+  ERR("(let ((nil 1)) 1)", "(setting-constant nil)");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "let-side-effect")));
+  ERR("(let ((t (setq let-side-effect 1))) 2)", "(setting-constant t)");
+  CHECK(!FeIsBound(context, FeMakeSymbol(context, "let-side-effect")));
+  CHK("(setq let-outer 7)", "7");
+  CHK("(let ((let-inner let-outer) (let-outer 9)) let-inner)", "7");
+  ERR("(fset 't (lambda () 1))", "(setting-constant t)");
+  ERR("(defalias ':foo 'car)", "(setting-constant :foo)");
+  ERR("((lambda (nil) nil) 1)", "(setting-constant nil)");
+  ERR("((lambda (:lambda-keyword) :lambda-keyword) 1)",
+      "(setting-constant :lambda-keyword)");
+  CHK("((lambda (t) (setq t 2)) 1)", "2");
+  CHK("(+ 1 2)", "3");
+
+#define API_ERR(call, condition)                                    \
+  do {                                                              \
+    state.called = false;                                           \
+    state.expected_message = "setting-constant";                    \
+    const size_t volatile gc = FeSaveGC(context);                   \
+    if (setjmp(state.jump) == 0) {                                  \
+      call;                                                         \
+      CHECK(false);                                                 \
+    }                                                               \
+    FeRestoreGC(context, gc);                                       \
+    CHECK(state.called);                                            \
+    CHECK(IsRendered(context, FeGetCondition(context), condition)); \
+  } while (false)
+
+  API_ERR(FeSetFunction(context, FeMakeSymbol(context, "t"),
+                        FeMakeNativeFn(context, OrdinaryNative)),
+          "(setting-constant t)");
+  API_ERR(FeSetFunction(context, FeNil(context),
+                        FeMakeNativeFn(context, OrdinaryNative)),
+          "(setting-constant nil)");
+  API_ERR(FeDefineNative(context, ":api-keyword", OrdinaryNative),
+          "(setting-constant :api-keyword)");
+
+#undef API_ERR
+
+  // Interned keywords remain self-valued after enough allocation to collect.
+  const FeObject* keyword = FeMakeSymbol(context, ":survives-gc");
+  for (size_t i = 0; i < 5000; i++) {
+    const size_t gc = FeSaveGC(context);
+    (void)FeMakeString(context, "garbage");
+    FeRestoreGC(context, gc);
+  }
+  CHECK(IsRendered(context,
+                   FeEvaluateString(context, "constants.fe", ":survives-gc",
+                                    sizeof(":survives-gc") - 1),
+                   ":survives-gc"));
+  CHECK(keyword == FeMakeSymbol(context, ":survives-gc"));
+
+#undef ERR
+#undef CHK
+  FeCloseContext(context);
+  return true;
+}
+
 // Sub-plan 02B: core `setq` (a special form) and `set` (ordinary-function
 // semantics) alongside the still-working assignment `=` primitive. The
 // compat corpus (fe/compat/) proves agreement with Emacs on the same
@@ -6162,8 +6253,9 @@ int main(void) {
                  TestMacroExpansion() && TestWriter() && TestParameterLists() &&
                  TestBinding() && TestSymbolCells() && TestInteger() &&
                  TestFunctionCells() && TestNamespaceCut() &&
-                 TestSetqAndSet() && TestNumericEqual() && TestNumericTower() &&
-                 TestNumericCut() && TestUnwindHostAPI() && TestUnwindLisp() &&
+                 TestSetqAndSet() && TestConstantsAndKeywords() &&
+                 TestNumericEqual() && TestNumericTower() && TestNumericCut() &&
+                 TestUnwindHostAPI() && TestUnwindLisp() &&
                  TestUnwindCleanupBudget() && TestFrameLimits() &&
                  TestFrameSubstrate() && TestArenaStats() &&
                  TestEvaluationStackProbe() && TestCallHeadProbe() &&

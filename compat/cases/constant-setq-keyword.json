@@ -1,0 +1,6 @@
+{
+	"id": "constant-setq-keyword",
+	"setup": [],
+	"expr": "(setq :kw 1)",
+	"note": "Table C: keyword value cells are protected."
+}

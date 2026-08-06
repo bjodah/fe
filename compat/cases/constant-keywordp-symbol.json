@@ -1,0 +1,6 @@
+{
+	"id": "constant-keywordp-symbol",
+	"setup": [],
+	"expr": "(keywordp 'foo)",
+	"note": "keywordp rejects an ordinary symbol."
+}

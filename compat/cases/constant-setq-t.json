@@ -1,0 +1,6 @@
+{
+	"id": "constant-setq-t",
+	"setup": [],
+	"expr": "(setq t nil)",
+	"note": "Table C: assigning the global truth constant signals setting-constant."
+}

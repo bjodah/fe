@@ -1,0 +1,6 @@
+{
+	"id": "constant-setq-nil",
+	"setup": [],
+	"expr": "(setq nil 1)",
+	"note": "Table C: nil is protected as a value-binding target."
+}

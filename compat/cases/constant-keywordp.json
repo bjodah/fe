@@ -1,0 +1,6 @@
+{
+	"id": "constant-keywordp",
+	"setup": [],
+	"expr": "(keywordp :foo)",
+	"note": "keywordp recognizes a keyword symbol."
+}

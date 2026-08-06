@@ -13,6 +13,7 @@ break; a host should assert both.
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
 types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+version 7 is the protected-constants and self-evaluating-keywords contract;
 version 6 is the strict-arity contract described below; version 4 was the
 numeric contract of the Emacs-subset cut: the reader
 classifies `42` as an integer and `42.0` as a float (05A Decision 3), floats
@@ -25,7 +26,7 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 6);
-static_assert(FE_LANGUAGE_VERSION == 6);
+static_assert(FE_LANGUAGE_VERSION == 7);
 ```
 
 Both macros moved 3 -> 4 together in sub-plan 05D of kg's Emacs-subset
@@ -61,6 +62,10 @@ to compile: `((lambda (x) x))`, `((lambda () 1) 2)`, `(car 1 2)` and
 accepted with nil data; `print` gains a one-argument minimum; and malformed
 parameter lists raise `invalid-function` rather than prose errors. Fe's
 dotted-tail and bare-symbol rest spellings are unaffected.
+
+`FE_LANGUAGE_VERSION` moved 6 -> 7 for protected constants and
+self-evaluating keywords. Assigning `t`, `nil`, or a keyword now signals
+`setting-constant`, and a keyword such as `:foo` no longer needs quoting.
 
 `FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
 kg's Emacs-subset program: the frame machine's Lisp-nesting and native
@@ -246,7 +251,10 @@ environment to consult and answers about the global one.
 ### The function namespace (sub-plan 04C)
 
 `FeSetFunction()` writes `sym`'s *function* cell, storing the object or symbol
-designator as-is, so a `defalias`-style indirection stays a symbol;
+designator as-is, so a `defalias`-style indirection stays a symbol. `FeSet`,
+`FeSetFunction`, and `FeDefineNative` reject `t`, `nil`, and keyword targets
+with `setting-constant`; the condition data is a one-element list containing
+the target.
 `FeIsFBound()` reports whether that cell holds anything. They are the
 function-cell twins of `FeSet()`/`FeIsBound()`, which keep their Emacs
 meaning and address the value cell. `FeGetFunction()` resolves a name the way

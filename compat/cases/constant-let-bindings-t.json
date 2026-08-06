@@ -1,0 +1,6 @@
+{
+	"id": "constant-let-bindings-t",
+	"setup": [],
+	"expr": "(let ((t 1)) t)",
+	"note": "Table C: an Emacs-shaped let binding cannot bind t."
+}

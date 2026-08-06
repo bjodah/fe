@@ -1852,18 +1852,40 @@
    "rationale": "07B narrows print to one or more values, but Fe deliberately retains its multi-value stdout policy rather than Emacs buffer output. primitive-print-two keeps its `(let ((standard-output ...)) ...)` sink: Emacs' `print` writes to `standard-output`, so without the sink the oracle shim emits a second line and utils/run-emacs-oracle.py fails for the whole corpus. Fe's answer to that expression is a `let` arity error rather than a print result, which is part of the same recorded divergence -- Fe's print arity itself is pinned by primitive-print-zero, primitive-print-three and scripts/arity.fe.",
    "source_name": null
   },
-  {
-   "id": "phase7-primitive-signal-arity",
-   "category": "errors-and-non-local-exits",
-   "status": "supported",
-   "owner": "fe-core",
-   "comparison": "emacs",
-   "cases": [
-    "primitive-signal-one"
-   ],
-   "kg_test": null,
-   "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
-   "source_name": null
-  }
- ]
+   {
+    "id": "phase7-primitive-signal-arity",
+    "category": "errors-and-non-local-exits",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-signal-one"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
+    "source_name": null
+   },
+   {
+    "id": "constants-and-keywords",
+    "category": "bindings",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "constant-setq-t",
+     "constant-setq-nil",
+     "constant-setq-keyword",
+     "constant-lambda-t-shadow",
+     "constant-keyword-self-eval",
+     "constant-keywordp",
+     "constant-keywordp-symbol",
+      "constant-keyword-eq",
+      "constant-let-bindings-t",
+      "constant-let-bindings-nil"
+    ],
+    "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
+    "rationale": "Phase 8, 08B Table C: constants are protected, keywords self-evaluate and keywordp reports the intern-time property.",
+    "source_name": "keywordp"
+    }
+  ]
 }

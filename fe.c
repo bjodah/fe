@@ -62,6 +62,7 @@ static const char* primitive_names[] = {[PAssert] = "assert",
                                         [PNotEqual] = "/=",
                                         [PIntegerp] = "integerp",
                                         [PFloatp] = "floatp",
+                                        [PKeywordp] = "keywordp",
                                         [PAdd] = "+",
                                         [PSub] = "-",
                                         [PMul] = "*",
@@ -525,6 +526,18 @@ static int IsStringEqual(FeObject* obj, const char* str) {
   return *str == '\0';
 }
 
+static bool IsKeywordName(const char* name) {
+  return name[0] == ':' && name[1] != '\0';
+}
+
+static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym);
+
+static void InitializeKeywordValue(FeObject* symbol, const char* name) {
+  if (IsKeywordName(name)) {
+    CDR(SymbolBindingCell(symbol)) = symbol;
+  }
+}
+
 // "Could an allocation still succeed?", which is what the raise paths mean
 // when they ask whether they can build a condition object. `FeIsNil(free_list)`
 // on its own answers a narrower question -- whether the free list happens to
@@ -628,6 +641,7 @@ FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
   SetType(obj, FeTSymbol);
   CDR(obj) =
       FeCons(ctx, FeCons(ctx, FeMakeString(ctx, name), &unbound), &unbound);
+  InitializeKeywordValue(obj, name);
   ctx->symbol_list = FeCons(ctx, obj, ctx->symbol_list);
   return obj;
 }
@@ -645,6 +659,7 @@ void FeDefineNative(FeContext* ctx, const char* name, FeNativeFn* fn) {
   // registered here is reachable as `(name ...)`; `(boundp 'name)` is nil.
   const size_t gc = FeSaveGC(ctx);
   FeObject* symbol = FeMakeSymbol(ctx, name);
+  CheckWritableSymbol(ctx, symbol);
   FeObject* native = FeMakeNativeFn(ctx, fn);
   SetSymbolFunction(symbol, native);
   FeRestoreGC(ctx, gc);
@@ -1119,8 +1134,16 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env) {
   return SymbolBindingCell(sym);
 }
 
+static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym) {
+  if (FeIsNil(sym) || IsConstantSymbol(sym)) {
+    RaiseCondition(ctx, FeCompletionError, "setting-constant",
+                   FeMakeList(ctx, (FeObject*[]){sym}, 1), "setting-constant");
+  }
+  return CheckType(ctx, sym, FeTSymbol);
+}
+
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v) {
-  CDR(GetBound(ctx, sym, &nil)) = v;
+  CDR(GetBound(ctx, CheckWritableSymbol(ctx, sym), &nil)) = v;
 }
 
 bool FeIsBound(FeContext* ctx, FeObject* sym) {
@@ -1134,7 +1157,7 @@ bool FeIsBound(FeContext* ctx, FeObject* sym) {
 // the bootstrap lives in function cells too, so these reach what call
 // position resolves.
 void FeSetFunction(FeContext* ctx, FeObject* sym, FeObject* fn) {
-  SetSymbolFunction(CheckType(ctx, sym, FeTSymbol), fn);
+  SetSymbolFunction(CheckWritableSymbol(ctx, sym), fn);
 }
 
 bool FeIsFBound(FeContext* ctx, FeObject* sym) {
@@ -1327,6 +1350,16 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata);
 
 bool IsNamedSymbol(const FeObject* v, const char* name) {
   return FeGetType(v) == FeTSymbol && IsStringEqual(SymbolName(v), name);
+}
+
+bool IsKeywordSymbol(const FeObject* v) {
+  return FeGetType(v) == FeTSymbol && SymbolName(v) != NULL &&
+         STRING_BUFFER(SymbolName(v))[0] == ':' &&
+         STRING_BUFFER(SymbolName(v))[1] != '\0';
+}
+
+bool IsConstantSymbol(const FeObject* v) {
+  return IsNamedSymbol(v, "t") || IsKeywordSymbol(v);
 }
 
 static bool IsDot(const FeObject* v) {
@@ -1980,7 +2013,7 @@ static FeContext* OpenContext(void* arena, size_t size) {
 
   // Initialize the objects:
   ctx->t = FeMakeSymbol(ctx, "t");
-  FeSet(ctx, ctx->t, ctx->t);
+  CDR(SymbolBindingCell(ctx->t)) = ctx->t;
 
   // Register the built-in primitives (sub-plan 04D's cut): every callable --
   // the primitives, the `fn` alias, and the math natives registered through
