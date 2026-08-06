@@ -1623,7 +1623,7 @@
      "cond-ct7"
     ],
     "kg_test": null,
-     "rationale": "A cleanup runs on the error, throw and quit paths alike, and nested unwind-protect runs innermost-first. cond-u2 pins the policy that a raising cleanup replaces the in-flight error: `(error \"cleanup\")` wins. cond-ct7 remains a known gap because it is written in Emacs' `progn`, which Fe does not implement.",
+     "rationale": "Phase 6: A cleanup runs on the error, throw and quit paths alike, and nested unwind-protect runs innermost-first. cond-u2 pins the policy that a raising cleanup replaces the in-flight error: `(error \"cleanup\")` wins. cond-ct7 remains a known gap because it is written in Emacs' `progn`, which Fe does not implement.",
     "source_name": null
    },
    {
