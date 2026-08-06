@@ -1,0 +1,6 @@
+{
+ "id": "primitive-signal-one",
+ "setup": [],
+ "expr": "(signal 'error)",
+ "note": "07A V6: signal accepts one argument and supplies nil data. Planned Fe gap until 07B."
+}

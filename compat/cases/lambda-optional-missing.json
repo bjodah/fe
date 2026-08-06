@@ -1,0 +1,6 @@
+{
+ "id": "lambda-optional-missing",
+ "setup": [],
+ "expr": "((lambda (a &optional b) (list a b)) 1)",
+ "note": "07A L8: missing optional parameters bind nil. Planned Fe gap contract for strict lambda-list validation."
+}

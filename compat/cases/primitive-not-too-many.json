@@ -1,0 +1,6 @@
+{
+ "id": "primitive-not-too-many",
+ "setup": [],
+ "expr": "(not 1 2)",
+ "note": "07A V2: not rejects two arguments with wrong-number-of-arguments. Planned Fe gap until 07B."
+}

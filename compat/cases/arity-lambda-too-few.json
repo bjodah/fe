@@ -1,0 +1,6 @@
+{
+ "id": "arity-lambda-too-few",
+ "setup": [],
+ "expr": "(funcall (lambda (x) x))",
+ "note": "07A A1: a required lambda argument raises wrong-number-of-arguments with the actual count in its condition data. Planned Fe gap until 07B."
+}

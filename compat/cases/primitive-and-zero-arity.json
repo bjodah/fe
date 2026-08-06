@@ -1,0 +1,6 @@
+{
+ "id": "primitive-and-zero-arity",
+ "setup": [],
+ "expr": "(and)",
+ "note": "07A V1: the zero-argument identity of and is t, not nil. Planned Fe gap until 07B."
+}

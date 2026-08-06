@@ -1665,6 +1665,136 @@
    "kg_test": null,
    "rationale": "Phase 6, 06A: Fe has no `error-message-string` and none is planned -- a condition reaches a Fe host as a completion with a message already formatted by the raise site, not as an object a Lisp program renders afterwards. The row is kept as the recorded oracle for the rendering (`Wrong type argument: listp, 5`), and to record that Emacs uses a right single quote in some texts (void-function/void-variable) where Fe pins ASCII. `unsupported` rather than `planned` because the exclusion is the decision, not a pending slice.",
    "source_name": null
-  }
+   },
+   {
+    "id": "phase7-lambda-arity",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "arity-lambda-too-few",
+     "arity-lambda-too-many",
+     "arity-lambda-after-operands",
+     "lambda-list-rest-empty",
+     "lambda-list-rest-trailing",
+     "lambda-list-non-symbol",
+     "lambda-optional-missing",
+     "lambda-rest-fresh-empty"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A rows A1/A2/A7 and L1/L3/L5/L8/L9: the oracle contract is recorded before 07B makes strict lambda arity and malformed-list conditions unconditional.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-car-arity",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "arity-car-before-operands",
+     "primitive-car-too-many",
+     "primitive-car-too-few"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A rows A6 and V2/V3: fixed primitive arity is preflighted before operands and reports actual argument counts.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-cons-arity",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-cons-too-many",
+     "primitive-cons-too-few"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A rows V2/V3: the exact two-argument cons contract is pinned ahead of 07B.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-not-arity",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-not-too-many"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V2: the unary not contract rejects extras before evaluation.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-quote-arity",
+    "category": "functions-and-macros",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-quote-too-many"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V2: quote's one raw-form contract is pinned ahead of 07B.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-and-arity",
+    "category": "control-flow",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-and-zero-arity"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V1: and's zero-argument identity is t, a correctness fix as well as an arity contract.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-if-arity",
+    "category": "control-flow",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-if-too-few",
+     "primitive-if-one-argument"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V4: if requires at least a test and consequent.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-print-arity",
+    "category": "values-and-equality",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-print-zero",
+     "primitive-print-two",
+     "primitive-print-three"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V5: print's narrowed 1+ contract is recorded without claiming Fe's existing stdout policy is Emacs-compatible.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-primitive-signal-arity",
+    "category": "errors-and-non-local-exits",
+    "status": "planned",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "primitive-signal-one"
+    ],
+    "kg_test": null,
+    "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
+    "source_name": null
+   }
  ]
 }

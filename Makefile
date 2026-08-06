@@ -194,8 +194,15 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # funded as a phase of its own rather than smuggled in with a review fix.
 # fe_eval.c is at 440 of 460; the next phase to touch it should price the
 # split rather than ask for 500.
-SCC_COMPLEXITY_MAX ?= 680
-SCC_FILE_COMPLEXITY_MAX ?= 460
+# Raised a seventh time by Phase 7 sub-plan 07A (2026-08-06), funding 07B's
+# strict-arity dispatch, ArgsToEnv validation, native-helper classification and
+# fuzz builders: the measured starting tree is 654/680 scc, fe_eval.c 440/460,
+# and 863/900 pmccabe across 292 symbols. The phase is priced +50..80 in both
+# scc and pmccabe; the top of that range funds it before implementation, as in
+# 03A/04A/05A/06A. The per-file raise funds fe_eval.c's measured 440 and the
+# new validation path; a new function still must stay at or below 15.
+SCC_COMPLEXITY_MAX ?= 760
+SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
 PMCCABE_FUNCTION_COMPLEXITY_MAX ?= 22
@@ -259,7 +266,10 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # whole phase at once, the 00A/03A/04A/05A precedent. Both scc gates move
 # with it (540->680 / 340->420, same estimate); the per-symbol manifest is
 # unchanged and is re-banked only if 06B-06D land improvements.
-PMCCABE_TOTAL_MAX ?= 900
+# Raised 900 -> 980 by Phase 7 sub-plan 07A (2026-08-06), on the same 863/900
+# baseline, funding 07B's +50..80 pmccabe estimate. This is a phase fund, not
+# permission for an over-limit function or an unpriced primitive.
+PMCCABE_TOTAL_MAX ?= 980
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

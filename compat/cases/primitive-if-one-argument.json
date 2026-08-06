@@ -1,0 +1,6 @@
+{
+ "id": "primitive-if-one-argument",
+ "setup": [],
+ "expr": "(if 1)",
+ "note": "07A V4: if requires a consequent, so one argument is wrong-number-of-arguments. Planned Fe gap until 07B."
+}

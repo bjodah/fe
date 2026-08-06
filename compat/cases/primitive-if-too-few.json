@@ -1,0 +1,6 @@
+{
+ "id": "primitive-if-too-few",
+ "setup": [],
+ "expr": "(if)",
+ "note": "07A V4: if requires a test and consequent, so zero arguments is wrong-number-of-arguments. Planned Fe gap until 07B."
+}

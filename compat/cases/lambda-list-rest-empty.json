@@ -1,0 +1,6 @@
+{
+ "id": "lambda-list-rest-empty",
+ "setup": [],
+ "expr": "((lambda (&rest) 1))",
+ "note": "07A L1: an empty &rest declaration is invalid-function. Planned Fe gap until 07B."
+}

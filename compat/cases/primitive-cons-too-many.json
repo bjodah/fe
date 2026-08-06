@@ -1,0 +1,6 @@
+{
+ "id": "primitive-cons-too-many",
+ "setup": [],
+ "expr": "(cons 1 2 3)",
+ "note": "07A V2: cons rejects three arguments with wrong-number-of-arguments. Planned Fe gap until 07B."
+}

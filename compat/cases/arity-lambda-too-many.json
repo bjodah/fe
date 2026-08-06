@@ -1,0 +1,6 @@
+{
+ "id": "arity-lambda-too-many",
+ "setup": [],
+ "expr": "(funcall (lambda (x) x) 1 2)",
+ "note": "07A A2: extra lambda arguments raise wrong-number-of-arguments with NARGS 2. Planned Fe gap until 07B."
+}

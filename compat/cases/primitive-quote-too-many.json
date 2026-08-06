@@ -1,0 +1,6 @@
+{
+ "id": "primitive-quote-too-many",
+ "setup": [],
+ "expr": "(quote 1 2)",
+ "note": "07A V2: quote rejects two raw forms with wrong-number-of-arguments. Planned Fe gap until 07B."
+}

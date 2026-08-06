@@ -1,0 +1,6 @@
+{
+ "id": "primitive-car-too-many",
+ "setup": [],
+ "expr": "(car 1 2)",
+ "note": "07A V2: car rejects two arguments with wrong-number-of-arguments. Planned Fe gap until 07B."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "lambda-list-rest-trailing",
+ "setup": [],
+ "expr": "((lambda (&rest x y) (list x y)) 1 2 3)",
+ "note": "07A L3: Emacs tolerates trailing lambda-list names after &rest, binding x and ignoring y. Planned Fe gap until 07B."
+}

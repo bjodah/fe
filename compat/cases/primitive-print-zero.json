@@ -1,0 +1,6 @@
+{
+ "id": "primitive-print-zero",
+ "setup": [],
+ "expr": "(print)",
+ "note": "07A V5: the Emacs print contract rejects zero arguments; Fe's existing variadic stdout primitive is a planned divergence to narrow in 07B."
+}

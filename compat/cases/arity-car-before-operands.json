@@ -1,0 +1,6 @@
+{
+ "id": "arity-car-before-operands",
+ "setup": [],
+ "expr": "(condition-case nil (progn (setq n 0) (car (setq n 1) (setq n 2))) (error n))",
+ "note": "07A A6: fixed primitive arity is rejected before operand evaluation, so the caught result is 0. Planned Fe gap until 07B."
+}

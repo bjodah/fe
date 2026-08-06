@@ -1,0 +1,6 @@
+{
+ "id": "primitive-print-three",
+ "setup": [],
+ "expr": "(print 1 nil 2)",
+ "note": "07A V5: print rejects three arguments with wrong-number-of-arguments. Planned Fe gap until 07B."
+}

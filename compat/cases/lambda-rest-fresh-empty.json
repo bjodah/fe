@@ -1,0 +1,6 @@
+{
+ "id": "lambda-rest-fresh-empty",
+ "setup": [],
+ "expr": "((lambda (a &rest r) (list a r)) 1)",
+ "note": "07A L9: an empty rest binds nil and is freshly constructed per call. Planned Fe gap contract."
+}

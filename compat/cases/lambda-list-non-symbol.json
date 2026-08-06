@@ -1,0 +1,6 @@
+{
+ "id": "lambda-list-non-symbol",
+ "setup": [],
+ "expr": "((lambda (1) 1))",
+ "note": "07A L5: a non-symbol lambda parameter is invalid-function. Planned Fe gap until 07B."
+}
