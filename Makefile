@@ -211,7 +211,16 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # 09C's mark rewrite both land in fe.c (140/520) and fe_eval.c (489/520), and
 # a file crossing 520 in this phase would be a design signal, not a funding
 # one. 09D re-sets both totals to the measured actuals at the phase close.
-SCC_COMPLEXITY_MAX ?= 820
+# Set 820 -> 757 at the Phase 9 fe close (2026-08-07): the measured actual
+# after 09B and 09C, not an estimate, and the same convention the Phase 8 fix
+# cycle established -- the cap sits *on* the number, proven by temporarily
+# lowering it by one and watching the gate fire. At 756 `make complexity-check`
+# reports "FAIL: total complexity 757 exceeds limit 756"; at 757 it passes.
+# The phase spent 11 of the 74 points the raise funded (746 -> 757 against a
+# +30..50 price), so the 63 unspent ones go back rather than sitting as
+# unearned headroom. `SCC_FILE_COMPLEXITY_MAX` was never raised for Phase 9
+# and stays where it is; the worst file is fe_eval.c at 490.
+SCC_COMPLEXITY_MAX ?= 757
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -299,7 +308,14 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # the usual small margin. Proved live before the raise landed by temporarily
 # setting it to 1055 and watching `make pmccabe-check` fail, then restoring.
 # 09D re-sets this to the measured actual at the phase close.
-PMCCABE_TOTAL_MAX ?= 1120
+# Set 1120 -> 1065 at the Phase 9 fe close (2026-08-07), the measured actual
+# across 341 symbols after 09B and 09C. Proven the same way: at 1064
+# `make pmccabe-check` reports "FAIL: total complexity 1065 exceeds funded
+# budget 1064 (+1)"; at 1065 it passes. The phase spent 9 of the 64 funded
+# points. The per-symbol manifest under .ci/pmccabe-baseline.json is unchanged
+# by this commit and remains the ratchet that stops a symbol growing inside
+# this envelope.
+PMCCABE_TOTAL_MAX ?= 1065
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
