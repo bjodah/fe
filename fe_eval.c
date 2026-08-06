@@ -502,8 +502,19 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
                                              FeCompletion kind,
                                              const char* msg) {
   FeObject* cl = ctx->call_list;
-  // A longjmp abandons the C activation that published this record.
+  // A longjmp abandons the C activation that published this record. Clearing
+  // the identity too, rather than only the flag, keeps `native_identity`'s
+  // "live object or nil" invariant (`CollectGarbage` marks it) instead of
+  // leaving the abandoned native's callable behind as a stale root.
+  //
+  // This is not the whole story: the completion may be *caught*, by a
+  // handler in a run this native started, in which case the native below is
+  // still on the C stack and its record has to come back.
+  // `RunEvaluationLoop` restores it after its own `setjmp` for exactly that
+  // case -- see the comment there.
   ctx->native_call_active = false;
+  ctx->native_identity = &nil;
+  ctx->native_argc = 0;
   // The fresh budget every cleanup entry below runs under, taken from the
   // ambient record: a bounded, working budget even when the record it comes
   // from is the exhausted or cancelled one the body just died on.
@@ -608,7 +619,9 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg) {
   // An exhausted arena cannot allocate its own condition object. Preserve the
   // existing non-allocating fatal path instead of recursing through MakeObject.
-  if (FeIsNil(ctx->free_list)) {
+  // `ArenaCanAllocate` -- not a bare free-list test -- is what "exhausted"
+  // means here; see its own comment.
+  if (!ArenaCanAllocate(ctx)) {
     ctx->condition = &nil;
     RaiseCompletion(ctx, FeCompletionError, msg);
   }
@@ -729,14 +742,16 @@ FeObject* FeGetCondition(const FeContext* ctx) {
                                  const char* name,
                                  FeObject* data,
                                  const char* message) {
-  if (FeIsNil(ctx->free_list)) {
+  const size_t gc = FeSaveGC(ctx);
+  // `data` is rooted first: it is usually a list the caller has just built
+  // and nothing else refers to, and both `ArenaCanAllocate`'s collection and
+  // `FeMakeSymbol`'s can sweep it otherwise.
+  FePushGC(ctx, data);
+  if (!ArenaCanAllocate(ctx)) {
+    FeRestoreGC(ctx, gc);
     ctx->condition = &nil;
     RaiseCompletion(ctx, kind, message);
   }
-  const size_t gc = FeSaveGC(ctx);
-  // `data` is rooted first: it is usually a list the caller has just built
-  // and nothing else refers to, and `FeMakeSymbol` can collect.
-  FePushGC(ctx, data);
   FeObject* symbol = FeMakeSymbol(ctx, name);
   FePushGC(ctx, symbol);
   ctx->condition = FeCons(ctx, symbol, data);
@@ -3303,6 +3318,19 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   // floor back when it returns -- `RunEvaluation`/`RunEvaluationBody` each
   // call this loop, and only one loop is live at a time.
   const size_t volatile saved_run_base = ctx->run_base;
+  // The native-call record (07A Decision 2) belongs to the C activation that
+  // published it, and a caught condition longjmps back past every native
+  // this run entered -- `RaiseCompletionCore` clears the record on the way
+  // out, and the native arm's own restore below is skipped by the jump. What
+  // must come back is the record of the native that owns *this* run, if a
+  // native started it by calling `FeCall*`: that activation is still on the
+  // C stack, below this loop's `setjmp`, and after the handler returns it
+  // may still ask `FeGetNextArgument` for another argument. Without this a
+  // `condition-case` anywhere inside a host-driven nested evaluation
+  // silently stripped the enclosing native's identity and count.
+  FeObject* const volatile saved_native_identity = ctx->native_identity;
+  const size_t volatile saved_native_argc = ctx->native_argc;
+  const bool volatile saved_native_active = ctx->native_call_active;
   jmp_buf condition_jump;
   jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
   ctx->run_base = base;
@@ -3310,6 +3338,10 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   ctx->condition_catch = &condition_jump;
   FeObject* result = &nil;
   (void)setjmp(condition_jump);
+  // Both on entry (a no-op) and after a caught condition jumped back here.
+  ctx->native_identity = saved_native_identity;
+  ctx->native_argc = saved_native_argc;
+  ctx->native_call_active = saved_native_active;
   while (ctx->frame_stack_index > base) {
     FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
     FeObject* const expr = frame->expr;

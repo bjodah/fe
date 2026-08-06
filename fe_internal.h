@@ -709,5 +709,6 @@ size_t RenderObject(FeContext* ctx,
                                    size_t argc,
                                    const char* message);
 [[noreturn]] void RaiseGcStackOverflow(FeContext* ctx);
+bool ArenaCanAllocate(FeContext* ctx);
 
 #endif

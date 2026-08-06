@@ -368,6 +368,12 @@ static void CollectGarbage(FeContext* ctx) {
   FeMark(ctx, ctx->call_result);
   FeMark(ctx, ctx->root_list);
   FeMark(ctx, ctx->condition);
+  // The running native's callable. While the native runs this is also
+  // reachable through the frame that invoked it, but relying on that made
+  // the record's lifetime depend on a second structure's; marking it here
+  // makes "native_identity is a live object whenever it is not nil" a local
+  // invariant instead of a cross-module argument.
+  FeMark(ctx, ctx->native_identity);
   FeMark(ctx, ctx->pending_throw_tag);
   FeMark(ctx, ctx->pending_throw_value);
   FeMarkEvaluatorRoots(ctx);
@@ -517,6 +523,23 @@ static int IsStringEqual(FeObject* obj, const char* str) {
     obj = CDR(obj);
   }
   return *str == '\0';
+}
+
+// "Could an allocation still succeed?", which is what the raise paths mean
+// when they ask whether they can build a condition object. `FeIsNil(free_list)`
+// on its own answers a narrower question -- whether the free list happens to
+// be empty at this instant -- and that is true after any allocation that took
+// the last cell, with a whole arena of collectable garbage behind it. Reading
+// that as exhaustion silently downgraded a structured condition to a bare,
+// uncatchable one whenever a raise landed on that boundary: under memory
+// pressure `(condition-case e (car 1 2) (wrong-number-of-arguments e))`
+// escaped its own handler.
+bool ArenaCanAllocate(FeContext* ctx) {
+  if (!FeIsNil(ctx->free_list)) {
+    return true;
+  }
+  CollectGarbage(ctx);
+  return !FeIsNil(ctx->free_list);
 }
 
 FeObject* MakeObject(FeContext* ctx) {
@@ -1935,6 +1958,10 @@ static FeContext* OpenContext(void* arena, size_t size) {
   // Initialize the lists:
   ctx->call_list = &nil;
   ctx->condition = &nil;
+  // Nil, not left zeroed: `CollectGarbage` marks it unconditionally, so the
+  // invariant is that it always holds a real object -- the callable of the
+  // native currently running, or nil when none is.
+  ctx->native_identity = &nil;
   ctx->pending_throw_tag = &nil;
   ctx->pending_throw_value = &nil;
   ctx->free_list = &nil;

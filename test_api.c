@@ -5790,6 +5790,187 @@ static bool TestMixedCleanupLIFO(void) {
   return true;
 }
 
+// 07B item 6's native-call record, exercised from the three directions the
+// slice owns. `InnerArityNative` consumes one argument and rejects the rest,
+// so both helper raises are reachable from Lisp; `OuterArityNative` does the
+// same but re-enters the evaluator first, with a `condition-case` inside that
+// nested run catching an inner native's arity raise -- the case where
+// `RaiseCompletionCore` cleared the record and the native arm's own restore
+// was jumped over.
+static FeObject* InnerArityNative(FeContext* context,
+                                  // cppcheck-suppress constParameterCallback
+                                  FeObject* arguments) {
+  (void)FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  return FeNil(context);
+}
+
+static FeObject* OuterArityNative(FeContext* context,
+                                  // cppcheck-suppress constParameterCallback
+                                  FeObject* arguments) {
+  (void)FeGetNextArgument(context, &arguments);
+  static const char nested[] =
+      "(setq nested-condition (condition-case e (inner-arity 1 2 3) "
+      "(wrong-number-of-arguments e)))";
+  (void)FeEvaluateString(context, "nested.fe", nested, sizeof(nested) - 1);
+  // Only now, after a handler in the nested run has run and returned, does
+  // the outer native ask for its own record back.
+  FeRequireNoArguments(context, arguments);
+  return FeNil(context);
+}
+
+// Allocates hard inside the nested run so a collection is in flight around
+// the enclosing native's record, then raises through it.
+static FeObject* ChurningArityNative(FeContext* context,
+                                     // cppcheck-suppress constParameterCallback
+                                     FeObject* arguments) {
+  (void)FeGetNextArgument(context, &arguments);
+  static const char churn[] =
+      "(do (setq n 0) (while (< n 100000) (setq n (+ n 1)) (cons n n)) n)";
+  (void)FeEvaluateString(context, "churn.fe", churn, sizeof(churn) - 1);
+  FeRequireNoArguments(context, arguments);
+  return FeNil(context);
+}
+
+// The `(FUNCTION NARGS)` condition data on the *host* side of 07A Decision 2,
+// which nothing tested: the record `FeGetNextArgument` and
+// `FeRequireNoArguments` read is published per native call and has to survive
+// a nested run, a nested native, and a condition caught inside either.
+static bool TestNativeArityRecord(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "inner-arity", InnerArityNative);
+  FeDefineNative(context, "outer-arity", OuterArityNative);
+  FeDefineNative(context, "churn-arity", ChurningArityNative);
+
+#define CHK(expr, expected)                                                 \
+  CHECK(IsRendered(                                                         \
+      context, FeEvaluateString(context, "rec.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // Direct symbol-head calls: the identity is the symbol the program wrote,
+  // the count is the actual one, and both directions raise.
+  CHK("(condition-case e (inner-arity 1 2) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments inner-arity 2)");
+  CHK("(condition-case e (inner-arity) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments inner-arity 0)");
+  CHK("(condition-case e (inner-arity 1 2 3 4) "
+      "(wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments inner-arity 4)");
+  // A computed head has no symbol to name, so Decision 2 says the callable
+  // object goes in the condition instead.
+  CHK("(condition-case e (funcall 'inner-arity 1 2) "
+      "(wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments [native-fn] 2)");
+
+  // The record is per call, restored around a nested one: the inner native's
+  // raise is caught inside a run the *outer* native started, and the outer
+  // native's own raise afterwards still names the outer native and its own
+  // count. Both halves are asserted, because a restore that put back the
+  // wrong record would keep the second one passing on its own.
+  CHK("(condition-case e (outer-arity 1 2) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments outer-arity 2)");
+  CHK("nested-condition", "(wrong-number-of-arguments inner-arity 3)");
+
+  // And with a collection forced through the nested run first, so the
+  // identity the record holds has been through a mark phase.
+  const size_t collections = FeGetArenaStats(context).collection_count;
+  CHK("(condition-case e (churn-arity 1 2) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments churn-arity 2)");
+  CHECK(FeGetArenaStats(context).collection_count > collections);
+
+  // Decision 2 also pins the rendered text: the condition changed, the
+  // message did not.
+  CHECK(ExpectEvaluationError(context, &state, "rec.fe", "(inner-arity 1 2)",
+                              strlen("(inner-arity 1 2)"),
+                              "rec.fe: too many arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "rec.fe", "(inner-arity)",
+                              strlen("(inner-arity)"),
+                              "rec.fe: too few arguments"));
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
+// 07B's "forced GC at each allocation in the data-list construction".
+// `RaiseNativeArity` allocates twice -- the count, then the two-element
+// `(FUNCTION NARGS)` list -- and both the callable and the count have to stay
+// rooted across both. A collection landing between them is the failure mode,
+// so this walks one *through* the sequence: the arena is filled with
+// unrooted garbage until exactly `headroom` objects are free, and then the
+// raise runs. The first `headroom` allocations of the evaluation succeed and
+// the next one collects, so sweeping `headroom` moves that collection one
+// allocation at a time across the whole raise, the two data allocations
+// included.
+//
+// The form is read once and re-evaluated from the rooted object: reading it
+// per iteration would spend the headroom on the reader and never let the
+// collection reach the raise at all.
+static bool TestArityDataUnderCollection(void) {
+  static const char* const raises[] = {
+      // A primitive, whose identity is the head symbol.
+      "'(condition-case e (car 1 2) (wrong-number-of-arguments e))",
+      // A closure, whose identity is the closure object.
+      "'(condition-case e ((lambda (x) x) 1 2) (wrong-number-of-arguments e))",
+      // A host native, through the argument helpers' own record.
+      "'(condition-case e (inner-arity 1 2) (wrong-number-of-arguments e))",
+  };
+  static const char* const expected[] = {
+      "(wrong-number-of-arguments car 2)",
+      "(wrong-number-of-arguments (lambda (x) x) 2)",
+      "(wrong-number-of-arguments inner-arity 2)",
+  };
+
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "inner-arity", InnerArityNative);
+
+  for (size_t which = 0; which < sizeof(raises) / sizeof(raises[0]); which++) {
+    FeRoot* const form = FeCreateRoot(
+        context, FeEvaluateString(context, "form.fe", raises[which],
+                                  strlen(raises[which])));
+    CHECK(form != nullptr);
+    size_t collected = 0;
+    for (size_t headroom = 1; headroom <= 32; headroom++) {
+      const size_t gc = FeSaveGC(context);
+      while (FeGetArenaStats(context).free_slots > headroom) {
+        (void)FeCons(context, FeNil(context), FeNil(context));
+        // Dropped from the root stack immediately, so it is garbage the
+        // collection below reclaims rather than a live object that would
+        // turn the squeeze into arena exhaustion.
+        FeRestoreGC(context, gc);
+      }
+      const size_t collections = FeGetArenaStats(context).collection_count;
+      CHECK(IsRendered(context, FeEvaluate(context, FeGetRoot(form)),
+                       expected[which]));
+      if (FeGetArenaStats(context).collection_count > collections) {
+        collected++;
+      }
+      FeRestoreGC(context, gc);
+    }
+    // A raise this size allocates fewer than 32 objects, so the widest
+    // headrooms legitimately finish without collecting at all; what matters
+    // is that the narrow ones did, which is what puts a collection inside the
+    // raise rather than before it.
+    printf("arity data under collection: form %zu collected in %zu of 32\n",
+           which, collected);
+    CHECK(collected >= 4);
+    FeReleaseRoot(context, form);
+  }
+
+  FeCloseContext(context);
+  return true;
+}
+
 // Fills the root stack from inside a native so the overflow report itself is
 // the thing under test.
 static FeObject* PushRootsPastTheLimit(FeContext* context,
@@ -5993,7 +6174,8 @@ int main(void) {
                  TestCleanupRunGC() && TestPrimitiveOrder() &&
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestLongArgumentLists() && TestCatchThrow() &&
+                 TestLongArgumentLists() && TestNativeArityRecord() &&
+                 TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion()
              ? EXIT_SUCCESS
