@@ -486,31 +486,6 @@ FeObject* FeGetCondition(const FeContext* ctx) {
   return ctx->condition;
 }
 
-FeEvalState FeSaveEvalState(const FeContext* ctx) {
-  return (FeEvalState){
-      .frame_stack_index = ctx->frame_stack_index,
-      .run_base = ctx->run_base,
-      .native_reentry_depth = ctx->native_reentry_depth,
-      .evaluator_catch = ctx->evaluator_catch,
-      .condition_catch = ctx->condition_catch,
-      .call_list = ctx->call_list,
-      .completion = ctx->completion,
-  };
-}
-
-void FeRestoreEvalState(FeContext* ctx, const FeEvalState* state) {
-  if (state == nullptr) {
-    return;
-  }
-  ctx->frame_stack_index = state->frame_stack_index;
-  ctx->run_base = state->run_base;
-  ctx->native_reentry_depth = state->native_reentry_depth;
-  ctx->evaluator_catch = state->evaluator_catch;
-  ctx->condition_catch = state->condition_catch;
-  ctx->call_list = state->call_list;
-  ctx->completion = state->completion;
-}
-
 [[noreturn]] void RaiseCondition(FeContext* ctx,
                                  FeCompletion kind,
                                  const char* name,
