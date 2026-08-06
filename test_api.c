@@ -6521,6 +6521,208 @@ static bool TestGcStackConstantInNesting(void) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Sub-plan 09A's "before" pins: Table X's catchability column, asserted
+// instead of described.
+//
+// Every case below records what this tree does *today*. Genuine arena
+// exhaustion and GC-root-stack overflow cannot build a condition object, so
+// `FeHandleError`, `RaiseCondition` and `RaiseGcStackOverflow` degrade it to
+// nil, and `ConditionMatches` answers false for every *named* handler once
+// the object is not a pair -- so only `(t ...)` catches them, and a handler
+// that binds the condition binds nil. The same degradation applies to any
+// named condition that happens to be raised while the arena is full.
+//
+// Sub-plan 09B changes exactly these answers, and flips these assertions in
+// the same commit that changes the behaviour -- which is what makes them a
+// contract rather than a description. Two rows must survive 09B unchanged
+// and are pinned here for that reason: Budget stays uncatchable (09A
+// Decision 2), and a quit is matched by completion *kind* before anything
+// looks at the condition object's shape, so it stays catchable even while
+// the object is nil.
+
+// The exhausting body row 1 is about: the chain is a `let`-local, so it is
+// unreachable the instant the handler's frame is entered and a handler is
+// free to allocate. A chain built into a *global* pins the arena instead,
+// which is the handler-re-entry case (09B), not this one.
+#define LocalExhaustion "(let ((l nil)) (while t (setq l (cons 1 l))))"
+
+// Small enough that `LocalExhaustion` fills it in well under a second, large
+// enough that the reader, the `condition-case` frame and the handler all fit.
+enum { PressureArenaExtra = 16 * 1024 };
+
+static ErrorState pressure_state;
+
+// Fills the arena to the point where `ArenaCanAllocate` -- the predicate the
+// raise paths themselves consult -- answers false, keeping only the chain's
+// head rooted so the GC stack stays flat, and then raises. `raise_quit`
+// picks which completion is raised from that state: a host quit (Table X's
+// C-g row, whose condition object is built by `RaiseCondition` and so
+// degrades like any other) or an ordinary named error (row 3).
+[[noreturn]] static void FillArenaThenRaise(FeContext* ctx, bool raise_quit) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* chain = FeNil(ctx);
+  while (ArenaCanAllocate(ctx)) {
+    chain = FeCons(ctx, FeNil(ctx), chain);
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, chain);
+  }
+  if (raise_quit) {
+    FeRaiseCompletion(ctx, FeCompletionQuit, "evaluation cancelled");
+  }
+  FeHandleError(ctx, "deliberate failure while full");
+}
+
+[[noreturn]] static FeObject* FillThenQuit(FeContext* ctx,
+                                           // cppcheck-suppress
+                                           // constParameterCallback
+                                           FeObject* arguments) {
+  FeRequireNoArguments(ctx, arguments);
+  FillArenaThenRaise(ctx, true);
+}
+
+[[noreturn]] static FeObject* FillThenError(FeContext* ctx,
+                                            // cppcheck-suppress
+                                            // constParameterCallback
+                                            FeObject* arguments) {
+  FeRequireNoArguments(ctx, arguments);
+  FillArenaThenRaise(ctx, false);
+}
+
+// Evaluates `source` in a fresh, deliberately small context and reports what
+// happened: either the form completed, and `rendered` holds its value, or the
+// completion escaped every handler and reached the host error callback, which
+// is what `*escaped` says. `expected_escape` is the message the host must see
+// on that path, so an escape for the wrong reason fails rather than passing
+// as "did not catch".
+static bool EvaluateUnderPressure(const char* source,
+                                  const char* expected_escape,
+                                  bool* escaped,
+                                  char* rendered,
+                                  size_t rendered_size) {
+  static TestArena storage;
+  const size_t size = FeMinimumArenaSize() + PressureArenaExtra;
+  CHECK(size <= sizeof(storage.bytes));
+  FeContext* const context = FeOpenContext(storage.bytes, size);
+  CHECK(context != nullptr);
+  pressure_state =
+      (ErrorState){.context = context, .expected_message = expected_escape};
+  FeSetUserData(context, &pressure_state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "push-roots", PushRootsPastTheLimit);
+  FeDefineNative(context, "fill-then-quit", FillThenQuit);
+  FeDefineNative(context, "fill-then-error", FillThenError);
+
+  FeContext* const volatile context_v = context;
+  char* const volatile rendered_v = rendered;
+  const size_t volatile rendered_size_v = rendered_size;
+  bool volatile did_escape = false;
+  rendered[0] = '\0';
+  if (setjmp(pressure_state.jump) == 0) {
+    FeObject* const value =
+        FeEvaluateString(context_v, "pressure.fe", source, strlen(source));
+    (void)FeToString(context_v, value, rendered_v, rendered_size_v);
+  } else {
+    did_escape = true;
+  }
+  *escaped = did_escape;
+  const bool reported_as_expected = !did_escape || pressure_state.called;
+  FeCloseContext(context_v);
+  CHECK(reported_as_expected);
+  return true;
+}
+
+// `(condition-case VAR BODY (SPEC HANDLER))` must complete and render
+// `expected`.
+static bool ExpectPressureCaught(const char* source, const char* expected) {
+  bool escaped = true;
+  char rendered[64];
+  CHECK(EvaluateUnderPressure(source, "unused", &escaped, rendered,
+                              sizeof(rendered)));
+  CHECK(!escaped);
+  CHECK(strcmp(rendered, expected) == 0);
+  return true;
+}
+
+// ... and the same form must reach the host with `expected_escape` when no
+// handler matches.
+static bool ExpectPressureEscapes(const char* source,
+                                  const char* expected_escape) {
+  bool escaped = false;
+  char rendered[64];
+  CHECK(EvaluateUnderPressure(source, expected_escape, &escaped, rendered,
+                              sizeof(rendered)));
+  CHECK(escaped);
+  return true;
+}
+
+static bool TestExhaustionCatchability(void) {
+  // Row 1 -- arena objects. `(t ...)` catches; `(error ...)` and the name
+  // the hierarchy already reserves for it do not.
+  CHECK(ExpectPressureCaught(
+      "(condition-case nil " LocalExhaustion " (t (quote caught)))", "caught"));
+  CHECK(ExpectPressureEscapes("(condition-case nil " LocalExhaustion
+                              " (error (quote caught)))",
+                              "pressure.fe:1: out of memory"));
+  CHECK(ExpectPressureEscapes("(condition-case nil " LocalExhaustion
+                              " (arena-exhaustion (quote caught)))",
+                              "pressure.fe:1: out of memory"));
+  // The degraded object itself, read from Lisp: the handler variable is
+  // bound to nil, not to `(arena-exhaustion)`.
+  CHECK(ExpectPressureCaught("(condition-case e " LocalExhaustion " (t e))",
+                             "nil"));
+
+  // Row 2 -- the GC root stack, provoked directly from a native so the
+  // overflow report is what is under test. Same answer: `(t ...)` only, and
+  // the object is nil.
+  CHECK(
+      ExpectPressureCaught("(condition-case nil (push-roots) (t (quote "
+                           "caught)))",
+                           "caught"));
+  CHECK(ExpectPressureEscapes(
+      "(condition-case nil (push-roots) (error (quote caught)))",
+      "pressure.fe:1: GC stack overflow"));
+  CHECK(ExpectPressureCaught("(condition-case e (push-roots) (t e))", "nil"));
+
+  // Row 3 -- a *named* raise that happens while the arena is full. Its own
+  // name is lost with the object, so it too is `(t ...)`-only today.
+  CHECK(ExpectPressureCaught("(condition-case e (fill-then-error) (t e))",
+                             "nil"));
+  CHECK(ExpectPressureEscapes(
+      "(condition-case nil (fill-then-error) (error (quote caught)))",
+      "pressure.fe:1: deliberate failure while full"));
+
+  // Row 8 -- quit, raised from the same exhausted state. `ConditionMatches`
+  // decides quit by completion kind *before* it looks at the object, so this
+  // one is catchable by name even though the object is nil. 09B must not
+  // change either half of that.
+  CHECK(ExpectPressureCaught(
+      "(condition-case nil (fill-then-quit) (quit (quote caught)))", "caught"));
+  CHECK(ExpectPressureCaught("(condition-case e (fill-then-quit) (quit e))",
+                             "nil"));
+
+  // Rows 4-6 -- Budget. `FindConditionHandler` refuses the whole search for
+  // a Budget completion, so not even `(t ...)` catches a step-limit wall
+  // (09A Decision 2: this is pinned so 09B asserts it rather than "fixes"
+  // it).
+  static TestArena budget_storage;
+  FeContext* const budget_context =
+      FeOpenContext(budget_storage.bytes, sizeof(budget_storage.bytes));
+  CHECK(budget_context != nullptr);
+  ErrorState budget_state = {.context = budget_context};
+  FeSetUserData(budget_context, &budget_state);
+  FeSetErrorFn(budget_context, HandleError);
+  static const char budget_source[] =
+      "(condition-case nil (while t (cons 1 2)) (t (quote caught)))";
+  const FeEvalOptions tiny_budget = {.step_limit = 64};
+  CHECK(ExpectEvaluationOptionsError(
+      budget_context, &budget_state, "budget.fe", budget_source,
+      sizeof(budget_source) - 1, &tiny_budget,
+      "budget.fe:1: evaluation step limit exceeded"));
+  FeCloseContext(budget_context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -6545,6 +6747,7 @@ int main(void) {
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
                  TestLongArgumentLists() && TestNativeArityRecord() &&
+                 TestExhaustionCatchability() &&
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion()
