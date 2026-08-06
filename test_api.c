@@ -97,21 +97,18 @@ static bool IsRendered(FeContext* context,
     // cppcheck-suppress constParameterCallback
     FeObject* stack) {
   ErrorState* state = FeGetUserData(context);
-  char expected_with_line[1024];
+  // Every expectation is written out in full, including the `file:LINE:`
+  // prefix the raise really carries. An earlier version of this handler
+  // inserted `:1` into any expectation that lacked a line number, which made
+  // the line part of a message unassertable -- and its "does this already
+  // have a line?" test only recognised single-digit lines, so an expectation
+  // for line 10 or later was silently corrupted into `file:10:1: ...`.
   const char* expected = state->expected_message;
-  const char* separator = strstr(expected, ": ");
-  const char* colon = strchr(expected, ':');
-  const bool has_line =
-      colon != nullptr && colon[1] >= '0' && colon[1] <= '9' && colon[2] == ':';
-  if (strncmp(expected, "byte ", 5) != 0 && !has_line && separator != nullptr &&
-      strlen(expected) + 2 < sizeof(expected_with_line)) {
-    const size_t prefix = (size_t)(separator - expected);
-    memcpy(expected_with_line, expected, prefix);
-    strcpy(expected_with_line + prefix, ":1");
-    strcpy(expected_with_line + prefix + 2, separator);
-    expected = expected_with_line;
-  }
   state->called = state->context == context && strcmp(message, expected) == 0;
+  if (!state->called && state->context == context) {
+    fprintf(stderr, "unexpected error message\n  expected: %s\n  actual:   %s\n",
+            expected, message);
+  }
   state->stack_was_nil = FeIsNil(stack);
   state->observed_completion = FeGetCompletion(context);
   state->completion_seen = true;
@@ -864,7 +861,7 @@ static bool TestEvaluationControl(void) {
   const FeEvalOptions recursion_options = {.step_limit = 64};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "recursion.fe", recursion, sizeof(recursion) - 1,
-      &recursion_options, "recursion.fe: evaluation step limit exceeded"));
+      &recursion_options, "recursion.fe:1: evaluation step limit exceeded"));
 
   static const char macros[] =
       "(fset 'expand (macro (x) x)) (expand (expand (expand (expand (expand "
@@ -872,7 +869,7 @@ static bool TestEvaluationControl(void) {
   const FeEvalOptions macro_options = {.step_limit = 20};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "macros.fe", macros, sizeof(macros) - 1, &macro_options,
-      "macros.fe: evaluation step limit exceeded"));
+      "macros.fe:1: evaluation step limit exceeded"));
 
   InterruptState interrupt = {.context = context,
                               .expected_userdata = &interrupt,
@@ -882,7 +879,7 @@ static bool TestEvaluationControl(void) {
       .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
   CHECK(ExpectEvaluationOptionsError(context, &state, "interrupt.fe", loop,
                                      sizeof(loop) - 1, &interrupt_options,
-                                     "interrupt.fe: evaluation cancelled"));
+                                     "interrupt.fe:1: evaluation cancelled"));
   CHECK(interrupt.polls == interrupt.cancel_after);
   CHECK(interrupt.userdata_seen);
   CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "6", 1),
@@ -896,7 +893,7 @@ static bool TestEvaluationControl(void) {
                                               .userdata = &default_poll};
   CHECK(ExpectEvaluationOptionsError(context, &state, "default-poll.fe", loop,
                                      sizeof(loop) - 1, &default_poll_options,
-                                     "default-poll.fe: evaluation cancelled"));
+                                     "default-poll.fe:1: evaluation cancelled"));
   CHECK(default_poll.polls == 1);
   CHECK(default_poll.userdata_seen);
 
@@ -905,7 +902,7 @@ static bool TestEvaluationControl(void) {
   for (size_t i = 0; i < 2; i++) {
     CHECK(ExpectEvaluationOptionsError(
         context, &state, "exact.fe", addition, sizeof(addition) - 1,
-        &exact_options, "exact.fe: evaluation step limit exceeded"));
+        &exact_options, "exact.fe:1: evaluation step limit exceeded"));
   }
   const FeEvalOptions sufficient_options = {.step_limit = 4};
   CHECK(IsRendered(
@@ -940,12 +937,12 @@ static bool TestEvaluationControl(void) {
   state.nested_with_options = false;
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "outer.fe", nested, sizeof(nested) - 1, &outer_options,
-      "inner.fe: evaluation step limit exceeded"));
+      "inner.fe:1: evaluation step limit exceeded"));
   CHECK(nested_interrupt.polls == 0);
   state.nested_with_options = true;
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "outer.fe", nested, sizeof(nested) - 1, &outer_options,
-      "inner.fe: evaluation step limit exceeded"));
+      "inner.fe:1: evaluation step limit exceeded"));
   CHECK(nested_interrupt.polls == 0);
   CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "7", 1),
                    "7"));
@@ -985,7 +982,7 @@ static bool TestCompletionKinds(void) {
   const FeEvalOptions step = {.step_limit = 32};
   CHECK(ExpectCompletionKind(
       context, &state, "steps.fe", loop, sizeof(loop) - 1, &step,
-      "steps.fe: evaluation step limit exceeded", FeCompletionBudget));
+      "steps.fe:1: evaluation step limit exceeded", FeCompletionBudget));
 
   // Interrupt -> Quit.
   InterruptState interrupt = {.context = context,
@@ -996,7 +993,7 @@ static bool TestCompletionKinds(void) {
       .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
   CHECK(ExpectCompletionKind(context, &state, "interrupt.fe", loop,
                              sizeof(loop) - 1, &interrupt_options,
-                             "interrupt.fe: evaluation cancelled",
+                             "interrupt.fe:1: evaluation cancelled",
                              FeCompletionQuit));
   CHECK(interrupt.polls == interrupt.cancel_after);
   // A real interrupt carries the same `(quit)` condition object
@@ -1015,7 +1012,7 @@ static bool TestCompletionKinds(void) {
   const FeEvalOptions one_less = {.max_frames = peak - 1};
   CHECK(ExpectCompletionKind(
       context, &state, "frames.fe", fixed, sizeof(fixed) - 1, &one_less,
-      "frames.fe: evaluation frame limit exceeded", FeCompletionBudget));
+      "frames.fe:1: evaluation frame limit exceeded", FeCompletionBudget));
 
   // Re-entry wall -> Budget, through a native that synchronously re-enters
   // `FeCallWithOptions` on itself until `max_native_reentry` blocks it.
@@ -1030,14 +1027,14 @@ static bool TestCompletionKinds(void) {
   CHECK(ExpectCompletionKind(
       context, &state, "reentry.fe", "(reentrant-native)",
       sizeof("(reentrant-native)") - 1, &reentry,
-      "reentry.fe: native evaluation re-entry limit exceeded",
+      "reentry.fe:1: native evaluation re-entry limit exceeded",
       FeCompletionBudget));
 
   // An ordinary error -> Error.
   static const char type_error[] = "(car 1)";
   CHECK(ExpectCompletionKind(
       context, &state, "error.fe", type_error, sizeof(type_error) - 1, nullptr,
-      "error.fe: expected pair, got integer", FeCompletionError));
+      "error.fe:1: expected pair, got integer", FeCompletionError));
 
   // The CleanupFrameReserve coupling (plan item 2): a body that exhausts a
   // tight `max_frames` still gets its `unwind-protect` cleanup -- the frame
@@ -1056,7 +1053,7 @@ static bool TestCompletionKinds(void) {
   CHECK(ExpectCompletionKind(
       context, &state, "reserve.fe", overflow_with_cleanup,
       sizeof(overflow_with_cleanup) - 1, &tight_frames,
-      "reserve.fe: evaluation frame limit exceeded", FeCompletionBudget));
+      "reserve.fe:1: evaluation frame limit exceeded", FeCompletionBudget));
   static const char check_cleanup_ran[] = "cleanup-ran";
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "check.fe", check_cleanup_ran,
@@ -1095,10 +1092,10 @@ static bool TestExtensionAPI(void) {
                    "5.0"));
   CHECK(ExpectEvaluationError(
       context, &state, "native.fe", "(add-exactly 2 3 4)",
-      sizeof("(add-exactly 2 3 4)") - 1, "native.fe: too many arguments"));
+      sizeof("(add-exactly 2 3 4)") - 1, "native.fe:1: too many arguments"));
   CHECK(ExpectEvaluationError(context, &state, "native.fe", "(add-exactly 2)",
                               sizeof("(add-exactly 2)") - 1,
-                              "native.fe: too few arguments"));
+                              "native.fe:1: too few arguments"));
 
   enum { TextLength = 128 };
   char text[TextLength];
@@ -1193,7 +1190,7 @@ static bool TestRootsAndCalls(void) {
   const FeEvalOptions options = {.step_limit = 32};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "call.fe", "(call-root)", sizeof("(call-root)") - 1,
-      &options, "call.fe: evaluation step limit exceeded"));
+      &options, "call.fe:1: evaluation step limit exceeded"));
   FeReleaseRoot(context, state.root);
 
   FeCloseContext(context);
@@ -1294,7 +1291,7 @@ static bool TestCallWithOptions(void) {
   const FeEvalOptions outer = {.step_limit = 24};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "outer.fe", nested, sizeof(nested) - 1, &outer,
-      "outer.fe: evaluation step limit exceeded"));
+      "outer.fe:1: evaluation step limit exceeded"));
   CHECK(nested_interrupt.polls == 0);
 
   // One failed invocation does not poison later independent calls.
@@ -1487,7 +1484,7 @@ static bool TestWriter(void) {
   interrupt.cancel_after = without_render + 20;
   CHECK(ExpectEvaluationOptionsError(context, &state, "cancel.fe",
                                      "(render long)", 13, &counted,
-                                     "cancel.fe: evaluation cancelled"));
+                                     "cancel.fe:1: evaluation cancelled"));
   CHECK(render_target.length > 0);
 
   // The context still works afterwards.
@@ -1570,25 +1567,25 @@ static bool TestParameterLists(void) {
   CHECK(ExpectEvaluationError(context, &state, "dotted.fe",
                               "((lambda (a) a) 1 . 2)",
                               strlen("((lambda (a) a) 1 . 2)"),
-                              "dotted.fe: dotted pair in argument list"));
+                              "dotted.fe:1: dotted pair in argument list"));
   CHECK(ExpectEvaluationError(
       context, &state, "rest.fe", "((lambda (a &rest) a) 1)",
-      strlen("((lambda (a &rest) a) 1)"), "rest.fe: invalid-function"));
+      strlen("((lambda (a &rest) a) 1)"), "rest.fe:1: invalid-function"));
   CHECK(ExpectEvaluationError(
       context, &state, "rest.fe", "((lambda (a &rest r x) a) 1)",
-      strlen("((lambda (a &rest r x) a) 1)"), "rest.fe: invalid-function"));
+      strlen("((lambda (a &rest r x) a) 1)"), "rest.fe:1: invalid-function"));
   CHECK(ExpectEvaluationError(
       context, &state, "rest.fe", "((lambda (a . 1) a) 1)",
-      strlen("((lambda (a . 1) a) 1)"), "rest.fe: invalid-function"));
+      strlen("((lambda (a . 1) a) 1)"), "rest.fe:1: invalid-function"));
 #define STRICT(expr, message)                                     \
   CHECK(ExpectEvaluationError(context, &state, "strict.fe", expr, \
                               strlen(expr), message))
-  STRICT("((lambda (x) x))", "strict.fe: wrong-number-of-arguments");
-  STRICT("((lambda (a b) a) 1)", "strict.fe: wrong-number-of-arguments");
-  STRICT("((lambda () 1) 2)", "strict.fe: wrong-number-of-arguments");
-  STRICT("((lambda (a) a) 1 2)", "strict.fe: wrong-number-of-arguments");
-  STRICT("((lambda (1) 5) 2)", "strict.fe: invalid-function");
-  STRICT("((macro (a) a))", "strict.fe: wrong-number-of-arguments");
+  STRICT("((lambda (x) x))", "strict.fe:1: wrong-number-of-arguments");
+  STRICT("((lambda (a b) a) 1)", "strict.fe:1: wrong-number-of-arguments");
+  STRICT("((lambda () 1) 2)", "strict.fe:1: wrong-number-of-arguments");
+  STRICT("((lambda (a) a) 1 2)", "strict.fe:1: wrong-number-of-arguments");
+  STRICT("((lambda (1) 5) 2)", "strict.fe:1: invalid-function");
+  STRICT("((macro (a) a))", "strict.fe:1: wrong-number-of-arguments");
 #undef STRICT
 
   // Optional and rest parameters remain valid.
@@ -1627,11 +1624,11 @@ static bool TestBinding(void) {
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "car")));
 
   CHECK(ExpectEvaluationError(context, &state, "void.fe", "absent", 6,
-                              "void.fe: void-variable absent"));
+                              "void.fe:1: void-variable absent"));
   CHECK(ExpectEvaluationError(context, &state, "void.fe", "(absent 1)", 10,
-                              "void.fe: void-function absent"));
+                              "void.fe:1: void-function absent"));
   CHECK(ExpectEvaluationError(context, &state, "void.fe", "(+ 1 absent)", 12,
-                              "void.fe: void-variable absent"));
+                              "void.fe:1: void-variable absent"));
 
 #define CHK(expr, expected)                                                  \
   CHECK(IsRendered(                                                          \
@@ -1660,7 +1657,7 @@ static bool TestBinding(void) {
   // The sentinel is not reachable: a symbol's cell is not a pair to Lisp, and
   // (env) yields symbols, which print as their names.
   CHECK(ExpectEvaluationError(context, &state, "reach.fe", "(cdr 'absent)", 13,
-                              "reach.fe: expected pair, got symbol"));
+                              "reach.fe:1: expected pair, got symbol"));
   CHK("(is (car (env)) (car (env)))", "t");
 
 #undef CHK
@@ -1848,7 +1845,7 @@ static bool TestFunctionCells(void) {
   CHK("(fset s (lambda () 4))", "(lambda nil 4)");
   CHK("(k)", "4");
   // The target is validated as a symbol before the function form evaluates.
-  LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe: expected symbol, got integer");
+  LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe:1: expected symbol, got integer");
 
   // `funcall` takes a value: a closure directly, a lexical value, and a
   // symbol designator resolved through the function cell (04D's cut removed
@@ -1864,10 +1861,10 @@ static bool TestFunctionCells(void) {
   // pinned `lisp2-void-function-value-only` oracle -- and an unbound one is
   // the same; the context stays reusable after both. A zero-operand
   // funcall/apply is an arity error, never a crash on an empty operand list.
-  LISP2_ERR("(setq v 7) (funcall 'v)", "lisp2.fe: void-function v");
-  LISP2_ERR("(funcall 'no-such)", "lisp2.fe: void-function no-such");
-  LISP2_ERR("(funcall)", "lisp2.fe: wrong-number-of-arguments");
-  LISP2_ERR("(apply)", "lisp2.fe: wrong-number-of-arguments");
+  LISP2_ERR("(setq v 7) (funcall 'v)", "lisp2.fe:1: void-function v");
+  LISP2_ERR("(funcall 'no-such)", "lisp2.fe:1: void-function no-such");
+  LISP2_ERR("(funcall)", "lisp2.fe:1: wrong-number-of-arguments");
+  LISP2_ERR("(apply)", "lisp2.fe:1: wrong-number-of-arguments");
   CHK("(+ 1 2)", "3");
 
   // `apply` spreads its final list argument; the caller's list is never
@@ -1882,10 +1879,10 @@ static bool TestFunctionCells(void) {
   // operand form has run (a side effect in an earlier operand already ran).
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "apply-probe")));
   LISP2_ERR("(apply '+ 1 (do (setq apply-probe t) '(2 3)) '(4 . 5))",
-            "lisp2.fe: apply: last argument must be a proper list");
+            "lisp2.fe:1: apply: last argument must be a proper list");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "apply-probe")));
   LISP2_ERR("(apply 'list 1)",
-            "lisp2.fe: apply: last argument must be a "
+            "lisp2.fe:1: apply: last argument must be a "
             "proper list");
   // 07A's census puts `apply` at 1+, like `funcall`: one operand is a
   // callable with no final list at all, which is that same malformed-tail
@@ -1893,7 +1890,7 @@ static bool TestFunctionCells(void) {
   // arity error -- `(apply #'list)` measures as
   // `(wrong-type-argument listp list)`.
   LISP2_ERR("(apply 'list)",
-            "lisp2.fe: apply: last argument must be a "
+            "lisp2.fe:1: apply: last argument must be a "
             "proper list");
   CHK("(apply '+ 1 2 (list 3 4))", "10");
 
@@ -1912,11 +1909,11 @@ static bool TestFunctionCells(void) {
   CHK("(= (+))", "t");
   CHK("(set 'zero-operand (+))", "0");
   CHK("zero-operand", "0");
-  LISP2_ERR("(funcall (+))", "lisp2.fe: tried to call non-callable value");
+  LISP2_ERR("(funcall (+))", "lisp2.fe:1: tried to call non-callable value");
   // `/` has no identity to return; nothing has evaluated by then, so this is
   // the same wrong-number-of-arguments Emacs signals. The context stays
   // reusable.
-  LISP2_ERR("(/)", "lisp2.fe: wrong-number-of-arguments");
+  LISP2_ERR("(/)", "lisp2.fe:1: wrong-number-of-arguments");
   CHK("(/ 8 2)", "4");
   CHK("(+ 1 2)", "3");
 
@@ -1925,19 +1922,19 @@ static bool TestFunctionCells(void) {
   // `(funcall 'quote 'a)` answered `(quote a)` and `(funcall 'if 1 2 3)`
   // took a branch of the *quoted* forms. Emacs signals invalid-function for
   // all of these, naming the operand the program wrote.
-  LISP2_ERR("(funcall 'quote 'a)", "lisp2.fe: invalid-function quote");
-  LISP2_ERR("(funcall 'if 1 2 3)", "lisp2.fe: invalid-function if");
-  LISP2_ERR("(funcall 'let 'z 1)", "lisp2.fe: invalid-function let");
-  LISP2_ERR("(apply 'and '(1 2))", "lisp2.fe: invalid-function and");
+  LISP2_ERR("(funcall 'quote 'a)", "lisp2.fe:1: invalid-function quote");
+  LISP2_ERR("(funcall 'if 1 2 3)", "lisp2.fe:1: invalid-function if");
+  LISP2_ERR("(funcall 'let 'z 1)", "lisp2.fe:1: invalid-function let");
+  LISP2_ERR("(apply 'and '(1 2))", "lisp2.fe:1: invalid-function and");
   CHK("(fset 'inc-macro (macro (x) (list '+ x 1)))",
       "(macro (x) (list (quote +) x 1))");
-  LISP2_ERR("(funcall 'inc-macro 5)", "lisp2.fe: invalid-function inc-macro");
-  LISP2_ERR("(apply 'inc-macro '(5))", "lisp2.fe: invalid-function inc-macro");
+  LISP2_ERR("(funcall 'inc-macro 5)", "lisp2.fe:1: invalid-function inc-macro");
+  LISP2_ERR("(apply 'inc-macro '(5))", "lisp2.fe:1: invalid-function inc-macro");
   // A designator chain ending in a macro is rejected at the name the caller
   // used, and the context is reusable after every one of these.
   CHK("(defalias 'macro-alias 'inc-macro)", "macro-alias");
   LISP2_ERR("(funcall 'macro-alias 5)",
-            "lisp2.fe: invalid-function macro-alias");
+            "lisp2.fe:1: invalid-function macro-alias");
   CHK("(inc-macro 5)", "6");
   // `funcall`/`apply` are function-shaped themselves, so they *are* legal
   // targets -- Emacs answers 3 here too.
@@ -1949,9 +1946,9 @@ static bool TestFunctionCells(void) {
   // `void-function dead-head` for both the call and the funcall.
   CHK("(fset 'dead-head 'dead-middle)", "dead-middle");
   CHK("(fset 'dead-middle 'dead-tail)", "dead-tail");
-  LISP2_ERR("(dead-head)", "lisp2.fe: void-function dead-head");
-  LISP2_ERR("(funcall 'dead-head)", "lisp2.fe: void-function dead-head");
-  LISP2_ERR("(apply 'dead-head '())", "lisp2.fe: void-function dead-head");
+  LISP2_ERR("(dead-head)", "lisp2.fe:1: void-function dead-head");
+  LISP2_ERR("(funcall 'dead-head)", "lisp2.fe:1: void-function dead-head");
+  LISP2_ERR("(apply 'dead-head '())", "lisp2.fe:1: void-function dead-head");
   CHK("(fset 'dead-tail (lambda () 5))", "(lambda nil 5)");
   CHK("(funcall 'dead-head)", "5");
 
@@ -1961,12 +1958,12 @@ static bool TestFunctionCells(void) {
   CHK("(funcall (symbol-function 'h) 5)", "5");
   CHK("(defalias 'g2 'car)", "g2");
   CHK("(is (symbol-function 'g2) 'car)", "t");
-  LISP2_ERR("(symbol-function 'nope)", "lisp2.fe: void-function nope");
+  LISP2_ERR("(symbol-function 'nope)", "lisp2.fe:1: void-function nope");
 
   // `symbol-value` reads the global value cell, empty one void-variable NAME.
   CHK("(setq sv 5)", "5");
   CHK("(symbol-value 'sv)", "5");
-  LISP2_ERR("(symbol-value 'nope)", "lisp2.fe: void-variable nope");
+  LISP2_ERR("(symbol-value 'nope)", "lisp2.fe:1: void-variable nope");
 
   // `fboundp` asks the function cell. The 04D cut moved the bootstrap into
   // function cells, so a primitive name answers t here -- `(boundp 'car)` is
@@ -1986,14 +1983,14 @@ static bool TestFunctionCells(void) {
   CHK("(fset 'm2 (lambda () 3))", "(lambda nil 3)");
   CHK("(fmakunbound 'm2)", "m2");
   CHK("m2", "1");
-  LISP2_ERR("(m2)", "lisp2.fe: void-function m2");
+  LISP2_ERR("(m2)", "lisp2.fe:1: void-function m2");
 
   // `defalias` points one symbol's function cell at another, returns the
   // aliased symbol, and the chain is resolved at call time -- late binding.
   CHK("(defalias 'first 'car)", "first");
   CHK("(first (list 1 2))", "1");
   CHK("(defalias 'a2 'b2)", "a2");
-  LISP2_ERR("(a2)", "lisp2.fe: void-function a2");
+  LISP2_ERR("(a2)", "lisp2.fe:1: void-function a2");
   CHK("(fset 'b2 (lambda () 1))", "(lambda nil 1)");
   CHK("(a2)", "1");
 
@@ -2006,28 +2003,28 @@ static bool TestFunctionCells(void) {
   CHK("(funcall (function (fn (x) x)) 9)", "9");
   CHK("(funcall ((lambda (z) (function (lambda () z))) 7))", "7");
   CHK("(is (function (lambda (x) x)) (function (lambda (x) x)))", "nil");
-  LISP2_ERR("(function 5)", "lisp2.fe: unsupported-function-form");
-  LISP2_ERR("(function (car 1))", "lisp2.fe: unsupported-function-form");
-  LISP2_ERR("(function f 1)", "lisp2.fe: wrong-number-of-arguments");
+  LISP2_ERR("(function 5)", "lisp2.fe:1: unsupported-function-form");
+  LISP2_ERR("(function (car 1))", "lisp2.fe:1: unsupported-function-form");
+  LISP2_ERR("(function f 1)", "lisp2.fe:1: wrong-number-of-arguments");
 
   // Cycles in the designator chain are named, in call position, in funcall,
   // and through the public API -- never left to exhaust the step budget.
   CHK("(fset 'x 'x)", "x");
-  LISP2_ERR("(x)", "lisp2.fe: cyclic-function-indirection");
-  LISP2_ERR("(funcall 'x)", "lisp2.fe: cyclic-function-indirection");
+  LISP2_ERR("(x)", "lisp2.fe:1: cyclic-function-indirection");
+  LISP2_ERR("(funcall 'x)", "lisp2.fe:1: cyclic-function-indirection");
   const FeEvalOptions small_budget = {.step_limit = 16};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "lisp2.fe", "(funcall 'x)", strlen("(funcall 'x)"),
-      &small_budget, "lisp2.fe: cyclic-function-indirection"));
+      &small_budget, "lisp2.fe:1: cyclic-function-indirection"));
   CHK("(defalias 'p 'q)", "p");
   CHK("(defalias 'q 'p)", "q");
-  LISP2_ERR("(funcall 'p)", "lisp2.fe: cyclic-function-indirection");
+  LISP2_ERR("(funcall 'p)", "lisp2.fe:1: cyclic-function-indirection");
   // Context fully reusable after the cycle errors, and the cell can be
   // rebound to something that is merely not callable.
   CHK("(+ 1 2)", "3");
   CHK("(fset 'x nil)", "nil");
-  LISP2_ERR("(funcall 'x)", "lisp2.fe: tried to call non-callable value");
-  LISP2_ERR("(funcall 'q)", "lisp2.fe: cyclic-function-indirection");
+  LISP2_ERR("(funcall 'x)", "lisp2.fe:1: tried to call non-callable value");
+  LISP2_ERR("(funcall 'q)", "lisp2.fe:1: cyclic-function-indirection");
 
 #undef LISP2_ERR
 #undef CHK
@@ -2115,9 +2112,9 @@ static bool TestFunctionCells(void) {
   // keep naming the cycle.
   CHECK(ExpectEvaluationError(context, &state, "lisp2.fe", "(funcall 'x)",
                               strlen("(funcall 'x)"),
-                              "lisp2.fe: cyclic-function-indirection"));
+                              "lisp2.fe:1: cyclic-function-indirection"));
   CHECK(ExpectEvaluationError(context, &state, "lisp2.fe", "(x)", strlen("(x)"),
-                              "lisp2.fe: cyclic-function-indirection"));
+                              "lisp2.fe:1: cyclic-function-indirection"));
 
   FeCloseContext(context);
   return true;
@@ -2162,8 +2159,8 @@ static bool TestNamespaceCut(void) {
 
   // Value-position use of a primitive name is `void-variable`: the cut left
   // the primitive value cells empty, so `car` is not a value any more.
-  CUT_ERR("car", "cut.fe: void-variable car");
-  CUT_ERR("(setq x car)", "cut.fe: void-variable car");
+  CUT_ERR("car", "cut.fe:1: void-variable car");
+  CUT_ERR("(setq x car)", "cut.fe:1: void-variable car");
 
   // A lexical binding never shadows call position: `(let car 5)` binds only
   // the value namespace, and `(car (list 1 2))` still resolves the function
@@ -2219,7 +2216,7 @@ static bool TestConstantsAndKeywords(void) {
   do {                                                                 \
     CHECK(ExpectEvaluationError(context, &state, "constants.fe", expr, \
                                 strlen(expr),                          \
-                                "constants.fe: setting-constant"));    \
+                                "constants.fe:1: setting-constant"));    \
     CHECK(IsRendered(context, FeGetCondition(context), condition));    \
   } while (false)
 
@@ -2334,18 +2331,18 @@ static bool TestSetqAndSet(void) {
   // run; the same context goes on to evaluate other forms afterwards.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "p3")));
   SETQ_ERR("(setq p1 1 p2 missing-thing p3 3)",
-           "setq.fe: void-variable missing-thing");
+           "setq.fe:1: void-variable missing-thing");
   CHK("p1", "1");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "p3")));
 
   // Odd form count: the earlier pair still stands; the dangling final
   // symbol is diagnosed only once it is reached.
-  SETQ_ERR("(setq odd-a 5 odd-b)", "setq.fe: wrong-number-of-arguments");
+  SETQ_ERR("(setq odd-a 5 odd-b)", "setq.fe:1: wrong-number-of-arguments");
   CHK("odd-a", "5");
 
   // A non-symbol target is a type error, checked before any value form
   // would be evaluated.
-  SETQ_ERR("(setq 1 2)", "setq.fe: wrong-type-argument");
+  SETQ_ERR("(setq 1 2)", "setq.fe:1: wrong-type-argument");
 
 #undef SETQ_ERR
 #undef CHK
@@ -2372,22 +2369,22 @@ static bool TestSetqAndSet(void) {
   // An arity error is raised before any raw argument form is evaluated.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe")));
   SET_ERR("(set 'set-target 1 (do (setq set-probe t) 2))",
-          "set.fe: wrong-number-of-arguments");
+          "set.fe:1: wrong-number-of-arguments");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe")));
-  SET_ERR("(set 'x)", "set.fe: wrong-number-of-arguments");
+  SET_ERR("(set 'x)", "set.fe:1: wrong-number-of-arguments");
 
   // An arity-correct call evaluates both forms left to right before
   // validating the first value's type, so a type error never erases a side
   // effect the second form already had.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
-  SET_ERR("(set 1 (do (setq set-probe2 t) 2))", "set.fe: wrong-type-argument");
+  SET_ERR("(set 1 (do (setq set-probe2 t) 2))", "set.fe:1: wrong-type-argument");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
 
-  SET_ERR("(set 'x)", "set.fe: wrong-number-of-arguments");
-  SET_ERR("(set 'x 1 2)", "set.fe: wrong-number-of-arguments");
+  SET_ERR("(set 'x)", "set.fe:1: wrong-number-of-arguments");
+  SET_ERR("(set 'x 1 2)", "set.fe:1: wrong-number-of-arguments");
   CHECK(ExpectEvaluationError(context, &state, "setq.fe", "(setq a 1 b)",
                               strlen("(setq a 1 b)"),
-                              "setq.fe: wrong-number-of-arguments"));
+                              "setq.fe:1: wrong-number-of-arguments"));
 
 #undef SET_ERR
 #undef SET_CHK
@@ -2422,7 +2419,7 @@ static bool TestNumericEqual(void) {
 
   // Zero arguments is an error; one argument is true without comparing
   // anything; two or more are a left-to-right chain.
-  EQ_ERR("(=)", "eq.fe: wrong-number-of-arguments");
+  EQ_ERR("(=)", "eq.fe:1: wrong-number-of-arguments");
   CHK("(= 1)", "t");
   CHK("(= 1 1)", "t");
   CHK("(= 1 1 1)", "t");
@@ -2448,15 +2445,15 @@ static bool TestNumericEqual(void) {
   // operand's form already had: argument evaluation precedes type
   // validation for the whole list, not just the failing one.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "eq-probe")));
-  EQ_ERR("(= 1 \"1\")", "eq.fe: wrong-type-argument");
-  EQ_ERR("(= 1 nil)", "eq.fe: wrong-type-argument");
-  EQ_ERR("(= \"1\" (do (setq eq-probe t) 2))", "eq.fe: wrong-type-argument");
+  EQ_ERR("(= 1 \"1\")", "eq.fe:1: wrong-type-argument");
+  EQ_ERR("(= 1 nil)", "eq.fe:1: wrong-type-argument");
+  EQ_ERR("(= \"1\" (do (setq eq-probe t) 2))", "eq.fe:1: wrong-type-argument");
   CHK("eq-probe", "t");
 
   // The hard cut, proven directly: `=` no longer assigns, so an unbound
   // symbol is void-variable, and it stays unbound afterwards.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "never-bound")));
-  EQ_ERR("(= never-bound 3)", "eq.fe: void-variable never-bound");
+  EQ_ERR("(= never-bound 3)", "eq.fe:1: void-variable never-bound");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "never-bound")));
 
   // `setq` and `set` still work after the old assignment arm they replaced
@@ -3053,7 +3050,7 @@ static bool TestNumericCut(void) {
   EVAL_AS("(integerp 42.0)", "nil");
   EVAL_AS("(floatp 42.0)", "t");
   EVAL_AS("(floatp 42)", "nil");
-  CUT_ERR("(/ 1 0)", "cut.fe: arith-error");
+  CUT_ERR("(/ 1 0)", "cut.fe:1: arith-error");
 
   // E rows: `eq` is pointer identity or both-integers-equal; `eql` is `eq`
   // or same-type numbers equal by bits. Two separately-read float literals
@@ -3071,12 +3068,12 @@ static bool TestNumericCut(void) {
   // E arity: `eq`/`eql` are strictly binary like `/=` (05A row C3) -- the
   // raw arity is rejected before anything evaluates, so a missing or extra
   // operand is `wrong-number-of-arguments`, never a comparison.
-  CUT_ERR("(eq)", "cut.fe: wrong-number-of-arguments");
-  CUT_ERR("(eq 1)", "cut.fe: wrong-number-of-arguments");
-  CUT_ERR("(eq 1 2 3)", "cut.fe: wrong-number-of-arguments");
-  CUT_ERR("(eql)", "cut.fe: wrong-number-of-arguments");
-  CUT_ERR("(eql 1)", "cut.fe: wrong-number-of-arguments");
-  CUT_ERR("(eql 1 2 3)", "cut.fe: wrong-number-of-arguments");
+  CUT_ERR("(eq)", "cut.fe:1: wrong-number-of-arguments");
+  CUT_ERR("(eq 1)", "cut.fe:1: wrong-number-of-arguments");
+  CUT_ERR("(eq 1 2 3)", "cut.fe:1: wrong-number-of-arguments");
+  CUT_ERR("(eql)", "cut.fe:1: wrong-number-of-arguments");
+  CUT_ERR("(eql 1)", "cut.fe:1: wrong-number-of-arguments");
+  CUT_ERR("(eql 1 2 3)", "cut.fe:1: wrong-number-of-arguments");
 
   // Context reuse after the errors above.
   EVAL_AS("(+ 1 2)", "3");
@@ -3118,12 +3115,12 @@ static bool TestMacroExpansion(void) {
   CHECK(ExpectEvaluationError(context, &state, "expansion.fe",
                               "(fset 'bad (macro () '(car 1))) (bad)",
                               strlen("(fset 'bad (macro () '(car 1))) (bad)"),
-                              "expansion.fe: expected pair, got integer"));
+                              "expansion.fe:1: expected pair, got integer"));
   CHECK(
       ExpectEvaluationError(context, &state, "expander.fe",
                             "(fset 'worse (macro () (car 1))) (worse)",
                             strlen("(fset 'worse (macro () (car 1))) (worse)"),
-                            "expander.fe: expected pair, got integer"));
+                            "expander.fe:1: expected pair, got integer"));
   CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
                    "3"));
 
@@ -3410,7 +3407,7 @@ static bool TestUnwindHostAPI(void) {
   static const char erroring[] = "(with-resource (fn () (car 1)))";
   CHECK(ExpectEvaluationError(context, &state, "host.fe", erroring,
                               sizeof(erroring) - 1,
-                              "host.fe: expected pair, got integer"));
+                              "host.fe:1: expected pair, got integer"));
   CHECK(!resource_state.open);
   CHECK(resource_state.close_count == 1);
 
@@ -3425,7 +3422,7 @@ static bool TestUnwindHostAPI(void) {
       .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
   CHECK(ExpectEvaluationOptionsError(context, &state, "host.fe", looping,
                                      sizeof(looping) - 1, &interrupt_options,
-                                     "host.fe: evaluation cancelled"));
+                                     "host.fe:1: evaluation cancelled"));
   CHECK(!resource_state.open);
   CHECK(resource_state.close_count == 1);
 
@@ -3436,7 +3433,7 @@ static bool TestUnwindHostAPI(void) {
   const FeEvalOptions tiny_budget = {.step_limit = 8};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "host.fe", looping, sizeof(looping) - 1, &tiny_budget,
-      "host.fe: evaluation step limit exceeded"));
+      "host.fe:1: evaluation step limit exceeded"));
   CHECK(!resource_state.open);
   CHECK(resource_state.close_count == 1);
 
@@ -3472,7 +3469,7 @@ static bool TestUnwindLisp(void) {
       "(unwind-protect (car 1) (setq run-count (+ run-count 1)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", erroring,
                               sizeof(erroring) - 1,
-                              "unwind.fe: expected pair, got integer"));
+                              "unwind.fe:1: expected pair, got integer"));
   CHK("run-count", "1");
 
   // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
@@ -3487,7 +3484,7 @@ static bool TestUnwindLisp(void) {
       .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
   CHECK(ExpectEvaluationOptionsError(context, &state, "unwind.fe", looping,
                                      sizeof(looping) - 1, &interrupt_options,
-                                     "unwind.fe: evaluation cancelled"));
+                                     "unwind.fe:1: evaluation cancelled"));
   CHK("run-count", "1");
 
   // Budget exhaustion: cleanup is not gated on steps remaining, and still
@@ -3503,7 +3500,7 @@ static bool TestUnwindLisp(void) {
   const FeEvalOptions tiny_budget = {.step_limit = 8};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "unwind.fe", budget_cleanup, sizeof(budget_cleanup) - 1,
-      &tiny_budget, "unwind.fe: evaluation step limit exceeded"));
+      &tiny_budget, "unwind.fe:1: evaluation step limit exceeded"));
   CHK("run-count", "1");
   CHK("spin-count", "200");
 
@@ -3520,7 +3517,7 @@ static bool TestUnwindLisp(void) {
       "  (setq log (cons 'outer log)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", nested,
                               sizeof(nested) - 1,
-                              "unwind.fe: assertion failure"));
+                              "unwind.fe:1: assertion failure"));
   CHK("log", "(outer middle inner)");
 
   // A cleanup that itself errors: 06A Decision 4 -- the cleanup's own error
@@ -3542,7 +3539,7 @@ static bool TestUnwindLisp(void) {
       .source = failing_cleanup,
       .length = sizeof(failing_cleanup) - 1,
       .options = nullptr,
-      .expected = "unwind.fe: expected pair, got integer"};
+      .expected = "unwind.fe:1: expected pair, got integer"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &failing_cleanup_call, captured,
                       sizeof(captured)));
@@ -3569,7 +3566,7 @@ static bool TestUnwindLisp(void) {
       "    (setq survivor x)))";
   CHECK(ExpectEvaluationError(context, &state, "unwind.fe", root_survival,
                               sizeof(root_survival) - 1,
-                              "unwind.fe: assertion failure"));
+                              "unwind.fe:1: assertion failure"));
   CHK("survivor", "(111 . 222)");
 
 #undef CHK
@@ -3610,7 +3607,7 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_cleanup,
       .length = sizeof(runaway_cleanup) - 1,
       .options = &small_cleanup_budget,
-      .expected = "budget.fe: evaluation step limit exceeded"};
+      .expected = "budget.fe:1: evaluation step limit exceeded"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &runaway_cleanup_call, captured,
                       sizeof(captured)));
@@ -3631,7 +3628,7 @@ static bool TestUnwindCleanupBudget(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "budget.fe", tiny_body_budget,
       sizeof(tiny_body_budget) - 1, &tiny_budget,
-      "budget.fe: evaluation step limit exceeded"));
+      "budget.fe:1: evaluation step limit exceeded"));
   CHK("tiny-budget-ran", "t");
 
   // A cleanup that never returns is instead interrupted by a *second* host
@@ -3661,7 +3658,7 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_interrupted_cleanup,
       .length = sizeof(runaway_interrupted_cleanup) - 1,
       .options = &interrupted_cleanup_budget,
-      .expected = "budget.fe: evaluation cancelled"};
+      .expected = "budget.fe:1: evaluation cancelled"};
   CHECK(CaptureStderr(RunEvalCall, &runaway_interrupted_call, captured,
                       sizeof(captured)));
   CHECK(runaway_interrupted_call.result);
@@ -3711,7 +3708,7 @@ static bool TestHostRaiseCompletion(void) {
       "(condition-case nil (raise-host-budget) (t 'nope))";
   CHECK(ExpectCompletionKind(context, &state, "raise.fe", budget,
                              sizeof(budget) - 1, nullptr,
-                             "raise.fe: host budget", FeCompletionBudget));
+                             "raise.fe:1: host budget", FeCompletionBudget));
 
 #undef CHK
 
@@ -3806,7 +3803,7 @@ static bool TestProtectedCall(void) {
   static const char uncaught[] = "(wrap-call (lambda () (car 5)))";
   CHECK(ExpectEvaluationError(context, &state, "protect.fe", uncaught,
                               sizeof(uncaught) - 1,
-                              "protect.fe: expected pair, got integer"));
+                              "protect.fe:1: expected pair, got integer"));
 
 #undef CHK
 
@@ -3863,7 +3860,7 @@ static bool TestQuitIsCatchable(void) {
       "(condition-case nil (while t 1) (error 'not-this-one))";
   CHECK(ExpectCompletionKind(
       context, &state, "quit.fe", uncaught, sizeof(uncaught) - 1, &options,
-      "quit.fe: evaluation cancelled", FeCompletionQuit));
+      "quit.fe:1: evaluation cancelled", FeCompletionQuit));
 
   // Budget is catchable by nothing at all, `t` included: it is fe's own
   // ceiling, not an Emacs condition, and a program must not be able to sit
@@ -3872,7 +3869,7 @@ static bool TestQuitIsCatchable(void) {
   const FeEvalOptions step = {.step_limit = 64};
   CHECK(ExpectCompletionKind(
       context, &state, "quit.fe", budget, sizeof(budget) - 1, &step,
-      "quit.fe: evaluation step limit exceeded", FeCompletionBudget));
+      "quit.fe:1: evaluation step limit exceeded", FeCompletionBudget));
 
   FeCloseContext(context);
   return true;
@@ -3901,7 +3898,7 @@ static bool TestConditionCaseResumesControl(void) {
   const FeEvalOptions generous = {.step_limit = 100000};
   CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_loop,
                              sizeof(caught_then_loop) - 1, &generous,
-                             "control.fe: evaluation step limit exceeded",
+                             "control.fe:1: evaluation step limit exceeded",
                              FeCompletionBudget));
 
   // The steps the body already spent stay spent: the same program under a
@@ -3912,7 +3909,7 @@ static bool TestConditionCaseResumesControl(void) {
   const FeEvalOptions small = {.step_limit = 40};
   CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_small,
                              sizeof(caught_then_small) - 1, &small,
-                             "control.fe: evaluation step limit exceeded",
+                             "control.fe:1: evaluation step limit exceeded",
                              FeCompletionBudget));
 
   // The interrupt: a caught condition must not disarm the host's C-g.
@@ -3926,7 +3923,7 @@ static bool TestConditionCaseResumesControl(void) {
       .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
   CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_spin,
                              sizeof(caught_then_spin) - 1, &interrupt_options,
-                             "control.fe: evaluation cancelled",
+                             "control.fe:1: evaluation cancelled",
                              FeCompletionQuit));
   CHECK(interrupt.polls == interrupt.cancel_after);
 
@@ -3937,7 +3934,7 @@ static bool TestConditionCaseResumesControl(void) {
   const FeEvalOptions tight_frames = {.max_frames = 32};
   CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_deep,
                              sizeof(caught_then_deep) - 1, &tight_frames,
-                             "control.fe: evaluation frame limit exceeded",
+                             "control.fe:1: evaluation frame limit exceeded",
                              FeCompletionBudget));
 
   // The source label: every error raised after a caught condition still
@@ -3946,7 +3943,7 @@ static bool TestConditionCaseResumesControl(void) {
       "(condition-case nil (car 5) (error nil)) (car 5)";
   CHECK(ExpectEvaluationError(context, &state, "control.fe", caught_then_error,
                               sizeof(caught_then_error) - 1,
-                              "control.fe: expected pair, got integer"));
+                              "control.fe:1: expected pair, got integer"));
 
   // And the same is true one level down: an error raised inside a handler
   // body, after the catch, keeps the label too.
@@ -3954,7 +3951,7 @@ static bool TestConditionCaseResumesControl(void) {
       "(condition-case nil (car 5) (error (car 5)))";
   CHECK(ExpectEvaluationError(context, &state, "control.fe", error_in_handler,
                               sizeof(error_in_handler) - 1,
-                              "control.fe: expected pair, got integer"));
+                              "control.fe:1: expected pair, got integer"));
 
   FeCloseContext(context);
   return true;
@@ -4003,17 +4000,17 @@ static bool TestCatchThrow(void) {
   CHECK(ExpectEvaluationError(context, &state, "catch.fe",
                               "(catch 1.5 (throw 1.5 'hit) 'miss)",
                               sizeof("(catch 1.5 (throw 1.5 'hit) 'miss)") - 1,
-                              "catch.fe: no-catch 1.5 hit"));
+                              "catch.fe:1: no-catch 1.5 hit"));
   CHECK(ExpectEvaluationError(
       context, &state, "catch.fe", "(catch \"s\" (throw \"s\" 'hit) 'miss)",
       sizeof("(catch \"s\" (throw \"s\" 'hit) 'miss)") - 1,
-      "catch.fe: no-catch s hit"));
+      "catch.fe:1: no-catch s hit"));
   CHECK(ExpectEvaluationError(context, &state, "catch.fe",
                               "(catch (list 1) (throw (list 1) 'hit) 'miss)",
                               sizeof("(catch (list 1) (throw (list 1) 'hit) "
                                      "'miss)") -
                                   1,
-                              "catch.fe: no-catch (1) hit"));
+                              "catch.fe:1: no-catch (1) hit"));
 
   // CT5 shared cons: the same object as the tag on both sides matches.
   CHK("(setq shared-tag (list 1))", "(1)");
@@ -4023,12 +4020,12 @@ static bool TestCatchThrow(void) {
   // error path.
   CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw 'nowhere 1)",
                               sizeof("(throw 'nowhere 1)") - 1,
-                              "catch.fe: no-catch nowhere 1"));
+                              "catch.fe:1: no-catch nowhere 1"));
 
   // CT4: nil never matches as a catch tag.
   CHECK(ExpectEvaluationError(
       context, &state, "catch.fe", "(catch nil (throw nil 5))",
-      sizeof("(catch nil (throw nil 5))") - 1, "catch.fe: no-catch nil 5"));
+      sizeof("(catch nil (throw nil 5))") - 1, "catch.fe:1: no-catch nil 5"));
 
   // Distinct tags select the level: a throw from the inner body to the outer
   // tag skips the inner catch entirely. Pinned by the compat cond-ct2 shape
@@ -4069,7 +4066,7 @@ static bool TestCatchThrow(void) {
                                  .source = cleanup_throw,
                                  .length = sizeof(cleanup_throw) - 1,
                                  .options = nullptr,
-                                 .expected = "catch.fe: no-catch escape 1"};
+                                 .expected = "catch.fe:1: no-catch escape 1"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &cleanup_throw_call, captured,
                       sizeof(captured)));
@@ -4125,7 +4122,7 @@ static bool TestCatchThrow(void) {
   static const char boundary[] = "(catch 'outer-tag (reenter-throw))";
   CHECK(ExpectEvaluationError(context, &state, "outer.fe", boundary,
                               sizeof(boundary) - 1,
-                              "nested.fe: no-catch outer-tag 42"));
+                              "nested.fe:1: no-catch outer-tag 42"));
 
   // Positive control for the wall: a catch entirely inside the nested run is
   // honoured, so re-entry only bounds the throw search, it does not disable
@@ -4165,23 +4162,23 @@ static bool TestCatchThrow(void) {
   CHECK(ExpectEvaluationOptionsError(
       frame_context, &frame_state, "toosmall.fe", throw_fixed,
       sizeof(throw_fixed) - 1, &one_less,
-      "toosmall.fe: evaluation frame limit exceeded"));
+      "toosmall.fe:1: evaluation frame limit exceeded"));
   FeCloseContext(frame_context);
 
   // The zero-operand and wrong-count degenerates (the Phase 4 lesson): both
   // forms are arity-checked before anything evaluates.
   CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(catch)",
                               sizeof("(catch)") - 1,
-                              "catch.fe: wrong-number-of-arguments"));
+                              "catch.fe:1: wrong-number-of-arguments"));
   CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw)",
                               sizeof("(throw)") - 1,
-                              "catch.fe: wrong-number-of-arguments"));
+                              "catch.fe:1: wrong-number-of-arguments"));
   CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw 'x)",
                               sizeof("(throw 'x)") - 1,
-                              "catch.fe: wrong-number-of-arguments"));
+                              "catch.fe:1: wrong-number-of-arguments"));
   CHECK(ExpectEvaluationError(context, &state, "catch.fe", "(throw 'x 1 2)",
                               sizeof("(throw 'x 1 2)") - 1,
-                              "catch.fe: wrong-number-of-arguments"));
+                              "catch.fe:1: wrong-number-of-arguments"));
 
   // Context reuse after no-catch: an uncaught throw leaves nothing poisoned,
   // and the completion kind reads Normal again after a normal return.
@@ -4241,7 +4238,7 @@ static bool TestFrameLimits(void) {
   const FeEvalOptions one_less = {.max_frames = peak - 1};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "toosmall.fe", fixed, sizeof(fixed) - 1, &one_less,
-      "toosmall.fe: evaluation frame limit exceeded"));
+      "toosmall.fe:1: evaluation frame limit exceeded"));
 
   // A separate, deliberately tiny `max_frames` against unbounded
   // self-recursion -- not tied to the measured peak above, since unbounded
@@ -4270,7 +4267,7 @@ static bool TestFrameLimits(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "cleanup-frames.fe", overflow_with_cleanup,
       sizeof(overflow_with_cleanup) - 1, &tight_frames,
-      "cleanup-frames.fe: evaluation frame limit exceeded"));
+      "cleanup-frames.fe:1: evaluation frame limit exceeded"));
   CHECK(state.reentry_cleanup_ran);
   static const char check_cleanup_ran[] = "cleanup-ran";
   CHECK(IsRendered(context,
@@ -4288,7 +4285,7 @@ static bool TestFrameLimits(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "macro-frames.fe", macro_recursion,
       sizeof(macro_recursion) - 1, &tight_macro_frames,
-      "macro-frames.fe: evaluation frame limit exceeded"));
+      "macro-frames.fe:1: evaluation frame limit exceeded"));
 
   // The context is reusable after both overflow paths.
   static const char deep[] =
@@ -4317,7 +4314,7 @@ static bool TestFrameSubstrate(void) {
   // quote takes exactly one raw argument and rejects extras before evaluation.
   CHECK(ExpectEvaluationError(context, &state, "quote.fe", "(quote 1 2)",
                               sizeof("(quote 1 2)") - 1,
-                              "quote.fe: wrong-number-of-arguments"));
+                              "quote.fe:1: wrong-number-of-arguments"));
   // Since 04D's cut, `quote` is a function-cell resident like every other
   // primitive: rebinding its *value* cell with `setq` no longer affects call
   // position, so `(quote (+ 1 2))` still special-forms and returns the form
@@ -4370,7 +4367,7 @@ static bool TestFrameSubstrate(void) {
   const FeEvalOptions physical_only = {.max_frames = 0};
   CHECK(ExpectEvaluationOptionsError(
       frame_context, &frame_state, "frames.fe", recurse, sizeof(recurse) - 1,
-      &physical_only, "frames.fe: evaluation frame limit exceeded"));
+      &physical_only, "frames.fe:1: evaluation frame limit exceeded"));
   CHECK(!frame_state.stack_was_nil);
   CHECK(FeGetArenaStats(frame_context).allocation_failures == 0);
   CHECK(IsRendered(frame_context,
@@ -4493,7 +4490,7 @@ static bool TestArenaStats(void) {
   // check `tight_state.called`: what it looks for is that the jump was
   // taken and the counters moved, not the exact message text.
   ErrorState tight_state = {.context = tight,
-                            .expected_message = "oom.fe: out of memory"};
+                            .expected_message = "oom.fe:1: out of memory"};
   FeSetUserData(tight, &tight_state);
   FeSetErrorFn(tight, HandleError);
   CHECK(FeGetArenaStats(tight).free_slots == 0);
@@ -4555,7 +4552,7 @@ static bool TestEvaluationStackProbe(void) {
   const FeEvalOptions tight_frames = {.max_frames = 5};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "probe-frames.fe", "(deep 50)", sizeof("(deep 50)") - 1,
-      &tight_frames, "probe-frames.fe: evaluation frame limit exceeded"));
+      &tight_frames, "probe-frames.fe:1: evaluation frame limit exceeded"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(deep 20)",
                                     sizeof("(deep 20)") - 1),
@@ -4742,7 +4739,7 @@ static bool TestCallHeadProbe(void) {
   static const char bad_chain[] = "((((((car-thing))))))";
   CHECK(ExpectEvaluationError(context, &state, "call-head.fe", bad_chain,
                               sizeof(bad_chain) - 1,
-                              "call-head.fe: void-function car-thing"));
+                              "call-head.fe:1: void-function car-thing"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
@@ -4775,7 +4772,7 @@ static bool TestArgumentFrame(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "arg-native.fe", "(add-exactly 1 2)",
       sizeof("(add-exactly 1 2)") - 1, &native_tight,
-      "arg-native.fe: evaluation step limit exceeded"));
+      "arg-native.fe:1: evaluation step limit exceeded"));
   const FeEvalOptions native_ok = {.step_limit = 6};
   CHECK(IsRendered(
       context,
@@ -4793,7 +4790,7 @@ static bool TestArgumentFrame(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "arg-lambda.fe", "((fn (x) x) 1)",
       sizeof("((fn (x) x) 1)") - 1, &lambda_tight,
-      "arg-lambda.fe: evaluation step limit exceeded"));
+      "arg-lambda.fe:1: evaluation step limit exceeded"));
   const FeEvalOptions lambda_ok = {.step_limit = 9};
   CHECK(IsRendered(
       context,
@@ -4828,14 +4825,14 @@ static bool TestArgumentFrame(void) {
   static const char dotted[] = "((fn (a b) (list a b)) 1 2 . 3)";
   CHECK(ExpectEvaluationError(context, &state, "arg-dotted.fe", dotted,
                               sizeof(dotted) - 1,
-                              "arg-dotted.fe: dotted pair in argument list"));
+                              "arg-dotted.fe:1: dotted pair in argument list"));
 
   // An error in an argument position unwinds through the argument frame and
   // the context stays usable afterwards.
   static const char bad_arg[] = "(add-exactly 1 (car 2))";
   CHECK(ExpectEvaluationError(context, &state, "arg-error.fe", bad_arg,
                               sizeof(bad_arg) - 1,
-                              "arg-error.fe: expected pair, got integer"));
+                              "arg-error.fe:1: expected pair, got integer"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
@@ -4944,7 +4941,7 @@ static bool TestLambdaBodyFrame(void) {
   const FeEvalOptions tight = {.step_limit = 19};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "body.fe", body, sizeof(body) - 1, &tight,
-      "body.fe: evaluation step limit exceeded"));
+      "body.fe:1: evaluation step limit exceeded"));
   const FeEvalOptions ok = {.step_limit = 20};
   CHECK(IsRendered(context,
                    FeEvaluateStringWithOptions(context, "body.fe", body,
@@ -4988,14 +4985,14 @@ static bool TestLambdaBodyFrame(void) {
       context, FeEvaluateString(context, "local.fe", local, sizeof(local) - 1),
       "5"));
   CHECK(ExpectEvaluationError(context, &state, "leak.fe", "fresh", 5,
-                              "leak.fe: void-variable fresh"));
+                              "leak.fe:1: void-variable fresh"));
 
   // An error in a body form unwinds through the body frame and the context
   // stays usable afterwards.
   static const char bad[] = "((fn () (car 2)))";
   CHECK(ExpectEvaluationError(context, &state, "body-error.fe", bad,
                               sizeof(bad) - 1,
-                              "body-error.fe: expected pair, got integer"));
+                              "body-error.fe:1: expected pair, got integer"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "recovered.fe", "(+ 1 2)",
                                     sizeof("(+ 1 2)") - 1),
@@ -5155,7 +5152,7 @@ static bool TestMacroFrame(void) {
   const FeEvalOptions tight = {.step_limit = 4};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "m.step.fe", "(m)", sizeof("(m)") - 1, &tight,
-      "m.step.fe: evaluation step limit exceeded"));
+      "m.step.fe:1: evaluation step limit exceeded"));
   const FeEvalOptions ok = {.step_limit = 5};
   CHECK(IsRendered(context,
                    FeEvaluateStringWithOptions(context, "m.step.fe", "(m)",
@@ -5170,7 +5167,7 @@ static bool TestMacroFrame(void) {
       "(boom)";
   CHECK(ExpectEvaluationError(context, &state, "mid-body.fe", mid_body_error,
                               sizeof(mid_body_error) - 1,
-                              "mid-body.fe: expected pair, got integer"));
+                              "mid-body.fe:1: expected pair, got integer"));
   CHECK(IsRendered(
       context, FeEvaluateString(context, "ran.fe", "ran", sizeof("ran") - 1),
       "t"));
@@ -5204,7 +5201,7 @@ static bool TestMacroFrame(void) {
   CHECK(ExpectEvaluationOptionsError(
       frame_context, &frame_state, "macro-frames.fe", self_expanding,
       sizeof(self_expanding) - 1, &physical_only,
-      "macro-frames.fe: evaluation frame limit exceeded"));
+      "macro-frames.fe:1: evaluation frame limit exceeded"));
   CHECK(!frame_state.stack_was_nil);
   CHECK(IsRendered(frame_context,
                    FeEvaluateString(frame_context, "recovered.fe", "(+ 1 2)",
@@ -5276,7 +5273,7 @@ static bool TestNativeReentry(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "native-reentry.fe", "(reentrant-native)",
       sizeof("(reentrant-native)") - 1, &options,
-      "native-reentry.fe: native evaluation re-entry limit exceeded"));
+      "native-reentry.fe:1: native evaluation re-entry limit exceeded"));
   CHECK(!state.stack_was_nil);
   CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
@@ -5316,7 +5313,7 @@ static bool TestNativeReentry(void) {
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "native-reentry.fe", "(reentrant-native)",
       sizeof("(reentrant-native)") - 1, &deeper,
-      "native-reentry.fe: native evaluation re-entry limit exceeded"));
+      "native-reentry.fe:1: native evaluation re-entry limit exceeded"));
   CHECK(state.reentry_max_seen == 17);
 
   FeCloseContext(context);
@@ -5403,7 +5400,7 @@ static bool TestNativeOwningReentry(void) {
   state.reentry_cleanup_ran = false;
   CHECK(ExpectEvaluationError(
       context, &state, "owning.fe", deep_body, sizeof(deep_body) - 1,
-      "owning.fe: native evaluation re-entry limit exceeded"));
+      "owning.fe:1: native evaluation re-entry limit exceeded"));
   CHECK(state.reentry_max_seen == 9);
   CHECK(state.reentry_cleanup_ran);
 
@@ -5418,7 +5415,7 @@ static bool TestNativeOwningReentry(void) {
       "((fn () (owning-reenter) (car 1) (ordinary-native)))";
   CHECK(ExpectEvaluationError(context, &state, "owning.fe", erroring,
                               sizeof(erroring) - 1,
-                              "owning.fe: expected pair, got integer"));
+                              "owning.fe:1: expected pair, got integer"));
   CHECK(IsRendered(
       context, FeEvaluateString(context, "owning.fe", body, sizeof(body) - 1),
       "42.0"));
@@ -5672,7 +5669,7 @@ static bool TestCleanupRunGC(void) {
   const FeEvalOptions generous_cleanup_budget = {.cleanup_step_limit = 100000};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "cleanup-gc.fe", source, sizeof(source) - 1,
-      &generous_cleanup_budget, "cleanup-gc.fe: expected pair, got integer"));
+      &generous_cleanup_budget, "cleanup-gc.fe:1: expected pair, got integer"));
   CHECK(FeGetArenaStats(context).collection_count > collections_before);
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "check.fe", "cleanup-result", 14),
@@ -5709,11 +5706,11 @@ static bool TestPrimitiveOrder(void) {
   // 2's side effect never runs.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcar-probe")));
   ORDER_ERR("(setcar 1 (do (setq setcar-probe t) 2))",
-            "order.fe: expected pair, got integer");
+            "order.fe:1: expected pair, got integer");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcar-probe")));
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcdr-probe")));
   ORDER_ERR("(setcdr 1 (do (setq setcdr-probe t) 2))",
-            "order.fe: expected pair, got integer");
+            "order.fe:1: expected pair, got integer");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "setcdr-probe")));
 
   // Arithmetic validates as it walks, unlike `=`'s evaluate-the-whole-list-
@@ -5721,7 +5718,7 @@ static bool TestPrimitiveOrder(void) {
   // stops evaluation before a later operand's form ever runs.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "arith-probe")));
   ORDER_ERR("(+ 1 \"x\" (do (setq arith-probe t) 3))",
-            "order.fe: wrong-type-argument");
+            "order.fe:1: wrong-type-argument");
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "arith-probe")));
 
   // Chained comparators evaluate their whole operand list before checking any
@@ -5729,11 +5726,11 @@ static bool TestPrimitiveOrder(void) {
   // its own error is reported during comparison.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   ORDER_ERR("(< 1 2 (do (setq less-probe t) (car 1)))",
-            "order.fe: expected pair, got integer");
+            "order.fe:1: expected pair, got integer");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   CHK("(makunbound 'less-probe)", "less-probe");
   ORDER_ERR("(<= 2 2 (do (setq less-probe t) (car 1)))",
-            "order.fe: expected pair, got integer");
+            "order.fe:1: expected pair, got integer");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   CHK("(makunbound 'less-probe)", "less-probe");
 
@@ -5744,10 +5741,10 @@ static bool TestPrimitiveOrder(void) {
   // both the condition and the data for all of them -- measured,
   // `(boundp 'car 'extra)` is `(wrong-number-of-arguments boundp 2)` and
   // `(car 1 2)` is `(wrong-number-of-arguments car 2)`.
-  ORDER_ERR("(boundp 'car 'extra)", "order.fe: wrong-number-of-arguments");
-  ORDER_ERR("(makunbound 'car 'extra)", "order.fe: wrong-number-of-arguments");
-  ORDER_ERR("(integerp)", "order.fe: wrong-number-of-arguments");
-  ORDER_ERR("(symbol-value 'a 'b)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(boundp 'car 'extra)", "order.fe:1: wrong-number-of-arguments");
+  ORDER_ERR("(makunbound 'car 'extra)", "order.fe:1: wrong-number-of-arguments");
+  ORDER_ERR("(integerp)", "order.fe:1: wrong-number-of-arguments");
+  ORDER_ERR("(symbol-value 'a 'b)", "order.fe:1: wrong-number-of-arguments");
 
   // `cons`'s two operands evaluate left to right.
   CHK("(setq cons-order '())", "nil");
@@ -5757,9 +5754,9 @@ static bool TestPrimitiveOrder(void) {
   CHK("cons-order", "(2 1)");
 
   // `if` requires both a condition and a consequent.
-  ORDER_ERR("(if)", "order.fe: wrong-number-of-arguments");
-  ORDER_ERR("(if nil)", "order.fe: wrong-number-of-arguments");
-  ORDER_ERR("(if t)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(if)", "order.fe:1: wrong-number-of-arguments");
+  ORDER_ERR("(if nil)", "order.fe:1: wrong-number-of-arguments");
+  ORDER_ERR("(if t)", "order.fe:1: wrong-number-of-arguments");
 
   // `let`'s `newenv == NULL` case: used where the enclosing evaluation was
   // never going to extend any sequence's environment -- here, `if`'s
@@ -5812,7 +5809,7 @@ static bool RunResumptionBudgetCase(const ResumptionStressCase* c) {
   const FeEvalOptions tiny = {.step_limit = 10};
   const bool raised = ExpectEvaluationOptionsError(
       context, &state, "budget.fe", c->form, strlen(c->form), &tiny,
-      "budget.fe: evaluation step limit exceeded");
+      "budget.fe:1: evaluation step limit exceeded");
   const bool recovered =
       raised &&
       IsRendered(context,
@@ -5861,7 +5858,7 @@ static bool RunResumptionCancelCase(const ResumptionStressCase* c) {
       .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
   const bool cancelled = ExpectEvaluationOptionsError(
       context, &state, "cancel.fe", c->form, strlen(c->form), &options,
-      "cancel.fe: evaluation cancelled");
+      "cancel.fe:1: evaluation cancelled");
   const bool polled = cancelled && interrupt.polls == interrupt.cancel_after;
   const bool recovered =
       cancelled &&
@@ -6040,10 +6037,10 @@ static bool TestNativeArityRecord(void) {
   // message did not.
   CHECK(ExpectEvaluationError(context, &state, "rec.fe", "(inner-arity 1 2)",
                               strlen("(inner-arity 1 2)"),
-                              "rec.fe: too many arguments"));
+                              "rec.fe:1: too many arguments"));
   CHECK(ExpectEvaluationError(context, &state, "rec.fe", "(inner-arity)",
                               strlen("(inner-arity)"),
-                              "rec.fe: too few arguments"));
+                              "rec.fe:1: too few arguments"));
 #undef CHK
 
   FeCloseContext(context);
@@ -6215,7 +6212,7 @@ static bool TestLongArgumentLists(void) {
   FeDefineNative(context, "push-roots", PushRootsPastTheLimit);
   CHECK(ExpectEvaluationError(context, &state, "overflow.fe", "(push-roots)",
                               strlen("(push-roots)"),
-                              "overflow.fe: GC stack overflow"));
+                              "overflow.fe:1: GC stack overflow"));
   // The context survives it: the barrier restored the stack, so ordinary
   // evaluation continues in the same context.
   CHECK(IsRendered(
