@@ -62,9 +62,10 @@ void EndEvaluationControl(FeContext* ctx, bool owns_control) {
 static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* forms,
                                    FeObject* env);
-[[noreturn]] static void RaiseCompletion(FeContext* ctx,
-                                         FeCompletion kind,
-                                         const char* msg);
+[[noreturn]] void FeRaiseCompletion(FeContext* ctx,
+                                 FeCompletion kind,
+                                 const char* msg);
+#define RaiseCompletion FeRaiseCompletion
 
 typedef struct ConditionParent {
   const char* name;
@@ -367,9 +368,9 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 // leaves a stale kind behind. The reserve gate in `AllocateFrame`
 // (`completion != FeCompletionNormal`) still means "a cleanup drain is in
 // progress" because only an evaluator barrier can reach that cleanup path.
-[[noreturn]] static void RaiseCompletion(FeContext* ctx,
-                                         FeCompletion kind,
-                                         const char* msg) {
+[[noreturn]] void FeRaiseCompletion(FeContext* ctx,
+                                  FeCompletion kind,
+                                  const char* msg) {
   FeObject* cl = ctx->call_list;
   const char* label = ctx->error_label;
   const size_t offset = ctx->error_offset;
