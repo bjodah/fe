@@ -655,9 +655,11 @@ Collection" above.
 ## Unwinding And Cleanup
 
 `doc/unwind-design.md` is the design this section's implementation follows;
-it also records which parts of that design (checkpoints and tokens for a
-rollback-on-error registry is still future work. Conditions are static
-`(SYMBOL . DATA)` objects: `condition-case` validates its clauses before its
+it also records which parts of that design are shipped and which are not. A
+cancellation token for the cleanup registry (so a host can retire an entry
+before its form completes) is the remaining piece of future work there.
+Conditions are `(SYMBOL . DATA)` objects built at raise time against a
+static hierarchy: `condition-case` validates its clauses before its
 body runs, then unwinds to the first matching clause and evaluates its body in
 an environment optionally binding the condition. `error` is the parent of the
 registered ordinary error symbols; `quit` is separate and only matches `quit`
@@ -703,19 +705,48 @@ every cleanup still sees the GC stack exactly as populated as it was when
 the error was raised (see "Garbage Collection" above and "Error Handling"
 below).
 
-A cleanup that itself raises is the one case `FeHandleError()` treats
+A cleanup that itself raises is the one case the raise path treats
 differently: `cleanup_catch`, a `jmp_buf*` naming the local `setjmp()` a
 helper (`RunOneCleanupEntry()`) installed around that one entry's execution,
-is non-null exactly while that entry is running. `FeHandleError()` checks it
-first, before anything else, and when it is set, resumes there directly
-instead of reaching `error_fn` -- reaching a callback contracted to never
-return would abandon every cleanup entry still below this one. The message
-is copied into context-owned storage first, since the frame that formatted
-it is what is about to be unwound past, then printed to `stderr` once
-control resumes at the `setjmp()`. Whichever error, interrupt, or budget
-exhaustion was already unwinding when the cleanup failed is what
-`RunCleanupsDownTo()`'s caller still eventually reports: a cleanup failure
-never replaces it, and the loop moves on to the next entry.
+is non-null exactly while that entry is running. `RaiseCompletionCore()`
+checks it first, before anything else, and when it is set, resumes there
+directly instead of reaching `error_fn` -- reaching a callback contracted to
+never return would abandon every cleanup entry still below this one. The
+message is copied into context-owned storage first, since the frame that
+formatted it is what is about to be unwound past, and the *kind* is copied
+with it, so a cleanup that runs out of its own bounded budget or answers a
+second host interrupt does not arrive relabelled as an ordinary error.
+
+Once control resumes at that `setjmp()`, `RunOneCleanupEntry()` restores
+the enclosing run's frame stack, floor, barriers and evaluation-control
+record, and then *replays* the completion there. That is 06A Decision 4 and
+Emacs' measured policy: the cleanup's own completion replaces whatever was
+already unwinding, and because the replay happens in the enclosing context
+it is an ordinary raise -- an enclosing `condition-case` can catch it. The
+replay goes to `RaiseCompletionCore()` rather than to `RaiseCompletion()`,
+which is the half that applies the `error_label` prefix, so the source label
+already in the saved text is not applied a second time.
+
+A cleanup's `throw` takes the same route for the same reason. Its catch
+frame is below the cleanup run's floor, so the search inside the cleanup
+finds nothing; instead of raising `no-catch` there, `PerformThrow()` parks
+the tag and value (both GC roots) and jumps to `cleanup_catch`, and
+`RunOneCleanupEntry()` re-issues the throw in the enclosing context, where
+the catch frames are. Delivering it then abandons the drain -- and whatever
+raise or completing form started it -- with a `longjmp` to that run's
+`condition_catch`.
+
+`RaiseCompletionCore()` deliberately does *not* clear the ambient
+evaluation-control record on the way in, because its three exits need three
+different answers and each one is stated at the exit that takes it. A caught
+condition resumes the interrupted program and keeps the record exactly as
+the body left it, remaining steps included -- clearing it there is what once
+let a single caught condition disarm the step limit, the frame wall, the
+re-entry ceiling and the host's interrupt for the rest of the run. A cleanup
+drain re-arms its own fresh bounded budget per entry inside
+`RunOneCleanupEntry()` and puts the ambient record back on both exits. Only
+the host exit clears it, and only the host exit drops `error_label`, so a
+stale source name cannot prefix a later unrelated raise.
 
 `catch`/`throw` (sub-plan 06C) are the first non-local exit that stops
 *partway* down the frame stack, and they are built on the checkpointed half

@@ -1,0 +1,6 @@
+{
+	"id": "cond-cc-handler-bypass",
+	"setup": [],
+	"expr": "(condition-case nil (condition-case nil (error \"body\") (error (error \"handler\"))) (error 'outer))",
+	"note": "CC: a condition raised by a running handler bypasses that handler -- it is not re-entered by its own error -- and searches an enclosing condition-case instead. Measured against the pinned Emacs 31.0.90; doc/language.md states this rule and this row is its oracle."
+}

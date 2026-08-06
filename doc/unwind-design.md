@@ -4,10 +4,11 @@ Status: **`unwind-protect` and its C-side counterpart are implemented**
 (`FeProtectWithCleanup()`, `doc/c-api.md`'s "Unwinding And Cleanup",
 `doc/implementation.md`'s section of the same name, `doc/language.md`'s
 `(unwind-protect ...)`). The evaluator has normal/error/throw/quit/budget
-completion kinds and a context-owned frame stack. Only normal and
-ordinary error are reachable through the Lisp-facing machinery; since
-sub-plan 06B the Quit and Budget kinds are also *true at their producers*
-and host-readable through Decision 5's additive accessors. Sub-plan 06C
+completion kinds and a context-owned frame stack, and all five are now real:
+06B made Quit and Budget true at their producers and host-readable through
+Decision 5's accessors, and 06C made Throw the state a `throw` is in while
+it drains to its catch. Four of the five reach a host; Throw exists only
+between the catch being found and the value reaching it. Sub-plan 06C
 then made `throw` a real completion: `catch`/`throw` are implemented as the
 mid-stack unwind this document's "Nested evaluation and native re-entry"
 section designs -- a `FeFrameCatch` whose checkpoints are the throw's
@@ -19,7 +20,16 @@ conditions by unwinding to its matching frame, while quit needs a `quit` or
 `t` clause and budget remains uncatchable. An uncaught error under an evaluator
 barrier drains the current cleanup registry, then reaches the outer public
 boundary exactly once. Only the token-based rollback-on-error registry sketched
-below for `MakeFile()`-shaped problems remains design work. The rest of this
+below for `MakeFile()`-shaped problems remains design work.
+
+06D closed the last of the cleanup-raise design: a cleanup's own completion
+-- error, quit, budget or throw -- replaces the one already unwinding
+(Decision 4, and Emacs' measured behaviour), and is replayed in the
+enclosing context so an enclosing `condition-case` or `catch` can take it.
+Nothing is printed to `stderr` behind the program's back any more.
+Line-number references in the rest of this document have been replaced by
+function names: they were stale within one slice of being written, and the
+function names are what a reader can actually find. The rest of this
 document is the original design; where the shipped implementation took a
 narrower or different shape, a note says so inline rather than rewriting
 history.
@@ -40,7 +50,8 @@ half-built and documented as such: the five completion kinds already exist
 as `FeCompletion` (in `fe.h` since 06B made the enum public; `fe_internal.h`
 before it) with only `Normal`/`Error` ever
 assigned (Phase 6 makes the other three true; it does not add the enum), and
-the checkpointed drain `RunCleanupsDownTo` (`fe_eval.c:132`) is already live
+the checkpointed drain `RunCleanupsDownTo` (`RunCleanups`'s null-budget
+caller, `fe_eval.c`) is already live
 and called by every completing pair frame, so the "Nested evaluation" note's
 "this has to change" is already half-built -- only the drain-to-zero
 `RunCleanupsAfterError` needs a `catch` frame to displace. Phase 5's residue
@@ -113,7 +124,7 @@ learned them the hard way; Fe should start there.
 header) declares all five kinds, but only
 `Normal` and `Error` are ever assigned today, and the enum currently serves
 as a one-bit "draining?" flag read exactly once: `AllocateFrame`'s
-`CleanupFrameReserve` gate (`fe_eval.c:711`) tests
+`CleanupFrameReserve` gate (`AllocateFrame`, `fe_eval.c`) tests
 `completion != FeCompletionNormal`. Phase 6 does not add the enum -- it makes
 the other three values true at their producers, and the reserve gate silently
 widens to them the moment they are assigned. That is a live coupling nobody
@@ -213,8 +224,8 @@ this section already says, or a `catch` inside a re-entrant native call
 would incorrectly run cleanups that belong to a scope outside the `catch`.
 
 **The checkpointed half already exists (06A's audit).**
-`RunCleanupsDownTo(ctx, target)` (`fe_eval.c:132`) is live and is what every
-completing pair frame calls (`fe_eval.c:2273`) to drop cleanups registered
+`RunCleanupsDownTo(ctx, target)` is live and is what every
+completing pair frame calls (`CompletePairFrame`, `fe_eval.c`) to drop cleanups registered
 above it; only the drain-to-zero `RunCleanupsAfterError` is the thing a
 `catch` frame has to displace. 06C's throw unwinds on exactly this
 function -- search down the frame stack for the innermost matching catch,

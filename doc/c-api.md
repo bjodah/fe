@@ -585,20 +585,28 @@ condition rather than the abandoned completion.
 ### Completion kinds
 
 Every abnormal way out of a form is a **completion**, and the context
-remembers which kind it was. The four a host can observe today are a
-`FeCompletion` value:
+remembers which kind it was. `FeCompletion` has five values:
 
 | Kind | Producer |
 | --- | --- |
 | `FeCompletionNormal` | a form produced a value; the default, and the value after any normal top-level return |
 | `FeCompletionError` | every ordinary `FeHandleError()` call |
-| `FeCompletionQuit` | the interrupt callback returned true ("evaluation cancelled") |
+| `FeCompletionQuit` | the interrupt callback returned true ("evaluation cancelled"), or `(signal 'quit nil)` |
 | `FeCompletionBudget` | the step limit, the frame wall, or the native re-entry wall was hit |
-| `FeCompletionThrow` | Lisp `throw` -- unassigned until `catch`/`throw` land |
+| `FeCompletionThrow` | a Lisp `throw` that has found its catch, for the duration of the drain to it |
+
+Four of the five can reach a host. `FeCompletionThrow` is the exception: it
+is assigned only between a matching `catch` frame being found and the value
+being delivered to it, so a host observes it just once -- from inside a
+cleanup that runs on the throw's own unwind path -- and never at a barrier
+or in `error_fn`. A throw with no matching catch is not this kind at all; it
+raises the condition `(no-catch TAG VALUE)` and arrives as
+`FeCompletionError`.
 
 ```c
 FeCompletion FeGetCompletion(const FeContext* ctx);
 FeObject* FeGetCondition(const FeContext* ctx);
+const char* FeGetCompletionMessage(const FeContext* ctx);
 ```
 
 `FeGetCompletion()` is Decision 5's additive migration path: a host telling
@@ -608,9 +616,138 @@ compiles and behaves as before without edits. The kind is always valid --
 it is assigned before the cleanup drain and before `error_fn` runs, and it
 stays readable after the host's recovery `longjmp` until the next run's
 outermost barrier or a normal top-level return resets it to
-`FeCompletionNormal`. `FeGetCondition()` returns the completion's
-`(SYMBOL . DATA)` object. It is `nil` for budget exhaustion and when arena
-exhaustion prevents constructing an error object.
+`FeCompletionNormal`.
+
+`FeGetCondition()` returns the completion's `(SYMBOL . DATA)` object, and it
+is deliberate for every kind rather than left over from an earlier one. An
+error carries the condition that was signalled (`(wrong-type-argument listp
+5)`, `(error "boom")`); a quit -- including a real host interrupt, not only
+`(signal 'quit nil)` -- carries `(quit)`; a budget completion carries `nil`,
+because fe's own ceilings are not Emacs conditions and have nothing to
+construct. It is also `nil` when arena exhaustion prevents constructing an
+object at all.
+
+The object lives in the context (`ctx->condition`) and is a GC root for as
+long as it is there, so it stays valid across the cleanup drain, inside
+`error_fn`, and after the host's recovery `longjmp` -- until the next
+completion replaces it or the next outermost run barrier resets it to `nil`.
+A host that needs it beyond that must copy what it wants out of it, or root
+it with `FeCreateRoot()`.
+
+`FeGetCompletionMessage()` returns the completion's fully formatted message
+-- source label and all, the same string `error_fn` is handed. It is valid
+until the next completion in this context.
+
+### Raising a completion from the host
+
+```c
+[[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
+[[noreturn]] void FeRaiseCompletion(FeContext* ctx, FeCompletion kind,
+                                    const char* msg);
+```
+
+`FeHandleError()` is the ordinary raise and what nearly every host site
+wants: an `FeCompletionError` whose condition object is `(error "msg")`.
+
+`FeRaiseCompletion()` exists for the two kinds `FeHandleError()` cannot
+spell. A host raises `FeCompletionQuit` when its own C-g arrived somewhere
+fe cannot poll -- the condition object is `(quit)`, so an enclosing
+`(quit ...)` handler catches it exactly as it catches the interrupt
+callback's -- and `FeCompletionBudget` when its own ceiling tripped, which
+no `condition-case` may catch.
+
+The other two kinds are not a host's to raise. `FeCompletionNormal` is not a
+raise, and `FeCompletionThrow` is the evaluator-internal state described
+above: raising it from outside would claim a delivery to a catch frame that
+never happens. Both are asserted against, and treated as an ordinary error
+when assertions are compiled out, because a `[[noreturn]]` function has no
+way to return and report a bad argument.
+
+### Containing a completion: the protected call
+
+```c
+bool FeTryCallWithOptions(FeContext* ctx, FeObject* callable,
+                          FeObject* const* arguments, size_t count,
+                          const FeEvalOptions* options, FeObject** result);
+[[noreturn]] void FeResignal(FeContext* ctx);
+```
+
+`FeCall()` and `FeCallWithOptions()` transfer a completion by `longjmp`, and
+the destination is the *enclosing* run's barrier -- past the C frame of any
+native that started the call. A host that puts its own `setjmp` inside such
+a native is therefore longjmping back into a frame that has already been
+unwound, which is undefined. `FeTryCallWithOptions()` is the entry point for
+that case: its `setjmp` lives inside fe, in a frame that is live for exactly
+as long as the call.
+
+It returns `true` when the call completed normally, with the value in
+`*result`. It returns `false` on any other completion, and then:
+
+- `error_fn` was **not** called and the host's frame was **not** unwound;
+- `FeGetCompletion()`, `FeGetCondition()` and `FeGetCompletionMessage()`
+  describe what happened;
+- the callee's `unwind-protect` and `FeProtectWithCleanup()` cleanups have
+  run, down to the depth this call started at and no further, so the
+  caller's own pending cleanups are untouched;
+- the callee's evaluator frames and GC-stack entries are gone, and the
+  caller's ambient evaluation-control record -- remaining steps included --
+  is exactly as it was;
+- a `throw` cannot escape: the barrier is also a catch wall, so an unmatched
+  throw inside the call becomes `no-catch` there.
+
+`options` bounds this call rather than being ignored in favour of an ambient
+record, which is the difference from `FeCallWithOptions()` when called from
+inside a native; a null `options` leaves the caller's ambient limits in
+place.
+
+The host then chooses. **Containment** -- a hook, a process filter, a
+sentinel -- swallows it and carries on; that is the whole point, since a
+broken hook in a user's init file must not take the editor's own evaluation
+down with it. **Wrapping** -- a native that runs a body between a save and a
+restore -- does its restoring work and then calls `FeResignal()`, which puts
+the completion back in flight in the enclosing run with its kind, its
+condition object and its already-formatted message intact, so an enclosing
+Lisp `condition-case` matches on the *original* condition symbol.
+
+```c
+static FeObject* CallHook(FeContext* ctx, FeObject* arguments) {
+  FeObject* hook = FeGetNextArgument(ctx, &arguments);
+  FeObject* value = FeNil(ctx);
+  const FeEvalOptions options = {.step_limit = 100000};
+  if (FeTryCallWithOptions(ctx, hook, nullptr, 0, &options, &value)) {
+    return value;
+  }
+  fprintf(stderr, "hook failed: %s\n", FeGetCompletionMessage(ctx));
+  return FeNil(ctx);  // or FeResignal(ctx) to re-raise it
+}
+```
+
+`example_host.c` exercises both the accessors and the protected call.
+
+### The standalone interpreter's structured channel
+
+The `fe` binary is a host like any other, and its error callback prints the
+message to `stderr`. Setting `FE_STRUCTURED_ERRORS` to any value makes it
+print the completion's condition object first, so a machine reader (the
+compat runner, `utils/run-fe-compat.py`) does not have to grep diagnostic
+text:
+
+```text
+condition: wrong-type-argument
+data: (listp 5)
+error: expected pair, got integer
+```
+
+`condition:` is the condition symbol -- the car of `FeGetCondition()` -- and
+`data:` on the next line is the cdr, rendered exactly as Emacs'
+`prin1-to-string` renders it, so the two can be compared character for
+character. A quit is the one special case: it prints `condition: quit` and
+no `data:` line, because a quit is a completion kind a host may need to tell
+apart from every condition, not a condition to be inspected. A completion
+with no condition object at all (budget exhaustion, arena exhaustion) prints
+neither line, only `error:`. The variable changes nothing else: the `error:`
+line and the call trace are printed exactly as they are without it, and the
+exit status is unchanged.
 
 The kind also has one internal effect a host can rely on: while a
 non-Normal completion is draining, a cleanup's own frame pushes get the

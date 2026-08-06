@@ -592,13 +592,42 @@ outer
 1
 ```
 
-If a cleanup form itself raises, that failure is reported directly (it does
-not become a normal, catchable Fe error) and cleanup evaluation moves on to
-the next entry -- an enclosing `unwind-protect`'s own cleanup, or, for the
-outermost one, the host. Whichever error was already unwinding when the
-cleanup failed is still what ultimately reaches the caller or the host; the
-cleanup's own failure does not replace it and does not stop any other
-pending cleanup from running.
+If a cleanup form itself raises, its completion **replaces** whatever was
+already unwinding -- Emacs' policy, and 06A Decision 4's. The replacement is
+an ordinary condition: an enclosing `condition-case` can catch it, and the
+error the cleanup interrupted is gone. Nothing is printed behind the
+program's back, and the remaining cleanups still run, on the replacing
+completion's own path.
+
+```clojure
+fe > (condition-case e (unwind-protect (error "orig") (error "cleanup"))
+       (error e))
+(error "cleanup")
+```
+
+The kind travels with it: a cleanup that runs out of its own bounded budget,
+or that answers a second host interrupt, reaches the host as a budget or a
+quit completion rather than as an ordinary error.
+
+A `throw` from a cleanup replaces the in-flight completion the same way, and
+it is delivered to its catch even though that catch is outside the cleanup's
+own evaluation -- the throw is re-issued in the enclosing context rather
+than answered as `no-catch`:
+
+```clojure
+fe > (catch 'tg (unwind-protect (throw 'tg 'a) (throw 'tg 'b)))
+b
+fe > (catch 'tg (unwind-protect (error "orig") (throw 'tg 'b)))
+b
+fe > (catch 'o (catch 'i (unwind-protect (throw 'i 1) (throw 'o 2))))
+2
+```
+
+Frames the in-flight completion is abandoning are still established while
+the cleanup runs, so a catch the original throw was on its way *past* is
+still a candidate for the cleanup's own throw. A cleanup throw that matches
+no live catch anywhere is `no-catch`, an ordinary error, which then replaces
+the completion as any other cleanup error would.
 
 Cleanup forms see the lexical environment `unwind-protect` was entered
 with, not any bindings `body` introduced, and objects that environment
@@ -627,9 +656,10 @@ Tags match by `eq`: a catch and a throw agree when the two tags are the
 same object, or both the same integer. Floats, strings and freshly built
 lists are distinct objects, so they do not match by content, and `nil`
 never matches as a tag at all. The innermost catch whose tag matches wins.
-A `throw` that finds no matching catch raises `no-catch`, reported through
-the ordinary error path as the message `no-catch TAG VALUE` until a real
-condition object replaces it (sub-plan 06D).
+A `throw` that finds no matching catch raises the condition
+`(no-catch TAG VALUE)` through the ordinary error path, rendered as the
+message `no-catch TAG VALUE`. `no-catch` is under `error`, so an
+`(error ...)` handler catches it.
 
 Nested `catch` forms with distinct tags let a program choose which level a
 throw unwinds to:
@@ -1012,8 +1042,29 @@ because every condition Fe registers names `error` as its parent: the
 hierarchy is one level deep, and Emacs' deeper chains (`overflow-error` is
 a `range-error` is an `arith-error`) are deliberately out of scope until a
 producer needs them. `quit` is separate and requires a `quit` or
-`t` handler. An error raised by a handler bypasses that active handler and
-searches an enclosing one. `signal` evaluates its two operands and raises
+`t` handler -- and that is true of a real host interrupt (a C-g) as well as
+of `(signal 'quit nil)`; both carry the condition object `(quit)`. Fe's own
+resource ceilings -- the evaluation step budget, the frame wall and the
+native re-entry wall -- are a *budget* completion, which nothing catches,
+`t` included: a program must not be able to sit inside the limit its host
+set. An error raised by a handler bypasses that active handler and searches
+an enclosing one.
+
+A condition does not cross an evaluator run that a host native started.
+When a native re-enters evaluation (`FeCall`, `FeEvaluate*`), the nested run
+has its own frame-stack floor, and neither `condition-case` handlers nor
+`catch` frames below that floor are candidates: an uncaught condition or a
+throw inside the nested run is answered inside it. That is the containment
+rule the host embedding depends on, not an accident of the search, and
+`FeTryCallWithOptions`/`FeResignal` (see `doc/c-api.md`) are how a host
+chooses to swallow such a completion or to put it back in flight for an
+enclosing `condition-case` to see. A cleanup drain is *not* such a run: an
+`unwind-protect` cleanup's own condition or throw is re-issued in the
+enclosing context, which is what makes the replacement policy above work.
+The rule has no Emacs analogue -- Emacs has no equivalent of a host native
+starting a fresh evaluator -- so it is pinned by `test_api.c`
+(`TestCatchThrow`'s re-entry wall and `TestProtectedCall`) rather than by an
+oracle row. `signal` evaluates its two operands and raises
 `(condition . data)`. Unknown condition symbols raise `(error "Invalid error
 symbol" SYMBOL)`. `error` formats its message at signal time and raises an
 `error` condition. Its supported directives are `%%`, `%d` (integer), `%s`

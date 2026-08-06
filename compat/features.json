@@ -1512,10 +1512,11 @@
     "cond-cc10",
     "cond-cc10-quit",
     "cond-cc10-t",
-    "cond-ct6"
+    "cond-ct6",
+    "cond-cc-handler-bypass"
    ],
    "kg_test": null,
-   "rationale": "Phase 6 condition handling: handlers match a static error hierarchy by symbol, list, or t; bind their optional variable to (SYMBOL . DATA); and run their bodies as an implicit sequence. Quit matches only quit or t, while budget remains uncatchable. :success is deliberately unsupported.",
+   "rationale": "Phase 6 condition handling: handlers match a static error hierarchy by symbol, list, or t; bind their optional variable to (SYMBOL . DATA); and run their bodies as an implicit sequence. Quit matches only quit or t, while budget remains uncatchable. :success is deliberately unsupported. A condition raised by a running handler bypasses that handler and searches an enclosing condition-case (cond-cc-handler-bypass).",
    "source_name": "condition-case"
   },
   {
