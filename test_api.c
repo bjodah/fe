@@ -346,6 +346,33 @@ static FeObject* WrapCall(FeContext* context, FeObject* arguments) {
   FeResignal(context);
 }
 
+// `FeRaiseCompletion`'s three legal kinds, one native each: a host raising
+// its own quit (its C-g arrived somewhere fe cannot poll), its own ceiling,
+// and an ordinary error.
+[[noreturn]] static FeObject* RaiseHostQuit(FeContext* context,
+                                            // cppcheck-suppress
+                                            // constParameterCallback
+                                            FeObject* arguments) {
+  (void)arguments;
+  FeRaiseCompletion(context, FeCompletionQuit, "host quit");
+}
+
+[[noreturn]] static FeObject* RaiseHostBudget(FeContext* context,
+                                              // cppcheck-suppress
+                                              // constParameterCallback
+                                              FeObject* arguments) {
+  (void)arguments;
+  FeRaiseCompletion(context, FeCompletionBudget, "host budget");
+}
+
+[[noreturn]] static FeObject* RaiseHostError(FeContext* context,
+                                             // cppcheck-suppress
+                                             // constParameterCallback
+                                             FeObject* arguments) {
+  (void)arguments;
+  FeRaiseCompletion(context, FeCompletionError, "host error");
+}
+
 static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
   const double x = FeToDouble(context, FeGetNextArgument(context, &arguments));
   const double y = FeToDouble(context, FeGetNextArgument(context, &arguments));
@@ -3468,6 +3495,47 @@ static bool TestUnwindCleanupBudget(void) {
   return true;
 }
 
+// `FeRaiseCompletion`, the public raise for the kinds `FeHandleError` cannot
+// spell. Its contract is narrow on purpose: Error, Quit and Budget are the
+// three a host may legitimately raise, and each is given the condition
+// object that kind is defined to carry, so nothing a host raises can leave
+// `FeGetCondition` answering with a leftover.
+static bool TestHostRaiseCompletion(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "raise-host-quit", RaiseHostQuit);
+  FeDefineNative(context, "raise-host-budget", RaiseHostBudget);
+  FeDefineNative(context, "raise-host-error", RaiseHostError);
+
+#define CHK(expr, expected)                                                   \
+  CHECK(IsRendered(                                                           \
+      context, FeEvaluateString(context, "raise.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // Quit: a `(quit ...)` handler catches it and the object is `(quit)`,
+  // exactly as for fe's own interrupt path.
+  CHK("(condition-case e (raise-host-quit) (quit (list 'q e)))", "(q (quit))");
+  // Error: an ordinary `(error "msg")` condition, catchable as one.
+  CHK("(condition-case e (raise-host-error) (error e))",
+      "(error \"host error\")");
+  // Budget: catchable by nothing, `t` included, and it reaches the host with
+  // the kind and with no condition object.
+  static const char budget[] =
+      "(condition-case nil (raise-host-budget) (t 'nope))";
+  CHECK(ExpectCompletionKind(context, &state, "raise.fe", budget,
+                             sizeof(budget) - 1, nullptr,
+                             "raise.fe: host budget", FeCompletionBudget));
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 // The protected call (`FeTryCallWithOptions`) and the re-signal that goes
 // with it. The property under test is the one the plain `FeCall` path cannot
 // have: a completion raised by a nested run started from inside a native
@@ -5788,7 +5856,8 @@ int main(void) {
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
                  TestCatchThrow() && TestConditionCaseResumesControl() &&
-                 TestQuitIsCatchable() && TestProtectedCall()
+                 TestQuitIsCatchable() && TestProtectedCall() &&
+                 TestHostRaiseCompletion()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
