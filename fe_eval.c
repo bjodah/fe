@@ -1309,6 +1309,19 @@ typedef struct PrimitiveArity {
   size_t maximum;
 } PrimitiveArity;
 
+// 07A's inventory, one row per `Primitive`. Two rows are worth naming because
+// they are easy to over-tighten:
+//
+// * `lambda`/`fn`/`macro` need a parameter list and nothing else -- 07A's
+//   "closure constructors with a raw parameter-list minimum". `(lambda (x))`
+//   is a valid closure in Emacs and `((lambda (x)) 1)` answers nil; requiring
+//   a body would reject a form Emacs accepts.
+// * `apply`, like `funcall`, is 1+ (07A's census). `(apply f)` has a callable
+//   but no final list, and Emacs diagnoses that as a *type* error about the
+//   missing list -- `(apply #'list)` is `(wrong-type-argument listp list)` --
+//   not as an arity error. Fe's own proper-list check is what should speak
+//   there, so the table must let one operand through.
+
 static const PrimitiveArity primitive_arities[PSentinel] = {
     [PAssert] = {1, 1},
     [PEnv] = {0, 0},
@@ -1317,8 +1330,8 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PSetq] = {0, SIZE_MAX},
     [PSet] = {2, 2},
     [PIf] = {2, SIZE_MAX},
-    [PFn] = {2, SIZE_MAX},
-    [PMacro] = {2, SIZE_MAX},
+    [PFn] = {1, SIZE_MAX},
+    [PMacro] = {1, SIZE_MAX},
     [PWhile] = {1, SIZE_MAX},
     [PQuote] = {1, 1},
     [PBoundp] = {1, 1},
@@ -1358,7 +1371,7 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PFboundp] = {1, 1},
     [PFmakunbound] = {1, 1},
     [PFuncall] = {1, SIZE_MAX},
-    [PApply] = {2, SIZE_MAX},
+    [PApply] = {1, SIZE_MAX},
     [PCatch] = {1, SIZE_MAX},
     [PThrow] = {2, 2},
     [PConditionCase] = {2, SIZE_MAX},
@@ -1782,6 +1795,12 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
   frame->accumulator = arguments;
   frame->env = ArgsToEnv(ctx, CAR(vb), arguments, CAR(va), identity, argc);
   frame->rest = CDR(vb);
+  // The evaluated arguments have done their work; hand the accumulator back
+  // to `ResumeBody`, whose "value of the last completed body form" it now is.
+  // A closure with no body forms at all -- legal since the constructors take
+  // a parameter-list minimum -- completes immediately from this value, so
+  // leaving the argument list here made `((lambda (x)) 1)` answer `(1)`.
+  frame->accumulator = &nil;
   // Sentinel, as for the argument frame: marks a freshly set up body frame no
   // form has completed in yet.
   frame->callee = &unbound;

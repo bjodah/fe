@@ -445,7 +445,7 @@ fe > (apply '+ 1 2 (list 3 4))
 10
 fe > (setq lst '(9 8))
 (9 8)
-fe > (apply 'cons lst '(7 6))
+fe > (apply 'cons lst '(7))
 ((9 8) . 7)
 fe > lst
 (9 8)
@@ -454,9 +454,18 @@ fe > lst
 The spread does not mutate the caller's list -- `lst` still holds `(9 8)`
 after `apply` rebuilt it -- and a final operand that is not a proper list is
 `apply: last argument must be a proper list`, raised only after every operand
-form has run. A callable-only `(apply 'f)` has no final operand at all and is
-that same error. `(apply)` with no operands is `wrong-number-of-arguments`,
-and `apply` rejects a macro or a special form exactly as `funcall` does.
+form has run. `apply` takes one operand or more, exactly like `funcall`: a
+callable-only `(apply 'f)` has no final operand at all and is that same
+malformed-tail error, not an arity error, while `(apply)` with no operands at
+all is `wrong-number-of-arguments`. Emacs also treats the callable-only form
+as a type error rather than an arity one -- `(apply #'list)` is
+`(wrong-type-argument listp list)` there, against Fe's prose message. `apply`
+rejects a macro or a special form exactly as `funcall` does.
+
+The spread rebuilds the call, so the callable sees each spread element as its
+own argument and its own arity applies: `(apply 'cons lst '(7 6))` hands
+`cons` three arguments and is `wrong-number-of-arguments`, not a silently
+dropped operand.
 
 #### `(fset symbol function)`
 

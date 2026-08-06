@@ -1452,6 +1452,14 @@ static bool TestParameterLists(void) {
   CHK("((lambda (a &optional b) (list a b)) 1)", "(1 nil)");
   CHK("((lambda (a &optional b) (list a b)) 1 2)", "(1 2)");
   CHK("((lambda (a &rest r) (list a r)) 1 2 3)", "(1 (2 3))");
+  // 07A's closure constructors take a raw *parameter-list* minimum, not a
+  // body: `(lambda (x))` is a valid closure in Emacs 31.0.90 (it prints as
+  // `#[(x) (nil) (t)]`) and `((lambda (x)) 1)` answers nil there. Requiring a
+  // body would reject a form the oracle accepts.
+  CHK("(lambda (x))", "(lambda (x))");
+  CHK("((lambda (x)) 1)", "nil");
+  CHK("((macro (x)) 1)", "nil");
+  CHK("((lambda ()))", "nil");
   CHK("((lambda (a &rest r) (list a r)) 1)", "(1 nil)");
   CHK("((lambda (&rest r) r) 1 2 3)", "(1 2 3)");
   CHK("((lambda (a . r) (list a r)) 1 2 3)", "(1 (2 3))");
@@ -1802,6 +1810,14 @@ static bool TestFunctionCells(void) {
             "lisp2.fe: apply: last argument must be a proper list");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "apply-probe")));
   LISP2_ERR("(apply 'list 1)",
+            "lisp2.fe: apply: last argument must be a "
+            "proper list");
+  // 07A's census puts `apply` at 1+, like `funcall`: one operand is a
+  // callable with no final list at all, which is that same malformed-tail
+  // error and not an arity error. Emacs 31.0.90 agrees that it is not an
+  // arity error -- `(apply #'list)` measures as
+  // `(wrong-type-argument listp list)`.
+  LISP2_ERR("(apply 'list)",
             "lisp2.fe: apply: last argument must be a "
             "proper list");
   CHK("(apply '+ 1 2 (list 3 4))", "10");
