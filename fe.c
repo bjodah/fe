@@ -526,8 +526,12 @@ static int IsStringEqual(FeObject* obj, const char* str) {
   return *str == '\0';
 }
 
+// Measured, GNU Emacs 31.0.90: `(keywordp :)` is t, `:` self-evaluates to
+// `:`, and `(setq : 1)` raises `(setting-constant :)`. 08B guessed a length
+// of at least 2 instead of measuring, which left the one-character keyword an
+// ordinary, unbound symbol.
 static bool IsKeywordName(const char* name) {
-  return name[0] == ':' && name[1] != '\0';
+  return name[0] == ':';
 }
 
 static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym);
@@ -1670,8 +1674,7 @@ bool IsNamedSymbol(const FeObject* v, const char* name) {
 
 bool IsKeywordSymbol(const FeObject* v) {
   return FeGetType(v) == FeTSymbol && SymbolName(v) != NULL &&
-         STRING_BUFFER(SymbolName(v))[0] == ':' &&
-         STRING_BUFFER(SymbolName(v))[1] != '\0';
+         STRING_BUFFER(SymbolName(v))[0] == ':';
 }
 
 bool IsConstantSymbol(const FeObject* v) {

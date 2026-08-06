@@ -2400,12 +2400,24 @@ static bool TestConstantsAndKeywords(void) {
                                 "constants.fe:1: setting-constant"));  \
     CHECK(IsRendered(context, FeGetCondition(context), condition));    \
   } while (false)
+#define LET_ERR(expr)                                                   \
+  CHECK(ExpectEvaluationError(context, &state, "constants.fe", expr,    \
+                              strlen(expr),                             \
+                              "constants.fe:1: lambda-list keyword in " \
+                              "let binding"))
 
   CHK(":foo", ":foo");
   CHK("(eq :a ':a)", "t");
   CHK("(keywordp :foo)", "t");
   CHK("(keywordp 'foo)", "nil");
-  CHK("(keywordp ':)", "nil");
+  // Measured, GNU Emacs 31.0.90: `(keywordp :)` is t, `:` self-evaluates to
+  // `:`, and `(setq : 1)` raises `(setting-constant :)`. 08B guessed a
+  // minimum name length of 2 instead of measuring, and asserted `nil` here.
+  CHK("(keywordp ':)", "t");
+  CHK("(keywordp :)", "t");
+  CHK(":", ":");
+  CHK("(eq : ':)", "t");
+  ERR("(setq : 1)", "(setting-constant :)");
   ERR("(setq t nil)", "(setting-constant t)");
   ERR("(setq nil 1)", "(setting-constant nil)");
   ERR("(setq :foo 1)", "(setting-constant :foo)");
@@ -2419,10 +2431,26 @@ static bool TestConstantsAndKeywords(void) {
   CHK("(let ((let-inner let-outer) (let-outer 9)) let-inner)", "7");
   ERR("(fset 't (lambda () 1))", "(setting-constant t)");
   ERR("(defalias ':foo 'car)", "(setting-constant :foo)");
+  // All three lambda-parameter rows, measured rather than assumed. Emacs
+  // 31.0.90 binds every one of them: `((lambda (t) t) 5)` is 5, and so are
+  // `((lambda (nil) nil) 5)` and `((lambda (:kw) :kw) 5)` -- a lexical
+  // binding of `nil` really does shadow the constant in the body. Fe follows
+  // Emacs for `t` and is deliberately stricter for the other two: `nil` is
+  // not a name any environment here can hold, and letting a keyword be
+  // shadowed would undo the self-evaluation this slice just established.
+  // Recorded as divergences in compat/features.json and doc/language.md.
   ERR("((lambda (nil) nil) 1)", "(setting-constant nil)");
   ERR("((lambda (:lambda-keyword) :lambda-keyword) 1)",
       "(setting-constant :lambda-keyword)");
+  CHK("((lambda (t) t) 1)", "1");
   CHK("((lambda (t) (setq t 2)) 1)", "2");
+
+  // `let` with a binding list compiles into a lambda application, which made
+  // a lambda-list keyword in binding position bind as one: `(let ((&rest 1)
+  // (x 2)) x)` answered `(1 2)` where Emacs answers 2.
+  LET_ERR("(let ((&rest 1) (x 2)) x)");
+  LET_ERR("(let ((&optional 1) (x 2)) x)");
+  CHK("(let ((&foo 1)) &foo)", "1");
   CHK("(+ 1 2)", "3");
 
 #define API_ERR(call, condition)                                    \
@@ -2462,7 +2490,15 @@ static bool TestConstantsAndKeywords(void) {
                                     sizeof(":survives-gc") - 1),
                    ":survives-gc"));
   CHECK(keyword == FeMakeSymbol(context, ":survives-gc"));
+  // 08B's outcome is that constancy survives collection, which means the
+  // refusal has to survive it too -- re-evaluating the keyword only shows
+  // the value cell is intact.
+  ERR("(setq :survives-gc 1)", "(setting-constant :survives-gc)");
+  ERR("(let ((:survives-gc 1)) 1)", "(setting-constant :survives-gc)");
+  ERR("(setq t nil)", "(setting-constant t)");
+  CHK("t", "t");
 
+#undef LET_ERR
 #undef ERR
 #undef CHK
   FeCloseContext(context);

@@ -79,17 +79,23 @@ Emacs' bignums (05A Decision 3).
 
 ### Constants And Keywords
 
-`t`, `nil`, and every symbol whose name begins with `:` and has at least one
-more character are constants. Keywords are self-evaluating, so `:type` and
-`':type` produce the same interned symbol; `:` alone is an ordinary symbol.
-`(keywordp VALUE)` recognizes keywords and returns `nil` for ordinary symbols.
+`t`, `nil`, and every symbol whose name begins with `:` are constants.
+Keywords are self-evaluating, so `:type` and `':type` produce the same
+interned symbol. `:` on its own is a keyword too, as it is in Emacs 31.0.90:
+it self-evaluates and `(keywordp :)` is `t`. `(keywordp VALUE)` recognizes
+keywords and returns `nil` for ordinary symbols.
 
 Value and function-cell writes through `setq`, `set`, `let`, `fset`, and
 `defalias` signal `setting-constant` with the target symbol as condition data.
 `makunbound` and `fmakunbound` refuse the same targets. The condition is a child
 of `error`, so `(condition-case e ... (setting-constant e))` catches it.
-Lexical lambda parameters are the measured exception: a parameter named `t`
-may shadow the global constant and may be assigned locally.
+Lexical lambda parameters are the measured exception, and only for `t`: a
+parameter named `t` may shadow the global constant and may be assigned
+locally, exactly as in Emacs. Emacs also binds `nil` and keyword parameters
+-- `((lambda (nil) nil) 5)` and `((lambda (:kw) :kw) 5)` are both 5 there --
+and Fe deliberately does not: `nil` is not a name any Fe environment can
+hold, and a shadowable keyword would undo keyword self-evaluation. Both are
+recorded divergences (`compat/features.json`).
 
 ```clojure
 fe > :type
@@ -110,7 +116,13 @@ Creates simultaneous lexical bindings, evaluating every initializer in the
 surrounding environment, then evaluates the body and returns its last value.
 A bare symbol binding, such as `(let (flag) flag)`, binds `nil`. `t`, `nil`,
 and keywords are rejected as binding targets with `setting-constant` before
-any initializer runs. Fe also retains the historical `(let symbol value)`
+any initializer runs. The binding list is compiled into a lambda
+application, so the two lambda-list keywords `&optional` and `&rest` are
+also refused as binding targets, with `lambda-list keyword in let binding`:
+Emacs binds a variable of that literal name, which Fe cannot do here, and
+binding one value to a rest parameter instead would be a silent
+misinterpretation. Any other `&`-prefixed name binds normally, as it does in
+Emacs. Fe also retains the historical `(let symbol value)`
 two-argument form, which creates a binding and returns `nil`.
 
 #### `(setq symbol value ...)`

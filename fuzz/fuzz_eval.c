@@ -136,6 +136,8 @@ static FeObject* BuildAtom(FeContext* ctx, FuzzInput* input) {
       return FeMakeSymbol(ctx, "x");
     case 3:
       return FeMakeSymbol(ctx, ":fuzz-keyword");
+    // The one-character keyword, which is a keyword and a constant here
+    // exactly as it is in Emacs.
     case 4:
       return FeMakeSymbol(ctx, ":");
     case 5:

@@ -2,10 +2,19 @@
 (print (keywordp :type))
 (print (keywordp 'type))
 (print (eq :a ':a))
+; `:` on its own is a keyword in Emacs 31.0.90: it self-evaluates and
+; `(keywordp :)` is t.
 (print (keywordp ':))
+(print :)
+(print (condition-case e (setq : 1) (setting-constant e)))
 (print (condition-case e (setq t nil) (setting-constant e)))
 (print (condition-case e (setq nil 1) (setting-constant e)))
 (print (condition-case e (setq :type 1) (setting-constant e)))
 (print (condition-case e (let ((t 1)) t) (setting-constant e)))
 (print (condition-case e (let ((nil 1)) 1) (setting-constant e)))
+; A `let` binding list is not a lambda list: Emacs binds a variable named
+; `&rest` here, and Fe -- which compiles the binding list into a lambda --
+; refuses rather than binding a rest parameter.
+(print (condition-case e (let ((&rest 1) (x 2)) x) (error e)))
+(print (let ((&foo 1)) &foo))
 (print ((lambda (t) (setq t 2)) 1))

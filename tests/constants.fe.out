@@ -2,10 +2,14 @@
 t
 nil
 t
-nil
+t
+:
+(setting-constant :)
 (setting-constant t)
 (setting-constant nil)
 (setting-constant :type)
 (setting-constant t)
 (setting-constant nil)
+(error "lambda-list keyword in let binding")
+1
 2

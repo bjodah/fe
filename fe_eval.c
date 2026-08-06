@@ -969,12 +969,26 @@ static FeObject* ReverseList(FeObject* list) {
   return result;
 }
 
+// `let` with a binding list compiles into a lambda application, so a
+// lambda-list keyword in binding position would reach the parameter decoder
+// and be read as one: `(let ((&rest 1) (x 2)) x)` answered `(1 2)` -- one
+// value bound to a rest parameter -- where Emacs answers 2, having bound a
+// variable literally named `&rest`. Fe cannot bind that name here, so it says
+// so instead of quietly meaning something else. Only the two names the
+// decoder acts on are refused; `(let ((&foo 1)) &foo)` is 1 in both.
+static void ValidateLetBindingTarget(FeContext* ctx, FeObject* target) {
+  if (IsNamedSymbol(target, "&optional") || IsNamedSymbol(target, "&rest")) {
+    FeHandleError(ctx, "lambda-list keyword in let binding");
+  }
+  ValidateValueTarget(ctx, target);
+}
+
 static void ValidateLetBindings(FeContext* ctx, FeObject* bindings) {
   while (!FeIsNil(bindings)) {
     if (FeGetType(bindings) != FeTPair) {
       RaiseWrongType(ctx, "listp", bindings);
     }
-    ValidateValueTarget(ctx, LetBindingTarget(ctx, CAR(bindings)));
+    ValidateLetBindingTarget(ctx, LetBindingTarget(ctx, CAR(bindings)));
     bindings = CDR(bindings);
   }
 }
@@ -2322,11 +2336,13 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       FeRequireNoArguments(ctx, frame->rest);
       *result = FeMakeBool(ctx, IsKeywordSymbol(value));
       break;
+    // One constancy check, before the type check: `CheckType` returns its
+    // argument unchanged, so the second `RejectConstantTarget(ctx, sym)` each
+    // arm used to make could never fail where the first had not.
     case PFmakunbound: {
       RejectConstantTarget(ctx, value);
       FeObject* const sym = CheckType(ctx, value, FeTSymbol);
       FeRequireNoArguments(ctx, frame->rest);
-      RejectConstantTarget(ctx, sym);
       SetSymbolFunction(sym, &unbound);
       *result = sym;
       break;
@@ -2335,7 +2351,6 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       RejectConstantTarget(ctx, value);
       FeObject* const sym = CheckType(ctx, value, FeTSymbol);
       FeRequireNoArguments(ctx, frame->rest);
-      RejectConstantTarget(ctx, sym);
       CDR(GetBound(ctx, sym, frame->env)) = &unbound;
       *result = sym;
       break;
