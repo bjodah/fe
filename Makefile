@@ -269,9 +269,20 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # Raised 900 -> 980 by Phase 7 sub-plan 07A (2026-08-06), on the same 863/900
 # baseline, funding 07B's +50..80 pmccabe estimate. This is a phase fund, not
 # permission for an over-limit function or an unpriced primitive.
-# Raised 980 -> 1090 by Phase 8 sub-plan 08A/08C: strict reader rejection,
-# shared escapes, UTF-8 character literals, radix integers and source lines.
-PMCCABE_TOTAL_MAX ?= 1090
+# Raised 980 -> 1090 inside Phase 8's reader commit (c40ca6c), which was
+# wrong three ways and is corrected here. It was attributed to sub-plan 08A,
+# which had said neither fe cap moves; +110 was 08C's *scc* band applied to
+# pmccabe, a different unit; and the tree it funded measured 1034, leaving 56
+# unearned points nothing had asked for.
+# Set 1090 -> 1056 by the Phase 8 review-cycle repair (2026-08-06), which is
+# the measured post-fix actual, not an estimate: kg's convention is that the
+# cap sits at the number, proven by temporarily lowering it by one and
+# watching the gate fire. At 1055 `make pmccabe-check` reports
+# "pmccabe total complexity 1056 exceeds 1055"; at 1056 it passes. The
+# per-symbol manifest under .ci/pmccabe-baseline.json is the ratchet that
+# stops a symbol growing inside this envelope; this number stops the tree
+# growing as a whole, and the next phase to want room prices it explicitly.
+PMCCABE_TOTAL_MAX ?= 1056
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
