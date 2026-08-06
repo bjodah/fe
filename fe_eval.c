@@ -584,11 +584,10 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   char message[1024];
   switch ((ctx->error_label != nullptr) * 4 + ctx->error_has_line * 2 +
           ctx->error_has_offset) {
+    // A known line wins over a byte offset, so `label + line` prints the same
+    // way whether or not a reader offset also happens to be live: cases 7 and
+    // 6 are one arm, not two identical ones.
     case 7:
-      Format(message, sizeof(message), "%s:%zu: %s", ctx->error_label,
-             ctx->error_line, msg);
-      msg = message;
-      break;
     case 6:
       Format(message, sizeof(message), "%s:%zu: %s", ctx->error_label,
              ctx->error_line, msg);
