@@ -58,14 +58,17 @@ layout goes through the named accessors (`SymbolName`, `SymbolBindingCell`,
 Phase-4 lookup slices can change resolution without touching the
 representation readers. Symbols are interned.
 
-The value cell of a newly interned symbol whose name begins with `:` and has
-more than one byte points back to the symbol itself, making keywords
-self-evaluating without an evaluator special case. `t` is initialized the same
-way. `IsConstantSymbol` is the single name-property test used by value and
-function mutation paths; `setting-constant` carries a one-element data list
-with the rejected object. Lambda parameter construction is the deliberate
-exception for `t`, while ordinary `let` binding-list construction validates all
-targets before evaluating any initializer.
+The value cell of a newly interned symbol whose name begins with `:` points
+back to the symbol itself, making keywords self-evaluating without an
+evaluator special case. That includes `:` on its own, which Emacs also treats
+as a keyword. `t` is initialized the same way. `IsConstantSymbol` is the
+single name-property test used by value and function mutation paths;
+`setting-constant` carries a one-element data list with the rejected object.
+Lambda parameter construction is the deliberate exception for `t` alone.
+Ordinary `let` binding-list construction validates every target before
+evaluating any initializer, and because it compiles the list into a lambda
+application, it also refuses `&optional` and `&rest` as binding names -- the
+parameter decoder would otherwise read them as lambda-list keywords.
 
 ### Numbers
 
@@ -652,12 +655,30 @@ stack-balanced. The next call replaces this root.
 ## Error Handling
 
 The reader has one strict escape decoder shared by string bodies and character
-literals. Character literals decode UTF-8 directly from the byte callback; the
-lead byte determines the fixed number of continuation bytes, so no public
-callback or pushback API is needed. Evaluated input maintains a one-based line
-counter in its string/file adapter and records the line before each top-level
-form is evaluated. The source label and that line survive into both read and
-runtime diagnostics; standalone byte-oriented reads keep their byte offset.
+literals. It returns a character value, and the caller decides what a value
+means: a `?` literal takes any of them, a string body is a byte string and
+rejects 0 and anything above 255 rather than writing it into a
+NUL-terminated buffer. `\x` consumes hex digits greedily to a U+10FFFF bound,
+as Emacs does.
+
+Character literals decode UTF-8 directly from the byte callback; the lead byte
+determines the fixed number of continuation bytes, so no public callback or
+pushback API is needed. The `?` grammar is two mutually recursive positions --
+escape position after a `\`, character position after a modifier -- which is
+what lets `?\C-\n` apply the modifier to a nested escape's value while
+`?\C-s` applies it to the letter `s`. Recursion depth is bounded at three by
+the duplicate-modifier rejection. A literal must end at a delimiter, so
+`?ab` and `?\s-a` are read errors rather than a character followed by a
+leftover token; that check is the one place the reader looks one byte ahead
+and pushes it back.
+
+Evaluated input maintains a one-based line counter in its string/file adapter
+and records the line before each top-level form is evaluated. `Read` skips
+whitespace and comments in one loop *before* latching that line: the latch
+keeps the first value it is given, so recording it ahead of the comment arm
+reported the leading `;`'s line for every form a comment block preceded. The
+source label and that line survive into both read and runtime diagnostics;
+standalone byte-oriented reads keep their byte offset.
 
 If an error occurs, `FeHandleError()` detaches the active call trace and invokes
 the configured error callback. The borrowed error message and trace are valid
