@@ -451,16 +451,24 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 [[noreturn]] static void TransferEvaluationError(FeContext* ctx,
                                                  const char* msg,
                                                  FeObject* trace) {
+  // Recorded for every completion that reaches a barrier or the host, not
+  // only the ones that `longjmp`: `FeGetCompletionMessage` is how a host
+  // that contained a completion with `FeTryCallWithOptions` reads the text,
+  // and `FeResignal` is how it puts the same text back in flight. The
+  // self-copy guard is for exactly that replay, whose `msg` is a copy of
+  // this buffer.
+  if (msg != ctx->evaluator_error_message) {
+    const size_t length = strlen(msg);
+    assert(length < sizeof(ctx->evaluator_error_message));
+    memcpy(ctx->evaluator_error_message, msg, length + 1);
+  }
+  ctx->evaluator_error_trace = trace;
   if (ctx->evaluator_catch == nullptr) {
     if (ctx->error_fn != nullptr) {
       ctx->error_fn(ctx, msg, trace);
     }
     abort();
   }
-  const size_t length = strlen(msg);
-  assert(length < sizeof(ctx->evaluator_error_message));
-  memcpy(ctx->evaluator_error_message, msg, length + 1);
-  ctx->evaluator_error_trace = trace;
   longjmp(*ctx->evaluator_catch, 1);
 }
 
@@ -3429,4 +3437,126 @@ FeObject* FeEvaluateWithOptions(FeContext* ctx,
   FeObject* result = FeEvaluate(ctx, obj);
   EndEvaluationControl(ctx, owns_control);
   return result;
+}
+
+// The protected call (06A Decision 5's host surface, completed): run
+// `callable` with a barrier whose `setjmp` lives *here*, in a frame that is
+// live for as long as the call is, and answer with a bool instead of a
+// `longjmp`.
+//
+// This is what a native that re-enters evaluation needs and could not have
+// before. Without it, a completion raised by the nested run transfers to the
+// *outer* run's barrier, past the native's own C frame: `error_fn` runs only
+// at the outermost barrier, so a host `setjmp` inside the native is already
+// dead by the time the host's error callback tries to `longjmp` back to it,
+// which is undefined -- and in practice corrupts whatever the native was
+// holding.
+//
+// On a non-normal completion the call returns false without calling
+// `error_fn` and without unwinding the host's frame at all. The kind, the
+// condition object and the message are readable through `FeGetCompletion`,
+// `FeGetCondition` and `FeGetCompletionMessage`, and the host then chooses:
+//
+//   - swallow it (containment -- a hook or a process callback must not take
+//     the editor down with it), or
+//   - `FeResignal` it into the enclosing run, kind, condition object and
+//     message intact, so an enclosing Lisp `condition-case` matches on the
+//     original condition symbol.
+//
+// What is contained is contained completely: the callee's own cleanup
+// entries drain (down to the depth this call started at, never past it into
+// the caller's), its frames are discarded, the GC stack is restored to its
+// entry depth, and the ambient evaluation-control record -- remaining steps
+// included -- is put back exactly as it was found. `options` applies to this
+// call, not to whatever run it is nested inside; a null `options` leaves the
+// caller's ambient limits in place.
+bool FeTryCallWithOptions(FeContext* ctx,
+                          FeObject* callable,
+                          FeObject* const* arguments,
+                          size_t count,
+                          const FeEvalOptions* options,
+                          FeObject** result) {
+  FeContext* const volatile ctx_v = ctx;
+  FeObject** const volatile result_v = result;
+  FeObject* const volatile callable_v = callable;
+  FeObject* const* const volatile arguments_v = arguments;
+  const size_t volatile count_v = count;
+  const FeEvalOptions* const volatile options_v = options;
+  const size_t volatile gc = FeSaveGC(ctx);
+  const size_t volatile frame_base = ctx->frame_stack_index;
+  const size_t volatile saved_run_base = ctx->run_base;
+  const size_t volatile saved_reentry = ctx->native_reentry_depth;
+  const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
+  FeObject* const volatile saved_call_list = ctx->call_list;
+  jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
+  jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
+  jmp_buf* const volatile saved_cleanup_catch = ctx->cleanup_catch;
+  const FeEvaluationControl saved_control = SaveEvaluationControl(ctx);
+  jmp_buf jump;
+
+  // cppcheck-suppress autoVariables
+  ctx_v->evaluator_catch = &jump;
+  // Nothing inside may bounce out through the enclosing cleanup drain's
+  // `setjmp` or escape as a pending throw past this frame: a completion
+  // raised in here stops at the barrier above.
+  ctx_v->cleanup_catch = nullptr;
+  ctx_v->cleanup_floor = ctx_v->cleanup_stack_index;
+  ctx_v->completion = FeCompletionNormal;
+  ctx_v->condition = &nil;
+  // `options` is meant to bound *this* call; `BeginEvaluationControl`
+  // refuses while a record is already active, so hand it an inactive one and
+  // put the caller's back below, on both exits.
+  ctx_v->evaluation_active = false;
+
+  const bool completed = setjmp(jump) == 0;
+  if (completed) {
+    FeObject* const value =
+        FeCallWithOptions(ctx_v, callable_v, arguments_v, count_v, options_v);
+    ctx_v->condition = &nil;
+    ctx_v->completion = FeCompletionNormal;
+    *result_v = value;
+  }
+  ctx_v->frame_stack_index = frame_base;
+  ctx_v->run_base = saved_run_base;
+  ctx_v->native_reentry_depth = saved_reentry;
+  ctx_v->cleanup_floor = saved_cleanup_floor;
+  ctx_v->call_list = saved_call_list;
+  ctx_v->evaluator_catch = saved_evaluator_catch;
+  ctx_v->condition_catch = saved_condition_catch;
+  ctx_v->cleanup_catch = saved_cleanup_catch;
+  ctx_v->pending_throw = false;
+  ctx_v->pending_throw_tag = FeNil(ctx_v);
+  ctx_v->pending_throw_value = FeNil(ctx_v);
+  RestoreEvaluationControl(ctx_v, &saved_control);
+  FeRestoreGC(ctx_v, gc);
+  return completed;
+}
+
+// The text of the last completion that reached a barrier or the host, fully
+// formatted -- source label and all -- exactly as `FeErrorFn` would have been
+// given it. Valid until the next completion in this context.
+const char* FeGetCompletionMessage(const FeContext* ctx) {
+  return ctx->evaluator_error_message;
+}
+
+// Puts a contained completion back in flight in the enclosing run, keeping
+// the kind, the condition object (`ctx->condition` is untouched by
+// containment, so an enclosing `condition-case` still matches on the
+// original condition symbol) and the message. The message is already
+// formatted, so it is replayed rather than re-prefixed with the source
+// label.
+//
+// Called after `FeTryCallWithOptions` returned false, from the frame that
+// made the call. There is nothing to re-signal after a call that succeeded,
+// and a `Normal` kind there is treated as an ordinary error rather than
+// asserted, because the useful failure mode for a host is a diagnosable
+// error and not an abort.
+[[noreturn]] void FeResignal(FeContext* ctx) {
+  char message[sizeof(ctx->evaluator_error_message)];
+  memcpy(message, ctx->evaluator_error_message, sizeof(message));
+  message[sizeof(message) - 1] = '\0';
+  const FeCompletion kind = ctx->completion == FeCompletionNormal
+                                ? FeCompletionError
+                                : ctx->completion;
+  RaiseCompletionCore(ctx, kind, message);
 }

@@ -306,6 +306,46 @@ static FeObject* ReenterCatchThrow(FeContext* context,
   return FeEvaluateString(context, "nested.fe", source, sizeof(source) - 1);
 }
 
+// The protected-call natives. `ContainCall` is hook-shaped: it runs the
+// callable it was handed inside `FeTryCallWithOptions` and swallows whatever
+// comes back, which is what kg's hook dispatch and process callbacks must do
+// -- an init file's broken hook cannot be allowed to take the editor's own
+// evaluation down with it. `WrapCall` is wrapper-shaped: it does its own
+// unwinding work and then `FeResignal`s, so an enclosing Lisp
+// `condition-case` still matches on the original condition symbol.
+static FeCompletion contained_kind;
+static bool contained_gc_balanced;
+static bool contained_message_seen;
+static bool wrap_cleanup_ran;
+
+static FeObject* ContainCall(FeContext* context, FeObject* arguments) {
+  FeObject* callable = FeGetNextArgument(context, &arguments);
+  FeObject* value = FeNil(context);
+  const size_t gc = FeSaveGC(context);
+  if (FeTryCallWithOptions(context, callable, nullptr, 0, nullptr, &value)) {
+    FeObject* items[] = {FeMakeSymbol(context, "ok"), value};
+    return FeMakeList(context, items, 2);
+  }
+  // Everything the host is promised on the false path, asserted from inside
+  // the very frame that would have been skipped by a `longjmp`.
+  contained_gc_balanced = FeSaveGC(context) == gc;
+  contained_kind = FeGetCompletion(context);
+  contained_message_seen = FeGetCompletionMessage(context)[0] != '\0';
+  FeObject* items[] = {FeMakeSymbol(context, "contained"),
+                       FeGetCondition(context)};
+  return FeMakeList(context, items, 2);
+}
+
+static FeObject* WrapCall(FeContext* context, FeObject* arguments) {
+  FeObject* callable = FeGetNextArgument(context, &arguments);
+  FeObject* value = FeNil(context);
+  if (FeTryCallWithOptions(context, callable, nullptr, 0, nullptr, &value)) {
+    return value;
+  }
+  wrap_cleanup_ran = true;
+  FeResignal(context);
+}
+
 static FeObject* AddExactly(FeContext* context, FeObject* arguments) {
   const double x = FeToDouble(context, FeGetNextArgument(context, &arguments));
   const double y = FeToDouble(context, FeGetNextArgument(context, &arguments));
@@ -3428,6 +3468,101 @@ static bool TestUnwindCleanupBudget(void) {
   return true;
 }
 
+// The protected call (`FeTryCallWithOptions`) and the re-signal that goes
+// with it. The property under test is the one the plain `FeCall` path cannot
+// have: a completion raised by a nested run started from inside a native
+// stops at a barrier that is still live, instead of transferring to the
+// enclosing run's barrier past the native's own C frame.
+static bool TestProtectedCall(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "contain-call", ContainCall);
+  FeDefineNative(context, "wrap-call", WrapCall);
+
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "protect.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  const size_t gc = FeSaveGC(context);
+
+  // A normal completion passes the value back.
+  CHK("(contain-call (lambda () (+ 40 2)))", "(ok 42)");
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
+
+  // An error from the nested run is contained: the condition object, the
+  // kind and the message are all readable in the native's own frame, and
+  // the GC stack there is back where it started.
+  contained_gc_balanced = false;
+  contained_message_seen = false;
+  CHK("(contain-call (lambda () (car 5)))",
+      "(contained (wrong-type-argument listp 5))");
+  CHECK(contained_kind == FeCompletionError);
+  CHECK(contained_gc_balanced);
+  CHECK(contained_message_seen);
+
+  // A throw is contained too. It finds no catch inside the protected call
+  // (the containment barrier is also a throw wall), becomes `no-catch`, and
+  // stops there.
+  CHK("(contain-call (lambda () (throw 'nowhere 1)))",
+      "(contained (no-catch nowhere 1))");
+  CHECK(contained_kind == FeCompletionError);
+
+  // The outer run is unharmed by either: a catch established *outside* the
+  // protected call is neither reached by the contained throw nor disturbed
+  // by it, and evaluation continues normally afterwards.
+  CHK("(catch 'tg (contain-call (lambda () (throw 'tg 'escaped))) 'intact)",
+      "intact");
+  CHK("(+ 1 2)", "3");
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
+
+  // The host's own cleanups are not drained by a contained completion: only
+  // the callee's are.
+  CHK("(setq outer-cleanup-ran nil)", "nil");
+  CHK("(unwind-protect (contain-call (lambda () (car 5))) "
+      "  (setq outer-cleanup-ran t))",
+      "(contained (wrong-type-argument listp 5))");
+  CHK("outer-cleanup-ran", "t");
+
+  // A cleanup *inside* the protected call does run, as part of containing
+  // it, and does not escape past the barrier.
+  CHK("(setq inner-cleanup-ran nil)", "nil");
+  CHK("(contain-call (lambda () (unwind-protect (car 5) "
+      "  (setq inner-cleanup-ran t))))",
+      "(contained (wrong-type-argument listp 5))");
+  CHK("inner-cleanup-ran", "t");
+
+  // Nothing above leaked a GC-stack entry.
+  CHECK(FeSaveGC(context) == gc);
+
+  // Re-signal: the wrapper does its own work and puts the completion back in
+  // flight, condition object intact, so the enclosing `condition-case`
+  // matches on the *original* condition symbol rather than on a re-worded
+  // `error`.
+  wrap_cleanup_ran = false;
+  CHK("(condition-case e (wrap-call (lambda () (car 5))) "
+      "  (wrong-type-argument (list 'caught e)))",
+      "(caught (wrong-type-argument listp 5))");
+  CHECK(wrap_cleanup_ran);
+
+  // A re-signalled completion that nothing catches reaches the host once,
+  // with the message it started with.
+  static const char uncaught[] = "(wrap-call (lambda () (car 5)))";
+  CHECK(ExpectEvaluationError(context, &state, "protect.fe", uncaught,
+                              sizeof(uncaught) - 1,
+                              "protect.fe: expected pair, got integer"));
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 // A real host interrupt is a `quit` a Lisp program can catch, exactly as
 // Emacs' C-g is: `(quit ...)` and `t` handlers see it, an `(error ...)`
 // handler does not, and the object bound is the same `(quit)` cons
@@ -5653,7 +5788,7 @@ int main(void) {
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
                  TestCatchThrow() && TestConditionCaseResumesControl() &&
-                 TestQuitIsCatchable()
+                 TestQuitIsCatchable() && TestProtectedCall()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

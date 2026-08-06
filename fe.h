@@ -264,6 +264,16 @@ void FeSetStrictArity(FeContext* ctx, bool strict);
 // The completion's `(SYMBOL . DATA)` condition object. It is nil when the
 // completion cannot construct an object, such as arena exhaustion.
 [[nodiscard]] FeObject* FeGetCondition(const FeContext* ctx);
+// The fully formatted text of that completion -- source label included --
+// the same string `FeErrorFn` is handed. Valid until the next completion in
+// this context.
+[[nodiscard]] const char* FeGetCompletionMessage(const FeContext* ctx);
+// Puts a completion contained by `FeTryCallWithOptions` back in flight in
+// the enclosing run, with its kind, condition object and message intact, so
+// an enclosing Lisp `condition-case` matches on the original condition
+// symbol. Call it from the frame that made the protected call, after it
+// returned false.
+[[noreturn]] void FeResignal(FeContext* ctx);
 
 [[nodiscard]] FeType FeGetType(const FeObject* obj);
 [[nodiscard]] bool FeIsNil(const FeObject* obj);
@@ -402,6 +412,23 @@ void FeReleaseRoot(FeContext* ctx, FeRoot* root);
                                           FeObject* const* arguments,
                                           size_t count,
                                           const FeEvalOptions* options);
+// The protected call: like `FeCallWithOptions`, but a non-normal completion
+// is *returned*, not thrown past this frame. On true, `*result` holds the
+// value. On false, nothing was written to `*result`, `error_fn` was not
+// called, the host's own frame was not unwound, and `FeGetCompletion`,
+// `FeGetCondition` and `FeGetCompletionMessage` describe what happened; the
+// host either swallows it or `FeResignal`s it. The callee's cleanups run,
+// its frames and GC-stack entries are discarded, and the caller's ambient
+// evaluation-control record -- remaining steps included -- is restored.
+// This is the entry point a native that re-enters evaluation should use:
+// `FeCall`/`FeCallWithOptions` transfer a nested run's completion to the
+// *enclosing* run's barrier, past the native's own C frame.
+[[nodiscard]] bool FeTryCallWithOptions(FeContext* ctx,
+                                        FeObject* callable,
+                                        FeObject* const* arguments,
+                                        size_t count,
+                                        const FeEvalOptions* options,
+                                        FeObject** result);
 [[nodiscard]] FeObject* FeEvaluate(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeEvaluateWithOptions(FeContext* ctx,
                                               FeObject* obj,
