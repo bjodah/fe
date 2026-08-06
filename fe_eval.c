@@ -1288,9 +1288,9 @@ static void CompleteImplicitBodyFrame(FeContext* ctx,
 // anything but `PQuote`, which the caller already handled), or completes
 // synchronously for the primitives that evaluate nothing at all (`PEnv`,
 // `PFn`, `PMacro`) or whose raw-argument shape already decides the answer
-// before any evaluation (`PIf`'s empty form, `PLet`'s `frame_bind == NULL`
-// case -- see `FeFrameLet`'s own comment in fe_internal.h for why the value
-// form is then never even evaluated). Returns true with `*result` holding
+// before any evaluation (`PLet`'s `frame_bind == NULL` case -- see
+// `FeFrameLet`'s own comment in fe_internal.h for why the value form is then
+// never even evaluated). Returns true with `*result` holding
 // the completed value, or false after switching `frame`'s kind to one of the
 // resumable continuation kinds `ResumeContinuation` drives below. This is
 // the frame-machine replacement for the old recursive `EvaluatePrimitive`;
@@ -1299,18 +1299,6 @@ static void CompleteImplicitBodyFrame(FeContext* ctx,
 // which primitives share which evaluation-order rules and why a single
 // generic "evaluate every argument first" policy is not an equivalent
 // replacement for most of them.
-// Rejects a primitive call whose raw argument list is not exactly two
-// elements, before anything evaluates. The strict-binary primitives -- `set`,
-// `/=` (05A row C3) and `eq`/`eql` (05D) -- share the rule, and a third
-// operand is `wrong-number-of-arguments`, never a chain or a comparison.
-static void RequireTwoArguments(FeContext* ctx, const FeObject* arguments) {
-  if (FeGetType(arguments) != FeTPair || FeGetType(CDR(arguments)) != FeTPair ||
-      !FeIsNil(CDR(CDR(arguments)))) {
-    RaiseNamedError(ctx, "wrong-number-of-arguments",
-                    "wrong-number-of-arguments");
-  }
-}
-
 typedef struct PrimitiveArity {
   size_t minimum;
   size_t maximum;
@@ -1433,11 +1421,12 @@ static bool DispatchPrimitive(FeContext* ctx,
                               FeObject* fn,
                               FeObject** frame_bind,
                               FeObject** result) {
+  // No preflight here: `DispatchResolvedCall`, the only caller, has already
+  // run it (and needs it there anyway, before `quote`'s fast path). Running
+  // it a second time walked every primitive call's raw argument list twice --
+  // about 4% of `scripts/mandelbrot.fe` -- for an answer that cannot have
+  // changed in between.
   FeObject* arguments = CDR(frame->expr);
-  FeObject* head = CAR(frame->expr);
-  FeObject* identity = FeGetType(head) == FeTSymbol ? head : fn;
-  PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn), identity,
-                     arguments);
   switch (PRIM(fn)) {
     case PEnv:
       *result = ctx->symbol_list;
@@ -1493,21 +1482,17 @@ static bool DispatchPrimitive(FeContext* ctx,
       return false;
     }
     // `(if COND THEN ELSE...)`, as in Emacs Lisp: the trailing forms are an
-    // implicit body. A missing condition is nil without evaluating anything.
+    // implicit body. The condition and the consequent are both required, and
+    // the arity table has already refused `(if)` and `(if COND)`.
     case PIf:
-      if (FeIsNil(arguments)) {
-        *result = &nil;
-        return true;
-      }
       frame->kind = FeFrameIf;
       frame->rest = arguments;
       frame->accumulator = &unbound;
       frame->callee = &unbound;
       return false;
     // `while`: the condition form is fixed for the frame's whole lifetime
-    // (held in `fn`, unused for anything else by this kind); an absent
-    // condition raises the same "too few arguments" `FeGetNextArgument`
-    // always raises on an empty list.
+    // (held in `fn`, unused for anything else by this kind); the arity table
+    // has already refused a `(while)` with no condition at all.
     case PWhile:
       frame->kind = FeFrameWhile;
       frame->fn = FeGetNextArgument(ctx, &arguments);
@@ -1547,12 +1532,9 @@ static bool DispatchPrimitive(FeContext* ctx,
     // delivers. The frame becomes `FeFrameCatch`; `rest` holds the raw TAG
     // and BODY forms, `accumulator` the delivered tag (`&unbound` until
     // then). A bare `(catch)` has no tag to catch anything with and is
-    // `wrong-number-of-arguments` before anything evaluates, matching Emacs.
+    // `wrong-number-of-arguments` before anything evaluates, matching Emacs;
+    // the arity table's `{1, SIZE_MAX}` row is what says so.
     case PCatch:
-      if (FeIsNil(arguments)) {
-        RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments",
-                       &nil, "wrong-number-of-arguments");
-      }
       frame->kind = FeFrameCatch;
       frame->rest = arguments;
       frame->accumulator = &unbound;
@@ -1565,7 +1547,6 @@ static bool DispatchPrimitive(FeContext* ctx,
     // evaluated operands dispatch the mid-stack unwind from
     // `ResumeEvalList`'s PThrow arm.
     case PThrow:
-      RequireTwoArguments(ctx, arguments);
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1610,7 +1591,6 @@ static bool DispatchPrimitive(FeContext* ctx,
     // then evaluated left to right by the shared `FeFrameEvalList` machinery
     // an ordinary call's argument list also uses.
     case PSet:
-      RequireTwoArguments(ctx, arguments);
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1628,10 +1608,6 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PLessEqual:
     case PGreater:
     case PGreaterEqual:
-      if (FeIsNil(arguments)) {
-        RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments",
-                       &nil, "wrong-number-of-arguments");
-      }
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1644,7 +1620,6 @@ static bool DispatchPrimitive(FeContext* ctx,
       // arity -- exactly two operands -- is checked before anything
       // evaluates. A third operand is `wrong-number-of-arguments`, not a
       // chain.
-      RequireTwoArguments(ctx, arguments);
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1670,11 +1645,8 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PApply:
       // Zero raw operands has no callable to dispatch, so it is an arity
       // error before anything evaluates (`(funcall)`/`(apply)`), matching
-      // Emacs' wrong-number-of-arguments for both.
-      if (FeIsNil(arguments)) {
-        RaiseNamedError(ctx, "wrong-number-of-arguments",
-                        "wrong-number-of-arguments");
-      }
+      // Emacs' wrong-number-of-arguments for both -- the arity table's
+      // `{1, SIZE_MAX}` row.
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1705,7 +1677,6 @@ static bool DispatchPrimitive(FeContext* ctx,
     // `wrong-number-of-arguments`.
     case PEq:
     case PEql:
-      RequireTwoArguments(ctx, arguments);
       frame->kind = FeFrameBinary;
       frame->fn = fn;
       frame->rest = arguments;
