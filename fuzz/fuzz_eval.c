@@ -22,6 +22,29 @@ static FeObject* BuildBindingForm(FeContext* ctx,
                                   unsigned depth,
                                   const char* binding);
 
+static FeObject* BuildLambdaParameters(FeContext* ctx, FuzzInput* input) {
+  FeObject* x = FeMakeSymbol(ctx, "x");
+  FeObject* y = FeMakeSymbol(ctx, "y");
+  switch (FuzzTakeByte(input) % 6) {
+    case 0:
+      return FeMakeList(ctx, nullptr, 0);
+    case 1:
+      return FeMakeList(ctx, (FeObject*[]){x}, 1);
+    case 2:
+      return FeMakeList(ctx, (FeObject*[]){x, y}, 2);
+    case 3:
+      return FeMakeList(ctx,
+                        (FeObject*[]){x, FeMakeSymbol(ctx, "&optional"), y}, 3);
+    case 4:
+      return FeMakeList(ctx, (FeObject*[]){x, FeMakeSymbol(ctx, "&rest"), y},
+                        3);
+    default:
+      // Deliberately malformed declarations exercise invalid-function.
+      return FeMakeList(ctx, (FeObject*[]){FeMakeSymbol(ctx, "&rest"), y, x},
+                        3);
+  }
+}
+
 static FeObject* MakeForm(FeContext* ctx,
                           const char* name,
                           FeObject** arguments,
@@ -422,12 +445,17 @@ static FeObject* BuildFunctionCall(FeContext* ctx,
                                    FuzzInput* input,
                                    unsigned depth) {
   FeObject* parameter = FeMakeSymbol(ctx, "x");
-  FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+  FeObject* parameters = BuildLambdaParameters(ctx, input);
   FeObject* body = MakeBinary(ctx, "cons", parameter,
                               BuildExpression(ctx, input, depth + 1));
   FeObject* function = MakeForm(ctx, "fn", (FeObject*[]){parameters, body}, 2);
-  return FeMakeList(
-      ctx, (FeObject*[]){function, BuildExpression(ctx, input, depth + 1)}, 2);
+  FeObject* arguments[3];
+  const size_t count = FuzzTakeByte(input) % 4;
+  for (size_t i = 0; i < count; i++) {
+    arguments[i] = BuildExpression(ctx, input, depth + 1);
+  }
+  FeObject* items[4] = {function, arguments[0], arguments[1], arguments[2]};
+  return FeMakeList(ctx, items, count + 1);
 }
 
 // A macro body. A list expansion is the interesting structural case, but the
@@ -458,11 +486,16 @@ static FeObject* BuildMacroCall(FeContext* ctx,
                                 FuzzInput* input,
                                 unsigned depth) {
   FeObject* parameter = FeMakeSymbol(ctx, "x");
-  FeObject* parameters = FeMakeList(ctx, (FeObject*[]){parameter}, 1);
+  FeObject* parameters = BuildLambdaParameters(ctx, input);
   FeObject* body = BuildMacroBody(ctx, input, parameter);
   FeObject* macro = MakeForm(ctx, "macro", (FeObject*[]){parameters, body}, 2);
-  return FeMakeList(ctx,
-                    (FeObject*[]){macro, BuildDatum(ctx, input, depth + 1)}, 2);
+  FeObject* arguments[3];
+  const size_t count = FuzzTakeByte(input) % 4;
+  for (size_t i = 0; i < count; i++) {
+    arguments[i] = BuildDatum(ctx, input, depth + 1);
+  }
+  FeObject* items[4] = {macro, arguments[0], arguments[1], arguments[2]};
+  return FeMakeList(ctx, items, count + 1);
 }
 
 static FeObject* BuildMutation(FeContext* ctx,

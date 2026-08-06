@@ -1,0 +1,6 @@
+{
+ "id": "lambda-list-dotted-rest",
+ "setup": [],
+ "expr": "((lambda (a . b) (list a b)) 1 2)",
+ "note": "07B L7: Fe deliberately keeps dotted lambda tails as a variadic rest spelling; Emacs rejects this lambda-list shape."
+}

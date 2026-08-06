@@ -2,5 +2,5 @@
  "id": "primitive-lambda",
  "setup": [],
  "expr": "((lambda (x) x) 5)",
- "note": "Basic closure creation and immediate application already agrees with Emacs under lexical binding. Fe's lax (non-strict) arity checking is a separate, already-recorded divergence (see kg's manifest entry `arity-not-strict`) and is not exercised by this minimal case."
+ "note": "Basic closure creation and immediate application already agrees with Emacs under lexical binding. Arity edge cases are covered by the Phase 7 compatibility rows."
 }

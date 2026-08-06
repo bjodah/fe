@@ -593,14 +593,14 @@
   {
    "id": "arity-not-strict",
    "category": "functions-and-macros",
-   "status": "divergent",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "arity-not-strict"
    ],
    "kg_test": null,
-   "rationale": "Parent plan section 7 ('Make strict arity normal') is Phase 7, milestone 2, not yet implemented or funded by this slice's Decision. Fe's `-a`/`fe -a` strict-arity pass exists standalone (test.sh's third pass) but is opt-in, not the evaluator's default -- this entry tracks the *default* mode's behavior, which is what an ordinary `(lambda ...)` call site sees.",
+   "rationale": "Phase 7, 07B: strict lambda and macro arity is now unconditional; the former opt-in divergence is closed.",
    "source_name": null
   },
   {
@@ -1288,7 +1288,7 @@
     "num-not-equal-unary"
    ],
    "kg_test": null,
-   "rationale": "Phase 5, row C3 (05C, landed): `/=` is an fe core primitive, strictly binary -- three operands are wrong-number-of-arguments, and so is one (unlike the chained comparators, whose single-operand form is `t`), enforced at dispatch since lambda arity stays lax.",
+   "rationale": "Phase 5, row C3 (05C, landed): `/=` is an fe core primitive, strictly binary -- three operands are wrong-number-of-arguments, and so is one (unlike the chained comparators, whose single-operand form is `t`), enforced at dispatch alongside the now-unconditional lambda arity checks.",
    "source_name": null
   },
   {
@@ -1669,27 +1669,39 @@
    {
     "id": "phase7-lambda-arity",
     "category": "functions-and-macros",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
      "arity-lambda-too-few",
      "arity-lambda-too-many",
-     "arity-lambda-after-operands",
-     "lambda-list-rest-empty",
-     "lambda-list-rest-trailing",
-     "lambda-list-non-symbol",
+      "arity-lambda-after-operands",
+      "lambda-list-rest-empty",
+      "lambda-list-non-symbol",
      "lambda-optional-missing",
      "lambda-rest-fresh-empty"
     ],
     "kg_test": null,
-    "rationale": "Phase 7, 07A rows A1/A2/A7 and L1/L3/L5/L8/L9: the oracle contract is recorded before 07B makes strict lambda arity and malformed-list conditions unconditional.",
+    "rationale": "07B closes strict lambda and macro arity, optional/rest binding, and the supported malformed-list conditions from 07A; the deliberate L3/L4/L7 divergences remain separate rows.",
     "source_name": null
    },
+    {
+     "id": "phase7-lambda-rest-trailing",
+     "category": "functions-and-macros",
+     "status": "divergent",
+     "owner": "fe-core",
+     "comparison": "emacs",
+     "cases": [
+      "lambda-list-rest-trailing"
+     ],
+     "kg_test": null,
+     "rationale": "07B deliberately keeps Fe's stricter policy: &rest must be the final declaration, while Emacs accepts and ignores trailing names.",
+     "source_name": null
+    },
    {
     "id": "phase7-primitive-car-arity",
     "category": "functions-and-macros",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1702,9 +1714,35 @@
     "source_name": null
    },
    {
+    "id": "phase7-lambda-malformed-optional",
+    "category": "functions-and-macros",
+    "status": "divergent",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lambda-list-double-optional"
+    ],
+    "kg_test": null,
+    "rationale": "07B deliberately rejects repeated &optional markers as invalid-function; Emacs' measured answer is also invalid-function, but its malformed-list data/rendering is not part of Fe's compatibility contract.",
+    "source_name": null
+   },
+   {
+    "id": "phase7-lambda-fe-rest-spellings",
+    "category": "functions-and-macros",
+    "status": "divergent",
+    "owner": "fe-core",
+    "comparison": "emacs",
+    "cases": [
+     "lambda-list-dotted-rest"
+    ],
+    "kg_test": null,
+    "rationale": "07B preserves Fe's deliberate dotted-tail rest spelling; Emacs rejects the measured lambda-list shape.",
+    "source_name": null
+   },
+   {
     "id": "phase7-primitive-cons-arity",
     "category": "functions-and-macros",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1718,7 +1756,7 @@
    {
     "id": "phase7-primitive-not-arity",
     "category": "functions-and-macros",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1731,7 +1769,7 @@
    {
     "id": "phase7-primitive-quote-arity",
     "category": "functions-and-macros",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1744,7 +1782,7 @@
    {
     "id": "phase7-primitive-and-arity",
     "category": "control-flow",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1757,7 +1795,7 @@
    {
     "id": "phase7-primitive-if-arity",
     "category": "control-flow",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1771,7 +1809,7 @@
    {
     "id": "phase7-primitive-print-arity",
     "category": "values-and-equality",
-    "status": "planned",
+    "status": "divergent",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [
@@ -1780,13 +1818,13 @@
      "primitive-print-three"
     ],
     "kg_test": null,
-    "rationale": "Phase 7, 07A row V5: print's narrowed 1+ contract is recorded without claiming Fe's existing stdout policy is Emacs-compatible.",
+    "rationale": "07B narrows print to one or more values, but Fe deliberately retains its multi-value stdout policy rather than Emacs buffer output.",
     "source_name": null
    },
    {
     "id": "phase7-primitive-signal-arity",
     "category": "errors-and-non-local-exits",
-    "status": "planned",
+    "status": "supported",
     "owner": "fe-core",
     "comparison": "emacs",
     "cases": [

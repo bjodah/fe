@@ -8,7 +8,7 @@
 ;; `fmakunbound`, `funcall` and `apply`, including designator chains, apply's
 ;; spread (without mutating the caller's list), and the
 ;; makunbound/fmakunbound independence pair. It must print byte-identically
-;; under all three test.sh passes (normal, RELEASE, -a), so every call below
+;; under the normal and RELEASE test.sh passes, so every call below
 ;; is arity-correct and nothing prints an answer the 04D cut flips.
 
 ;; One symbol holds a value and a function at once: call position resolves
@@ -37,7 +37,7 @@
 ;; mutated, so it still holds its original contents afterwards.
 (print (apply '+ 1 2 (list 3 4)))
 (setq lst '(9 8))
-(print (apply 'cons lst '(7 6)))
+(print (apply 'cons lst '(7)))
 (print lst)
 (print (apply 'list 1 2 '(3 4)))
 (print (apply 'list '()))

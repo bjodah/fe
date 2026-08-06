@@ -23,6 +23,7 @@ The language offers the following features:
   tag and running the `unwind-protect` cleanups in between
 * Structured conditions: `signal`, `error`, and `condition-case`, with a
   static error hierarchy and cleanup-safe unwinding
+* Unconditional strict arity for functions, macros, and core primitives
 * Mark-and-sweep garbage collector
 * Stack traceback on error
 

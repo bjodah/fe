@@ -110,9 +110,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 5);
-  static_assert(FE_LANGUAGE_VERSION == 5);
-  CHECK(strcmp(FeVersion, "6.0") == 0);
+  static_assert(FE_API_VERSION == 6);
+  static_assert(FE_LANGUAGE_VERSION == 6);
+  CHECK(strcmp(FeVersion, "7.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -1169,16 +1169,14 @@ static bool TestCallWithOptions(void) {
     CHECK(FeSaveGC(context) == call_gc);
   }
 
-  // Wrong arity raises only under strict arity, like any other call.
+  // Wrong arity is unconditional for user functions.
   static const char one_arg_function[] = "(fn (x) x)";
   FeRoot* arity_root = FeCreateRoot(
       context, FeEvaluateString(context, "call.fe", one_arg_function,
                                 sizeof(one_arg_function) - 1));
-  FeSetStrictArity(context, true);
   CHECK(ExpectCallWithOptionsError(context, &state, FeGetRoot(arity_root),
                                    nullptr, 0, &generous,
                                    "wrong-number-of-arguments"));
-  FeSetStrictArity(context, false);
 
   // Error propagation: a body that raises, and a non-callable value.
   static const char raise_function[] = "(fn () (car 1))";
@@ -1459,32 +1457,29 @@ static bool TestParameterLists(void) {
   CHK("((lambda (a . r) (list a r)) 1 2 3)", "(1 (2 3))");
   CHK("((lambda r r) 1 2 3)", "(1 2 3)");
   CHK("((macro (a &rest r) (cons 'list (cons a r))) 1 2 3)", "(1 2 3)");
+  CHK("(condition-case e ((lambda (x) x) 1 2) "
+      "(wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments (lambda (x) x) 2)");
+  CHK("(condition-case e (funcall (lambda (x) x)) "
+      "(wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments (lambda (x) x) 0)");
+  CHK("(condition-case e ((macro (x) x)) "
+      "(wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments (macro (x) x) 0)");
+  CHK("(condition-case e (car 1 2) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments car 2)");
 
 #undef CHK
 
-  CHECK(ExpectEvaluationError(context, &state, "rest.fe",
-                              "((lambda (a &rest) a) 1)",
-                              strlen("((lambda (a &rest) a) 1)"),
-                              "rest.fe: &rest needs a parameter name"));
-  CHECK(ExpectEvaluationError(context, &state, "rest.fe",
-                              "((lambda (a &rest r x) a) 1)",
-                              strlen("((lambda (a &rest r x) a) 1)"),
-                              "rest.fe: &rest must be the last parameter"));
-
-  // Lax by default: a missing argument is nil, an extra one is dropped, and a
-  // non-symbol parameter binds nothing.
-  CHECK(!FeGetStrictArity(context));
-#define LAX(expr, expected)                                                 \
-  CHECK(IsRendered(                                                         \
-      context, FeEvaluateString(context, "lax.fe", expr, sizeof(expr) - 1), \
-      expected))
-  LAX("((lambda (x) x))", "nil");
-  LAX("((lambda () 1) 2)", "1");
-  LAX("((lambda (1) 5) 2)", "5");
-#undef LAX
-
-  FeSetStrictArity(context, true);
-  CHECK(FeGetStrictArity(context));
+  CHECK(ExpectEvaluationError(
+      context, &state, "rest.fe", "((lambda (a &rest) a) 1)",
+      strlen("((lambda (a &rest) a) 1)"), "rest.fe: invalid-function"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "rest.fe", "((lambda (a &rest r x) a) 1)",
+      strlen("((lambda (a &rest r x) a) 1)"), "rest.fe: invalid-function"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "rest.fe", "((lambda (a . 1) a) 1)",
+      strlen("((lambda (a . 1) a) 1)"), "rest.fe: invalid-function"));
 #define STRICT(expr, message)                                     \
   CHECK(ExpectEvaluationError(context, &state, "strict.fe", expr, \
                               strlen(expr), message))
@@ -1492,11 +1487,11 @@ static bool TestParameterLists(void) {
   STRICT("((lambda (a b) a) 1)", "strict.fe: wrong-number-of-arguments");
   STRICT("((lambda () 1) 2)", "strict.fe: wrong-number-of-arguments");
   STRICT("((lambda (a) a) 1 2)", "strict.fe: wrong-number-of-arguments");
-  STRICT("((lambda (1) 5) 2)", "strict.fe: parameter is not a symbol");
+  STRICT("((lambda (1) 5) 2)", "strict.fe: invalid-function");
   STRICT("((macro (a) a))", "strict.fe: wrong-number-of-arguments");
 #undef STRICT
 
-  // What strict arity still accepts.
+  // Optional and rest parameters remain valid.
 #define OK(expr, expected)                                                     \
   CHECK(IsRendered(context,                                                    \
                    FeEvaluateString(context, "ok.fe", expr, sizeof(expr) - 1), \
@@ -1509,11 +1504,6 @@ static bool TestParameterLists(void) {
   OK("((lambda r r) 1 2 3)", "(1 2 3)");
   OK("((lambda (a) a) nil)", "nil");
 #undef OK
-
-  FeSetStrictArity(context, false);
-  CHECK(IsRendered(
-      context, FeEvaluateString(context, "again.fe", "((lambda (x) x))", 16),
-      "nil"));
 
   FeCloseContext(context);
   return true;
@@ -1784,7 +1774,7 @@ static bool TestFunctionCells(void) {
   // mutated, so it still holds its original contents afterwards.
   CHK("(apply '+ 1 2 (list 3 4))", "10");
   CHK("(setq lst '(9 8))", "(9 8)");
-  CHK("(apply 'cons lst '(7 6))", "((9 8) . 7)");
+  CHK("(apply 'cons lst '(7))", "((9 8) . 7)");
   CHK("lst", "(9 8)");
   CHK("(apply 'list 1 2 '(3 4))", "(1 2 3 4)");
   CHK("(apply 'list '())", "nil");
@@ -2194,17 +2184,11 @@ static bool TestSetqAndSet(void) {
   SET_ERR("(set 1 (do (setq set-probe2 t) 2))", "set.fe: wrong-type-argument");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
 
-  // Exact arity for `setq`/`set` does not move with `FeSetStrictArity()`;
-  // the lax-arity option applies only to user functions/macros.
-  CHECK(!FeGetStrictArity(context));
-  FeSetStrictArity(context, true);
-  CHECK(FeGetStrictArity(context));
   SET_ERR("(set 'x)", "set.fe: wrong-number-of-arguments");
   SET_ERR("(set 'x 1 2)", "set.fe: wrong-number-of-arguments");
   CHECK(ExpectEvaluationError(context, &state, "setq.fe", "(setq a 1 b)",
                               strlen("(setq a 1 b)"),
                               "setq.fe: wrong-number-of-arguments"));
-  FeSetStrictArity(context, false);
 
 #undef SET_ERR
 #undef SET_CHK
@@ -4131,11 +4115,10 @@ static bool TestFrameSubstrate(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
-  // quote takes exactly one raw argument and deliberately ignores extras.
-  CHECK(IsRendered(context,
-                   FeEvaluateString(context, "quote.fe", "(quote 1 2)",
-                                    sizeof("(quote 1 2)") - 1),
-                   "1"));
+  // quote takes exactly one raw argument and rejects extras before evaluation.
+  CHECK(ExpectEvaluationError(context, &state, "quote.fe", "(quote 1 2)",
+                              sizeof("(quote 1 2)") - 1,
+                              "quote.fe: wrong-number-of-arguments"));
   // Since 04D's cut, `quote` is a function-cell resident like every other
   // primitive: rebinding its *value* cell with `setq` no longer affects call
   // position, so `(quote (+ 1 2))` still special-forms and returns the form
@@ -5568,12 +5551,10 @@ static bool TestPrimitiveOrder(void) {
       "(1 . 2)");
   CHK("cons-order", "(2 1)");
 
-  // `if`'s missing-form cases: no condition, a nil condition with no
-  // then-form, and a truthy condition with no then-form are all nil,
-  // without an error.
-  CHK("(if)", "nil");
-  CHK("(if nil)", "nil");
-  CHK("(if t)", "nil");
+  // `if` requires both a condition and a consequent.
+  ORDER_ERR("(if)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(if nil)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(if t)", "order.fe: wrong-number-of-arguments");
 
   // `let`'s `newenv == NULL` case: used where the enclosing evaluation was
   // never going to extend any sequence's environment -- here, `if`'s

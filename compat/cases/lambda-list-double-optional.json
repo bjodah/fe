@@ -1,0 +1,6 @@
+{
+ "id": "lambda-list-double-optional",
+ "setup": [],
+ "expr": "((lambda (&optional a &optional b) (list a b)) 1)",
+ "note": "07B L4: Fe rejects a repeated &optional marker; Emacs signals invalid-function for this malformed lambda list."
+}

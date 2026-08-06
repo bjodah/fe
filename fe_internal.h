@@ -614,6 +614,12 @@ struct FeContext {
   jmp_buf* condition_catch;
   FeObject* evaluator_error_trace;
   FeObject* condition;
+  // The native currently being invoked.  This is published only for the
+  // duration of the callback so the generic argument helpers can construct
+  // the same wrong-number condition as Lisp calls.
+  FeObject* native_identity;
+  size_t native_argc;
+  bool native_call_active;
   // A `throw` raised inside a cleanup entry whose matching catch frame is
   // not in the cleanup's own nested run: the tag and value are parked here
   // (both GC roots, since the nested run's frames are discarded before they
@@ -635,7 +641,6 @@ struct FeContext {
   bool pending_throw;
   bool evaluation_active;
   bool evaluation_limited;
-  bool strict_arity;
   bool error_has_offset;
   char nextchr;
 
@@ -687,5 +692,12 @@ size_t RenderObject(FeContext* ctx,
                                  const char* name,
                                  FeObject* data,
                                  const char* message);
+[[noreturn]] void RaiseWrongNumber(FeContext* ctx,
+                                   FeObject* function,
+                                   size_t argc);
+[[noreturn]] void RaiseNativeArity(FeContext* ctx,
+                                   FeObject* function,
+                                   size_t argc,
+                                   const char* message);
 
 #endif

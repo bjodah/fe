@@ -37,7 +37,9 @@
 // was deliberately deferred to the cut so the whole numeric contract moves as
 // one visible break -- a "compatible" break that silently reinterprets `42`
 // is the worst kind (05D).
-#define FE_API_VERSION 5
+// Version 6 (sub-plan 07B) makes strict arity unconditional and removes the
+// per-context arity switch from the public embedding API.
+#define FE_API_VERSION 6
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -55,7 +57,7 @@
 // explicit `.0`, integer division truncates, `(/ 1 0)` is `arith-error`, and
 // `eq`/`eql` are core primitives with Emacs' identity semantics. See
 // doc/language.md and doc/c-api.md.
-#define FE_LANGUAGE_VERSION 5
+#define FE_LANGUAGE_VERSION 6
 
 extern const char* FeVersion;
 
@@ -243,8 +245,6 @@ void FeSetUserData(FeContext* ctx, void* userdata);
 void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
 void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
-void FeSetStrictArity(FeContext* ctx, bool strict);
-[[nodiscard]] bool FeGetStrictArity(const FeContext* ctx);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
 [[noreturn]] void FeRaiseCompletion(FeContext* ctx,
                                     FeCompletion kind,

@@ -86,9 +86,9 @@ For a behavior change:
 
 `FE_RUNNER` and `FE_SKIP_SCRIPTS` are test-harness controls used by CI. Do not
 set them for the normal regression suite, and do not use exclusions to hide a
-correctness failure. `FE_FLAGS` passes interpreter options; `test.sh` uses it
-itself for a third pass with `-a` (strict arity), which must produce byte-identical
-output because every script is arity-correct.
+correctness failure. The ordinary and RELEASE passes are both unconditional
+strict-arity runs; `scripts/arity.fe` records accepted optional/rest forms and
+the deliberate errors.
 
 ## Engineering expectations
 

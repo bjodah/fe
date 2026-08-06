@@ -2,5 +2,5 @@
  "id": "num-not-equal-arity",
  "setup": [],
  "expr": "(/= 1 2 3)",
- "note": "05A, row C3b: `/=` is strictly binary in Emacs, so three operands are `wrong-number-of-arguments`, unlike the chained `=`. Lambda arity stays lax (Phase 7), so 05C's primitive must enforce this arity itself rather than relying on the general rule."
+ "note": "05A, row C3b: `/=` is strictly binary in Emacs, so three operands are `wrong-number-of-arguments`, unlike the chained `=`. The primitive enforces this arity before operand evaluation."
 }

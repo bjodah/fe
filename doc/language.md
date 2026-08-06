@@ -111,8 +111,8 @@ for the numeric comparator sub-plan 02C repurposed `=` as.
 
 If `condition` is true, evaluates `then`; otherwise, evaluates every remaining
 form as an implicit `do` and returns the last one, exactly as Emacs Lisp's `if`
-does. `(if condition)` and `(if condition then)` with a false condition are
-`nil`.
+does. The condition and consequent are required; `(if)` and `(if condition)`
+raise `wrong-number-of-arguments` before evaluating an operand.
 
 ```clojure
 fe > (setq x 2)
@@ -187,14 +187,14 @@ recognized by name, so they cannot also be used as parameter names.
 
 Macros take their parameters the same way, over the caller's unevaluated forms.
 
-By default Fe does not check argument counts at all: `((lambda (x) x))` is
-`nil`, `((lambda () 1) 2)` is `1`, and `((lambda (1) 5) 2)` is `5`. A host can
-ask for the checks with `FeSetStrictArity()`, and `fe -a` turns them on for the
-interpreter. Then a parameter before `&optional` must have an argument, an
-argument must have a parameter or a rest parameter to go to, and a parameter
-must be a symbol; the failures are `wrong-number-of-arguments` and `parameter
-is not a symbol`. Optional and rest parameters are unaffected, and passing
-`nil` explicitly is still passing an argument.
+Fe checks arity unconditionally: `((lambda (x) x))` and
+`((lambda () 1) 2)` raise `wrong-number-of-arguments`. Required parameters
+must have arguments and extra arguments must have a rest destination. Missing
+`&optional` parameters bind `nil`; an empty `&rest` binds a fresh list. The
+dotted-tail and bare-symbol spellings are Fe's deliberate variadic spellings.
+A non-symbol parameter, duplicate `&optional`, or malformed `&rest` declaration
+raises `invalid-function` at call time, after ordinary function operands have
+been evaluated.
 
 #### `(macro arguments ...)`
 

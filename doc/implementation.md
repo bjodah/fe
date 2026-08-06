@@ -412,6 +412,13 @@ when the next one is evaluated (`doc/language.md` and
 `fe/tests/*.err`/`.out` pin the exact answers), so the frame kinds are
 grouped by evaluation *shape*, not by primitive:
 
+Primitive arity is checked in one raw-form preflight table before a
+continuation push, so fixed-arity failures do not evaluate an operand. Lambda
+and macro operands are evaluated completely before `ArgsToEnv` validates and
+binds the parameter list. Both paths use the same condition builder, rooting
+the original designator/callable and original argument count while constructing
+`(FUNCTION NARGS)` data.
+
 - `FeFrameIf`, `FeFrameWhile`, `FeFrameAndOr`, `FeFrameLet`, `FeFrameSetq`
   and `FeFrameRelay` (`do` and `unwind-protect`'s body) are each their own
   kind, since each threads a distinct small state machine (`if`'s

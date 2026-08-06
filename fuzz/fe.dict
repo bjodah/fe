@@ -17,6 +17,8 @@
 "function"
 "funcall"
 "apply"
+"&optional"
+"&rest"
 "catch"
 "throw"
 "condition-case"

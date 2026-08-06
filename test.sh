@@ -42,9 +42,6 @@ make clean
 RELEASE=1 make fe
 run_test
 
-# Every script is arity-correct, so -a must not change a single byte of output.
-FE_FLAGS="-a" FE_COMMENT=" (-a)" run_test
-
 if [[ $failed -eq 0 ]]; then
   echo "✅ all tests passed"
 else

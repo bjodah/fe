@@ -1,0 +1,5 @@
+t
+(1 nil)
+(1 nil)
+7
+(wrong-number-of-arguments (lambda (x) x) 0)

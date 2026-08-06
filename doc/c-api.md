@@ -23,8 +23,8 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 4);
-static_assert(FE_LANGUAGE_VERSION == 4);
+static_assert(FE_API_VERSION == 6);
+static_assert(FE_LANGUAGE_VERSION == 6);
 ```
 
 Both macros moved 3 -> 4 together in sub-plan 05D of kg's Emacs-subset
@@ -137,15 +137,17 @@ use must remain valid until replaced or until `FeCloseContext()` returns. The
 mark and GC callbacks can run during any operation that allocates an Fe object,
 including context close.
 
-`FeSetStrictArity()` turns on argument-count checking for lambda and macro
-calls in that context, and `FeGetStrictArity()` reports it. It is off by
-default, which is Fe's historical behaviour: a missing argument binds `nil`, an
-extra one is dropped, and a non-symbol parameter binds nothing. With it on, a
-parameter before `&optional` must have an argument, an argument must have
-somewhere to go, and a parameter must be a symbol. It is a per-context setting
-that can be changed at any time and does not affect native functions, which
-enforce their own arity with `FeGetNextArgument()` and
-`FeRequireNoArguments()`.
+Lambda and macro arity is always strict. Missing required arguments and
+leftover arguments raise `wrong-number-of-arguments`; missing `&optional`
+parameters bind `nil`, and `&rest` receives a fresh list. Fe's dotted-tail and
+bare-symbol parameter spellings remain variadic. A malformed proper parameter
+list raises `invalid-function` when the callable is invoked.
+
+Native helpers retain their historical `too few arguments` and `too many
+arguments` messages. During a native callback, `FeGetNextArgument()` and
+`FeRequireNoArguments()` publish the callable and original argument count in
+the `wrong-number-of-arguments` condition data. The record is scoped across
+nested native re-entry and is cleared before a non-local raise abandons it.
 
 An Fe native callback may re-enter the reader or evaluator on the same context.
 This nesting is supported on the same thread. The callback must observe the GC

@@ -108,9 +108,8 @@ static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
           "fe — Fe language interpreter\n\n"
           "Usage:\n\n"
           "  fe -h\n"
-          "  fe [-ai] [-s size] [program-file ...]\n\n"
+          "  fe [-i] [-s size] [program-file ...]\n\n"
           "Options:\n\n"
-          "  -a    Check argument counts against parameter lists\n"
           "  -d    Verbose debugging\n"
           "  -h    Print this help message and exit\n"
           "  -i    Interactive mode (read from stdin)\n"
@@ -149,16 +148,12 @@ int main(int count, char* arguments[]) {
   bool program_literal = false;
   bool interactive = false;
   bool extensions = true;
-  bool strict_arity = false;
   while (true) {
-    int ch = getopt(count, arguments, "adehis:vx");
+    int ch = getopt(count, arguments, "dehis:vx");
     if (ch == -1) {
       break;
     }
     switch (ch) {
-      case 'a':
-        strict_arity = true;
-        break;
       case 'd':
         debugging = true;
         break;
@@ -207,7 +202,6 @@ int main(int count, char* arguments[]) {
   live_context = opened_context;
   live_arena = arena;
   FeSetErrorFn(context, HandleFatalError);
-  FeSetStrictArity(context, strict_arity);
   if (extensions) {
     FexInit(context);
     FexInstallIO(context);

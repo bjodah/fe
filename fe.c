@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "6.0";
+const char* FeVersion = "7.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -167,14 +167,6 @@ void FeSetGCFn(FeContext* ctx, FeNativeFn* fn) {
   ctx->gc_fn = fn;
 }
 
-void FeSetStrictArity(FeContext* ctx, bool strict) {
-  ctx->strict_arity = strict;
-}
-
-bool FeGetStrictArity(const FeContext* ctx) {
-  return ctx->strict_arity;
-}
-
 void __attribute((format(printf, 3, 4))) Format(char* result,
                                                 size_t size,
                                                 const char* format,
@@ -203,6 +195,10 @@ FeObject* FeGetNextArgument(FeContext* ctx, FeObject** arg) {
   FeObject* a = *arg;
   if (FeGetType(a) != FeTPair) {
     if (FeIsNil(a)) {
+      if (ctx->native_call_active) {
+        RaiseNativeArity(ctx, ctx->native_identity, ctx->native_argc,
+                         "too few arguments");
+      }
       FeHandleError(ctx, "too few arguments");
     }
     FeHandleError(ctx, "dotted pair in argument list");
@@ -260,6 +256,10 @@ FeObject* CheckType(FeContext* ctx, FeObject* obj, FeType type) {
 
 void FeRequireNoArguments(FeContext* ctx, const FeObject* args) {
   if (!FeIsNil(args)) {
+    if (ctx->native_call_active) {
+      RaiseNativeArity(ctx, ctx->native_identity, ctx->native_argc,
+                       "too many arguments");
+    }
     FeHandleError(ctx, "too many arguments");
   }
 }

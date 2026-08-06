@@ -5,7 +5,7 @@
  "record": {
   "kind": "condition",
   "condition": "wrong-number-of-arguments",
-  "data": "(#[(x) (x) (t)] 2)",
+  "data": "((lambda (x) x) 2)",
   "condition_source": "structured"
  }
 }

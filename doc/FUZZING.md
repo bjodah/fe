@@ -63,8 +63,12 @@ because the shape before it was unreachable by construction:
 
 `fuzz/seeds/eval` carries one hand-built seed per group
 (`error-format-directives`, `condition-case-handlers`,
-`catch-throw-cleanup-gap`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints
+`catch-throw-cleanup-gap`, `strict-arity`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints
 the forms each one builds.
+
+The evaluator grammar's lambda builder covers zero, one, and two required
+parameters, `&optional`, `&rest`, malformed declarations, and deliberate
+under/over-arity calls. Macro calls use the same builder and receive raw forms.
 
 The grammar deliberately excludes:
 

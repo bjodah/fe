@@ -502,6 +502,8 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
                                              FeCompletion kind,
                                              const char* msg) {
   FeObject* cl = ctx->call_list;
+  // A longjmp abandons the C activation that published this record.
+  ctx->native_call_active = false;
   // The fresh budget every cleanup entry below runs under, taken from the
   // ambient record: a bounded, working budget even when the record it comes
   // from is the exhausted or cancelled one the body just died on.
@@ -619,6 +621,29 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
                                          const char* name,
                                          const char* message) {
   RaiseCondition(ctx, FeCompletionError, name, &nil, message);
+}
+
+// The condition data is deliberately built in one place.  Keep both values
+// rooted while the two list allocations run: callers commonly pass a symbol
+// or a freshly resolved callable that has no other reference at this point.
+[[noreturn]] void RaiseNativeArity(FeContext* ctx,
+                                   FeObject* function,
+                                   size_t argc,
+                                   const char* message) {
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, function);
+  FeObject* count = FeMakeInteger(ctx, (int64_t)argc);
+  FePushGC(ctx, count);
+  FeObject* data = FeMakeList(ctx, (FeObject*[]){function, count}, 2);
+  FeRestoreGC(ctx, gc);
+  RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments", data,
+                 message);
+}
+
+[[noreturn]] void RaiseWrongNumber(FeContext* ctx,
+                                   FeObject* function,
+                                   size_t argc) {
+  RaiseNativeArity(ctx, function, argc, "wrong-number-of-arguments");
 }
 
 // `wrong-type-argument` with Emacs' `(PREDICATE VALUE)` data. `CheckType`
@@ -782,23 +807,68 @@ static FeObject* Bind(FeContext* ctx,
   return FeCons(ctx, FeCons(ctx, name, value), env);
 }
 
+static void ValidateParameterName(FeContext* ctx,
+                                  const FeObject* name,
+                                  bool optional) {
+  if (FeGetType(name) != FeTSymbol ||
+      (optional && IsNamedSymbol(name, "&optional"))) {
+    RaiseNamedError(ctx, "invalid-function", "invalid-function");
+  }
+}
+
+static void ValidateParameters(FeContext* ctx, FeObject* prm) {
+  bool optional = false;
+  while (FeGetType(prm) == FeTPair) {
+    const FeObject* name = CAR(prm);
+    prm = CDR(prm);
+    ValidateParameterName(ctx, name, optional);
+    if (IsNamedSymbol(name, "&optional")) {
+      optional = true;
+      continue;
+    }
+    if (IsNamedSymbol(name, "&rest")) {
+      if (FeGetType(prm) != FeTPair || FeGetType(CAR(prm)) != FeTSymbol ||
+          !FeIsNil(CDR(prm))) {
+        RaiseNamedError(ctx, "invalid-function", "invalid-function");
+      }
+      return;
+    }
+  }
+  if (!FeIsNil(prm) && FeGetType(prm) != FeTSymbol) {
+    RaiseNamedError(ctx, "invalid-function", "invalid-function");
+  }
+}
+
+static FeObject* CopyArgumentList(FeContext* ctx, FeObject* list) {
+  FeObject* copy = &nil;
+  while (!FeIsNil(list)) {
+    copy = FeCons(ctx, CAR(list), copy);
+    list = CDR(list);
+  }
+  FeObject* result = &nil;
+  while (!FeIsNil(copy)) {
+    result = FeCons(ctx, CAR(copy), result);
+    copy = CDR(copy);
+  }
+  return result;
+}
+
 // Binds a lambda or macro parameter list to an argument list. Three spellings
 // collect the remaining arguments: Fe's dotted tail `(a . r)`, Fe's bare symbol
-// `r`, and Emacs Lisp's `(a &rest r)`. Under `FeSetStrictArity()` a parameter
-// before `&optional` must have an argument, an argument must have somewhere to
-// go, and a parameter must be a symbol; otherwise a missing argument is nil, an
-// extra one is dropped, and a non-symbol parameter binds nothing -- Fe's
-// historical behaviour.
+// `r`, and Emacs Lisp's `(a &rest r)`. Bare symbols and dotted tails are Fe's
+// deliberate variadic spellings; proper lambda lists are otherwise strict.
 static FeObject* ArgsToEnv(FeContext* ctx,
                            FeObject* prm,
                            FeObject* arg,
-                           FeObject* env) {
-  const bool strict = ctx->strict_arity;
+                           FeObject* env,
+                           FeObject* function,
+                           size_t argc) {
   bool optional = false;
+  ValidateParameters(ctx, prm);
   while (!FeIsNil(prm)) {
     EvaluationStep(ctx);
     if (FeGetType(prm) != FeTPair) {
-      return Bind(ctx, env, prm, arg);
+      return Bind(ctx, env, prm, CopyArgumentList(ctx, arg));
     }
     FeObject* name = CAR(prm);
     prm = CDR(prm);
@@ -808,27 +878,26 @@ static FeObject* ArgsToEnv(FeContext* ctx,
     }
     if (IsNamedSymbol(name, "&rest")) {
       if (FeGetType(prm) != FeTPair) {
-        FeHandleError(ctx, "&rest needs a parameter name");
+        RaiseNamedError(ctx, "invalid-function", "invalid-function");
       }
       if (!FeIsNil(CDR(prm))) {
-        FeHandleError(ctx, "&rest must be the last parameter");
+        RaiseNamedError(ctx, "invalid-function", "invalid-function");
       }
-      return Bind(ctx, env, CAR(prm), arg);
+      return Bind(ctx, env, CAR(prm), CopyArgumentList(ctx, arg));
     }
-    if (strict) {
-      if (FeGetType(name) != FeTSymbol) {
-        FeHandleError(ctx, "parameter is not a symbol");
-      }
-      if (!optional && FeIsNil(arg)) {
-        FeHandleError(ctx, "wrong-number-of-arguments");
-      }
+    if (FeGetType(name) != FeTSymbol) {
+      RaiseNamedError(ctx, "invalid-function", "invalid-function");
     }
-    env = Bind(ctx, env, name, FeCar(ctx, arg));
-    arg = FeCdr(ctx, arg);
+    if (!optional && FeIsNil(arg)) {
+      RaiseWrongNumber(ctx, function, argc);
+    }
+    env = Bind(ctx, env, name, FeIsNil(arg) ? &nil : FeCar(ctx, arg));
+    if (!FeIsNil(arg)) {
+      arg = FeCdr(ctx, arg);
+    }
   }
-  if (strict && !FeIsNil(arg)) {
-    RaiseCondition(ctx, FeCompletionError, "wrong-number-of-arguments", &nil,
-                   "wrong-number-of-arguments");
+  if (!FeIsNil(arg)) {
+    RaiseWrongNumber(ctx, function, argc);
   }
   return env;
 }
@@ -1016,6 +1085,11 @@ static bool DispatchPrimitive(FeContext* ctx,
                               FeObject* fn,
                               FeObject** frame_bind,
                               FeObject** result);
+static void PreflightPrimitive(FeContext* ctx,
+                               Primitive primitive,
+                               FeObject* function,
+                               FeObject* arguments);
+static size_t CountRawArguments(FeContext* ctx, FeObject* arguments);
 
 // Dispatches a call whose head has already resolved to `fn`. `quote`
 // short-circuits on its first raw argument. An ordinary callable (native
@@ -1034,6 +1108,10 @@ static bool DispatchResolvedCall(FeContext* ctx,
                                  FeObject** frame_bind,
                                  FeObject** result) {
   if (FeGetType(fn) == FeTPrimitive) {
+    FeObject* const head = CAR(frame->expr);
+    FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
+    PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn), identity,
+                       CDR(frame->expr));
     if (PRIM(fn) == PQuote) {
       FeObject* arguments = CDR(frame->expr);
       *result = FeGetNextArgument(ctx, &arguments);
@@ -1071,7 +1149,11 @@ static bool DispatchResolvedCall(FeContext* ctx,
     // never-evaluating helper, charging one step per parameter walk exactly
     // as the recursive arm did.
     FeObject* const caller_env = frame->env;
-    frame->env = ArgsToEnv(ctx, CAR(vb), CDR(frame->expr), CAR(va));
+    FeObject* const head = CAR(frame->expr);
+    FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
+    const size_t argc = CountRawArguments(ctx, CDR(frame->expr));
+    frame->env =
+        ArgsToEnv(ctx, CAR(vb), CDR(frame->expr), CAR(va), identity, argc);
     frame->rest = CDR(vb);
     frame->fn = caller_env;
     return false;
@@ -1205,12 +1287,110 @@ static void RequireTwoArguments(FeContext* ctx, const FeObject* arguments) {
   }
 }
 
+typedef struct PrimitiveArity {
+  size_t minimum;
+  size_t maximum;
+} PrimitiveArity;
+
+static const PrimitiveArity primitive_arities[PSentinel] = {
+    [PAssert] = {1, 1},
+    [PEnv] = {0, 0},
+    [PLet] = {2, 2},
+    [PNumericEqual] = {1, SIZE_MAX},
+    [PSetq] = {0, SIZE_MAX},
+    [PSet] = {2, 2},
+    [PIf] = {2, SIZE_MAX},
+    [PFn] = {2, SIZE_MAX},
+    [PMacro] = {2, SIZE_MAX},
+    [PWhile] = {1, SIZE_MAX},
+    [PQuote] = {1, 1},
+    [PBoundp] = {1, 1},
+    [PMakeUnbound] = {1, 1},
+    [PAnd] = {0, SIZE_MAX},
+    [POr] = {0, SIZE_MAX},
+    [PDo] = {0, SIZE_MAX},
+    [PUnwindProtect] = {1, SIZE_MAX},
+    [PCons] = {2, 2},
+    [PCar] = {1, 1},
+    [PCdr] = {1, 1},
+    [PSetCar] = {2, 2},
+    [PSetCdr] = {2, 2},
+    [PList] = {0, SIZE_MAX},
+    [PNot] = {1, 1},
+    [PIs] = {2, 2},
+    [PEq] = {2, 2},
+    [PEql] = {2, 2},
+    [PAtom] = {1, 1},
+    [PPrint] = {1, SIZE_MAX},
+    [PLess] = {1, SIZE_MAX},
+    [PLessEqual] = {1, SIZE_MAX},
+    [PGreater] = {1, SIZE_MAX},
+    [PGreaterEqual] = {1, SIZE_MAX},
+    [PNotEqual] = {2, 2},
+    [PIntegerp] = {1, 1},
+    [PFloatp] = {1, 1},
+    [PAdd] = {0, SIZE_MAX},
+    [PSub] = {0, SIZE_MAX},
+    [PMul] = {0, SIZE_MAX},
+    [PDiv] = {1, SIZE_MAX},
+    [PFunction] = {1, 1},
+    [PFset] = {2, 2},
+    [PDefalias] = {2, 2},
+    [PSymbolFunction] = {1, 1},
+    [PSymbolValue] = {1, 1},
+    [PFboundp] = {1, 1},
+    [PFmakunbound] = {1, 1},
+    [PFuncall] = {1, SIZE_MAX},
+    [PApply] = {2, SIZE_MAX},
+    [PCatch] = {1, SIZE_MAX},
+    [PThrow] = {2, 2},
+    [PConditionCase] = {2, SIZE_MAX},
+    [PSignal] = {1, 2},
+    [PError] = {1, SIZE_MAX},
+};
+
+static size_t CountRawArguments(FeContext* ctx, FeObject* arguments) {
+  size_t count = 0;
+  while (!FeIsNil(arguments)) {
+    if (FeGetType(arguments) != FeTPair) {
+      RaiseWrongNumber(ctx, &nil, count);
+    }
+    count++;
+    arguments = CDR(arguments);
+  }
+  return count;
+}
+
+static void PreflightPrimitive(FeContext* ctx,
+                               Primitive primitive,
+                               FeObject* function,
+                               FeObject* arguments) {
+  const size_t count = CountRawArguments(ctx, arguments);
+  const PrimitiveArity arity = primitive_arities[primitive];
+  if (count < arity.minimum || count > arity.maximum) {
+    if (primitive == PFunction || primitive == PBoundp ||
+        primitive == PMakeUnbound || primitive == PSymbolFunction ||
+        primitive == PSymbolValue || primitive == PFboundp ||
+        primitive == PFmakunbound || primitive == PIntegerp ||
+        primitive == PFloatp) {
+      RaiseNativeArity(
+          ctx, function, count,
+          count < arity.minimum ? "too few arguments" : "too many arguments");
+    }
+    RaiseWrongNumber(ctx, function, count);
+  }
+}
+
 static bool DispatchPrimitive(FeContext* ctx,
                               FeEvalFrame* frame,
                               FeObject* fn,
                               FeObject** frame_bind,
                               FeObject** result) {
   FeObject* arguments = CDR(frame->expr);
+  FeObject* head = CAR(frame->expr);
+  FeObject* identity = FeGetType(head) == FeTSymbol ? head : fn;
+  PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn), identity,
+                     arguments);
   switch (PRIM(fn)) {
     case PEnv:
       *result = ctx->symbol_list;
@@ -1347,9 +1527,6 @@ static bool DispatchPrimitive(FeContext* ctx,
       return false;
     case PSignal:
     case PError:
-      if (PRIM(fn) == PSignal) {
-        RequireTwoArguments(ctx, arguments);
-      }
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1567,7 +1744,12 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
   FeObject* va = CDR(fn);  // (env params ...)
   FeObject* vb = CDR(va);  // (params ...)
   frame->kind = FeFrameLambda;
-  frame->env = ArgsToEnv(ctx, CAR(vb), arguments, CAR(va));
+  FeObject* const head = CAR(frame->expr);
+  FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
+  const size_t argc = CountRawArguments(ctx, CDR(frame->expr));
+  // Keep the evaluated list rooted while strict rest binding copies it.
+  frame->accumulator = arguments;
+  frame->env = ArgsToEnv(ctx, CAR(vb), arguments, CAR(va), identity, argc);
   frame->rest = CDR(vb);
   // Sentinel, as for the argument frame: marks a freshly set up body frame no
   // form has completed in yet.
@@ -1783,7 +1965,7 @@ static bool ResumeAndOr(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
     return false;
   }
   if (FeIsNil(frame->rest)) {
-    *result = &nil;
+    *result = PRIM(frame->fn) == PAnd ? ctx->t : &nil;
     return true;
   }
   PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
@@ -2828,10 +3010,11 @@ static bool ResumeEvalList(FeContext* ctx,
         RaiseCondition(ctx, FeCompletionError, "error", data,
                        "Invalid error symbol");
       }
+      FeObject* const data = FeIsNil(CDR(list)) ? &nil : CAR(CDR(list));
       RaiseCondition(
           ctx,
           IsNamedSymbol(name, "quit") ? FeCompletionQuit : FeCompletionError,
-          symbol, CAR(CDR(list)), symbol);
+          symbol, data, symbol);
     }
     case PError: {
       // `(error)` with no format string at all is
@@ -3205,7 +3388,17 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         // through `EnterNativeReentry`, restoring its own pre-entry counter
         // on every exit path; nothing here needs to save or restore
         // anything around the call.
+        FeObject* const saved_identity = ctx->native_identity;
+        const size_t saved_argc = ctx->native_argc;
+        const bool saved_active = ctx->native_call_active;
+        FeObject* const head = CAR(frame->expr);
+        ctx->native_identity = FeGetType(head) == FeTSymbol ? head : frame->fn;
+        ctx->native_argc = CountRawArguments(ctx, CDR(frame->expr));
+        ctx->native_call_active = true;
         result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
+        ctx->native_identity = saved_identity;
+        ctx->native_argc = saved_argc;
+        ctx->native_call_active = saved_active;
         CompletePairFrame(ctx, frame);
         break;
 

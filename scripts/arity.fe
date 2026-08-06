@@ -1,0 +1,8 @@
+;; The public strict-arity examples: optional and rest bindings remain useful,
+;; while malformed calls are real wrong-number/invalid-function conditions.
+(print (and))
+(print ((lambda (a &optional b) (list a b)) 1))
+(print ((lambda (a &rest r) (list a r)) 1))
+(print ((macro (x) x) 7))
+(print (condition-case e ((lambda (x) x)) (wrong-number-of-arguments e)))
+((lambda (1) 5) 2)

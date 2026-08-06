@@ -86,7 +86,7 @@
   (while (<= i n)
     (print ">> iteration" i)
     (print-grid grid)
-    (print)
+    (print "")
     (setq grid (next-grid grid))
     (setq i (+ i 1))
   )

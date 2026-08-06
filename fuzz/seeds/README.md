@@ -34,3 +34,5 @@ the defect rather than its hash, and say in the commit which fix it pins.
   operand buffer in the EvalList frame's `accumulator` and the relay frame's
   fields -- the 04C instance of the class 03F's `cons-second-operand-gc`
   found, which is why the plan gates this slice on the fuzz lane.
+- `strict-arity` -- drives the lambda-list builder through required,
+  optional, rest, malformed, and mismatched call shapes.

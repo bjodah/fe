@@ -1,0 +1,2 @@
+error: invalid-function
+((lambda (1) 5) 2)
