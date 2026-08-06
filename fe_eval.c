@@ -621,6 +621,18 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   RaiseCondition(ctx, FeCompletionError, name, &nil, message);
 }
 
+// `wrong-type-argument` with Emacs' `(PREDICATE VALUE)` data. `CheckType`
+// builds the same shape from the type it wanted; this is for the sites that
+// know the predicate by name because they accept more than one type.
+[[noreturn]] static void RaiseWrongType(FeContext* ctx,
+                                        const char* predicate,
+                                        FeObject* value) {
+  FeObject* items[] = {FeMakeSymbol(ctx, predicate), value};
+  RaiseCondition(ctx, FeCompletionError, "wrong-type-argument",
+                 FeMakeList(ctx, items, sizeof(items) / sizeof(items[0])),
+                 "wrong-type-argument");
+}
+
 // The host's way to raise a completion that is not an ordinary error: a
 // `quit` because the embedder's own C-g arrived somewhere fe cannot poll, or
 // a `budget` because the embedder's own ceiling tripped. See `doc/c-api.md`.
@@ -851,7 +863,8 @@ static NumericPair GetNumericPair(FeContext* ctx, FeObject* a, FeObject* b) {
                          .a_d = FeToDouble(ctx, a),
                          .b_d = FeToDouble(ctx, b)};
   }
-  RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
+  RaiseWrongType(ctx, "number-or-marker-p",
+                 a_type == FeTInteger || a_type == FeTDouble ? b : a);
 }
 
 // `=` (`PNumericEqual` in `ResumeEvalList`): numeric equality over both
@@ -1820,7 +1833,7 @@ static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   }
   FeObject* const target = CAR(frame->rest);
   if (FeGetType(target) != FeTSymbol) {
-    RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
+    RaiseWrongType(ctx, "symbolp", target);
   }
   frame->rest = CDR(frame->rest);
   if (FeGetType(frame->rest) != FeTPair) {
@@ -2102,7 +2115,7 @@ static FeObject* SeedArith(FeContext* ctx,
     }
     return operand;
   }
-  FeHandleError(ctx, "wrong-type-argument");
+  RaiseWrongType(ctx, "number-or-marker-p", operand);
 }
 
 // Combines the accumulated value with a just-delivered operand through
@@ -2778,7 +2791,7 @@ static bool ResumeEvalList(FeContext* ctx,
       FeObject* const symbol = CAR(list);
       FeObject* const value = CAR(CDR(list));
       if (FeGetType(symbol) != FeTSymbol) {
-        RaiseNamedError(ctx, "wrong-type-argument", "wrong-type-argument");
+        RaiseWrongType(ctx, "symbolp", symbol);
       }
       FeSet(ctx, symbol, value);
       *result = value;

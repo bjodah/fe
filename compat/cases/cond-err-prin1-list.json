@@ -1,0 +1,6 @@
+{
+	"id": "cond-err-prin1-list",
+	"setup": [],
+	"expr": "(condition-case e (error \"%S\" (list 1 \"x\")) (error e))",
+	"note": "The other half of the princ/prin1 split: %S keeps the quotes at every level."
+}

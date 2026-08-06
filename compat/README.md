@@ -199,9 +199,28 @@ Classification is structural:
   (produced by wrapping the case's `expr` in `(print expr)`, since `fe`
   only echoes a result automatically when reading from an interactive
   stdin REPL, which per-case isolation does not use);
-* nonzero exit → `kind: condition`, `condition_source: message`, the
-  first `error: ...` line of stderr;
+* nonzero exit with a `condition: SYMBOL` line on stderr (which `fe`
+  prints when `FE_STRUCTURED_ERRORS` is set, as the runner always sets
+  it) → `kind: condition`, `condition_source: structured`, that symbol,
+  plus the `data: ...` line that follows it; a bare `condition: quit`
+  is `kind: quit`, which has no condition object to print;
+* nonzero exit with no such line → `kind: condition`,
+  `condition_source: message`, the first `error: ...` line of stderr,
+  which is compared only as a substring claim (see below);
 * no return within `--timeout` → `kind: timeout`.
+
+A structured condition is compared on its **symbol and its data list**:
+the oracle shim prints `(prin1-to-string (cdr err))` and `fe` prints the
+same rendering of the same cdr, so where both are non-nil they must be
+equal character for character. Where `fe`'s data is `nil` and the
+oracle's is not, the run prints a `# condition data:` census line naming
+those cases rather than failing -- `fe` attaches `(PREDICATE VALUE)` data
+to the conditions that have one, and its `wrong-number-of-arguments`
+family carries no `(FUNCTION NARGS)` pair at all. A case may set
+`"compare_data": false` to opt out entirely, and must say why in its
+`note`; the only legitimate reason is an oracle rendering `fe` cannot
+produce (an Emacs object with no Fe analogue), never a disagreement `fe`
+could fix.
 
 ## What decides pass vs. fail: `features.json`'s `status`
 

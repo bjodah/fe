@@ -90,3 +90,17 @@
 ;; an ordinary error and catchable as one.
 (assert-equals '(no-catch nope 1)
   (condition-case e (unwind-protect (error "orig") (throw 'nope 1)) (error e)))
+
+;; Printed so the golden pins values, not just the absence of a failure.
+(print (catch 'tg (throw 'tg 'delivered)))
+(print (catch 'tg (unwind-protect (throw 'tg 'a) (throw 'tg 'b))))
+(print ct-log)
+(print ct-replace-log)
+
+;; The zero-and-wrong-operand degenerates, each caught so the script can
+;; carry on. Measured Emacs: (catch) is (wrong-number-of-arguments catch 0),
+;; (throw 'x) is wna 1 and (throw 'x 1 2) is wna 3; Fe names the same
+;; condition, with no (FUNCTION NARGS) data of its own.
+(print (condition-case e (catch) (error (car e))))
+(print (condition-case e (throw 'x) (error (car e))))
+(print (condition-case e (throw 'x 1 2) (error (car e))))

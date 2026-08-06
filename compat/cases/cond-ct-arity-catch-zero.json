@@ -1,0 +1,6 @@
+{
+	"id": "cond-ct-arity-catch-zero",
+	"setup": [],
+	"expr": "(condition-case e (catch) (error (car e)))",
+	"note": "`(catch)` with no tag is wrong-number-of-arguments, diagnosed before anything evaluates. Compared on the condition symbol the handler binds; Emacs' data is `(catch 0)` and Fe's arity conditions carry none."
+}

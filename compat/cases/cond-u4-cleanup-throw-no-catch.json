@@ -1,0 +1,6 @@
+{
+	"id": "cond-u4-cleanup-throw-no-catch",
+	"setup": [],
+	"expr": "(condition-case e (unwind-protect (error \"orig\") (throw 'nope 1)) (error e))",
+	"note": "U4: a cleanup's throw that matches no catch anywhere is `no-catch`, an ordinary error, which then replaces the error that was unwinding and is caught as one."
+}

@@ -1,0 +1,9 @@
+{
+	"id": "cond-u3-order",
+	"setup": [
+		"(setq cond-u3o-log nil)",
+		"(condition-case nil (unwind-protect (unwind-protect (error \"boom\") (setq cond-u3o-log (cons 'in cond-u3o-log))) (setq cond-u3o-log (cons 'out cond-u3o-log))) (error 'caught))"
+	],
+	"expr": "cond-u3o-log",
+	"note": "U3: nested unwind-protect cleanups run innermost-first, so `in` is consed before `out` and the list reads (out in). Written in the Fe/Emacs dialect intersection -- setup forms set a flag, the expression reads it -- because the case it replaces used Emacs' `progn`/`push`, which Fe does not have, and so died on void-function before it tested anything."
+}

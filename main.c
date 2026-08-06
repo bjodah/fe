@@ -55,6 +55,12 @@ static void PrintError(FeContext* ctx, const char* message, FeObject* stack) {
     (void)FeToString(ctx, FeCar(ctx, FeGetCondition(ctx)), condition,
                      sizeof(condition));
     fprintf(stderr, "condition: %s\n", condition);
+    // The data list too, printed the way the Emacs oracle shim prints
+    // `(prin1-to-string (cdr err))`, so the compat runner can compare the
+    // whole condition object rather than only its symbol.
+    char data[1024];
+    (void)FeToString(ctx, FeCdr(ctx, FeGetCondition(ctx)), data, sizeof(data));
+    fprintf(stderr, "data: %s\n", data);
   }
   fprintf(stderr, "error: %s\n", message);
   while (!FeIsNil(stack)) {

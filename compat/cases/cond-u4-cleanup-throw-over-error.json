@@ -1,0 +1,6 @@
+{
+	"id": "cond-u4-cleanup-throw-over-error",
+	"setup": [],
+	"expr": "(catch 'tg (unwind-protect (error \"orig\") (throw 'tg 'b)))",
+	"note": "U4: a cleanup's throw wins over an in-flight *error* too, and the catch returns the thrown value rather than the error reaching a handler or the host."
+}

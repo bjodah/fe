@@ -1,0 +1,6 @@
+{
+	"id": "cond-err-no-format",
+	"setup": [],
+	"expr": "(condition-case nil (error) (wrong-number-of-arguments 'wna))",
+	"note": "`(error)` with no format string is wrong-number-of-arguments, not an `error` condition whose message is the word \"error\". Fe's condition carries no `(FUNCTION NARGS)` data, so this row is written to compare the handler that matches rather than the data list."
+}

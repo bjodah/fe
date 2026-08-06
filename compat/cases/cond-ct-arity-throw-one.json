@@ -1,0 +1,6 @@
+{
+	"id": "cond-ct-arity-throw-one",
+	"setup": [],
+	"expr": "(condition-case e (throw 'x) (error (car e)))",
+	"note": "`(throw TAG)` with no value is wrong-number-of-arguments; `throw` is exactly two arguments."
+}

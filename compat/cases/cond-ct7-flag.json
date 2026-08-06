@@ -1,0 +1,9 @@
+{
+	"id": "cond-ct7-flag",
+	"setup": [
+		"(setq cond-ct7f-flag nil)",
+		"(catch 'tg (unwind-protect (throw 'tg 'thrown) (setq cond-ct7f-flag 'ran)))"
+	],
+	"expr": "cond-ct7f-flag",
+	"note": "CT7: a throw through unwind-protect runs the cleanup. Written in the Fe/Emacs dialect intersection -- setup forms set a flag, the expression reads it -- because the case it replaces used Emacs' `progn`/`push`, which Fe does not have, and so died on void-function before it tested anything."
+}

@@ -1,8 +1,0 @@
-{
-	"id": "cond-u1-quit",
-	"setup": [
-		"(setq cond-u1-flag nil)"
-	],
-	"expr": "(progn (condition-case nil (unwind-protect (signal 'quit nil) (setq cond-u1-flag 'ran)) (quit 'q)) cond-u1-flag)",
-	"note": "U1: a cleanup runs on the quit path -- the flag is set while unwinding to the quit handler, and the expression returns ran. Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D."
-}

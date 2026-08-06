@@ -1,0 +1,6 @@
+{
+	"id": "cond-u4-cleanup-throw-outer",
+	"setup": [],
+	"expr": "(catch 'o (catch 'i (unwind-protect (throw 'i 1) (throw 'o 2))))",
+	"note": "U4: the cleanup's throw picks its own level -- the in-flight throw to the inner tag is abandoned and the outer catch receives 2."
+}

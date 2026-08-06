@@ -1,0 +1,6 @@
+{
+	"id": "cond-ct-arity-throw-three",
+	"setup": [],
+	"expr": "(condition-case e (throw 'x 1 2) (error (car e)))",
+	"note": "`(throw TAG VALUE EXTRA)` is wrong-number-of-arguments too -- a third operand is not silently dropped."
+}

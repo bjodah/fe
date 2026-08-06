@@ -43,3 +43,10 @@
   (condition-case nil (error "%") (error 'format-error)))
 (assert-equals 'format-error
   (condition-case nil (error "%x" 1) (error 'format-error)))
+
+;; The uncaught tail: everything above is caught, so nothing above this line
+;; reaches the host. This one does, and the golden `tests/conditions.fe.err`
+;; is what an uncaught condition looks like on its way out of the standalone
+;; interpreter -- the rendered message and the call trace, innermost first.
+(print "conditions: all caught cases passed")
+(condition-case nil (car 5) (arith-error 'not-this-handler))

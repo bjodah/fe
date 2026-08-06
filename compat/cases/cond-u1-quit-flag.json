@@ -1,0 +1,9 @@
+{
+	"id": "cond-u1-quit-flag",
+	"setup": [
+		"(setq cond-u1q-flag nil)",
+		"(condition-case nil (unwind-protect (signal 'quit nil) (setq cond-u1q-flag 'ran)) (quit 'q))"
+	],
+	"expr": "cond-u1q-flag",
+	"note": "U1: a cleanup runs on the quit path -- the flag is set while unwinding to the quit handler. Written in the Fe/Emacs dialect intersection -- setup forms set a flag, the expression reads it -- because the case it replaces used Emacs' `progn`/`push`, which Fe does not have, and so died on void-function before it tested anything."
+}

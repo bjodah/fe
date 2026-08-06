@@ -1,0 +1,9 @@
+{
+	"id": "cond-u1-throw-flag",
+	"setup": [
+		"(setq cond-u1t-flag nil)",
+		"(catch 'tg (unwind-protect (throw 'tg 'x) (setq cond-u1t-flag 'ran)))"
+	],
+	"expr": "cond-u1t-flag",
+	"note": "U1: a cleanup runs on the throw path -- the flag is set during the mid-stack unwind to the catch. Written in the Fe/Emacs dialect intersection -- setup forms set a flag, the expression reads it -- because the case it replaces used Emacs' `progn`/`push`, which Fe does not have, and so died on void-function before it tested anything."
+}

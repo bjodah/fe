@@ -1,0 +1,6 @@
+{
+	"id": "cond-u4-cleanup-throw-inner-live",
+	"setup": [],
+	"expr": "(catch 'o (unwind-protect (catch 'i (unwind-protect (throw 'o 1) (throw 'i 2))) 'x))",
+	"note": "U4: frames being abandoned are still established while the cleanup runs, so the inner catch -- which the in-flight throw was on its way past -- is what takes the cleanup's throw."
+}

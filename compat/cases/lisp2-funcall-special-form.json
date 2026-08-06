@@ -1,6 +1,7 @@
 {
- "id": "lisp2-funcall-special-form",
- "setup": [],
- "expr": "(funcall 'quote 'a)",
- "note": "A special form is not a funcall target: Emacs signals invalid-function. Fe's evaluate-then-redispatch shape would otherwise hand `quote` the `(quote v)` wrappers it builds and answer `(quote a)`, and the same mis-execution reached `if`, `and` and every macro."
+	"id": "lisp2-funcall-special-form",
+	"setup": [],
+	"expr": "(funcall 'quote 'a)",
+	"note": "A special form is not a funcall target: Emacs signals invalid-function. Fe's evaluate-then-redispatch shape would otherwise hand `quote` the `(quote v)` wrappers it builds and answer `(quote a)`, and the same mis-execution reached `if`, `and` and every macro. compare_data is off for this row alone: the condition symbols agree, but Emacs' data is the subr object itself (`(#<subr quote>)`) while Fe's is the symbol that named it (`(quote)`), and Fe has no subr object to print. That is a rendering Fe cannot produce rather than a disagreement it could fix.",
+	"compare_data": false
 }

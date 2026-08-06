@@ -78,13 +78,20 @@ def run_fe_case(fe_bin, case, timeout):
 		return {"kind": "value", "printed": printed}, None
 
 	stderr = proc.stderr.decode("utf-8", "replace")
-	for line in stderr.splitlines():
+	lines = stderr.splitlines()
+	for index, line in enumerate(lines):
 		if line.startswith("condition: "):
 			condition = line[len("condition: "):]
 			if condition == "quit":
 				return {"kind": "quit"}, None
-			return {"kind": "condition", "condition_source": "structured",
-					"condition": condition}, None
+			record = {"kind": "condition",
+				  "condition_source": "structured",
+				  "condition": condition}
+			# The `data:` line is emitted right after `condition:` by the
+			# same branch of main.c's PrintError.
+			if index + 1 < len(lines) and lines[index + 1].startswith("data: "):
+				record["data"] = lines[index + 1][len("data: "):]
+			return record, None
 	message = stderr
 	for line in stderr.splitlines():
 		if line.startswith("error: "):
@@ -94,7 +101,20 @@ def run_fe_case(fe_bin, case, timeout):
 		"message": message}, None
 
 
-def records_agree(oracle, fe):
+def data_gap(oracle, fe):
+	"""True when the oracle carries condition data and fe carries none.
+
+	Reported per run so the coverage of the data comparison is visible
+	rather than assumed; see records_agree().
+	"""
+	if oracle.get("kind") != "condition" or fe.get("kind") != "condition":
+		return False
+	if fe.get("condition_source") != "structured":
+		return False
+	return bool(oracle.get("data")) and fe.get("data", "nil") == "nil"
+
+
+def records_agree(oracle, fe, compare_data=True):
 	if oracle["kind"] != fe["kind"]:
 		return False
 	kind = oracle["kind"]
@@ -104,12 +124,33 @@ def records_agree(oracle, fe):
 		condition = oracle.get("condition", "")
 		if fe.get("condition_source") == "message":
 			# A weaker claim by design (see the module docstring and
-			# 00b's "condition_source" note): fe has no structured
-			# condition symbol yet, so this checks whether the
-			# oracle's condition name shows up in fe's free-text
-			# message rather than comparing symbols.
+			# 00b's "condition_source" note): a case whose fe side
+			# still arrives as free text -- a raise site that has no
+			# condition object to print -- is only checked for the
+			# oracle's condition name appearing somewhere in the
+			# message, not compared symbol for symbol.
 			return bool(condition) and condition in fe.get("message", "")
-		return condition == fe.get("condition")
+		if condition != fe.get("condition"):
+			return False
+		if not compare_data:
+			return True
+		# The data list, when both sides carry one.  The oracle shim
+		# prints `(prin1-to-string (cdr err))` and fe prints the same
+		# rendering of the same cdr through its structured channel, so
+		# where both are non-nil they must be equal, character for
+		# character.
+		#
+		# `nil` on fe's side is not a disagreement here but a *census*:
+		# fe attaches `(PREDICATE VALUE)` data to the conditions that
+		# have one to attach, and its `wrong-number-of-arguments` family
+		# carries no `(FUNCTION NARGS)` pair at all, which the run
+		# reports per case (see `data_gap`) rather than failing on.
+		# Narrowing that gap is condition-data work, not runner work.
+		oracle_data = oracle.get("data")
+		fe_data = fe.get("data")
+		if not oracle_data or not fe_data or fe_data == "nil":
+			return True
+		return oracle_data == fe_data
 	if kind == "unsupported":
 		return oracle.get("feature") == fe.get("feature")
 	# "quit", "timeout", and anything else: kind equality is the whole
@@ -140,6 +181,7 @@ def main():
 	passed = 0
 	known_gaps = 0
 	failures = []
+	data_gaps = []
 	for case_path in case_paths:
 		with open(case_path, "r", encoding="utf-8") as fp:
 			case = json.load(fp)
@@ -180,7 +222,14 @@ def main():
 			snapshot = json.load(fp)
 		oracle_record = snapshot["record"]
 
-		agree = records_agree(oracle_record, fe_record)
+		# A case may opt out of the data comparison, and must say why in
+		# its note: the only legitimate reason is an oracle rendering fe
+		# cannot produce at all (an Emacs object with no fe analogue),
+		# never a disagreement fe could fix.
+		compare_data = case.get("compare_data", True)
+		agree = records_agree(oracle_record, fe_record, compare_data)
+		if data_gap(oracle_record, fe_record):
+			data_gaps.append(case_id)
 		if feature["status"] == "supported":
 			if agree:
 				passed += 1
@@ -196,6 +245,10 @@ def main():
 			      f"{feature['status']}): {tag} -- "
 			      f"oracle={oracle_record!r} fe={fe_record!r}")
 
+	if data_gaps:
+		print(f"# condition data: {len(data_gaps)} case(s) where the "
+		      f"oracle carries data and fe carries none: "
+		      f"{' '.join(sorted(data_gaps))}")
 	print(f"fe compat: {len(case_paths)} case(s), {passed} passed, "
 	      f"{known_gaps} known gap(s) (not required to match yet), "
 	      f"{len(failures)} failed")

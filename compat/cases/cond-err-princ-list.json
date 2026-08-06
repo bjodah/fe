@@ -1,0 +1,6 @@
+{
+	"id": "cond-err-princ-list",
+	"setup": [],
+	"expr": "(condition-case e (error \"%s\" (list 1 \"x\")) (error e))",
+	"note": "`error`'s %s is Emacs' princ, recursively: a string inside a list loses its quotes too. Fe quoted nested strings."
+}

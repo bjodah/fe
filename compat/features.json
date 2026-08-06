@@ -38,7 +38,7 @@
     "condition-void-function"
    ],
    "kg_test": null,
-    "rationale": "Fe reports `void-function` as a structured, catchable condition; every recorded Fe-side result therefore carries condition_source: \"structured\".",
+   "rationale": "Fe reports `void-function` as a structured, catchable condition; every recorded Fe-side result therefore carries condition_source: \"structured\".",
    "source_name": null
   },
   {
@@ -64,7 +64,7 @@
     "planned-quit-signal"
    ],
    "kg_test": null,
-    "rationale": "Fe's `signal` accepts registered static-hierarchy names, including `quit`; `(signal 'quit nil)` has a structured quit completion. The compatibility runner compares that completion without relying on diagnostic text.",
+   "rationale": "Fe's `signal` accepts registered static-hierarchy names, including `quit`; `(signal 'quit nil)` has a structured quit completion. The compatibility runner compares that completion without relying on diagnostic text.",
    "source_name": null
   },
   {
@@ -1490,167 +1490,180 @@
     "num-int64-literal-overflow"
    ],
    "kg_test": null,
-    "rationale": "Phase 5, row A8's reader sibling (05A Decision 3): an integer literal that overflows int64 reads as a double -- the pre-bignum Emacs behaviour -- while modern Emacs reads it as a bignum. 2^64 (= 18446744073709551616) is the canonical example: Emacs prints the bignum 18446744073709551616, fe reads the nearest double and prints its shortest round-trip. The alternative -- a read error -- would punish pasted constants. The fall-back is bounded by the reader's token buffer, not by magnitude: `ReadAtom`'s `char buf[64]` caps a token at 63 characters, so a literal of 64 or more digits is `symbol too long` and never reaches the classifier at all. 2^64 is 20 digits and is well inside that; a caller who pastes a 64-digit constant gets a reader error rather than a double, and this row does not claim otherwise.",
-     "source_name": null
-   },
-   {
-    "id": "condition-case",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-cc1",
-     "cond-cc2",
-     "cond-cc3",
-     "cond-cc4",
-     "cond-cc5",
-     "cond-cc6",
-     "cond-cc7",
-     "cond-cc8",
-     "cond-cc9",
-     "cond-cc10",
-     "cond-cc10-quit",
-      "cond-cc10-t",
-     "cond-ct6"
-    ],
-    "kg_test": null,
-     "rationale": "Phase 6 condition handling: handlers match a static error hierarchy by symbol, list, or t; bind their optional variable to (SYMBOL . DATA); and run their bodies as an implicit sequence. Quit matches only quit or t, while budget remains uncatchable. :success is deliberately unsupported.",
-    "source_name": "condition-case"
-   },
-   {
-    "id": "condition-case-success-handler",
-    "category": "errors-and-non-local-exits",
-    "status": "divergent",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-cc11"
-    ],
-    "kg_test": null,
-    "rationale": "Fe deliberately does not implement Emacs' :success handler.",
-    "source_name": null
-   },
-   {
-    "id": "catch",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-ct1",
-     "cond-ct2",
-     "cond-ct4",
-     "cond-ct5-fixnum",
-     "cond-ct5-float",
-     "cond-ct5-string",
-     "cond-ct5-shared-cons",
-     "cond-ct5-fresh-cons"
-    ],
-    "kg_test": null,
-     "rationale": "Tag comparison is `eq`, not `eql`/`equal` (cond-ct5-*): an equal fixnum matches, floats and strings do not, a shared cons matches while two fresh conses do not. Value delivery (cond-ct1), innermost same-tag wins (cond-ct2), and `nil` never matches as a tag (cond-ct4). The catch frame (`FeFrameCatch`) carries the gc/cleanup checkpoints the throw path drains to, and an uncaught throw raises structured `no-catch`.",
-    "source_name": "catch"
-   },
-   {
-    "id": "throw",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-ct3"
-    ],
-    "kg_test": null,
-     "rationale": "An uncaught throw signals structured `(no-catch TAG VALUE)` through the ordinary error path (cond-ct3), which an enclosing `condition-case` can handle. A throw that matches a catch drains to the catch frame's checkpoint (`RunCleanupsDownTo`); the native re-entry boundary is a tested wall. `throw` is function-shaped, exactly two arguments evaluated normally, matching Emacs' `(special-form-p 'throw)` nil.",
-    "source_name": "throw"
-   },
-   {
+   "rationale": "Phase 5, row A8's reader sibling (05A Decision 3): an integer literal that overflows int64 reads as a double -- the pre-bignum Emacs behaviour -- while modern Emacs reads it as a bignum. 2^64 (= 18446744073709551616) is the canonical example: Emacs prints the bignum 18446744073709551616, fe reads the nearest double and prints its shortest round-trip. The alternative -- a read error -- would punish pasted constants. The fall-back is bounded by the reader's token buffer, not by magnitude: `ReadAtom`'s `char buf[64]` caps a token at 63 characters, so a literal of 64 or more digits is `symbol too long` and never reaches the classifier at all. 2^64 is 20 digits and is well inside that; a caller who pastes a 64-digit constant gets a reader error rather than a double, and this row does not claim otherwise.",
+   "source_name": null
+  },
+  {
+   "id": "condition-case",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-cc1",
+    "cond-cc2",
+    "cond-cc3",
+    "cond-cc4",
+    "cond-cc5",
+    "cond-cc6",
+    "cond-cc7",
+    "cond-cc8",
+    "cond-cc9",
+    "cond-cc10",
+    "cond-cc10-quit",
+    "cond-cc10-t",
+    "cond-ct6"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 6 condition handling: handlers match a static error hierarchy by symbol, list, or t; bind their optional variable to (SYMBOL . DATA); and run their bodies as an implicit sequence. Quit matches only quit or t, while budget remains uncatchable. :success is deliberately unsupported.",
+   "source_name": "condition-case"
+  },
+  {
+   "id": "condition-case-success-handler",
+   "category": "errors-and-non-local-exits",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-cc11"
+   ],
+   "kg_test": null,
+   "rationale": "Fe deliberately does not implement Emacs' :success handler.",
+   "source_name": null
+  },
+  {
+   "id": "catch",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-ct1",
+    "cond-ct2",
+    "cond-ct4",
+    "cond-ct5-fixnum",
+    "cond-ct5-float",
+    "cond-ct5-string",
+    "cond-ct5-shared-cons",
+    "cond-ct5-fresh-cons",
+    "cond-ct-arity-catch-zero"
+   ],
+   "kg_test": null,
+   "rationale": "Tag comparison is `eq`, not `eql`/`equal` (cond-ct5-*): an equal fixnum matches, floats and strings do not, a shared cons matches while two fresh conses do not. Value delivery (cond-ct1), innermost same-tag wins (cond-ct2), and `nil` never matches as a tag (cond-ct4). The catch frame (`FeFrameCatch`) carries the gc/cleanup checkpoints the throw path drains to, and an uncaught throw raises structured `no-catch`. `(catch)` with no tag is wrong-number-of-arguments, diagnosed before anything evaluates (cond-ct-arity-catch-zero).",
+   "source_name": "catch"
+  },
+  {
+   "id": "throw",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-ct3",
+    "cond-ct-arity-throw-one",
+    "cond-ct-arity-throw-three"
+   ],
+   "kg_test": null,
+   "rationale": "An uncaught throw signals structured `(no-catch TAG VALUE)` through the ordinary error path (cond-ct3), which an enclosing `condition-case` can handle. A throw that matches a catch drains to the catch frame's checkpoint (`RunCleanupsDownTo`); the native re-entry boundary is a tested wall. `throw` is function-shaped, exactly two arguments evaluated normally, matching Emacs' `(special-form-p 'throw)` nil. One operand or three is wrong-number-of-arguments (cond-ct-arity-throw-one, cond-ct-arity-throw-three): a missing value is not nil and a third operand is not dropped.",
+   "source_name": "throw"
+  },
+  {
    "id": "signal",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-s1",
-     "cond-s2",
-     "cond-s3",
-     "cond-s4"
-    ],
-    "kg_test": null,
-     "rationale": "`signal` builds `(SYMBOL . DATA)` at raise time and the data reaches the handler verbatim (cond-s1); a non-symbol condition is `wrong-type-argument` with `symbolp` data (cond-s2); an unregistered condition symbol becomes `(error \"Invalid error symbol\" SYMBOL)` catchable by an `(error ...)` handler (cond-s3); improper data is tolerated (cond-s4).",
-     "source_name": "signal"
-   },
-   {
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-s1",
+    "cond-s2",
+    "cond-s3",
+    "cond-s4"
+   ],
+   "kg_test": null,
+   "rationale": "`signal` builds `(SYMBOL . DATA)` at raise time and the data reaches the handler verbatim (cond-s1); a non-symbol condition is `wrong-type-argument` with `symbolp` data (cond-s2); an unregistered condition symbol becomes `(error \"Invalid error symbol\" SYMBOL)` catchable by an `(error ...)` handler (cond-s3); improper data is tolerated (cond-s4).",
+   "source_name": "signal"
+  },
+  {
    "id": "error",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-data-error-format",
-     "cond-q1"
-    ],
-    "kg_test": null,
-     "rationale": "`error` formats its message at signal time: cond-data-error-format pins `(error \"fmt %d\" 7)` becoming `(error \"fmt 7\")`, with the rendered string as condition data. cond-q1 pins the uncaught host-boundary shape through the structured channel.",
-     "source_name": "error"
-   },
-   {
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-data-error-format",
+    "cond-q1",
+    "cond-err-prin1-string",
+    "cond-err-princ-list",
+    "cond-err-prin1-list",
+    "cond-err-extra-arguments",
+    "cond-err-no-format"
+   ],
+   "kg_test": null,
+   "rationale": "`error` formats its message at signal time: cond-data-error-format pins `(error \"fmt %d\" 7)` becoming `(error \"fmt 7\")`, with the rendered string as condition data. cond-q1 pins the uncaught host-boundary shape through the structured channel. The cond-err-* rows pin the format directives against Emacs: %s is princ and %S is prin1, recursively (a string keeps or loses its quotes at every level), arguments the format string never consumes are ignored, and `(error)` with no format string at all is wrong-number-of-arguments.",
+   "source_name": "error"
+  },
+  {
    "id": "condition-object",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-data-arith-error-nodata",
-     "cond-data-wrong-type-shape"
-    ],
-    "kg_test": null,
-     "rationale": "A condition is the cons `(SYMBOL . DATA)` constructed at signal time: `(car 5)` produces `(wrong-type-argument listp 5)`, while `(/ 1 0)` signals `(arith-error)` with no data. The rendered message remains byte-identical at existing raise sites.",
-    "source_name": null
-   },
-   {
-    "id": "unwind-protect-cleanup-policy",
-    "category": "errors-and-non-local-exits",
-    "status": "planned",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-u1-error",
-     "cond-u1-throw",
-     "cond-u1-quit",
-     "cond-u2",
-     "cond-u3",
-     "cond-ct7"
-    ],
-    "kg_test": null,
-     "rationale": "Phase 6: A cleanup runs on the error, throw and quit paths alike, and nested unwind-protect runs innermost-first. cond-u2 pins the policy that a raising cleanup replaces the in-flight error: `(error \"cleanup\")` wins. cond-ct7 remains a known gap because it is written in Emacs' `progn`, which Fe does not implement.",
-    "source_name": null
-   },
-   {
-    "id": "condition-hierarchy",
-    "category": "errors-and-non-local-exits",
-    "status": "planned",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-h1"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 6, implementing slice 06D (Decision 1). Reference pin for the static hierarchy: Emacs spells arith-error's chain as (arith-error error) via its error-conditions property, and the full audited table (24 symbols, deepest chain 4, everything Phase 6 needs at depth <= 2, quit NOT under error) is the Decision's source. fe keeps the hierarchy as static C data rather than symbol properties, so `get`/`error-conditions` stay out of scope and the fe side of this row is permanently void-function get -- the row records the oracle the static table is built against, not a form fe will ever support, which is why it stays planned.",
-    "source_name": null
-   },
-   {
-    "id": "error-message-string",
-    "category": "errors-and-non-local-exits",
-    "status": "planned",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "cond-h2"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 6, implementing slice 06D. Rendering reference: error-message-string renders a condition object as `Wrong type argument: listp, 5`. Emacs uses a right single quote in some texts (void-function/void-variable); fe pins ASCII, so agreement is pinned on the ASCII forms and the right-quote spellings are recorded divergences for the renderer. fe has no error-message-string; the row records the oracle for 06D's condition-to-message formatter, which must keep the rendered text byte-identical at every existing raise site.",
-    "source_name": null
-   }
-  ]
- }
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-data-arith-error-nodata",
+    "cond-data-wrong-type-shape"
+   ],
+   "kg_test": null,
+   "rationale": "A condition is the cons `(SYMBOL . DATA)` constructed at signal time: `(car 5)` produces `(wrong-type-argument listp 5)`, while `(/ 1 0)` signals `(arith-error)` with no data. The rendered message remains byte-identical at existing raise sites.",
+   "source_name": null
+  },
+  {
+   "id": "unwind-protect-cleanup-policy",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-u1-error-flag",
+    "cond-u1-throw-flag",
+    "cond-u1-quit-flag",
+    "cond-u2",
+    "cond-u3-order",
+    "cond-ct7-flag",
+    "cond-u4-cleanup-throw-wins",
+    "cond-u4-cleanup-throw-over-error",
+    "cond-u4-cleanup-throw-outer",
+    "cond-u4-cleanup-throw-inner-live",
+    "cond-u4-cleanup-throw-no-catch"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 6, 06A Decision 4, complete: a cleanup runs on the error, throw and quit paths alike (cond-u1-*), nested cleanups run innermost-first (cond-u3-order), and a cleanup that raises replaces the completion already unwinding -- an error (cond-u2) or a throw (cond-u4-*), including a throw whose catch lies below the cleanup's own nested run, which is re-issued in the enclosing context rather than answered as no-catch. The five original rows were written in Emacs' progn/push and died on void-function before testing anything; their replacements are in the dialect intersection and carry fresh snapshots of their own.",
+   "source_name": null
+  },
+  {
+   "id": "condition-hierarchy",
+   "category": "errors-and-non-local-exits",
+   "status": "unsupported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-h1"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 6, 06A Decision 1: the hierarchy is static C data, not symbol properties, so Fe has no `get` and no `error-conditions` and cond-h1's expression is void-function in Fe by design. The row is kept as the recorded oracle the static table was built against -- Emacs spells arith-error's chain as (arith-error error) -- and is `unsupported` rather than `planned` because nothing is planned: symbol properties are a later phase's question if any init-file corpus ever needs them. The hierarchy Fe does implement is exercised by cond-cc5, cond-cc8 and cond-ct6, which match a subtype through an `error` handler. Every chain Fe registers is one level deep; Emacs' deeper chains (overflow-error -> range-error -> arith-error) are excluded by the same Decision and have no producer in Fe.",
+   "source_name": null
+  },
+  {
+   "id": "error-message-string",
+   "category": "errors-and-non-local-exits",
+   "status": "unsupported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-h2"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 6, 06A: Fe has no `error-message-string` and none is planned -- a condition reaches a Fe host as a completion with a message already formatted by the raise site, not as an object a Lisp program renders afterwards. The row is kept as the recorded oracle for the rendering (`Wrong type argument: listp, 5`), and to record that Emacs uses a right single quote in some texts (void-function/void-variable) where Fe pins ASCII. `unsupported` rather than `planned` because the exclusion is the decision, not a pending slice.",
+   "source_name": null
+  }
+ ]
+}

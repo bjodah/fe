@@ -1,0 +1,6 @@
+{
+	"id": "cond-u4-cleanup-throw-wins",
+	"setup": [],
+	"expr": "(catch 'tg (unwind-protect (throw 'tg 'a) (throw 'tg 'b)))",
+	"note": "U4 (06A Decision 4): a throw raised by a cleanup replaces the throw already unwinding, so the catch receives the cleanup's value. Fe used to answer `no-catch tg b` here -- the cleanup's own nested run has a frame-stack floor above every catch frame, so the search found nothing and the completion escaped the catch entirely."
+}

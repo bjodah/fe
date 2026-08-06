@@ -1,0 +1,6 @@
+{
+	"id": "cond-err-prin1-string",
+	"setup": [],
+	"expr": "(condition-case e (error \"%S\" \"str\") (error e))",
+	"note": "`error`'s %S is Emacs' prin1: a string keeps its quotes. Fe rendered it with the writer's top-level unquoted mode and dropped them."
+}

@@ -1,0 +1,6 @@
+{
+	"id": "cond-err-extra-arguments",
+	"setup": [],
+	"expr": "(condition-case e (error \"x\" 1 2) (error e))",
+	"note": "Arguments the format string never consumes are ignored. Fe rejected them with `too many arguments`."
+}

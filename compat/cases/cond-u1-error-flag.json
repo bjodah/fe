@@ -1,0 +1,9 @@
+{
+	"id": "cond-u1-error-flag",
+	"setup": [
+		"(setq cond-u1e-flag nil)",
+		"(condition-case nil (unwind-protect (error \"boom\") (setq cond-u1e-flag 'ran)) (error 'caught))"
+	],
+	"expr": "cond-u1e-flag",
+	"note": "U1: a cleanup runs on the error path -- the flag is set while unwinding to the handler. Written in the Fe/Emacs dialect intersection -- setup forms set a flag, the expression reads it -- because the case it replaces used Emacs' `progn`/`push`, which Fe does not have, and so died on void-function before it tested anything."
+}
