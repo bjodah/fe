@@ -358,6 +358,8 @@ static void CollectGarbage(FeContext* ctx) {
   FeMark(ctx, ctx->call_result);
   FeMark(ctx, ctx->root_list);
   FeMark(ctx, ctx->condition);
+  FeMark(ctx, ctx->pending_throw_tag);
+  FeMark(ctx, ctx->pending_throw_value);
   FeMarkEvaluatorRoots(ctx);
   MarkCleanupRoots(ctx);
 
@@ -1886,6 +1888,8 @@ static FeContext* OpenContext(void* arena, size_t size) {
   // Initialize the lists:
   ctx->call_list = &nil;
   ctx->condition = &nil;
+  ctx->pending_throw_tag = &nil;
+  ctx->pending_throw_value = &nil;
   ctx->free_list = &nil;
   ctx->symbol_list = &nil;
   ctx->evaluation_result = &nil;

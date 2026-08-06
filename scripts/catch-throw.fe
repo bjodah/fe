@@ -50,3 +50,43 @@
         (cons ct-gc-i ct-gc-i)
         (setq ct-gc-i (+ ct-gc-i 1)))
       (throw 'tg (cons 111 222)))))
+
+;; 06A Decision 4, measured against Emacs 31.0.90: a `throw` raised by an
+;; `unwind-protect` cleanup wins over whatever completion was already
+;; unwinding -- another throw, an error, or an ordinary return. The catch it
+;; names lives below the cleanup's own nested run, so the throw is re-issued
+;; in the enclosing context rather than answered where it was raised.
+(assert-equals 'b (catch 'tg (unwind-protect (throw 'tg 'a) (throw 'tg 'b))))
+(assert-equals 'b (catch 'tg (unwind-protect (error "orig") (throw 'tg 'b))))
+(assert-equals 'b (catch 'tg (unwind-protect 1 (throw 'tg 'b))))
+(assert-equals 2 (catch 'o (catch 'i (unwind-protect (throw 'i 1) (throw 'o 2)))))
+
+;; Frames being abandoned are still live while the cleanup runs, so the
+;; inner catch is still established and takes the cleanup's throw.
+(assert-equals 2
+  (catch 'o
+    (unwind-protect
+      (catch 'i (unwind-protect (throw 'o 1) (throw 'i 2)))
+      'x)))
+
+;; An enclosing `condition-case` sees the replacing throw's value, not the
+;; error the cleanup replaced.
+(assert-equals 'b
+  (condition-case e
+    (catch 'tg (unwind-protect (error "orig") (throw 'tg 'b)))
+    (error (list 'err e))))
+
+;; Cleanups between the replacing throw and its catch still run, innermost
+;; first, on the new throw's own path.
+(setq ct-replace-log '())
+(assert-equals 'b
+  (catch 'tg
+    (unwind-protect
+      (unwind-protect (throw 'tg 'a) (throw 'tg 'b))
+      (setq ct-replace-log (cons 'outer ct-replace-log)))))
+(assert-equals '(outer) ct-replace-log)
+
+;; A cleanup throw with no matching catch anywhere is `no-catch`, which is
+;; an ordinary error and catchable as one.
+(assert-equals '(no-catch nope 1)
+  (condition-case e (unwind-protect (error "orig") (throw 'nope 1)) (error e)))

@@ -3665,12 +3665,11 @@ static bool TestCatchThrow(void) {
       "done");
   CHK("log", "(outer inner)");
 
-  // A throw during a cleanup drain: the cleanup's own throw finds no catch
-  // within the cleanup run (it runs above the saved barrier) and is
-  // contained by the cleanup isolation barrier -- the original error still
-  // reaches the host and the throw becomes a printed diagnostic, the
-  // behavior `RunOneCleanupEntry` pins for any cleanup failure. Decision 4's
-  // match-Emacs policy at 06D rewrites this row.
+  // A cleanup's throw with no matching catch anywhere: it is re-issued in
+  // each enclosing context in turn, finds nothing in any of them, and
+  // becomes `no-catch` -- which then replaces the error that was unwinding,
+  // per 06A Decision 4. Measured Emacs: `(unwind-protect (error "orig")
+  // (throw 'nope 1))` is `(no-catch nope 1)`. The outer cleanup still runs.
   CHK("(setq outer-ran nil)", "nil");
   static const char cleanup_throw[] =
       "(unwind-protect"
@@ -3691,6 +3690,39 @@ static bool TestCatchThrow(void) {
   CHECK(cleanup_throw_call.result);
   CHECK(captured[0] == '\0');
   CHK("outer-ran", "t");
+
+  // A cleanup's throw whose catch *does* exist below the drain: Emacs' rule
+  // (06A Decision 4, measured against 31.0.90) is that it wins over
+  // whatever completion was already unwinding, whether that was another
+  // throw, an error, or nothing at all. The catch frames live in the run
+  // being unwound, below the cleanup run's own floor, so the throw has to
+  // be re-issued in the enclosing context rather than answered where it was
+  // raised.
+  CHK("(catch 'tg (unwind-protect (throw 'tg 'a) (throw 'tg 'b)))", "b");
+  CHK("(catch 'tg (unwind-protect (error \"orig\") (throw 'tg 'b)))", "b");
+  CHK("(catch 'tg (unwind-protect 1 (throw 'tg 'b)))", "b");
+  // A different tag selects a different level, and the in-flight throw to
+  // the inner tag is abandoned.
+  CHK("(catch 'o (catch 'i (unwind-protect (throw 'i 1) (throw 'o 2))))", "2");
+  // Frames between the cleanup and its catch that are themselves being
+  // abandoned are still live while the cleanup runs, exactly as they are in
+  // Emacs: the inner catch is still established, so it takes the throw and
+  // the outer one never sees the original.
+  CHK("(catch 'o (unwind-protect (catch 'i (unwind-protect (throw 'o 1) "
+      "(throw 'i 2))) 'x))",
+      "2");
+  // An enclosing `condition-case` around all of it sees the value, not the
+  // error the cleanup replaced.
+  CHK("(condition-case e (catch 'tg (unwind-protect (error \"orig\") "
+      "(throw 'tg 'b))) (error (list 'err e)))",
+      "b");
+  // The cleanups between the throw and its catch still run, innermost
+  // first, on the replacing throw's own path.
+  CHK("(setq log '())", "nil");
+  CHK("(catch 'tg (unwind-protect (unwind-protect (throw 'tg 'a) "
+      "(throw 'tg 'b)) (setq log (cons 'outer log))))",
+      "b");
+  CHK("log", "(outer)");
 
   // Forced GC across a throw: a freshly allocated value thrown out of a body
   // that collects heavily must survive the unwind and arrive intact.

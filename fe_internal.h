@@ -614,6 +614,15 @@ struct FeContext {
   jmp_buf* condition_catch;
   FeObject* evaluator_error_trace;
   FeObject* condition;
+  // A `throw` raised inside a cleanup entry whose matching catch frame is
+  // not in the cleanup's own nested run: the tag and value are parked here
+  // (both GC roots, since the nested run's frames are discarded before they
+  // are read again) and `RunOneCleanupEntry` re-issues the throw in the
+  // enclosing context, where the catch frames of the run being unwound are
+  // still on the frame stack. Emacs' rule, measured: a cleanup's throw wins
+  // over whatever completion was already unwinding.
+  FeObject* pending_throw_tag;
+  FeObject* pending_throw_value;
   // The kind of the completion currently being drained -- Normal otherwise.
   // Assigned by `RaiseCompletion` (fe_eval.c) for every barrier-backed raise,
   // reset by the outermost run's barrier and by a normal top-level return.
@@ -623,6 +632,7 @@ struct FeContext {
   // regardless of which wall (step/frame/re-entry/interrupt) tripped.
   FeCompletion completion;
   char evaluator_error_message[1024];
+  bool pending_throw;
   bool evaluation_active;
   bool evaluation_limited;
   bool strict_arity;

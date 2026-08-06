@@ -111,6 +111,10 @@ void EndEvaluationControl(FeContext* ctx, bool owns_control) {
 static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* forms,
                                    FeObject* env);
+// Forward-declared for the same reason: `RunOneCleanupEntry` re-issues a
+// cleanup's escaping `throw` once it has put the enclosing run's frame
+// stack, floor and barriers back.
+static bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value);
 // The two halves of a raise. `RaiseCompletion` applies the ambient
 // `error_label`/`error_offset` prefix to `msg` and then hands the finished
 // text to `RaiseCompletionCore`, which does the actual work: cleanup drain,
@@ -365,6 +369,27 @@ static void RunOneCleanupEntry(FeContext* ctx,
     ctx_v->frame_stack_index = saved_frame_stack_index;
     ctx_v->call_list = saved_call_list;
     RestoreEvaluationControl(ctx_v, &saved_control);
+    if (ctx_v->pending_throw) {
+      // The cleanup threw to a tag whose catch frame is not inside the
+      // cleanup's own run. Everything above is back to what the enclosing
+      // run had, so re-issuing the throw here searches the frames that were
+      // live before the drain started -- which is where the catch is. It
+      // either delivers (and resumes that run's loop below), escapes again
+      // to a still-further-out cleanup, or finds nothing anywhere and
+      // raises `no-catch`.
+      ctx_v->pending_throw = false;
+      FeObject* const tag = ctx_v->pending_throw_tag;
+      FeObject* const value = ctx_v->pending_throw_value;
+      ctx_v->pending_throw_tag = &nil;
+      ctx_v->pending_throw_value = &nil;
+      (void)PerformThrow(ctx_v, tag, value);
+      // Delivered: the catch frame holds the value and every frame above it
+      // is gone, so abandon the drain -- and whatever raise or completing
+      // form started it -- and resume the loop that owns the catch. This is
+      // how a cleanup's throw replaces the completion already unwinding,
+      // the same way a cleanup's error does.
+      longjmp(*ctx_v->condition_catch, 1);
+    }
     // Already through the label formatter once, on the way in: replay it
     // verbatim rather than prefixing the source label a second time.
     RaiseCompletionCore(ctx_v, ctx_v->cleanup_error_kind,
@@ -2581,6 +2606,21 @@ static bool FindCatchFrame(const FeContext* ctx, FeObject* tag, size_t* index) {
 static bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value) {
   size_t index;
   if (!FindCatchFrame(ctx, tag, &index)) {
+    if (ctx->cleanup_catch != nullptr) {
+      // Inside a cleanup entry, whose forms run as a nested frame-machine
+      // run above a saved barrier: this run's floor sits above every catch
+      // frame belonging to the computation being unwound, so "no catch
+      // here" is not yet an answer. Park the throw and resume at
+      // `RunOneCleanupEntry`, which puts the enclosing run's frame stack and
+      // floor back and asks again there -- exactly the route a cleanup's own
+      // *error* already takes. Measured Emacs: `(catch 'tg (unwind-protect
+      // (throw 'tg 'a) (throw 'tg 'b)))` is `b`, and a cleanup's throw wins
+      // over an in-flight error too.
+      ctx->pending_throw = true;
+      ctx->pending_throw_tag = tag;
+      ctx->pending_throw_value = value;
+      longjmp(*ctx->cleanup_catch, 1);
+    }
     char tag_text[64];
     char value_text[64];
     char message[160];
