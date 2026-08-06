@@ -1,0 +1,90 @@
+;; Reader literals, sub-plan 08C.  Every value asserted below is the value
+;; GNU Emacs 31.0.90 reads the same spelling to, measured with
+;; `emacs -Q --batch` (/opt-3/emacs-31-lucid, TERM=xterm-256color).  The
+;; spellings Fe rejects cannot be listed here -- a read error ends the file
+;; where it appears -- so the full reject matrix lives in `test_api.c`'s
+;; `TestReaderLiterals`, and this script closes with exactly one of them so
+;; that a reject arm's diagnostic is part of a golden too.
+
+;; Plain characters, and the escape table shared with string bodies.
+(assert-equals 97 ?a)
+(assert-equals 32 ? )
+(assert-equals 233 ?é)
+(assert-equals 8364 ?€)
+(assert-equals 10 ?\n)
+(assert-equals 9 ?\t)
+(assert-equals 27 ?\e)
+(assert-equals 92 ?\\)
+(assert-equals 32 ?\s)
+(assert-equals 127 ?\d)
+(assert-equals 7 ?\a)
+(assert-equals 8 ?\b)
+(assert-equals 11 ?\v)
+(assert-equals 12 ?\f)
+(assert-equals 13 ?\r)
+
+;; Octal and hexadecimal.  `\x` is greedy and variable-width, as in Emacs:
+;; reading a fixed two digits made `?\x41f` 65 with an `f` left over.
+(assert-equals 0 ?\0)
+(assert-equals 1 ?\1)
+(assert-equals 65 ?\101)
+(assert-equals 65 ?\x41)
+(assert-equals 65 ?\x0041)
+(assert-equals 1055 ?\x41f)
+
+;; The control modifier is not `& 0x1f`.  `?` is DEL; `@`..`_` and `a`..`z`
+;; fold; everything else keeps its value with the 2^26 control bit.
+(assert-equals 1 ?\C-a)
+(assert-equals 1 ?\C-A)
+(assert-equals 0 ?\C-@)
+(assert-equals 31 ?\C-_)
+(assert-equals 26 ?\C-z)
+(assert-equals 19 ?\C-s)
+(assert-equals 127 ?\C-?)
+(assert-equals 67108901 ?\C-%)
+(assert-equals 67108913 ?\C-1)
+(assert-equals 67109097 ?\C-é)
+(assert-equals 67108874 ?\C-\n)
+(assert-equals 67108991 ?\C-\d)
+
+;; The meta modifier, alone and combined in either order.
+(assert-equals 134217825 ?\M-a)
+(assert-equals 134217738 ?\M-\n)
+(assert-equals 134217729 ?\M-\C-a)
+(assert-equals 134217729 ?\C-\M-a)
+
+;; Radix integers, including both ends of the int64 window.  Past it the
+;; recorded pre-bignum policy applies and the literal reads as a double.
+(assert-equals 16 #x10)
+(assert-equals 255 #xff)
+(assert-equals 15 #o17)
+(assert-equals 5 #b101)
+(assert-equals -16 #x-10)
+(assert-equals 9223372036854775807 #x7fffffffffffffff)
+(assert-equals -9223372036854775808 #x-8000000000000000)
+(assert-not-nil (integerp #x7fffffffffffffff))
+(assert-not-nil (floatp #x8000000000000000))
+(assert-not-nil (floatp #xFFFFFFFFFFFFFFFF))
+
+;; The same escape table inside a string body.  A Fe string is a byte string,
+;; so an escape has to land in one byte: `"\0..."` and `"\400"` are errors
+;; here where Emacs stores a NUL and U+0100.
+(assert-equals "A" "\x41")
+(assert-equals "A" "\x0041")
+(assert-equals "A" "\101")
+(assert-equals " " "\s")
+(assert-equals "AA" "\x41\101")
+
+;; A `?` literal ends at a delimiter, so a character can abut the closing
+;; paren, a quote or a string with nothing between them.
+(assert-equals '(97 x) (list ?a 'x))
+(assert-equals '(32 x) (list ?\s 'x))
+(assert-equals '(97 "x") (list ?a "x"))
+
+(print "reader literals ok")
+
+;; One reject arm, on purpose: `?\s-a` is Emacs' super modifier, which Fe does
+;; not implement.  Before 08C's repair this read as the two forms `32` and
+;; `-a`; the golden stderr beside this script is the diagnostic that replaced
+;; that silent misread.  Nothing after this line is read.
+(print ?\s-a)

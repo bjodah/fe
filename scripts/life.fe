@@ -86,7 +86,7 @@
   (while (<= i n)
     (print ">> iteration" i)
     (print-grid grid)
-    (if (< i n) (print ""))
+    (print "")
     (setq grid (next-grid grid))
     (setq i (+ i 1))
   )
@@ -99,7 +99,6 @@
   (0 1 0)
   (0 1 0)
 ))
-(print "")
 
 
 ; glider in an 8x8 universe
