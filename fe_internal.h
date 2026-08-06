@@ -599,6 +599,9 @@ struct FeContext {
   size_t native_reentry_depth;
   const char* error_label;
   size_t error_offset;
+  size_t error_line;
+  bool error_has_line;
+  size_t top_form_line;
   FeCleanupEntry cleanup_stack[CleanupStackSize];
   size_t cleanup_stack_index;
   // Non-null while a cleanup entry's own `fn`/unwind-forms are running: the

@@ -580,14 +580,14 @@
   {
    "id": "reader-char-literal-unsupported",
    "category": "reader-and-literals",
-   "status": "unsupported",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "reader-char-literal-unsupported"
    ],
    "kg_test": null,
-   "rationale": "Deliberately not implemented: FeReadFn (fe.h's public read callback) yields one raw byte at a time with no lookahead buffer for multi-byte reassembly at the reader's character-literal site, so `?\u00c3\u00a9` (a two-byte UTF-8 encoding) would read only its first byte -- exactly the silent wrongness this compat manifest exists to prevent. Failing clearly (void-variable on the resulting bare symbol) is the current, intentional behavior rather than a bug to fix; a real implementation needs the reader's byte source to support decoding a full codepoint, which is untracked.",
+   "rationale": "08C implements UTF-8 character literals and the measured modifier forms; the former unsupported-reader rationale is retired.",
    "source_name": null
   },
   {

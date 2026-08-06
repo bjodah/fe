@@ -651,6 +651,14 @@ stack-balanced. The next call replaces this root.
 
 ## Error Handling
 
+The reader has one strict escape decoder shared by string bodies and character
+literals. Character literals decode UTF-8 directly from the byte callback; the
+lead byte determines the fixed number of continuation bytes, so no public
+callback or pushback API is needed. Evaluated input maintains a one-based line
+counter in its string/file adapter and records the line before each top-level
+form is evaluated. The source label and that line survive into both read and
+runtime diagnostics; standalone byte-oriented reads keep their byte offset.
+
 If an error occurs, `FeHandleError()` detaches the active call trace and invokes
 the configured error callback. The borrowed error message and trace are valid
 only for that invocation. A recovering callback must `longjmp` or perform an

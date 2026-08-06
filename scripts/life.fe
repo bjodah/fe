@@ -29,7 +29,7 @@
 (fset 'print-grid (fn (grid)
   (map
     (fn (row)
-      (print (map (fn (x) (if (is x 0) '- '#)) row))
+      (print (map (fn (x) (if (is x 0) '- "#")) row))
     )
     grid
   )
@@ -86,7 +86,7 @@
   (while (<= i n)
     (print ">> iteration" i)
     (print-grid grid)
-    (print "")
+    (if (< i n) (print ""))
     (setq grid (next-grid grid))
     (setq i (+ i 1))
   )
@@ -99,6 +99,7 @@
   (0 1 0)
   (0 1 0)
 ))
+(print "")
 
 
 ; glider in an 8x8 universe

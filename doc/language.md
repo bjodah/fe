@@ -2,6 +2,26 @@
 
 ## Syntax
 
+### Reader Literals
+
+The reader accepts character literals as integers: `?a` is `97`, UTF-8 input is
+decoded to its Unicode codepoint, and the measured control/meta forms include
+`?\C-a` (`1`) and `?\M-a` (`134217825`). String escapes use the same strict
+table: `\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`, `\e`, `\d`, `\s`, `\\`,
+`\"`, exactly two hexadecimal digits after `\x`, and one to three octal
+digits. Unknown or incomplete escapes are read errors.
+
+Signed radix integers use `#x`, `#o`, and `#b`, for hexadecimal, octal, and
+binary respectively. An overflowing integer follows Fe's pre-bignum policy and
+becomes a double. Unsupported reader syntax is rejected rather than becoming a
+symbol: vectors (`[...]`), `#:`, other `#` dispatches, and symbol escapes are
+not part of Fe's subset.
+
+When reading a file or evaluated string, diagnostics identify the one-based
+line containing the top-level form, including runtime errors raised while that
+form is evaluated. Reader errors from the standalone `FeReadString` API retain
+their byte-offset diagnostics.
+
 A list is written `(` element … `)`. The final `cdr` may be given explicitly
 with a dot:
 

@@ -1,4 +1,4 @@
-(fset '# (lambda (a b)
+(fset 'concat (lambda (a b)
     (if (atom a)
         (cons a b)
       (if (not (cdr a))
@@ -10,11 +10,11 @@
                         (if (atom b) (cons b nil) b)))
         aa))))
 
-(assert-equals '(1 2 3 4 5 6) (# '(1 2 3) '(4 5 6)))
-(assert-equals '(1 2 3 4 5 6) (# '(1 2 3 4 5) 6))
-(assert-equals '(1 2 3 4 5 6) (# '(1 2 3 4 5) '(6)))
-(assert-equals '(1 2 3 4 5 6) (# '(1) '(2 3 4 5 6)))
-(assert-equals '(1 2 3 4 5 6) (# 1 '(2 3 4 5 6)))
+(assert-equals '(1 2 3 4 5 6) (concat '(1 2 3) '(4 5 6)))
+(assert-equals '(1 2 3 4 5 6) (concat '(1 2 3 4 5) 6))
+(assert-equals '(1 2 3 4 5 6) (concat '(1 2 3 4 5) '(6)))
+(assert-equals '(1 2 3 4 5 6) (concat '(1) '(2 3 4 5 6)))
+(assert-equals '(1 2 3 4 5 6) (concat 1 '(2 3 4 5 6)))
 
 (fset 'count (fn (xs)
     (let n 0)

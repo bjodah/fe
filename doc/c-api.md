@@ -29,6 +29,11 @@ static_assert(FE_API_VERSION == 6);
 static_assert(FE_LANGUAGE_VERSION == 7);
 ```
 
+Fe 8.0 keeps both compatibility macros unchanged. It is a reader and
+diagnostic release: unsupported syntax now errors instead of being misread,
+character and radix literals are supported, and evaluated source errors carry a
+one-based line number.
+
 Both macros moved 3 -> 4 together in sub-plan 05D of kg's Emacs-subset
 program, the numeric cut: 05A's placement (a) Decision had inserted
 `FeTInteger` into the public `FeType` enum immediately after `FeTDouble`,

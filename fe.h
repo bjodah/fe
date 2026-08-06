@@ -90,6 +90,8 @@
 // Version 7 protects `t`, `nil` and keyword symbols from value or function
 // assignment, and makes keywords self-evaluating. Programs that assigned `t`
 // now signal `setting-constant`; `:foo` no longer needs quoting.
+// Fe 8.0 adds strict reader diagnostics, UTF-8 character literals, radix
+// integers, and source-line diagnostics without changing either macro.
 #define FE_LANGUAGE_VERSION 7
 
 extern const char* FeVersion;

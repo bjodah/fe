@@ -269,7 +269,9 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # Raised 900 -> 980 by Phase 7 sub-plan 07A (2026-08-06), on the same 863/900
 # baseline, funding 07B's +50..80 pmccabe estimate. This is a phase fund, not
 # permission for an over-limit function or an unpriced primitive.
-PMCCABE_TOTAL_MAX ?= 980
+# Raised 980 -> 1090 by Phase 8 sub-plan 08A/08C: strict reader rejection,
+# shared escapes, UTF-8 character literals, radix integers and source lines.
+PMCCABE_TOTAL_MAX ?= 1090
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

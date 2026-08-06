@@ -97,8 +97,21 @@ static bool IsRendered(FeContext* context,
     // cppcheck-suppress constParameterCallback
     FeObject* stack) {
   ErrorState* state = FeGetUserData(context);
-  state->called = state->context == context &&
-                  strcmp(message, state->expected_message) == 0;
+  char expected_with_line[1024];
+  const char* expected = state->expected_message;
+  const char* separator = strstr(expected, ": ");
+  const char* colon = strchr(expected, ':');
+  const bool has_line =
+      colon != nullptr && colon[1] >= '0' && colon[1] <= '9' && colon[2] == ':';
+  if (strncmp(expected, "byte ", 5) != 0 && !has_line && separator != nullptr &&
+      strlen(expected) + 2 < sizeof(expected_with_line)) {
+    const size_t prefix = (size_t)(separator - expected);
+    memcpy(expected_with_line, expected, prefix);
+    strcpy(expected_with_line + prefix, ":1");
+    strcpy(expected_with_line + prefix + 2, separator);
+    expected = expected_with_line;
+  }
+  state->called = state->context == context && strcmp(message, expected) == 0;
   state->stack_was_nil = FeIsNil(stack);
   state->observed_completion = FeGetCompletion(context);
   state->completion_seen = true;
@@ -112,7 +125,7 @@ static bool TestContextCreation(void) {
   // only be checked here.
   static_assert(FE_API_VERSION == 6);
   static_assert(FE_LANGUAGE_VERSION == 7);
-  CHECK(strcmp(FeVersion, "7.0") == 0);
+  CHECK(strcmp(FeVersion, "8.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -728,11 +741,60 @@ static bool TestStringInput(void) {
   CHECK(ExpectEvaluationError(context, &state, "nul.fe", with_nul,
                               sizeof(with_nul), "nul.fe:1: embedded NUL byte"));
   CHECK(ExpectEvaluationError(context, &state, "syntax.fe", "1 (+ 2 3", 8,
-                              "syntax.fe:8: unclosed list"));
+                              "syntax.fe:1: unclosed list"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-syntax.fe", "6", 1), "6"));
   CHECK(ExpectEvaluationError(context, &state, "runtime.fe", "1 (car 2) 3", 11,
-                              "runtime.fe: expected pair, got integer"));
+                              "runtime.fe:1: expected pair, got integer"));
+  CHECK(IsRendered(context, FeReadString(context, "?a", 2, nullptr), "97"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\n", 3, nullptr), "10"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\t", 3, nullptr), "9"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\e", 3, nullptr), "27"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\\\", 3, nullptr), "92"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\s", 3, nullptr), "32"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\d", 3, nullptr), "127"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\x41", 5, nullptr), "65"));
+  CHECK(IsRendered(context, FeReadString(context, "?\\101", 5, nullptr), "65"));
+  CHECK(IsRendered(context, FeReadString(context, "?\xC3\xA9", 3, nullptr),
+                   "233"));
+  CHECK(IsRendered(context, FeReadString(context, "?\xE2\x82\xAC", 4, nullptr),
+                   "8364"));
+  CHECK(IsRendered(context,
+                   FeReadString(context, "?\xF0\x90\x80\x80", 5, nullptr),
+                   "65536"));
+  CHECK(IsRendered(
+      context, FeReadString(context, "?\\C-a", sizeof("?\\C-a") - 1, nullptr),
+      "1"));
+  CHECK(IsRendered(
+      context, FeReadString(context, "?\\M-a", sizeof("?\\M-a") - 1, nullptr),
+      "134217825"));
+  CHECK(IsRendered(context, FeReadString(context, "#x10", 4, nullptr), "16"));
+  CHECK(IsRendered(context, FeReadString(context, "#o17", 4, nullptr), "15"));
+  CHECK(IsRendered(context, FeReadString(context, "#b101", 5, nullptr), "5"));
+  CHECK(IsRendered(context, FeReadString(context, "#x-10", 5, nullptr), "-16"));
+  CHECK(IsRendered(context,
+                   FeReadString(context, "#x7fffffffffffffff", 18, nullptr),
+                   "9223372036854775807"));
+  CHECK(IsRendered(context,
+                   FeReadString(context, "#x8000000000000000", 18, nullptr),
+                   "9.223372036854776e+18"));
+  CHECK(IsRendered(context,
+                   FeReadString(context, "\"\\x41\\101\\e\\d\\s\"",
+                                sizeof("\"\\x41\\101\\e\\d\\s\"") - 1, nullptr),
+                   "AA\x1b\x7f "));
+  CHECK(ExpectReadError(context, &state, "#q", 2,
+                        "byte 1: unsupported read syntax: #"));
+  CHECK(ExpectReadError(context, &state, "[1 2]", 5,
+                        "byte 0: unsupported read syntax: vector brackets"));
+  CHECK(ExpectReadError(context, &state, "\"\\q\"", 4,
+                        "byte 2: unsupported read syntax: unknown escape"));
+  CHECK(ExpectReadError(context, &state, "?\\q", 3,
+                        "byte 2: unsupported read syntax: unknown escape"));
+  CHECK(ExpectEvaluationError(context, &state, "lines.fe", "\n(car 2)", 8,
+                              "lines.fe:2: expected pair, got integer"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "lines.fe", "\n[", 2,
+      "lines.fe:2: unsupported read syntax: vector brackets"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-runtime.fe", "7", 1), "7"));
 
@@ -793,7 +855,7 @@ static bool TestEvaluationControl(void) {
   const FeEvalOptions loop_options = {.step_limit = 32};
   CHECK(ExpectEvaluationOptionsError(
       context, &state, "loop.fe", loop, sizeof(loop) - 1, &loop_options,
-      "loop.fe: evaluation step limit exceeded"));
+      "loop.fe:1: evaluation step limit exceeded"));
   CHECK(IsRendered(context, FeEvaluateString(context, "recovered.fe", "5", 1),
                    "5"));
 

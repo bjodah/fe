@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "7.0";
+const char* FeVersion = "8.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -1308,7 +1308,7 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   const char* delimiter = " \n\t\r();`,";
   do {
     if (p == buf + sizeof(buf) - 1) {
-      FeHandleError(ctx, "symbol too long");
+      FeHandleError(ctx, "symbol too long (63-byte limit)");
     }
     *p++ = chr;
     chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
@@ -1346,6 +1346,204 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   return FeMakeSymbol(ctx, buf);
 }
 
+typedef struct EscapeValue {
+  int value;
+  size_t consumed;
+} EscapeValue;
+
+static int HexDigit(char chr) {
+  if (chr >= '0' && chr <= '9')
+    return chr - '0';
+  if (chr >= 'a' && chr <= 'f')
+    return chr - 'a' + 10;
+  if (chr >= 'A' && chr <= 'F')
+    return chr - 'A' + 10;
+  return -1;
+}
+
+static EscapeValue ReadEscape(FeContext* ctx, FeReadFn fn, void* udata) {
+  const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+  ctx->nextchr = '\0';
+  if (chr == '\0')
+    FeHandleError(ctx, "unclosed string");
+  switch (chr) {
+    case 'a':
+      return (EscapeValue){.value = '\a', .consumed = 1};
+    case 'b':
+      return (EscapeValue){.value = '\b', .consumed = 1};
+    case 't':
+      return (EscapeValue){.value = '\t', .consumed = 1};
+    case 'n':
+      return (EscapeValue){.value = '\n', .consumed = 1};
+    case 'v':
+      return (EscapeValue){.value = '\v', .consumed = 1};
+    case 'f':
+      return (EscapeValue){.value = '\f', .consumed = 1};
+    case 'r':
+      return (EscapeValue){.value = '\r', .consumed = 1};
+    case 'e':
+      return (EscapeValue){.value = 27, .consumed = 1};
+    case 'd':
+      return (EscapeValue){.value = 127, .consumed = 1};
+    case 's':
+      return (EscapeValue){.value = ' ', .consumed = 1};
+    case '\\':
+      return (EscapeValue){.value = '\\', .consumed = 1};
+    case '"':
+      return (EscapeValue){.value = '"', .consumed = 1};
+    default:
+      break;
+  }
+  if (chr == 'x') {
+    const int hi = HexDigit(fn(ctx, udata));
+    const int lo = HexDigit(fn(ctx, udata));
+    if (hi < 0 || lo < 0)
+      FeHandleError(ctx, "unsupported read syntax: \\x");
+    return (EscapeValue){.value = hi * 16 + lo, .consumed = 3};
+  }
+  if (chr >= '0' && chr <= '7') {
+    int value = chr - '0';
+    for (size_t i = 1; i < 3; i++) {
+      const char next = fn(ctx, udata);
+      if (next < '0' || next > '7') {
+        ctx->nextchr = next;
+        break;
+      }
+      value = value * 8 + next - '0';
+    }
+    return (EscapeValue){.value = value, .consumed = 1};
+  }
+  FeHandleError(ctx, "unsupported read syntax: unknown escape");
+}
+
+static bool IsValidUtf8Codepoint(int value, size_t count) {
+  const int minimum = count == 1 ? 0x80 : count == 2 ? 0x800 : 0x10000;
+  return value >= minimum && value <= 0x10ffff &&
+         (value < 0xd800 || value > 0xdfff);
+}
+
+static int ReadUtf8(FeContext* ctx, FeReadFn fn, void* udata, char lead) {
+  const unsigned char first = (unsigned char)lead;
+  if (first >= 0x80 && (first < 0xc2 || first > 0xf4)) {
+    FeHandleError(ctx, "unsupported read syntax: invalid UTF-8 character");
+  }
+  size_t count = first < 0x80 ? 0 : first < 0xe0 ? 1 : first < 0xf0 ? 2 : 3;
+  if (count == 0)
+    return first;
+  int value = first & ((1 << (6 - count)) - 1);
+  for (size_t i = 0; i < count; i++) {
+    const unsigned char byte = (unsigned char)fn(ctx, udata);
+    if ((byte & 0xc0) != 0x80) {
+      FeHandleError(ctx, "unsupported read syntax: invalid UTF-8 character");
+    }
+    value = (value << 6) | (byte & 0x3f);
+  }
+  if (!IsValidUtf8Codepoint(value, count)) {
+    FeHandleError(ctx, "unsupported read syntax: invalid UTF-8 character");
+  }
+  return value;
+}
+
+static FeObject* ReadCharacter(FeContext* ctx, FeReadFn fn, void* udata) {
+  char chr = fn(ctx, udata);
+  if (chr == '\\') {
+    chr = fn(ctx, udata);
+    bool control = false;
+    bool meta = false;
+    while (chr == 'C' || chr == 'M') {
+      const bool is_control = chr == 'C';
+      if (is_control ? control : meta) {
+        FeHandleError(ctx,
+                      "unsupported read syntax: duplicate character modifier");
+      }
+      if (fn(ctx, udata) != '-') {
+        FeHandleError(ctx,
+                      "unsupported read syntax: malformed character modifier");
+      }
+      control |= is_control;
+      meta |= !is_control;
+      chr = fn(ctx, udata);
+    }
+    int value;
+    if ((control || meta) && chr == '\\') {
+      value = ReadEscape(ctx, fn, udata).value;
+    } else if (!control && !meta) {
+      ctx->nextchr = chr;
+      value = ReadEscape(ctx, fn, udata).value;
+    } else {
+      value = ReadUtf8(ctx, fn, udata, chr);
+    }
+    if (control) {
+      if (value > 0x7f)
+        FeHandleError(ctx, "unsupported read syntax: control character");
+      value &= 0x1f;
+    }
+    if (meta)
+      value |= 1 << 27;
+    return FeMakeInteger(ctx, value);
+  }
+  return FeMakeInteger(ctx, ReadUtf8(ctx, fn, udata, chr));
+}
+
+typedef struct RadixDigits {
+  uint64_t magnitude;
+  double fallback;
+  size_t digits;
+  bool overflow;
+} RadixDigits;
+
+static RadixDigits ReadRadixDigits(FeContext* ctx,
+                                   FeReadFn fn,
+                                   void* udata,
+                                   int base,
+                                   char chr) {
+  char buf[64];
+  size_t length = 0;
+  RadixDigits result = {0};
+  while (chr && !strchr(" \n\t\r();`,", chr)) {
+    if (length == sizeof(buf) - 1)
+      FeHandleError(ctx, "symbol too long (63-byte limit)");
+    const int digit = HexDigit(chr);
+    if (digit < 0 || digit >= base) {
+      FeHandleError(ctx, "unsupported read syntax: malformed radix integer");
+    }
+    buf[length++] = chr;
+    result.digits++;
+    if (!result.overflow) {
+      if (result.magnitude > (UINT64_MAX - (unsigned)digit) / (unsigned)base) {
+        result.overflow = true;
+      } else {
+        result.magnitude = result.magnitude * (unsigned)base + (unsigned)digit;
+      }
+    }
+    result.fallback = result.fallback * base + digit;
+    chr = fn(ctx, udata);
+  }
+  if (result.digits == 0)
+    FeHandleError(ctx, "unsupported read syntax: malformed radix integer");
+  ctx->nextchr = chr;
+  return result;
+}
+
+static FeObject* ReadRadix(FeContext* ctx, FeReadFn fn, void* udata, int base) {
+  char chr = fn(ctx, udata);
+  char sign = '+';
+  if (chr == '+' || chr == '-') {
+    sign = chr;
+    chr = fn(ctx, udata);
+  }
+  const RadixDigits digits = ReadRadixDigits(ctx, fn, udata, base, chr);
+  const bool negative = sign == '-';
+  const uint64_t limit = negative ? (uint64_t)INT64_MAX + 1 : INT64_MAX;
+  if (!digits.overflow && digits.magnitude <= limit) {
+    if (negative && digits.magnitude == (uint64_t)INT64_MAX + 1)
+      return FeMakeInteger(ctx, INT64_MIN);
+    return FeMakeInteger(
+        ctx, negative ? -(int64_t)digits.magnitude : (int64_t)digits.magnitude);
+  }
+  return FeMakeDouble(ctx, negative ? -digits.fallback : digits.fallback);
+}
+
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata);
 
 bool IsNamedSymbol(const FeObject* v, const char* name) {
@@ -1364,6 +1562,50 @@ bool IsConstantSymbol(const FeObject* v) {
 
 static bool IsDot(const FeObject* v) {
   return IsNamedSymbol(v, ".");
+}
+
+static FeObject* ReadHash(FeContext* ctx, FeReadFn fn, void* udata) {
+  const char next = fn(ctx, udata);
+  if (next == '\'')
+    return ReadWrapped(ctx, fn, udata, "function", "stray '#''");
+  if (next == 'x' || next == 'X')
+    return ReadRadix(ctx, fn, udata, 16);
+  if (next == 'o' || next == 'O')
+    return ReadRadix(ctx, fn, udata, 8);
+  if (next == 'b' || next == 'B')
+    return ReadRadix(ctx, fn, udata, 2);
+  FeHandleError(ctx, "unsupported read syntax: #");
+}
+
+static FeObject* ReadStringLiteral(FeContext* ctx, FeReadFn fn, void* udata) {
+  FeObject* res = BuildString(ctx, NULL, '\0');
+  FeObject* value = res;
+  char chr = fn(ctx, udata);
+  while (chr != '"') {
+    if (chr == '\0')
+      FeHandleError(ctx, "unclosed string");
+    if (chr == '\\')
+      chr = (char)ReadEscape(ctx, fn, udata).value;
+    value = BuildString(ctx, value, chr);
+    chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+    ctx->nextchr = '\0';
+  }
+  return res;
+}
+
+static void RecordInputLine(FeContext* ctx, size_t* line, char chr) {
+  ctx->error_line = *line;
+  if (chr == '\n')
+    (*line)++;
+}
+
+static void RecordTopFormLine(FeContext* ctx) {
+  if (ctx->top_form_line == 0)
+    ctx->top_form_line = ctx->error_line;
+}
+
+static size_t TopFormLine(const FeContext* ctx) {
+  return ctx->top_form_line == 0 ? 1 : ctx->top_form_line;
 }
 
 // Reads the rest of a list, the opening '(' already consumed. A '.' is the
@@ -1426,6 +1668,13 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
   while (chr && strchr(" \n\t\r", chr)) {
     chr = fn(ctx, udata);
   }
+  RecordTopFormLine(ctx);
+  if (chr == '?')
+    return ReadCharacter(ctx, fn, udata);
+  if (chr == '[' || chr == ']')
+    FeHandleError(ctx, "unsupported read syntax: vector brackets");
+  if (chr == '\\')
+    FeHandleError(ctx, "unsupported read syntax: symbol escape");
 
   switch (chr) {
     case '\0':
@@ -1433,7 +1682,8 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
 
     case ';':
       while (chr && chr != '\n') {
-        chr = fn(ctx, udata);
+        chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+        ctx->nextchr = '\0';
       }
       return Read(ctx, fn, udata);
 
@@ -1458,38 +1708,10 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
       return ReadWrapped(ctx, fn, udata, "unquote", "stray ','");
     }
 
-    // `#` is an ordinary symbol character, so only `#'` is a reader macro.
-    // Since sub-plan 04D's Lisp-2 cut, `#'x` reads as `(function x)` -- the
-    // same `ReadWrapped` construction every other reader macro uses, so a
-    // missing operand keeps the `stray '#''` diagnostic.
-    case '#': {
-      const char next = fn(ctx, udata);
-      if (next == '\'') {
-        return ReadWrapped(ctx, fn, udata, "function", "stray '#''");
-      }
-      ctx->nextchr = next;
-      return ReadAtom(ctx, fn, udata, chr);
-    }
-
-    case '"': {
-      FeObject* res = BuildString(ctx, NULL, '\0');
-      FeObject* v = res;
-      chr = fn(ctx, udata);
-      while (chr != '"') {
-        if (chr == '\0') {
-          FeHandleError(ctx, "unclosed string");
-        }
-        if (chr == '\\') {
-          chr = fn(ctx, udata);
-          if (memchr("nrt", chr, 3) != nullptr) {
-            chr = strchr("n\nr\rt\t", chr)[1];
-          }
-        }
-        v = BuildString(ctx, v, chr);
-        chr = fn(ctx, udata);
-      }
-      return res;
-    }
+    case '#':
+      return ReadHash(ctx, fn, udata);
+    case '"':
+      return ReadStringLiteral(ctx, fn, udata);
 
     default:
       return ReadAtom(ctx, fn, udata, chr);
@@ -1517,6 +1739,7 @@ typedef struct StringInput {
   const char* source;
   size_t length;
   size_t* offset;
+  size_t line;
 } StringInput;
 
 static char ReadString(FeContext* ctx, void* udata) {
@@ -1532,6 +1755,7 @@ static char ReadString(FeContext* ctx, void* udata) {
   if (chr == '\0') {
     FeHandleError(ctx, "embedded NUL byte");
   }
+  RecordInputLine(ctx, &input->line, chr);
   return chr;
 }
 
@@ -1544,9 +1768,12 @@ FeObject* FeReadString(FeContext* ctx,
   const char* saved_label = ctx->error_label;
   const size_t saved_offset = ctx->error_offset;
   const bool saved_has_offset = ctx->error_has_offset;
+  const size_t saved_line = ctx->error_line;
+  const bool saved_has_line = ctx->error_has_line;
   ctx->error_label = nullptr;
   ctx->error_offset = *position;
   ctx->error_has_offset = true;
+  ctx->error_has_line = false;
   ctx->nextchr = '\0';
   if (source == nullptr && length != 0) {
     FeHandleError(ctx, "null source");
@@ -1555,7 +1782,8 @@ FeObject* FeReadString(FeContext* ctx,
     FeHandleError(ctx, "offset exceeds source length");
   }
 
-  StringInput input = {.source = source, .length = length, .offset = position};
+  StringInput input = {
+      .source = source, .length = length, .offset = position, .line = 1};
   FeObject* result = FeRead(ctx, ReadString, &input);
   if (ctx->nextchr != '\0') {
     (*position)--;
@@ -1564,6 +1792,8 @@ FeObject* FeReadString(FeContext* ctx,
   ctx->error_label = saved_label;
   ctx->error_offset = saved_offset;
   ctx->error_has_offset = saved_has_offset;
+  ctx->error_line = saved_line;
+  ctx->error_has_line = saved_has_line;
   return result;
 }
 
@@ -1599,27 +1829,36 @@ static FeObject* EvaluateInput(FeContext* ctx,
   const char* saved_label = ctx->error_label;
   const size_t saved_offset = ctx->error_offset;
   const bool saved_has_offset = ctx->error_has_offset;
+  const size_t saved_line = ctx->error_line;
+  const bool saved_has_line = ctx->error_has_line;
   const size_t gc = FeSaveGC(ctx);
   ctx->error_label = label;
   ctx->error_has_offset = true;
+  ctx->error_has_line = true;
+  ctx->error_line = 1;
+  ctx->top_form_line = 0;
   ctx->nextchr = '\0';
   ctx->evaluation_result = &nil;
 
   while (true) {
     FeRestoreGC(ctx, gc);
-    ctx->error_has_offset = true;
+    ctx->error_has_offset = false;
+    ctx->error_has_line = true;
     FeObject* object = FeRead(ctx, read, input);
     if (object == nullptr) {
       break;
     }
-    ctx->error_has_offset = false;
+    ctx->error_line = TopFormLine(ctx);
     ctx->evaluation_result = FeEvaluate(ctx, object);
+    ctx->top_form_line = 0;
   }
 
   FeRestoreGC(ctx, gc);
   ctx->error_label = saved_label;
   ctx->error_offset = saved_offset;
   ctx->error_has_offset = saved_has_offset;
+  ctx->error_line = saved_line;
+  ctx->error_has_line = saved_has_line;
   return ctx->evaluation_result;
 }
 
@@ -1628,7 +1867,8 @@ FeObject* FeEvaluateString(FeContext* ctx,
                            const char* source,
                            size_t length) {
   size_t offset = 0;
-  StringInput input = {.source = source, .length = length, .offset = &offset};
+  StringInput input = {
+      .source = source, .length = length, .offset = &offset, .line = 1};
   return EvaluateInput(ctx, label, ReadString, &input);
 }
 
@@ -1646,6 +1886,7 @@ FeObject* FeEvaluateStringWithOptions(FeContext* ctx,
 typedef struct FileInput {
   FILE* file;
   size_t offset;
+  size_t line;
 } FileInput;
 
 static char ReadEvaluatedFile(FeContext* ctx, void* udata) {
@@ -1665,11 +1906,12 @@ static char ReadEvaluatedFile(FeContext* ctx, void* udata) {
     FeHandleError(ctx, "embedded NUL byte");
   }
   input->offset++;
+  RecordInputLine(ctx, &input->line, (char)chr);
   return (char)chr;
 }
 
 FeObject* FeEvaluateFile(FeContext* ctx, const char* label, FILE* file) {
-  FileInput input = {.file = file, .offset = 0};
+  FileInput input = {.file = file, .offset = 0, .line = 1};
   return EvaluateInput(ctx, label, ReadEvaluatedFile, &input);
 }
 

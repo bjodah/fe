@@ -582,14 +582,25 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
                                          FeCompletion kind,
                                          const char* msg) {
   char message[1024];
-  switch ((ctx->error_label != nullptr) * 2 + ctx->error_has_offset) {
-    case 3:
+  switch ((ctx->error_label != nullptr) * 4 + ctx->error_has_line * 2 +
+          ctx->error_has_offset) {
+    case 7:
       Format(message, sizeof(message), "%s:%zu: %s", ctx->error_label,
-             ctx->error_offset, msg);
+             ctx->error_line, msg);
       msg = message;
       break;
-    case 2:
+    case 6:
+      Format(message, sizeof(message), "%s:%zu: %s", ctx->error_label,
+             ctx->error_line, msg);
+      msg = message;
+      break;
+    case 4:
       Format(message, sizeof(message), "%s: %s", ctx->error_label, msg);
+      msg = message;
+      break;
+    case 5:
+      Format(message, sizeof(message), "%s:%zu: %s", ctx->error_label,
+             ctx->error_offset, msg);
       msg = message;
       break;
     case 1:
