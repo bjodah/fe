@@ -201,7 +201,17 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # scc and pmccabe; the top of that range funds it before implementation, as in
 # 03A/04A/05A/06A. The per-file raise funds fe_eval.c's measured 440 and the
 # new validation path; a new function still must stay at or below 15.
-SCC_COMPLEXITY_MAX ?= 760
+# Raised an eighth time by Phase 9 sub-plan 09A's Decision 7 (2026-08-06),
+# funding 09B (catchable exhaustion conditions) and 09C (the flat-stack mark
+# phase) by name. The measured starting tree is 746/760 scc with fe_eval.c at
+# 489 and fe.c at 140 against the 520 file cap; Phase 9 is priced fe +30..50
+# scc, which breaches the total at the *bottom* of its band, so the cap moves
+# by the top of the band plus the same small margin 03A/04A/05A/06A/07A used.
+# The per-file cap is NOT raised and does not need to be: 09B's plumbing and
+# 09C's mark rewrite both land in fe.c (140/520) and fe_eval.c (489/520), and
+# a file crossing 520 in this phase would be a design signal, not a funding
+# one. 09D re-sets both totals to the measured actuals at the phase close.
+SCC_COMPLEXITY_MAX ?= 820
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -282,7 +292,14 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # per-symbol manifest under .ci/pmccabe-baseline.json is the ratchet that
 # stops a symbol growing inside this envelope; this number stops the tree
 # growing as a whole, and the next phase to want room prices it explicitly.
-PMCCABE_TOTAL_MAX ?= 1056
+# Raised 1056 -> 1120 by Phase 9 sub-plan 09A's Decision 7 (2026-08-06),
+# funding 09B and 09C by name. The measured starting total is 1056 across
+# 339 symbols -- the cap sits *exactly* on the number, so the phase breaches
+# it at its first point; +30..50 is the priced band and 1120 is its top plus
+# the usual small margin. Proved live before the raise landed by temporarily
+# setting it to 1055 and watching `make pmccabe-check` fail, then restoring.
+# 09D re-sets this to the measured actual at the phase close.
+PMCCABE_TOTAL_MAX ?= 1120
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
