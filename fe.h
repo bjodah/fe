@@ -267,6 +267,19 @@ void FeSetStrictArity(FeContext* ctx, bool strict);
 [[nodiscard]] bool FeIsNil(const FeObject* obj);
 [[nodiscard]] FeObject* FeNil(FeContext* ctx);
 
+typedef struct FeEvalState {
+  size_t frame_stack_index;
+  size_t run_base;
+  size_t native_reentry_depth;
+  void* evaluator_catch;
+  void* condition_catch;
+  void* call_list;
+  FeCompletion completion;
+} FeEvalState;
+
+[[nodiscard]] FeEvalState FeSaveEvalState(const FeContext* ctx);
+void FeRestoreEvalState(FeContext* ctx, const FeEvalState* state);
+
 void FePushGC(FeContext* ctx, FeObject* obj);
 void FeRestoreGC(FeContext* ctx, size_t idx);
 [[nodiscard]] size_t FeSaveGC(const FeContext* ctx);
