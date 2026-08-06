@@ -276,9 +276,19 @@ FeObject* FeNil(FeContext*) {
   return &nil;
 }
 
+// The ordinary ceiling stops `GcStackReserve` slots short of the array, and
+// only a completion already in flight may spend the rest -- `AllocateFrame`'s
+// reserve, applied to the other bounded stack. Reporting an overflow roots
+// objects of its own, so a raise that started from a genuinely full stack
+// came straight back here: `FeHandleError` built its condition string,
+// `FeMakeString` called `MakeObject`, `MakeObject` called `FePushGC`, and the
+// C stack died before the Lisp error ever surfaced.
 void FePushGC(FeContext* ctx, FeObject* obj) {
-  if (ctx->gc_stack_index == GcStackSize) {
-    FeHandleError(ctx, "GC stack overflow");
+  const size_t limit = ctx->completion == FeCompletionNormal
+                           ? GcStackSize - GcStackReserve
+                           : GcStackSize;
+  if (ctx->gc_stack_index >= limit) {
+    RaiseGcStackOverflow(ctx);
   }
   ctx->gc_stack[ctx->gc_stack_index++] = obj;
   if (ctx->gc_stack_index > ctx->arena_peak_gc_stack_depth) {

@@ -5738,6 +5738,111 @@ static bool TestMixedCleanupLIFO(void) {
   return true;
 }
 
+// Fills the root stack from inside a native so the overflow report itself is
+// the thing under test.
+static FeObject* PushRootsPastTheLimit(FeContext* context,
+                                       FeObject* arguments) {
+  (void)arguments;
+  for (size_t i = 0; i <= GcStackSize; i++) {
+    FePushGC(context, FeNil(context));
+  }
+  return FeNil(context);
+}
+
+// Builds `HEAD 1 2 ... COUNT TAIL`, evaluates it, and compares the rendering.
+static bool EvaluateLongCall(FeContext* context,
+                             char* source,
+                             size_t size,
+                             const char* head,
+                             const char* tail,
+                             size_t count,
+                             const char* expected) {
+  int written = snprintf(source, size, "%s", head);
+  if (written <= 0 || (size_t)written >= size) {
+    return false;
+  }
+  size_t used = (size_t)written;
+  for (size_t i = 1; i <= count; i++) {
+    written = snprintf(source + used, size - used, " %zu", i);
+    if (written <= 0 || (size_t)written >= size - used) {
+      return false;
+    }
+    used += (size_t)written;
+  }
+  written = snprintf(source + used, size - used, "%s", tail);
+  if (written <= 0 || (size_t)written >= size - used) {
+    return false;
+  }
+  used += (size_t)written;
+  return IsRendered(context, FeEvaluateString(context, "long.fe", source, used),
+                    expected);
+}
+
+// A call's root-stack cost must not grow with its argument count, and the
+// overflow report must be an error rather than a crash.
+//
+// Both halves are the same defect. `ArgsToEnv` consed the argument list twice
+// on the way to a `&rest` parameter and `ResumeArguments` left every
+// accumulator cell on the root stack, so a call cost three `FePushGC` slots
+// per argument and passed 4096 at roughly 1400 arguments -- and the report
+// for that was `FeHandleError`, which allocates, which pushes, which
+// overflowed again, without bound, until the C stack died with SIGSEGV.
+// So the assertion is a *constant*: the 3000-argument calls may not cost one
+// root-stack slot more than the 1500-argument ones.
+static bool TestLongArgumentLists(void) {
+  const size_t arena_size = 32ULL * 1024 * 1024;
+  unsigned char* arena = malloc(arena_size);
+  CHECK(arena != nullptr);
+  FeContext* context = FeOpenContext(arena, arena_size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  const size_t source_size = 64 * 1024;
+  char* source = malloc(source_size);
+  CHECK(source != nullptr);
+
+  // Every spelling that collects a tail: `&rest`, Fe's dotted tail, and the
+  // same shapes reached through `apply`'s spread rather than written out.
+  static const size_t counts[] = {1500, 3000};
+  size_t peaks[2] = {0, 0};
+  for (size_t pass = 0; pass < 2; pass++) {
+    const size_t count = counts[pass];
+    CHECK(EvaluateLongCall(context, source, source_size,
+                           "((fn (a &rest r) (car r))", ")", count, "2"));
+    CHECK(EvaluateLongCall(context, source, source_size,
+                           "((fn (a . r) (car r))", ")", count, "2"));
+    CHECK(EvaluateLongCall(context, source, source_size,
+                           "(apply (fn (a &rest r) (car r)) (list", "))", count,
+                           "2"));
+    CHECK(EvaluateLongCall(context, source, source_size, "((fn (a &rest r) a)",
+                           ")", count, "1"));
+    peaks[pass] = FeGetArenaStats(context).peak_gc_stack_depth;
+  }
+  printf("gc stack across argument counts: %zu args=%zu %zu args=%zu\n",
+         counts[0], peaks[0], counts[1], peaks[1]);
+  CHECK(peaks[0] == peaks[1]);
+  CHECK(peaks[1] < GcStackSize - GcStackReserve);
+
+  // And the overflow itself, provoked directly, is a reportable Lisp error.
+  FeDefineNative(context, "push-roots", PushRootsPastTheLimit);
+  CHECK(ExpectEvaluationError(context, &state, "overflow.fe", "(push-roots)",
+                              strlen("(push-roots)"),
+                              "overflow.fe: GC stack overflow"));
+  // The context survives it: the barrier restored the stack, so ordinary
+  // evaluation continues in the same context.
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "after.fe", "(+ 1 2)", strlen("(+ 1 2)")),
+      "3"));
+
+  free(source);
+  FeCloseContext(context);
+  free(arena);
+  return true;
+}
+
 // The GC stack must not grow with Lisp nesting. Every frame is a mark-phase
 // root, so an intermediate result needs no separate `FePushGC`: it is
 // delivered straight into the frame below's `callee`. Before that held, each
@@ -5836,9 +5941,9 @@ int main(void) {
                  TestCleanupRunGC() && TestPrimitiveOrder() &&
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestCatchThrow() && TestConditionCaseResumesControl() &&
-                 TestQuitIsCatchable() && TestProtectedCall() &&
-                 TestHostRaiseCompletion()
+                 TestLongArgumentLists() && TestCatchThrow() &&
+                 TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
+                 TestProtectedCall() && TestHostRaiseCompletion()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

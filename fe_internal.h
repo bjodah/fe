@@ -134,6 +134,15 @@ enum {
   // native recursion (`Read`/`ReadList`) and the writer's, neither of which
   // go through the frame machine.
   GcStackSize = 4096,
+  // The tail of `gc_stack` an ordinary push may not reach, the direct
+  // analogue of `AllocateFrame`'s `CleanupFrameReserve`: reporting an
+  // overflow is itself a rooting operation (`RaiseCompletionCore` protects
+  // the condition object across the cleanup drain, and a cleanup entry
+  // evaluates Lisp of its own), so a raise that starts from a completely
+  // full stack re-enters `FePushGC` and recurses. Only an in-flight
+  // completion (`ctx->completion != FeCompletionNormal`) may use these
+  // slots; see `FePushGC`.
+  GcStackReserve = 64,
   StringBufferSize = (sizeof(FeObject*) - 1),
   DefaultEvalPollInterval = 1024,
   // Cleanup entries are pushed only by `unwind-protect` and
@@ -699,5 +708,6 @@ size_t RenderObject(FeContext* ctx,
                                    FeObject* function,
                                    size_t argc,
                                    const char* message);
+[[noreturn]] void RaiseGcStackOverflow(FeContext* ctx);
 
 #endif

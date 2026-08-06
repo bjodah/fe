@@ -646,6 +646,29 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   RaiseNativeArity(ctx, function, argc, "wrong-number-of-arguments");
 }
 
+// The one raise that may not allocate. Every allocation pushes a root onto
+// the very stack that has just filled, so the ordinary route out
+// (`FeHandleError` -> `FeMakeString` -> `MakeObject` -> `FePushGC`) re-enters
+// the overflow check and recurses until the C stack dies -- which is how a
+// 1500-argument `&rest` call reached SIGSEGV instead of an error. This
+// completion therefore carries the nil condition object arena exhaustion
+// already uses, and nothing on the way to `RaiseCompletion` allocates.
+//
+// `GcStackReserve` slots stay free for the unwind itself, so the raise below
+// can root what it needs. Past them there is nothing left to unwind with and
+// no way to widen a fixed array, so that case takes the same host-notify-and-
+// abort exit `RaiseCompletion` takes when no barrier can catch at all.
+[[noreturn]] void RaiseGcStackOverflow(FeContext* ctx) {
+  if (ctx->gc_stack_index >= GcStackSize) {
+    if (ctx->error_fn != nullptr) {
+      ctx->error_fn(ctx, "GC stack overflow while unwinding", &nil);
+    }
+    abort();
+  }
+  ctx->condition = &nil;
+  RaiseCompletion(ctx, FeCompletionError, "GC stack overflow");
+}
+
 // `wrong-type-argument` with Emacs' `(PREDICATE VALUE)` data. `CheckType`
 // builds the same shape from the type it wanted; this is for the sites that
 // know the predicate by name because they accept more than one type.
@@ -839,24 +862,18 @@ static void ValidateParameters(FeContext* ctx, FeObject* prm) {
   }
 }
 
-static FeObject* CopyArgumentList(FeContext* ctx, FeObject* list) {
-  FeObject* copy = &nil;
-  while (!FeIsNil(list)) {
-    copy = FeCons(ctx, CAR(list), copy);
-    list = CDR(list);
-  }
-  FeObject* result = &nil;
-  while (!FeIsNil(copy)) {
-    result = FeCons(ctx, CAR(copy), result);
-    copy = CDR(copy);
-  }
-  return result;
-}
-
 // Binds a lambda or macro parameter list to an argument list. Three spellings
 // collect the remaining arguments: Fe's dotted tail `(a . r)`, Fe's bare symbol
 // `r`, and Emacs Lisp's `(a &rest r)`. Bare symbols and dotted tails are Fe's
 // deliberate variadic spellings; proper lambda lists are otherwise strict.
+//
+// A rest parameter is bound to the argument list itself, never to a copy of
+// it. For an ordinary call that list is the freshly consed evaluated-operand
+// list `ResumeArguments` just built, so 07A row L9's per-call freshness holds
+// without copying anything; for a macro it is the caller's raw source tail,
+// which is what Emacs binds too. The copy this used to make cost two conses
+// per argument, each one a `FePushGC` on the caller's frame, and overflowed
+// the 4096-slot root stack at roughly 1400 arguments.
 static FeObject* ArgsToEnv(FeContext* ctx,
                            FeObject* prm,
                            FeObject* arg,
@@ -868,7 +885,7 @@ static FeObject* ArgsToEnv(FeContext* ctx,
   while (!FeIsNil(prm)) {
     EvaluationStep(ctx);
     if (FeGetType(prm) != FeTPair) {
-      return Bind(ctx, env, prm, CopyArgumentList(ctx, arg));
+      return Bind(ctx, env, prm, arg);
     }
     FeObject* name = CAR(prm);
     prm = CDR(prm);
@@ -883,7 +900,7 @@ static FeObject* ArgsToEnv(FeContext* ctx,
       if (!FeIsNil(CDR(prm))) {
         RaiseNamedError(ctx, "invalid-function", "invalid-function");
       }
-      return Bind(ctx, env, CAR(prm), CopyArgumentList(ctx, arg));
+      return Bind(ctx, env, CAR(prm), arg);
     }
     if (FeGetType(name) != FeTSymbol) {
       RaiseNamedError(ctx, "invalid-function", "invalid-function");
@@ -1718,6 +1735,12 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
   }
   if (!FeIsNil(frame->rest)) {
     EvaluationStep(ctx);
+    // `ResumeBody`'s rule, for the same reason: the accumulator cons just
+    // made is a frame field and therefore a mark-phase root, so it does not
+    // also need a GC-stack slot. Without this restore a call's root-stack
+    // cost grew with its argument count and a long enough argument list
+    // overflowed the stack rather than the arena.
+    FeRestoreGC(ctx, frame->gc_checkpoint);
     PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
                         NULL);
     return false;
@@ -1747,7 +1770,9 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
   FeObject* const head = CAR(frame->expr);
   FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
   const size_t argc = CountRawArguments(ctx, CDR(frame->expr));
-  // Keep the evaluated list rooted while strict rest binding copies it.
+  // Keep the evaluated list rooted across `ArgsToEnv`'s own allocations: the
+  // GC-stack slots that used to hold it are released once per delivered
+  // argument, above, so this frame field is now its only root.
   frame->accumulator = arguments;
   frame->env = ArgsToEnv(ctx, CAR(vb), arguments, CAR(va), identity, argc);
   frame->rest = CDR(vb);
@@ -2954,6 +2979,11 @@ static bool ResumeEvalList(FeContext* ctx,
   }
   if (!FeIsNil(frame->rest)) {
     EvaluationStep(ctx);
+    // `ResumeArguments`/`ResumeBody`'s rule: the accumulator is a frame
+    // field and so a mark-phase root already, and holding a GC-stack slot
+    // per operand as well made `(list 1 2 ... N)` overflow the root stack
+    // at N around 4000 instead of at the arena's own limit.
+    FeRestoreGC(ctx, frame->gc_checkpoint);
     PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
                         NULL);
     return false;
