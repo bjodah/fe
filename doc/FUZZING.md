@@ -109,6 +109,35 @@ by exhausting the arena, and the arena is a fixed `FuzzArenaSize`, so the
 iteration count is bounded by the object slots it holds -- a few hundred, not
 by the input -- with the harness's own `MaxEvaluationSteps` behind that.
 
+Phase 9's second arm (09C) is the collector's. `MaxDepth` bounds the grammar's
+own recursion and `BuildMutation` keeps `setcar`/`setcdr` acyclic, so from this
+lane the mark phase was only ever asked to walk shallow, acyclic graphs -- the
+two shapes 09C's rewrite exists for, a deep `car` spine and a cycle, were
+unreachable by construction. `BuildDeepGraph` emits
+
+```clojure
+(let ((d nil) (i 0))
+  (while (< i LEVELS) (do (setq i (+ i 1)) (setq d (cons d nil))))
+  [(setcdr d d)]                       ; half the arms
+  (while (< i CHURN) (do (setq i (+ i 1)) (cons i i)))
+  i)
+```
+
+-- a `car` chain 8..207 levels deep, closed into a cycle half the time, with
+enough churn over the top of it to force several collections while it is live.
+Both loops are bounded by constants compiled into the form rather than by the
+input, and the form returns a number, so nothing deep or cyclic reaches the
+harness's own `FeToString`. Measured over the same 800 random inputs: 184 reach
+the arm, building 226 graphs of which 118 are cyclic, up to 206 levels deep,
+across 838 collections. `MaxDepth` also went 4 -> 6 in the same slice, so the
+rest of the grammar builds structures the collector has to walk further into.
+
+The harness's arena stays 64 KiB deliberately, and is *not* enlarged for this:
+the tracked `cons-second-operand-gc` seed reproduces only at that arena's
+collection rate ("a roomier one collects too rarely to land on that exact
+allocation"), and the depth this arm needs comes from its own loop rather than
+from arena size.
+
 The atom pool includes `t`, `:fuzz-keyword`, and the ordinary `:` symbol;
 binding targets independently choose `t`, `nil`, the keyword, or `x`. This
 makes protected `setq`/`let` writes and keyword self-evaluation reachable
@@ -117,8 +146,9 @@ rather than relying on incidental symbol generation.
 `fuzz/seeds/eval` carries one hand-built seed per group
 (`error-format-directives`, `condition-case-handlers`,
 `catch-throw-cleanup-gap`, `strict-arity`,
-`exhaustion-under-condition-case`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED`
-prints the forms each one builds.
+`exhaustion-under-condition-case`, `deep-car-collection`,
+`cyclic-collection`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints the forms
+each one builds.
 
 The evaluator grammar's lambda builder covers zero, one, and two required
 parameters, `&optional`, `&rest`, malformed declarations, and deliberate

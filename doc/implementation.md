@@ -897,19 +897,69 @@ design document names. `FeHandleError()`'s drain-to-zero is unchanged: an
 *error* still goes to the host; only the throw path uses the checkpointed
 drain.
 
+## The Mark Phase
+
+The collector's mark phase walks the object graph without recursion and
+without allocating: it is Deutsch-Schorr-Waite pointer reversal, and it stores
+its own return path inside the objects it is walking. Until sub-plan 09C it
+recursed once per `car` level -- the `cdr` spine was already a loop -- which
+cost 48 bytes of C stack per level in the default build (32 at `-Os`, 64 under
+ASan, 80 under MSan) and took the process down inside the collector at, measured
+by bisection on an 8 MiB stack, between 130 000 and 150 000 levels. That depth
+is reachable from pure Lisp in any arena of about 4.9 MiB, and was reachable in
+kg's 1 MiB arena as soon as the process stack limit dropped to 1280 KiB.
+`test_api.c`'s `TestMarkStackProbe` is the gate: the collector's C-stack
+high-water mark, read from inside a `mark_fn` at the bottom of a `car` chain
+10, 1 000 and 100 000 levels deep, must stay within 2 KiB of the same probe
+fired with no chain at all.
+
+The encoding is two spare low bits of a **pair's** `car` word. Every object is
+at least 8-byte aligned, so bits 0-2 of a pointer stored there are free: bit 0
+stays clear so `FeGetType()` keeps answering `FeTPair`, bit 1 is `GcMarkBit`
+-- which the recursive walk already stored inside a pair's car pointer, and
+which the sweep's `TAG(obj) &= ~GcMarkBit` puts back -- and bit 2 is
+`GcMarkCdrBit`, which says which half of the pair the walk is in:
+
+| state | `car` | `cdr` |
+|---|---|---|
+| car half | parent \| mark | the pair's own cdr |
+| cdr half | the pair's own car \| mark \| cdr bit | parent |
+| finished | the pair's own car \| mark | the pair's own cdr |
+
+An object with exactly one pointer child -- `fn`, `macro`, `symbol`, `string`,
+whose `car` word is a type tag (plus, for a string, seven bytes of text) and
+never a pointer -- needs no state bit: its link is always in `cdr`, and the
+ascent tells it from a pair by its type. Everything else is a leaf.
+
+Two invariants make this safe. Every intermediate state keeps `GcMarkBit` set
+and bit 0 clear, so `FeGetType()` never lies about a cell and a cycle that
+comes back around stops at the mark check exactly as it did before; and every
+path out of the walk restores the cell it leaves, so the sweep sees the tags
+the recursive walk would have left it. The graph *is* scrambled while the walk
+is inside it, but collection is stop-the-world, so the only code that can
+observe that is the host's `mark_fn`. A `mark_fn` may call `FeMark()` -- an
+object the walk is inside is already marked, so a nested walk stops at it
+immediately -- but must not read `car`/`cdr` of anything but the object it was
+handed; `doc/c-api.md` says so.
+
+The alternative considered and rejected was an explicit worklist. Bounding one
+for *any* data shape costs one slot per object, which for kg's 1 MiB arena is
+56 224 pointers -- 439 KiB, 43% of the whole arena -- and growing one on demand
+puts a failable allocation inside the one routine that runs after allocation
+has already failed. Pointer reversal costs neither.
+
 ## Known Issues
 
 The implementation has some known issues. These exist as a side effect of trying
 to keep the implementation concise, but should not hinder normal usage.
 
-* The garbage collector recurses on the `car` of objects; thus, deeply nested
-  `car`s may overflow the C stack. An object’s `cdr` is looped on and will not
-  overflow the stack. `FeMark()` also has no cycle detection of its own; it
-  relies on the mark bit, which the writer has no equivalent of. The writer
-  used to share the recursion and shares it no longer: `WriteObject()` bounds
-  `car` nesting with an explicit depth budget and walks the `cdr` spine with
-  two pointers, so the two are no longer the same shape and should not be
-  changed as if they were.
+* `FeMark()` has no cycle detection of its own; it relies on the mark bit,
+  which the writer has no equivalent of. The writer used to share the
+  collector's recursion and shares it no longer: `WriteObject()` bounds `car`
+  nesting with an explicit depth budget and walks the `cdr` spine with two
+  pointers, so the two are not the same shape and should not be changed as if
+  they were. (The collector's own `car` recursion, which this entry used to
+  describe as a known issue, is gone -- see "The Mark Phase" below.)
 * The storage of an object’s type and GC mark assumes a little-endian system and
   will not work correctly on systems of other endianness.
 * Proper tailcalls are not implemented — `while` can be used for iterating over

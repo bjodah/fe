@@ -126,6 +126,14 @@ enum {
   OtherCell = 1,
   // The 2nd-lowest-order bit of `Value.c` is the mark bit:
   GcMarkBit = 2,
+  // And the 3rd, on a *pair* only, is which half of that pair the mark phase
+  // is currently inside (sub-plan 09C's pointer reversal; `FeMark` documents
+  // the encoding). It is meaningless -- and must never be set -- on any other
+  // cell, whose `car` word holds `type << GcMarkBit | OtherCell` and so uses
+  // this bit as the low bit of the type. No object is less than 8-byte
+  // aligned, so a pointer stored in a pair's `car` or `cdr` leaves bits 0-2
+  // free for exactly this.
+  GcMarkCdrBit = 4,
   // TODO: This should scale with arena size?
   // A self-recursive Fe call no longer costs any GC-stack slots at all
   // (every live pair form roots its own operands as frame fields --

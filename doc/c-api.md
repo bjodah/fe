@@ -186,6 +186,16 @@ use must remain valid until replaced or until `FeCloseContext()` returns. The
 mark and GC callbacks can run during any operation that allocates an Fe object,
 including context close.
 
+The mark callback runs *inside* the mark phase, which since sub-plan 09C walks
+the object graph by pointer reversal: while the walk is in progress the
+`car`/`cdr` fields of the objects between the roots and the one being marked
+hold the collector's return path, not their own values. A mark callback may
+call `FeMark()` on anything (an object the walk is inside is already marked, so
+a nested walk stops at it immediately), and may read the object it was handed;
+it must not read `car`/`cdr` of anything else, and must not allocate. The
+collector puts every field back before it returns, so nothing outside the
+callback can observe any of it.
+
 Lambda and macro arity is always strict. Missing required arguments and
 leftover arguments raise `wrong-number-of-arguments`; missing `&optional`
 parameters bind `nil`, and `&rest` receives a fresh list. Fe's dotted-tail and

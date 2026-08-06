@@ -62,6 +62,15 @@ the defect rather than its hash, and say in the commit which fix it pins.
   (see `doc/FUZZING.md`), which is why this is a reachability seed rather
   than a crash reproduction.
 
+- `deep-car-collection`, `cyclic-collection` -- Phase 9 sub-plan 09C's pair,
+  12 bytes each: four rounds of `BuildDeepGraph` at 100 levels, acyclic and
+  cyclic respectively. Replayed without mutation each one builds 4 graphs and
+  drives 19 collections over them, so a fresh checkout's `make fuzz-eval-smoke`
+  walks a deep `car` spine and a `setcdr` cycle through the rewritten mark
+  phase on every run. Like the seeds above these are reachability seeds, not
+  crash reproductions: before the arm existed the grammar could not build
+  either shape at all.
+
   Not every bucket has a dedicated seed: the empty and single-required
   parameter lists are what the pre-Phase-7 grammar generated unconditionally
   and are reached by any mutation, so they get no file of their own.

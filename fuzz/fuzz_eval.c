@@ -9,7 +9,7 @@
 #include "fe.h"
 
 enum {
-  MaxDepth = 4,
+  MaxDepth = 6,
   MaxInputSize = 4096,
   MaxEvaluationSteps = 10000,
 };
@@ -480,6 +480,62 @@ static FeObject* BuildExhaustionForm(FeContext* ctx,
                   3);
 }
 
+// Sub-plan 09C's mark-phase shapes. The grammar's own recursion is capped at
+// `MaxDepth` and `BuildMutation` deliberately keeps `setcar`/`setcdr` acyclic,
+// so before this arm the collector was only ever asked, from this lane, to
+// walk shallow acyclic graphs -- the two shapes 09C's rewrite is *about*, a
+// deep `car` spine and a cycle, were unreachable by construction.
+//
+// The generated form grows a `car` chain to an input-chosen depth, optionally
+// closes it into a cycle with `setcdr`, and then allocates enough garbage over
+// the top of it to force at least one collection while it is live:
+//
+//   (let ((d nil) (i 0))
+//     (while (< i LEVELS) (do (setq i (+ i 1)) (setq d (cons d nil))))
+//     [(setcdr d d)]
+//     (while (< i CHURN) (do (setq i (+ i 1)) (cons i i)))
+//     i)
+//
+// Both loops are bounded by constants baked into the form, not by the input:
+// `LEVELS` is one byte and `CHURN` a fixed count, so this respects the
+// harness's termination bound the same way the 09B exhaustion arm does. The
+// chain is a `let`-local and the form returns a number, so nothing deep or
+// cyclic reaches the harness's own `FeToString`.
+static FeObject* BuildDeepGraph(FeContext* ctx, FuzzInput* input) {
+  enum { MinimumLevels = 8, ChurnAllocations = 250 };
+  const int64_t levels = MinimumLevels + FuzzTakeByte(input) % 200;
+  const bool cyclic = FuzzTakeByte(input) % 2 == 0;
+  FeObject* const d = FeMakeSymbol(ctx, "d");
+  FeObject* const i = FeMakeSymbol(ctx, "i");
+  FeObject* const bindings = FeMakeList(
+      ctx,
+      (FeObject*[]){
+          FeMakeList(ctx, (FeObject*[]){d, &nil}, 2),
+          FeMakeList(ctx, (FeObject*[]){i, FeMakeInteger(ctx, 0)}, 2)},
+      2);
+  FeObject* const step = MakeBinary(
+      ctx, "setq", i, MakeBinary(ctx, "+", i, FeMakeInteger(ctx, 1)));
+  FeObject* const grow = MakeBinary(
+      ctx, "while", MakeBinary(ctx, "<", i, FeMakeInteger(ctx, levels)),
+      MakeBinary(ctx, "do", step,
+                 MakeBinary(ctx, "setq", d, MakeBinary(ctx, "cons", d, &nil))));
+  FeObject* const churn = MakeBinary(
+      ctx, "while",
+      MakeBinary(ctx, "<", i, FeMakeInteger(ctx, levels + ChurnAllocations)),
+      MakeBinary(ctx, "do", step, MakeBinary(ctx, "cons", i, i)));
+  FeObject* items[6];
+  size_t count = 0;
+  items[count++] = FeMakeSymbol(ctx, "let");
+  items[count++] = bindings;
+  items[count++] = grow;
+  if (cyclic) {
+    items[count++] = MakeBinary(ctx, "setcdr", d, d);
+  }
+  items[count++] = churn;
+  items[count++] = i;
+  return FeMakeList(ctx, items, count);
+}
+
 static FeObject* BuildListForm(FeContext* ctx,
                                FuzzInput* input,
                                unsigned depth) {
@@ -774,7 +830,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 35) {
+  switch (FuzzTakeByte(input) % 36) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -862,6 +918,8 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildArityForm(ctx, input, depth);
     case 33:
       return BuildExhaustionForm(ctx, input, depth);
+    case 34:
+      return BuildDeepGraph(ctx, input);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

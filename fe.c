@@ -305,46 +305,147 @@ size_t FeSaveGC(const FeContext* ctx) {
   return ctx->gc_stack_index;
 }
 
+// The reversed link a pair carries while the mark phase is inside one of its
+// children shares a word with the cell's tag, so taking it back means clearing
+// the collector's two flag bits before reading the pointer. This clears them
+// in place rather than returning a masked copy because every caller overwrites
+// the field immediately afterwards -- and it stays a bit operation on the tag
+// byte, the way the rest of fe manipulates these bits and the way the sweep's
+// own `TAG(obj) &= ~GcMarkBit` does, rather than a round trip through
+// `uintptr_t`.
+static FeObject* TakeMarkLink(FeObject* obj) {
+  TAG(obj) &= ~(GcMarkBit | GcMarkCdrBit);
+  return CAR(obj);
+}
+
+// The mark phase, with the C stack out of it (sub-plan 09C).
+//
+// The old walk recursed once per `car` level -- 48 bytes a frame in this
+// tree's default build, 32 at `-Os`, 64 under ASan, 80 under MSan -- so a
+// chain of `car`s cost C stack in proportion to its depth, and a deep enough
+// one took the process down inside the collector: measured by bisection on an
+// 8 MiB stack, between 130 000 and 150 000 levels, reachable from pure Lisp in
+// any arena of about 4.9 MiB, and reachable in kg's 1 MiB arena as soon as the
+// process stack limit fell to 1280 KiB. The `cdr` spine was already a loop;
+// this makes the `car` edge one too, for every shape, with no bound to tune.
+//
+// The mechanism is Deutsch-Schorr-Waite pointer reversal: the walk stores its
+// own return path in the objects it is walking, so it needs no stack and
+// allocates nothing -- which matters here more than anywhere else in fe,
+// because the collector is the one thing that runs *after* allocation has
+// already failed. The alternative, an explicit worklist, is recorded in the
+// commit that landed this; the short version is that bounding one for any data
+// shape costs a slot per object, which for kg's 1 MiB arena is 56 224 pointers
+// (439 KiB, 43% of the whole arena), and growing one instead puts a failable
+// allocation inside collection.
+//
+// The encoding is two spare low bits of a *pair's* `car` word. Every object is
+// at least 8-byte aligned, so bits 0-2 of a pointer stored there are free: bit
+// 0 stays clear so `FeGetType` keeps answering `FeTPair`, bit 1 is `GcMarkBit`
+// (which the recursive walk already stored inside a pair's car pointer -- that
+// is what the sweep's `TAG(obj) &= ~GcMarkBit` puts back), and bit 2 is
+// `GcMarkCdrBit`, which says which half of the pair the walk is in:
+//
+//   car half   car = parent   | mark            cdr = the pair's cdr
+//   cdr half   car = own car  | mark | cdr bit  cdr = parent
+//   finished   car = own car  | mark            cdr = the pair's cdr
+//
+// An object with exactly one pointer child -- `fn`, `macro`, `symbol`,
+// `string`, whose `car` word is a type tag plus, for a string, seven bytes of
+// text, and never a pointer -- needs no state bit: its link is always in
+// `cdr`, and the ascent tells it from a pair by its type.
+//
+// Two invariants make this safe. Every intermediate state keeps `GcMarkBit`
+// set and bit 0 clear, so `FeGetType` never lies about a cell and a cycle that
+// comes back around stops at the mark check exactly as it did before; and
+// every path out restores the cell it leaves, so the sweep sees the tags the
+// recursive walk would have left. The graph really is scrambled while the walk
+// is inside it, but collection is stop-the-world, so the only code that can
+// observe that is `mark_fn` -- which may call `FeMark` (an object the walk is
+// inside is already marked, so a nested walk stops at it immediately) but must
+// not read `car`/`cdr` of anything but the object it was handed. `doc/c-api.md`
+// says so.
 void FeMark(FeContext* ctx, FeObject* obj) {
-  FeObject* car;
-begin:
-  if (TAG(obj) & GcMarkBit) {
+  FeObject* parent = nullptr;
+  FeObject* current = obj;
+
+descend:
+  if (~TAG(current) & GcMarkBit) {
+    // Read `car` before the mark bit goes in: on a pair, the word the mark
+    // bit lives in *is* the car pointer. (Meaningless on any other cell,
+    // where `car` is a tag -- and never dereferenced there, exactly as in the
+    // recursive walk this replaces.)
+    FeObject* const car = CAR(current);
+    TAG(current) |= GcMarkBit;
+    switch (FeGetType(current)) {
+      case FeTPair:
+        // The reversed link goes in `car`, which is also where the mark bit
+        // lives, so the mark has to go back in after the pointer.
+        CAR(current) = parent;
+        TAG(current) |= GcMarkBit;
+        parent = current;
+        current = car;
+        goto descend;
+
+      case FeTFn:
+      case FeTMacro:
+      case FeTSymbol:
+      case FeTString: {
+        FeObject* const child = CDR(current);
+        CDR(current) = parent;
+        parent = current;
+        current = child;
+        goto descend;
+      }
+
+      case FeTPtr:
+      case FeTFex0:
+      case FeTFex1:
+      case FeTFex2:
+        if (ctx->mark_fn) {
+          ctx->mark_fn(ctx, current);
+        }
+        break;
+
+      case FeTFree:
+      case FeTNil:
+      case FeTDouble:
+      case FeTInteger:
+      case FeTPrimitive:
+      case FeTNativeFn:
+        // Do nothing.
+        break;
+
+      case FeTSentinel:
+        abort();
+    }
+  }
+
+ascend:
+  if (parent == nullptr) {
     return;
   }
-  car = CAR(obj);  // Store car before modifying it with GcMarkBit
-  TAG(obj) |= GcMarkBit;
-
-  switch (FeGetType(obj)) {
-    case FeTPair:
-      FeMark(ctx, car);
-      // fall through
-    case FeTFn:
-    case FeTMacro:
-    case FeTSymbol:
-    case FeTString:
-      obj = CDR(obj);
-      goto begin;
-
-    case FeTPtr:
-    case FeTFex0:
-    case FeTFex1:
-    case FeTFex2:
-      if (ctx->mark_fn) {
-        ctx->mark_fn(ctx, obj);
-      }
-      break;
-
-    case FeTFree:
-    case FeTNil:
-    case FeTDouble:
-    case FeTInteger:
-    case FeTPrimitive:
-    case FeTNativeFn:
-      // Do nothing.
-      break;
-
-    case FeTSentinel:
-      abort();
+  if (FeGetType(parent) == FeTPair && (~TAG(parent) & GcMarkCdrBit)) {
+    // The car half is finished: put the car child back with the half flag
+    // set, hand the reversed link to `cdr`, and go down the cdr.
+    FeObject* const grandparent = TakeMarkLink(parent);
+    CAR(parent) = current;
+    TAG(parent) |= GcMarkBit | GcMarkCdrBit;
+    current = CDR(parent);
+    CDR(parent) = grandparent;
+    goto descend;
+  }
+  {
+    // The cdr half of a pair, or the only child of a one-child object, is
+    // finished: put the child back, clear the half flag, step up.
+    FeObject* const grandparent = CDR(parent);
+    CDR(parent) = current;
+    if (FeGetType(parent) == FeTPair) {
+      TAG(parent) &= ~GcMarkCdrBit;
+    }
+    current = parent;
+    parent = grandparent;
+    goto ascend;
   }
 }
 

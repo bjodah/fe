@@ -6847,6 +6847,345 @@ static bool TestCaughtExhaustionSession(void) {
   return true;
 }
 
+// Measured on the *recursive* mark phase, immediately before 09C replaced it,
+// with `TestCollectionStatsPinned`'s own fixed corpus and fixed arena. The
+// rewrite is invisible to every one of them.
+enum {
+  PinnedTotalSlots = 15210,
+  PinnedCollectionCount = 3,
+  PinnedPeakLive = 15210,
+  PinnedLiveAfterCollection = 1027,
+};
+
+// ---------------------------------------------------------------------------
+// Sub-plan 09C: the mark phase's C stack, and the shapes that used to reach
+// past it.
+//
+// `FeSetMarkFn` is called from inside the mark phase, for `ptr`/`fex` objects
+// only, which makes it the one place a test can stand *inside* a collection
+// and read the collector's own C-stack high-water mark -- and exercising it
+// here is also this slice's "Fex's host mark callback still works" case, the
+// path `fe -d` installs.
+static size_t mark_probe_calls;
+static void* const mark_probe_payload = (void*)&mark_probe_calls;
+
+static FeObject* MarkStackProbe(FeContext* ctx,
+                                // cppcheck-suppress constParameterCallback
+                                FeObject* obj) {
+  // Reading the object it was handed is the one thing a mark callback is
+  // allowed to do to the graph while the walk is inside it (`doc/c-api.md`),
+  // and it is what makes this a count of *host pointer* marks rather than of
+  // callbacks in general.
+  mark_probe_calls += FeGetType(obj) == FeTPtr ? 1 : 0;
+  RecordStackProbeAddress();
+  return FeNil(ctx);
+}
+
+// `depth` levels of `car` nesting with the host `ptr` object at the bottom:
+// `(((...PTR...)))`, every `cdr` nil. Only the head stays rooted, so the GC
+// stack is flat however deep the chain is -- the chain roots itself.
+static FeObject* BuildCarChain(FeContext* ctx, size_t depth) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* node = FeMakePtr(ctx, FeTPtr, mark_probe_payload);
+  for (size_t i = 0; i < depth; i++) {
+    node = FeCons(ctx, node, FeNil(ctx));
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, node);
+  }
+  return node;
+}
+
+// `depth` cons cells down the `cdr` spine, the shape the old walk already
+// handled iteratively, with the `ptr` object as the last element's car so the
+// probe fires at the far end of the spine too.
+static FeObject* BuildCdrChain(FeContext* ctx, size_t depth) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* node =
+      FeCons(ctx, FeMakePtr(ctx, FeTPtr, mark_probe_payload), FeNil(ctx));
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, node);
+  for (size_t i = 0; i < depth; i++) {
+    node = FeCons(ctx, FeNil(ctx), node);
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, node);
+  }
+  return node;
+}
+
+// Alternating: each level nests one deeper in `car` *and* carries a second
+// pair in `cdr`, so neither edge is a straight line and the walk has to
+// interleave both halves of every pair.
+static FeObject* BuildAlternatingChain(FeContext* ctx, size_t depth) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* node = FeMakePtr(ctx, FeTPtr, mark_probe_payload);
+  for (size_t i = 0; i < depth; i++) {
+    node = FeCons(ctx, node, FeCons(ctx, FeNil(ctx), FeNil(ctx)));
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, node);
+  }
+  return node;
+}
+
+// Consing garbage until the collector runs, without leaving anything behind
+// for it to keep: whatever the caller had rooted before the call stays rooted.
+static bool ForceCollection(FeContext* ctx) {
+  const size_t before = FeGetArenaStats(ctx).collection_count;
+  const size_t gc = FeSaveGC(ctx);
+  for (size_t i = 0; i < 100000000; i++) {
+    if (FeGetArenaStats(ctx).collection_count != before) {
+      return true;
+    }
+    (void)FeCons(ctx, FeNil(ctx), FeNil(ctx));
+    FeRestoreGC(ctx, gc);
+  }
+  return false;
+}
+
+// Walks the `car` spine back down, checking every level is a pair with a nil
+// `cdr` and that the bottom is the host pointer the chain was built around.
+// This is the strongest statement the tests make about pointer reversal: the
+// collector wrote a return path through every one of these cells and had to
+// put all of it back.
+static bool IsCarChainIntact(FeContext* ctx, FeObject* node, size_t depth) {
+  for (size_t i = 0; i < depth; i++) {
+    CHECK(FeGetType(node) == FeTPair);
+    CHECK(FeIsNil(FeCdr(ctx, node)));
+    node = FeCar(ctx, node);
+  }
+  CHECK(FeGetType(node) == FeTPtr);
+  CHECK(FeToPtr(ctx, node) == mark_probe_payload);
+  return true;
+}
+
+enum { MarkProbeArenaSize = 64u << 20 };
+
+// One measurement: a fresh context, a `car` chain `depth` levels deep, the
+// probe state cleared, one forced collection, and the C-stack delta the mark
+// phase reached against `baseline` -- which is the same probe fired by the
+// same callback from the same collector, with no chain above it at all.
+static bool MeasureMarkDepth(unsigned char* storage,
+                             size_t depth,
+                             uintptr_t* address,
+                             size_t* peak_live) {
+  FeContext* const ctx = FeOpenContext(storage, MarkProbeArenaSize);
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx, .expected_message = "unused"};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  FeSetMarkFn(ctx, MarkStackProbe);
+
+  FeObject* const chain = BuildCarChain(ctx, depth);
+  stack_probe_last_address = 0;
+  stack_probe_deepest_address = 0;
+  mark_probe_calls = 0;
+  CHECK(ForceCollection(ctx));
+  CHECK(mark_probe_calls > 0);
+  CHECK(stack_probe_last_address != 0);
+  CHECK(IsCarChainIntact(ctx, chain, depth));
+  *address = stack_probe_deepest_address;
+  *peak_live = FeGetArenaStats(ctx).peak_live_objects;
+  FeCloseContext(ctx);
+  return true;
+}
+
+// The 03E stack-probe convention, transferred from the evaluator to the
+// collector: the same assertion shape as `TestEvaluationStackProbe`, the same
+// 2 KiB tolerance, at the same N = 10 / 1 000 / 100 000.
+//
+// Before this slice the answer was linear, not flat. `FeMark` recursed once
+// per `car` level, so a chain deep enough took the process down inside the
+// collector -- and unlike the evaluator's old wall there was no counter in
+// front of it: the only bound was the host's stack limit, and the only
+// symptom was SIGSEGV.
+static bool TestMarkStackProbe(void) {
+  unsigned char* const storage = malloc(MarkProbeArenaSize);
+  CHECK(storage != nullptr);
+
+  uintptr_t baseline = 0;
+  size_t baseline_live = 0;
+  CHECK(MeasureMarkDepth(storage, 0, &baseline, &baseline_live));
+
+  static const size_t depths[] = {10, 1000, 100000};
+  for (size_t i = 0; i < sizeof(depths) / sizeof(depths[0]); i++) {
+    uintptr_t probed = 0;
+    size_t peak_live = 0;
+    CHECK(MeasureMarkDepth(storage, depths[i], &probed, &peak_live));
+    const uintptr_t delta =
+        probed > baseline ? probed - baseline : baseline - probed;
+    printf("mark probe: n=%6zu baseline=%#" PRIxPTR " probe=%#" PRIxPTR
+           " delta=%" PRIuPTR " bytes, peak_live=%zu\n",
+           depths[i], baseline, probed, delta, peak_live);
+    // Flat. The same measured tolerance 03A/03D/03E/03F assert for the
+    // evaluator's own probe, under default and sanitizer builds alike: a
+    // regression that sent the mark phase back through a recursive C call
+    // would miss this by megabytes at n=100000, not by bytes of noise.
+    CHECK(delta < 2048);
+    // ... and the run really was that deep, so a flat delta is not the two
+    // collections having quietly done the same amount of work.
+    CHECK(peak_live > depths[i]);
+  }
+
+  free(storage);
+  return true;
+}
+
+// The shapes the walk has to get right, each built, collected through, and
+// then read back: a deep `car` spine, a deep `cdr` spine, an alternating
+// structure that uses both halves of every pair, and four cyclic graphs --
+// the case a mark phase must terminate on rather than merely survive.
+static bool TestMarkGraphShapes(void) {
+  enum { ShapeDepth = 50000, CycleNodes = 3 };
+  unsigned char* const storage = malloc(MarkProbeArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const ctx = FeOpenContext(storage, MarkProbeArenaSize);
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx, .expected_message = "unused"};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  FeSetMarkFn(ctx, MarkStackProbe);
+  const size_t gc = FeSaveGC(ctx);
+
+  FeObject* const car_chain = BuildCarChain(ctx, ShapeDepth);
+  FePushGC(ctx, car_chain);
+  FeObject* const cdr_chain = BuildCdrChain(ctx, ShapeDepth);
+  FePushGC(ctx, cdr_chain);
+  FeObject* const alternating = BuildAlternatingChain(ctx, ShapeDepth);
+  FePushGC(ctx, alternating);
+
+  // The cycles. `test_api.c` reaches through `fe_internal.h`'s `CAR`/`CDR`
+  // for these because Fe has no C spelling of `setcar`/`setcdr` and the
+  // point is to build the graph, not to evaluate one: a pair whose car is
+  // itself, one whose cdr is itself, one that is both, and a three-node ring
+  // whose entry also carries the `ptr` object, so the host callback fires
+  // from inside a cycle.
+  FeObject* const self_car = FeCons(ctx, FeNil(ctx), FeNil(ctx));
+  FePushGC(ctx, self_car);
+  CAR(self_car) = self_car;
+  FeObject* const self_cdr = FeCons(ctx, FeNil(ctx), FeNil(ctx));
+  FePushGC(ctx, self_cdr);
+  CDR(self_cdr) = self_cdr;
+  FeObject* const self_both = FeCons(ctx, FeNil(ctx), FeNil(ctx));
+  FePushGC(ctx, self_both);
+  CAR(self_both) = self_both;
+  CDR(self_both) = self_both;
+
+  FeObject* ring =
+      FeCons(ctx, FeMakePtr(ctx, FeTPtr, mark_probe_payload), FeNil(ctx));
+  FePushGC(ctx, ring);
+  FeObject* const ring_head = ring;
+  for (size_t i = 1; i < CycleNodes; i++) {
+    ring = FeCons(ctx, ring_head, ring);
+    FePushGC(ctx, ring);
+  }
+  CDR(ring_head) = ring;
+
+  mark_probe_calls = 0;
+  CHECK(ForceCollection(ctx));
+  // Three `ptr` objects are live (the three chains' bottoms plus the ring's),
+  // and the collector reached every one of them without looping.
+  CHECK(mark_probe_calls >= 4);
+
+  // Everything is still exactly what it was built as.
+  CHECK(IsCarChainIntact(ctx, car_chain, ShapeDepth));
+  FeObject* spine = cdr_chain;
+  for (size_t i = 0; i < ShapeDepth; i++) {
+    CHECK(FeGetType(spine) == FeTPair);
+    CHECK(FeIsNil(FeCar(ctx, spine)));
+    spine = FeCdr(ctx, spine);
+  }
+  CHECK(FeGetType(FeCar(ctx, spine)) == FeTPtr);
+  FeObject* alt = alternating;
+  for (size_t i = 0; i < ShapeDepth; i++) {
+    CHECK(FeGetType(alt) == FeTPair);
+    CHECK(FeGetType(FeCdr(ctx, alt)) == FeTPair);
+    CHECK(FeIsNil(FeCar(ctx, FeCdr(ctx, alt))));
+    alt = FeCar(ctx, alt);
+  }
+  CHECK(FeGetType(alt) == FeTPtr);
+  CHECK(FeCar(ctx, self_car) == self_car);
+  CHECK(FeIsNil(FeCdr(ctx, self_car)));
+  CHECK(FeCdr(ctx, self_cdr) == self_cdr);
+  CHECK(FeIsNil(FeCar(ctx, self_cdr)));
+  CHECK(FeCar(ctx, self_both) == self_both);
+  CHECK(FeCdr(ctx, self_both) == self_both);
+  CHECK(FeCdr(ctx, ring_head) == ring);
+  CHECK(FeGetType(FeCar(ctx, ring_head)) == FeTPtr);
+
+  // A second collection over the same graphs, now that the first one has run
+  // its sweep: the tags it restored have to be good enough to walk again.
+  CHECK(ForceCollection(ctx));
+  CHECK(IsCarChainIntact(ctx, car_chain, ShapeDepth));
+  CHECK(FeCar(ctx, self_both) == self_both);
+  CHECK(FeCdr(ctx, ring_head) == ring);
+
+  // And dropping the roots really does free all of it, so the walk marked
+  // what was reachable rather than everything it touched.
+  const size_t live_before =
+      FeGetArenaStats(ctx).total_slots - FeGetArenaStats(ctx).free_slots;
+  FeRestoreGC(ctx, gc);
+  CHECK(ForceCollection(ctx));
+  const size_t live_after =
+      FeGetArenaStats(ctx).total_slots - FeGetArenaStats(ctx).free_slots;
+  CHECK(live_after < live_before / 2);
+
+  FeCloseContext(ctx);
+  free(storage);
+  return true;
+}
+
+// 09C's "invisible except to the C stack": a fixed corpus in a fixed arena
+// has to produce exactly the same collector figures after the rewrite as
+// before it. The numbers below are literals measured on the *recursive* walk,
+// in the commit that replaced it; a range would not have caught a new walk
+// that marked one object too many or collected one time too few.
+static bool TestCollectionStatsPinned(void) {
+  static TestArena storage;
+  const size_t size = FeMinimumArenaSize() + 256 * 1024;
+  CHECK(size <= sizeof(storage.bytes));
+  FeContext* const ctx = FeOpenContext(storage.bytes, size);
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx, .expected_message = "unused"};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+
+  // Pairs, deep recursion, strings, symbols, closures and a macro -- every
+  // arm of the mark switch except the host-pointer one, which
+  // `TestMarkGraphShapes` owns.
+  static const char corpus[] =
+      "(do"
+      " (fset 'build (lambda (n acc)"
+      "   (if (<= n 0) acc (build (- n 1) (cons (cons n \"cell\") acc)))))"
+      " (fset 'twice (macro (f x) (list f (list f x))))"
+      " (setq deep (build 150 nil))"
+      " (setq tagged (list 'a 'b 'c \"a string long enough to span cells\"))"
+      " (setq counted 0)"
+      " (while (< counted 8000) (setq counted (+ counted 1))"
+      "   (cons counted (cons \"cell\" nil)))"
+      " (twice car (cons (cons 7 nil) nil)))";
+  CHECK(IsRendered(
+      ctx, FeEvaluateString(ctx, "stats.fe", corpus, sizeof(corpus) - 1), "7"));
+
+  // One more collection with only the corpus's own globals reachable, so the
+  // live count read below is what the mark phase decided to keep -- the
+  // figure a walk that marked one object too many, or reached one edge too
+  // few, would move. `peak_live_objects` cannot be that figure: `MakeObject`
+  // only collects once the free list is empty, so any run that collects at
+  // all peaks at `total_slots` by construction.
+  CHECK(ForceCollection(ctx));
+  const FeArenaStats stats = FeGetArenaStats(ctx);
+  const size_t live = stats.total_slots - stats.free_slots;
+  printf("collection stats: total=%zu collections=%zu peak_live=%zu live=%zu\n",
+         stats.total_slots, stats.collection_count, stats.peak_live_objects,
+         live);
+  CHECK(stats.total_slots == PinnedTotalSlots);
+  CHECK(stats.collection_count == PinnedCollectionCount);
+  CHECK(stats.peak_live_objects == PinnedPeakLive);
+  CHECK(live == PinnedLiveAfterCollection);
+  CHECK(stats.allocation_failures == 0);
+  FeCloseContext(ctx);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -6873,7 +7212,8 @@ int main(void) {
                  TestLongArgumentLists() && TestNativeArityRecord() &&
                  TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
-                 TestCaughtExhaustionSession() &&
+                 TestCaughtExhaustionSession() && TestMarkStackProbe() &&
+                 TestMarkGraphShapes() && TestCollectionStatsPinned() &&
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion()
