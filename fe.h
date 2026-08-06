@@ -246,7 +246,9 @@ void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetStrictArity(FeContext* ctx, bool strict);
 [[nodiscard]] bool FeGetStrictArity(const FeContext* ctx);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
-[[noreturn]] void FeRaiseCompletion(FeContext* ctx, FeCompletion kind, const char* msg);
+[[noreturn]] void FeRaiseCompletion(FeContext* ctx,
+                                    FeCompletion kind,
+                                    const char* msg);
 
 // The completion kind of the last completion that reached a host boundary:
 // `FeCompletionError` for an ordinary error, `FeCompletionQuit` for the

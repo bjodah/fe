@@ -27,6 +27,55 @@
 #include "fe.h"
 #include "fe_internal.h"
 
+// The whole ambient evaluation-control record, as one value: everything
+// `ClearEvaluationControl` clears, so a raise that ends up *resuming* the
+// interrupted program (a `condition-case` handler, a cleanup that runs and
+// returns) can put back exactly what it found -- including the steps still
+// remaining, not a fresh budget. Deliberately does not carry
+// `native_reentry_depth`, which is a census of live C activations rather
+// than a configured ceiling; see its own comment on `struct FeContext`.
+typedef struct FeEvaluationControl {
+  FeInterruptFn* interrupt;
+  void* userdata;
+  size_t steps;
+  size_t poll_interval;
+  size_t poll_countdown;
+  size_t cleanup_step_limit;
+  size_t max_frames_limit;
+  size_t native_reentry_limit;
+  bool active;
+  bool limited;
+} FeEvaluationControl;
+
+static FeEvaluationControl SaveEvaluationControl(const FeContext* ctx) {
+  return (FeEvaluationControl){
+      .interrupt = ctx->evaluation_interrupt,
+      .userdata = ctx->evaluation_userdata,
+      .steps = ctx->evaluation_steps,
+      .poll_interval = ctx->evaluation_poll_interval,
+      .poll_countdown = ctx->evaluation_poll_countdown,
+      .cleanup_step_limit = ctx->cleanup_step_limit,
+      .max_frames_limit = ctx->max_frames_limit,
+      .native_reentry_limit = ctx->native_reentry_limit,
+      .active = ctx->evaluation_active,
+      .limited = ctx->evaluation_limited,
+  };
+}
+
+static void RestoreEvaluationControl(FeContext* ctx,
+                                     const FeEvaluationControl* control) {
+  ctx->evaluation_interrupt = control->interrupt;
+  ctx->evaluation_userdata = control->userdata;
+  ctx->evaluation_steps = control->steps;
+  ctx->evaluation_poll_interval = control->poll_interval;
+  ctx->evaluation_poll_countdown = control->poll_countdown;
+  ctx->cleanup_step_limit = control->cleanup_step_limit;
+  ctx->max_frames_limit = control->max_frames_limit;
+  ctx->native_reentry_limit = control->native_reentry_limit;
+  ctx->evaluation_active = control->active;
+  ctx->evaluation_limited = control->limited;
+}
+
 // Clears the ambient *limits* a cleanup should not inherit from the
 // abandoned body (`max_frames_limit`, `native_reentry_limit`, and the rest
 // of the ordinary control record), but deliberately leaves
@@ -62,10 +111,19 @@ void EndEvaluationControl(FeContext* ctx, bool owns_control) {
 static FeObject* RunEvaluationBody(FeContext* ctx,
                                    FeObject* forms,
                                    FeObject* env);
-[[noreturn]] void FeRaiseCompletion(FeContext* ctx,
-                                 FeCompletion kind,
-                                 const char* msg);
-#define RaiseCompletion FeRaiseCompletion
+// The two halves of a raise. `RaiseCompletion` applies the ambient
+// `error_label`/`error_offset` prefix to `msg` and then hands the finished
+// text to `RaiseCompletionCore`, which does the actual work: cleanup drain,
+// handler search, transfer. A message that has already been through the
+// formatter -- a cleanup's own failure, replayed by `RunOneCleanupEntry`
+// after the bounce, or a host's `FeResignal` -- goes straight to the core
+// so the label is not prefixed twice.
+[[noreturn]] static void RaiseCompletion(FeContext* ctx,
+                                         FeCompletion kind,
+                                         const char* msg);
+[[noreturn]] static void RaiseCompletionCore(FeContext* ctx,
+                                             FeCompletion kind,
+                                             const char* msg);
 
 typedef struct ConditionParent {
   const char* name;
@@ -211,11 +269,16 @@ static void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
   }
 }
 
-// Copies an error message raised while a cleanup entry was itself running
-// into context-owned storage, since the formatted message `FeHandleError` is
-// about to `longjmp` away from lives on that frame's stack and would
-// otherwise be gone by the time `RunOneCleanupEntry` reads it.
-static void SaveCleanupErrorMessage(FeContext* ctx, const char* msg) {
+// Copies the completion raised while a cleanup entry was itself running
+// into context-owned storage, since the formatted message `RaiseCompletion`
+// is about to `longjmp` away from lives on that frame's stack and would
+// otherwise be gone by the time `RunOneCleanupEntry` reads it. The *kind*
+// travels with the text: a cleanup that runs out of its own budget or
+// answers a second C-g must reach the host as Budget or Quit, not silently
+// become an ordinary Error on the way back out.
+static void SaveCleanupCompletion(FeContext* ctx,
+                                  FeCompletion kind,
+                                  const char* msg) {
   const size_t capacity = sizeof(ctx->cleanup_error_message) - 1;
   size_t length = 0;
   while (length < capacity && msg[length] != '\0') {
@@ -223,16 +286,39 @@ static void SaveCleanupErrorMessage(FeContext* ctx, const char* msg) {
   }
   memcpy(ctx->cleanup_error_message, msg, length);
   ctx->cleanup_error_message[length] = '\0';
+  ctx->cleanup_error_kind = kind;
 }
+
+// The evaluation control a cleanup drain re-arms fresh for every entry it
+// runs, captured from the ambient record by the raise that started the
+// drain. `step_limit` of 0 means "the host did not set
+// `FeEvalOptions.cleanup_step_limit`," resolved to `DefaultCleanupStepLimit`
+// where it is used, not here, since the resolved value does not need to
+// survive a `longjmp`.
+typedef struct FeCleanupBudget {
+  FeInterruptFn* interrupt;
+  void* userdata;
+  size_t poll_interval;
+  size_t step_limit;
+} FeCleanupBudget;
 
 // Runs one cleanup entry. A cleanup that itself raises does not reach
 // `error_fn` -- that would let the host `longjmp` away and abandon the rest
-// of the stack -- so `FeHandleError` redirects here instead (see
-// `cleanup_catch`) and the failure becomes a printed diagnostic. Per
-// `doc/unwind-design.md`, the original error or interrupt that is actually
-// unwinding takes priority: it is what every remaining entry, and finally
-// the host, still sees.
-static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
+// of the stack -- so `RaiseCompletion` redirects here instead (see
+// `cleanup_catch`), and this function replays the completion in the
+// *enclosing* context, where the frame stack, the run floor and the
+// barriers are the ones that were live before the drain started. 06A
+// Decision 4: the cleanup's own completion replaces whatever was already
+// unwinding, so the replay is an ordinary raise and can be caught by an
+// enclosing `condition-case`.
+//
+// `budget`, when non-null, is the fresh bounded control record this one
+// entry runs under (see the drain's own comment); the ambient record is
+// saved here and put back on every exit path, so a drain leaves the
+// interrupted program's remaining steps exactly as it found them.
+static void RunOneCleanupEntry(FeContext* ctx,
+                               const FeCleanupEntry* entry,
+                               const FeCleanupBudget* budget) {
   FeContext* const volatile ctx_v = ctx;
   const FeCleanupEntry* const volatile entry_v = entry;
   jmp_buf local_jump;
@@ -244,6 +330,17 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
   const size_t volatile saved_run_base = ctx_v->run_base;
   FeObject* const volatile saved_call_list = ctx_v->call_list;
   jmp_buf* const volatile saved_condition_catch = ctx_v->condition_catch;
+  const FeEvaluationControl saved_control = SaveEvaluationControl(ctx_v);
+  if (budget != nullptr) {
+    ctx_v->evaluation_interrupt = budget->interrupt;
+    ctx_v->evaluation_userdata = budget->userdata;
+    ctx_v->evaluation_poll_interval = budget->poll_interval;
+    ctx_v->evaluation_poll_countdown = budget->poll_interval;
+    ctx_v->evaluation_limited = true;
+    ctx_v->evaluation_steps =
+        budget->step_limit != 0 ? budget->step_limit : DefaultCleanupStepLimit;
+    ctx_v->evaluation_active = true;
+  }
   ctx_v->cleanup_catch = &local_jump;
   if (setjmp(local_jump) == 0) {
     if (entry_v->kind == FeCleanupNative) {
@@ -259,7 +356,11 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
     ctx_v->condition_catch = saved_condition_catch;
     ctx_v->frame_stack_index = saved_frame_stack_index;
     ctx_v->call_list = saved_call_list;
-    RaiseCompletion(ctx_v, FeCompletionError, ctx_v->cleanup_error_message);
+    RestoreEvaluationControl(ctx_v, &saved_control);
+    // Already through the label formatter once, on the way in: replay it
+    // verbatim rather than prefixing the source label a second time.
+    RaiseCompletionCore(ctx_v, ctx_v->cleanup_error_kind,
+                        ctx_v->cleanup_error_message);
   }
   ctx_v->cleanup_catch = saved_catch;
   // A cleanup error longjmps directly here, bypassing the nested
@@ -271,66 +372,42 @@ static void RunOneCleanupEntry(FeContext* ctx, const FeCleanupEntry* entry) {
   ctx->run_base = saved_run_base;
   ctx->condition_catch = saved_condition_catch;
   ctx->call_list = saved_call_list;
+  RestoreEvaluationControl(ctx, &saved_control);
 }
 
 // Drains cleanup entries down to (but not including) `target`, most recently
-// pushed first, leaving the ambient evaluation-control record exactly as it
-// was found. Used only by `Evaluate`, down to the checkpoint it saved on
-// entry, so a call form that returns normally drains what it pushed under
-// whatever budget was already ambient -- the same one the rest of the
-// program is running under, nothing special. `FeHandleError`'s abnormal
-// drain is `RunCleanupsAfterError`, below, not this.
-static void RunCleanupsDownTo(FeContext* ctx, size_t target) {
+// pushed first.
+//
+// With `budget` null this is the ordinary-return drain: a call form that
+// completes normally runs what it pushed under whatever budget was already
+// ambient -- the same one the rest of the program is running under, nothing
+// special.
+//
+// With `budget` non-null it is the abnormal drain, after an error, a host
+// interrupt, or step-budget exhaustion: every call form still on the C
+// stack is being abandoned, so every pending cleanup down to `target` must
+// run before the completion reaches its handler or the host. Each entry
+// gets its own fresh copy of `budget`, not one shared across the whole
+// drain and not the exhausted or cancelled control the body was running
+// under: a body that ran out of steps still gets a working cleanup (the
+// budget is new), and a cleanup that does not return terminates on its own
+// instead of hanging with no escape (the budget is bounded). Interrupt
+// polling stays live on the same re-armed schedule, so a second host
+// interrupt during a runaway cleanup aborts that one entry -- caught by its
+// own `RunOneCleanupEntry`, like any other cleanup failure -- without a
+// stale poll countdown from the body either firing on the first step or
+// (via unsigned underflow) never firing again.
+static void RunCleanups(FeContext* ctx,
+                        size_t target,
+                        const FeCleanupBudget* budget) {
   while (ctx->cleanup_stack_index > target) {
     const FeCleanupEntry entry = ctx->cleanup_stack[--ctx->cleanup_stack_index];
-    RunOneCleanupEntry(ctx, &entry);
+    RunOneCleanupEntry(ctx, &entry, budget);
   }
 }
 
-// The evaluation control `RunCleanupsAfterError` re-arms fresh for every
-// cleanup entry it runs, captured from the ambient record before
-// `FeHandleError` clears it. `step_limit` of 0 means "the host did not set
-// `FeEvalOptions.cleanup_step_limit`," resolved to `DefaultCleanupStepLimit`
-// where it is used, not here, since the resolved value does not need to
-// survive a `longjmp`.
-typedef struct FeCleanupBudget {
-  FeInterruptFn* interrupt;
-  void* userdata;
-  size_t poll_interval;
-  size_t step_limit;
-} FeCleanupBudget;
-
-// Drains the entire cleanup registry after an error, a host interrupt, or
-// step-budget exhaustion: every call form still on the C stack is being
-// abandoned, so every pending cleanup must run before `FeHandleError`
-// reaches the host. Each entry gets its own fresh copy of `budget`, not one
-// shared across the whole drain and not the exhausted or cancelled control
-// the body was running under: a body that ran out of steps still gets a
-// working cleanup (the budget below is new), and a cleanup that does not
-// return terminates on its own instead of hanging with no escape (the
-// budget below is bounded). Interrupt polling stays live on the same
-// re-armed schedule, so a second host interrupt during a runaway cleanup
-// aborts that one entry -- caught by its own `RunOneCleanupEntry`, like any
-// other cleanup failure -- without a stale poll countdown from the body
-// either firing on the first step or (via unsigned underflow) never firing
-// again. Leaves the control record cleared when done, matching
-// `FeHandleError`'s existing guarantee that the host sees an inactive one.
-static void RunCleanupsAfterError(FeContext* ctx,
-                                  const FeCleanupBudget* budget) {
-  const size_t step_limit =
-      budget->step_limit != 0 ? budget->step_limit : DefaultCleanupStepLimit;
-  while (ctx->cleanup_stack_index > 0) {
-    const FeCleanupEntry entry = ctx->cleanup_stack[--ctx->cleanup_stack_index];
-    ctx->evaluation_interrupt = budget->interrupt;
-    ctx->evaluation_userdata = budget->userdata;
-    ctx->evaluation_poll_interval = budget->poll_interval;
-    ctx->evaluation_poll_countdown = budget->poll_interval;
-    ctx->evaluation_limited = true;
-    ctx->evaluation_steps = step_limit;
-    ctx->evaluation_active = true;
-    RunOneCleanupEntry(ctx, &entry);
-  }
-  ClearEvaluationControl(ctx);
+static void RunCleanupsDownTo(FeContext* ctx, size_t target) {
+  RunCleanups(ctx, target, nullptr);
 }
 
 void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
@@ -366,57 +443,46 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 // leaves a stale kind behind. The reserve gate in `AllocateFrame`
 // (`completion != FeCompletionNormal`) still means "a cleanup drain is in
 // progress" because only an evaluator barrier can reach that cleanup path.
-[[noreturn]] void FeRaiseCompletion(FeContext* ctx,
-                                  FeCompletion kind,
-                                  const char* msg) {
+//
+// `msg` is final: the label prefix has already been applied by
+// `RaiseCompletion`, or deliberately not applied because the text carries
+// one from a previous pass through it.
+//
+// The ambient control record is *not* cleared on the way in. The three exits
+// need three different answers and each one is stated where it happens: a
+// caught condition resumes the interrupted program and must keep its
+// remaining steps, its frame wall and its interrupt (clearing them here is
+// what let one caught condition disarm evaluation for the rest of the run);
+// a cleanup drain re-arms its own fresh bounded budget per entry inside
+// `RunOneCleanupEntry` and puts the ambient record back afterwards; and only
+// the host exit clears, keeping the long-standing guarantee that a host sees
+// an inactive record.
+[[noreturn]] static void RaiseCompletionCore(FeContext* ctx,
+                                             FeCompletion kind,
+                                             const char* msg) {
   FeObject* cl = ctx->call_list;
-  const char* label = ctx->error_label;
-  const size_t offset = ctx->error_offset;
-  const bool has_offset = ctx->error_has_offset;
-  // The ambient control record is about to be cleared; this is the fresh
-  // budget every cleanup entry runs under below, captured while it is still
-  // here to capture.
+  // The fresh budget every cleanup entry below runs under, taken from the
+  // ambient record: a bounded, working budget even when the record it comes
+  // from is the exhausted or cancelled one the body just died on.
   const FeCleanupBudget cleanup_budget = {
       .interrupt = ctx->evaluation_interrupt,
       .userdata = ctx->evaluation_userdata,
       .poll_interval = ctx->evaluation_poll_interval,
       .step_limit = ctx->cleanup_step_limit,
   };
-  char message[1024];
   // Reset ambient reader/evaluation state before either sort of cleanup runs.
   // The old trace stays in `cl`; a cleanup starts with a fresh visible trace.
   ctx->call_list = &nil;
-  ctx->error_label = nullptr;
-  ctx->error_has_offset = false;
   ctx->nextchr = '\0';
-  ClearEvaluationControl(ctx);
-
-  switch ((label != nullptr) * 2 + has_offset) {
-    case 3:
-      Format(message, sizeof(message), "%s:%zu: %s", label, offset, msg);
-      msg = message;
-      break;
-    case 2:
-      Format(message, sizeof(message), "%s: %s", label, msg);
-      msg = message;
-      break;
-    case 1:
-      Format(message, sizeof(message), "byte %zu: %s", offset, msg);
-      msg = message;
-      break;
-    default:
-      break;
-  }
 
   if (ctx->cleanup_catch != nullptr) {
     // A cleanup entry's own `fn` or unwind-forms raised. Resume at
     // `RunOneCleanupEntry`'s `setjmp` instead of reaching the host: that
-    // keeps unwinding the cleanup stack instead of abandoning it, and
-    // preserves whatever error is already in flight above this one. The
-    // in-flight completion kind is preserved too -- nothing here assigns
-    // `kind`, so a cleanup that runs out of its own steps mid-drain does not
-    // overwrite the Error/Quit/Budget the drain is for.
-    SaveCleanupErrorMessage(ctx, msg);
+    // keeps unwinding the cleanup stack instead of abandoning it, and lets
+    // the replay happen in the enclosing context, where an enclosing
+    // `condition-case` can see it (06A Decision 4: the cleanup's completion
+    // replaces the one already in flight). Kind and text travel together.
+    SaveCleanupCompletion(ctx, kind, msg);
     longjmp(*ctx->cleanup_catch, 1);
   }
 
@@ -427,7 +493,7 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   if (FindConditionHandler(ctx, kind, &handler_index, &handler)) {
     FeEvalFrame* const frame = &ctx->frame_stack[handler_index];
     FePushGC(ctx, ctx->condition);
-    RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
+    RunCleanups(ctx, frame->cleanup_checkpoint, &cleanup_budget);
     FeRestoreGC(ctx, frame->gc_checkpoint);
     FePushGC(ctx, ctx->condition);
     frame->fn = handler;
@@ -435,14 +501,50 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     ctx->frame_stack_index = handler_index + 1;
     ctx->call_list = &frame->trace_cell;
     ctx->completion = FeCompletionNormal;
+    // The control record is exactly the one the body was running under,
+    // minus the steps the body spent: the handler and everything after it
+    // continue inside the same budget, wall and interrupt.
     longjmp(*ctx->condition_catch, 1);
   }
 
-  // A fresh, bounded budget, not the exhausted or cancelled one the body
-  // was running under and not no budget at all: see `RunCleanupsAfterError`.
-  RunCleanupsAfterError(ctx, &cleanup_budget);
+  // Nothing here can catch it, so the whole registry drains (down to
+  // `cleanup_floor`, which a protected host call raises to its own base) and
+  // the host takes over. Only now is the record cleared, and only now is the
+  // source label dropped -- keeping a label alive past the host boundary
+  // would prefix a later, unrelated raise with a stale file name.
+  RunCleanups(ctx, ctx->cleanup_floor, &cleanup_budget);
+  ClearEvaluationControl(ctx);
+  ctx->error_label = nullptr;
+  ctx->error_has_offset = false;
 
   TransferEvaluationError(ctx, msg, cl);
+}
+
+// Applies the ambient source label and reader offset to `msg` and raises.
+// Every raise from Lisp or from a native goes through here; the only callers
+// of the core directly are the ones replaying an already-formatted message.
+[[noreturn]] static void RaiseCompletion(FeContext* ctx,
+                                         FeCompletion kind,
+                                         const char* msg) {
+  char message[1024];
+  switch ((ctx->error_label != nullptr) * 2 + ctx->error_has_offset) {
+    case 3:
+      Format(message, sizeof(message), "%s:%zu: %s", ctx->error_label,
+             ctx->error_offset, msg);
+      msg = message;
+      break;
+    case 2:
+      Format(message, sizeof(message), "%s: %s", ctx->error_label, msg);
+      msg = message;
+      break;
+    case 1:
+      Format(message, sizeof(message), "byte %zu: %s", ctx->error_offset, msg);
+      msg = message;
+      break;
+    default:
+      break;
+  }
+  RaiseCompletionCore(ctx, kind, msg);
 }
 
 // The public raise entry point: an ordinary Error completion, which is what
@@ -465,6 +567,33 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
                                          const char* name,
                                          const char* message) {
   RaiseCondition(ctx, FeCompletionError, name, &nil, message);
+}
+
+// The host's way to raise a completion that is not an ordinary error: a
+// `quit` because the embedder's own C-g arrived somewhere fe cannot poll, or
+// a `budget` because the embedder's own ceiling tripped. See `doc/c-api.md`.
+//
+// The two kinds a host may not raise are refused rather than half-honoured.
+// `FeCompletionNormal` is not a raise at all, and `FeCompletionThrow` is an
+// evaluator-internal state that only ever exists between a matching catch
+// frame being found and the value being delivered to it: raising it from
+// outside would leave the frame stack claiming a delivery that never
+// happens. Both are asserted, and treated as an ordinary error when
+// assertions are compiled out, because a raise cannot return to report a
+// bad argument.
+[[noreturn]] void FeRaiseCompletion(FeContext* ctx,
+                                    FeCompletion kind,
+                                    const char* msg) {
+  assert(kind == FeCompletionError || kind == FeCompletionQuit ||
+         kind == FeCompletionBudget);
+  if (kind == FeCompletionQuit) {
+    RaiseCondition(ctx, FeCompletionQuit, "quit", &nil, msg);
+  }
+  if (kind == FeCompletionBudget) {
+    ctx->condition = &nil;
+    RaiseCompletion(ctx, FeCompletionBudget, msg);
+  }
+  FeHandleError(ctx, msg);
 }
 
 // Decision 5's (sub-plan 06A) additive host surface. The kind is always

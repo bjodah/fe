@@ -596,6 +596,17 @@ struct FeContext {
   // cleanup stack.
   jmp_buf* cleanup_catch;
   char cleanup_error_message[256];
+  // The kind that goes with `cleanup_error_message`. A cleanup that runs out
+  // of its own bounded budget, or that answers a second host interrupt, must
+  // reach the enclosing handler or the host as Budget or Quit; before this
+  // was recorded the replay hard-coded Error and both were mislabelled.
+  FeCompletion cleanup_error_kind;
+  // The floor an abnormal drain stops at. Zero -- the whole registry -- for
+  // an ordinary run, since every pending cleanup belongs to the computation
+  // being abandoned. `FeTryCallWithOptions` raises it to its own entry depth
+  // for the duration of the protected call, so a contained completion
+  // unwinds the callee's cleanups and not the host's.
+  size_t cleanup_floor;
   // An evaluator barrier owns the automatic jmp_buf it points at. It is
   // installed only for the duration of RunEvaluation(), and errors copy
   // their text and trace below before jumping to it.

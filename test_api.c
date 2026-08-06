@@ -3206,6 +3206,9 @@ static bool TestUnwindLisp(void) {
       "42");
   CHK("run-count", "1");
 
+  // Error: the body raises, the cleanup still runs exactly once, and the
+  // error still propagates to the host with its own message intact.
+  // `setq` returns the assigned value, unlike old assignment `=`.
   CHK("(setq run-count 0)", "0");
   static const char erroring[] =
       "(unwind-protect (car 1) (setq run-count (+ run-count 1)))";
@@ -3214,6 +3217,7 @@ static bool TestUnwindLisp(void) {
                               "unwind.fe: expected pair, got integer"));
   CHK("run-count", "1");
 
+  // Interrupt: a host `C-g` mid-body still runs the cleanup exactly once.
   CHK("(setq run-count 0)", "0");
   static const char looping[] =
       "(unwind-protect (while t 1) (setq run-count (+ run-count 1)))";
@@ -3228,6 +3232,11 @@ static bool TestUnwindLisp(void) {
                                      "unwind.fe: evaluation cancelled"));
   CHK("run-count", "1");
 
+  // Budget exhaustion: cleanup is not gated on steps remaining, and still
+  // runs exactly once. The cleanup form itself needs more steps than the
+  // tiny budget the body exhausted, which would fail immediately if it were
+  // still charged against that budget instead of running unbounded, as
+  // `doc/unwind-design.md` and the sub-plan both require.
   CHK("(setq run-count 0) (setq spin-count 0)", "0");
   static const char budget_cleanup[] =
       "(unwind-protect (while t 1) "
@@ -3240,6 +3249,8 @@ static bool TestUnwindLisp(void) {
   CHK("run-count", "1");
   CHK("spin-count", "200");
 
+  // Three levels of nesting, inner error: cleanups run innermost first
+  // (LIFO), and the nesting is visible in the order they append to `log`.
   CHK("(setq log '())", "nil");
   static const char nested[] =
       "(unwind-protect"
@@ -3254,6 +3265,11 @@ static bool TestUnwindLisp(void) {
                               "unwind.fe: assertion failure"));
   CHK("log", "(outer middle inner)");
 
+  // A cleanup that itself errors: 06A Decision 4 -- the cleanup's own error
+  // replaces the one already unwinding, so that is what reaches the host,
+  // carrying the same `unwind.fe:` source label any other error from this
+  // evaluation carries; nothing is printed to stderr behind the host's
+  // back; and the outer cleanup still runs.
   CHK("(setq outer-ran nil)", "nil");
   static const char failing_cleanup[] =
       "(unwind-protect"
@@ -3261,13 +3277,14 @@ static bool TestUnwindLisp(void) {
       "    (assert nil)"
       "    (car 1))"
       "  (setq outer-ran t))";
-  EvalCall failing_cleanup_call = {.context = context,
-                                   .state = &state,
-                                   .label = "unwind.fe",
-                                   .source = failing_cleanup,
-                                   .length = sizeof(failing_cleanup) - 1,
-                                   .options = nullptr,
-                                   .expected = "expected pair, got integer"};
+  EvalCall failing_cleanup_call = {
+      .context = context,
+      .state = &state,
+      .label = "unwind.fe",
+      .source = failing_cleanup,
+      .length = sizeof(failing_cleanup) - 1,
+      .options = nullptr,
+      .expected = "unwind.fe: expected pair, got integer"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &failing_cleanup_call, captured,
                       sizeof(captured)));
@@ -3335,12 +3352,15 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_cleanup,
       .length = sizeof(runaway_cleanup) - 1,
       .options = &small_cleanup_budget,
-      .expected = "evaluation step limit exceeded"};
+      .expected = "budget.fe: evaluation step limit exceeded"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &runaway_cleanup_call, captured,
                       sizeof(captured)));
   CHECK(runaway_cleanup_call.result);
   CHECK(captured[0] == '\0');
+  // The kind travels with the replaced completion: the cleanup ran out of
+  // its own *budget*, so the host is told Budget, not Error.
+  CHECK(state.observed_completion == FeCompletionBudget);
 
   // The regression this whole feature exists to keep passing: a body that
   // exhausted a tiny budget of its own still gets a cleanup that runs to
@@ -3383,15 +3403,100 @@ static bool TestUnwindCleanupBudget(void) {
       .source = runaway_interrupted_cleanup,
       .length = sizeof(runaway_interrupted_cleanup) - 1,
       .options = &interrupted_cleanup_budget,
-      .expected = "evaluation cancelled"};
+      .expected = "budget.fe: evaluation cancelled"};
   CHECK(CaptureStderr(RunEvalCall, &runaway_interrupted_call, captured,
                       sizeof(captured)));
   CHECK(runaway_interrupted_call.result);
   CHECK(interrupt.polls >= interrupt.cancel_after_second);
   CHECK(captured[0] == '\0');
+  // Same rule for the other escape hatch: a cleanup aborted by a host
+  // interrupt reaches the host as Quit.
+  CHECK(state.observed_completion == FeCompletionQuit);
   CHK("outer-ran", "t");
 
 #undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
+// A caught condition *resumes* the interrupted program, so everything the
+// host configured for it has to survive the catch: the step budget (with the
+// steps already spent still spent), the frame wall, the native-reentry
+// ceiling, the C-g interrupt, and the source label errors are prefixed with.
+// Clearing the control record on the way into the handler search -- which is
+// what this file used to do -- disarmed all five permanently, so the first
+// caught condition in a run silently removed every bound the host had asked
+// for and the next runaway loop hung forever.
+static bool TestConditionCaseResumesControl(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // The step budget: a caught condition, then a runaway loop in the same
+  // run, which must still hit the limit rather than spin forever.
+  static const char caught_then_loop[] =
+      "(condition-case nil (car 5) (error nil)) (while t 1)";
+  const FeEvalOptions generous = {.step_limit = 100000};
+  CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_loop,
+                             sizeof(caught_then_loop) - 1, &generous,
+                             "control.fe: evaluation step limit exceeded",
+                             FeCompletionBudget));
+
+  // The steps the body already spent stay spent: the same program under a
+  // budget that the `condition-case` alone very nearly exhausts still runs
+  // out, rather than starting again from a full budget after the catch.
+  static const char caught_then_small[] =
+      "(condition-case nil (car 5) (error nil)) (while t 1)";
+  const FeEvalOptions small = {.step_limit = 40};
+  CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_small,
+                             sizeof(caught_then_small) - 1, &small,
+                             "control.fe: evaluation step limit exceeded",
+                             FeCompletionBudget));
+
+  // The interrupt: a caught condition must not disarm the host's C-g.
+  static const char caught_then_spin[] =
+      "(condition-case nil (car 5) (error nil)) (while t 1)";
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_spin,
+                             sizeof(caught_then_spin) - 1, &interrupt_options,
+                             "control.fe: evaluation cancelled",
+                             FeCompletionQuit));
+  CHECK(interrupt.polls == interrupt.cancel_after);
+
+  // The frame wall: a caught condition must not remove `max_frames` either.
+  static const char caught_then_deep[] =
+      "(condition-case nil (car 5) (error nil)) "
+      "(fset 'recurse (fn (x) (recurse x))) (recurse 1)";
+  const FeEvalOptions tight_frames = {.max_frames = 32};
+  CHECK(ExpectCompletionKind(context, &state, "control.fe", caught_then_deep,
+                             sizeof(caught_then_deep) - 1, &tight_frames,
+                             "control.fe: evaluation frame limit exceeded",
+                             FeCompletionBudget));
+
+  // The source label: every error raised after a caught condition still
+  // carries the `label:` prefix that names where it came from.
+  static const char caught_then_error[] =
+      "(condition-case nil (car 5) (error nil)) (car 5)";
+  CHECK(ExpectEvaluationError(context, &state, "control.fe", caught_then_error,
+                              sizeof(caught_then_error) - 1,
+                              "control.fe: expected pair, got integer"));
+
+  // And the same is true one level down: an error raised inside a handler
+  // body, after the catch, keeps the label too.
+  static const char error_in_handler[] =
+      "(condition-case nil (car 5) (error (car 5)))";
+  CHECK(ExpectEvaluationError(context, &state, "control.fe", error_in_handler,
+                              sizeof(error_in_handler) - 1,
+                              "control.fe: expected pair, got integer"));
 
   FeCloseContext(context);
   return true;
@@ -3507,7 +3612,7 @@ static bool TestCatchThrow(void) {
                                  .source = cleanup_throw,
                                  .length = sizeof(cleanup_throw) - 1,
                                  .options = nullptr,
-                                 .expected = "no-catch escape 1"};
+                                 .expected = "catch.fe: no-catch escape 1"};
   char captured[512];
   CHECK(CaptureStderr(RunEvalCall, &cleanup_throw_call, captured,
                       sizeof(captured)));
@@ -5443,7 +5548,7 @@ int main(void) {
                  TestCleanupRunGC() && TestPrimitiveOrder() &&
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestCatchThrow()
+                 TestCatchThrow() && TestConditionCaseResumesControl()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
