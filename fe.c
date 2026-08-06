@@ -1307,6 +1307,13 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   char* p = buf;
   const char* delimiter = " \n\t\r();`,";
   do {
+    // Emacs reads `a\ b` as the single symbol `a b`; Fe has no symbol-escape
+    // syntax, so the backslash is rejected wherever it appears in a token, not
+    // just at its start. Rejecting only the leading position let `(a\ b)` read
+    // as the two symbols `a` and `b` -- a silent misread of a one-element list.
+    if (chr == '\\') {
+      FeHandleError(ctx, "unsupported read syntax: symbol escape");
+    }
     if (p == buf + sizeof(buf) - 1) {
       FeHandleError(ctx, "symbol too long (63-byte limit)");
     }
@@ -1346,10 +1353,14 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   return FeMakeSymbol(ctx, buf);
 }
 
-typedef struct EscapeValue {
-  int value;
-  size_t consumed;
-} EscapeValue;
+// The two modifier bits Emacs sets on a character that has no plain encoding,
+// and the largest character Fe reads. Both were measured against GNU Emacs
+// 31.0.90: `?\C-%` is 2^26 + 37 and `?\M-a` is 2^27 + 97.
+enum {
+  CharControlBit = 1 << 26,
+  CharMetaBit = 1 << 27,
+  MaxCharacter = 0x10ffff,
+};
 
 static int HexDigit(char chr) {
   if (chr >= '0' && chr <= '9')
@@ -1361,45 +1372,68 @@ static int HexDigit(char chr) {
   return -1;
 }
 
-static EscapeValue ReadEscape(FeContext* ctx, FeReadFn fn, void* udata) {
+// Emacs reads `\x` greedily and to any width: `"\x41f"` is U+041F and
+// `"\x0041"` is "A". Reading exactly two digits answered "Af" and "41" -- two
+// silent misreads of a perfectly ordinary Emacs spelling. The bound is Fe's
+// own largest character rather than Emacs' internal one, so the band above
+// U+10FFFF that Emacs still accepts is a named error here, not a truncation.
+static int ReadHexEscape(FeContext* ctx, FeReadFn fn, void* udata) {
+  int value = 0;
+  size_t digits = 0;
+  char chr = fn(ctx, udata);
+  for (int digit = HexDigit(chr); digit >= 0; digit = HexDigit(chr)) {
+    if (value > (MaxCharacter - digit) / 16) {
+      FeHandleError(ctx, "unsupported read syntax: \\x character out of range");
+    }
+    value = value * 16 + digit;
+    digits++;
+    chr = fn(ctx, udata);
+  }
+  if (digits == 0)
+    FeHandleError(ctx, "unsupported read syntax: \\x");
+  ctx->nextchr = chr;
+  return value;
+}
+
+// One escape, shared by string bodies and `?` literals, returning the
+// character's value rather than the bytes it will occupy. The caller decides
+// what a value means: a `?` literal takes any of them, a string body is a
+// byte string and rejects the ones that do not fit in a byte.
+static int ReadEscape(FeContext* ctx, FeReadFn fn, void* udata) {
   const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
   ctx->nextchr = '\0';
   if (chr == '\0')
     FeHandleError(ctx, "unclosed string");
   switch (chr) {
     case 'a':
-      return (EscapeValue){.value = '\a', .consumed = 1};
+      return '\a';
     case 'b':
-      return (EscapeValue){.value = '\b', .consumed = 1};
+      return '\b';
     case 't':
-      return (EscapeValue){.value = '\t', .consumed = 1};
+      return '\t';
     case 'n':
-      return (EscapeValue){.value = '\n', .consumed = 1};
+      return '\n';
     case 'v':
-      return (EscapeValue){.value = '\v', .consumed = 1};
+      return '\v';
     case 'f':
-      return (EscapeValue){.value = '\f', .consumed = 1};
+      return '\f';
     case 'r':
-      return (EscapeValue){.value = '\r', .consumed = 1};
+      return '\r';
     case 'e':
-      return (EscapeValue){.value = 27, .consumed = 1};
+      return 27;
     case 'd':
-      return (EscapeValue){.value = 127, .consumed = 1};
+      return 127;
     case 's':
-      return (EscapeValue){.value = ' ', .consumed = 1};
+      return ' ';
     case '\\':
-      return (EscapeValue){.value = '\\', .consumed = 1};
+      return '\\';
     case '"':
-      return (EscapeValue){.value = '"', .consumed = 1};
+      return '"';
     default:
       break;
   }
   if (chr == 'x') {
-    const int hi = HexDigit(fn(ctx, udata));
-    const int lo = HexDigit(fn(ctx, udata));
-    if (hi < 0 || lo < 0)
-      FeHandleError(ctx, "unsupported read syntax: \\x");
-    return (EscapeValue){.value = hi * 16 + lo, .consumed = 3};
+    return ReadHexEscape(ctx, fn, udata);
   }
   if (chr >= '0' && chr <= '7') {
     int value = chr - '0';
@@ -1411,7 +1445,7 @@ static EscapeValue ReadEscape(FeContext* ctx, FeReadFn fn, void* udata) {
       }
       value = value * 8 + next - '0';
     }
-    return (EscapeValue){.value = value, .consumed = 1};
+    return value;
   }
   FeHandleError(ctx, "unsupported read syntax: unknown escape");
 }
@@ -1444,45 +1478,130 @@ static int ReadUtf8(FeContext* ctx, FeReadFn fn, void* udata, char lead) {
   return value;
 }
 
-static FeObject* ReadCharacter(FeContext* ctx, FeReadFn fn, void* udata) {
-  char chr = fn(ctx, udata);
+// Emacs' control-modifier rule, enumerated against GNU Emacs 31.0.90 over
+// every printable ASCII character and over `é`: `?` is DEL, `@`..`_` and
+// `a`..`z` fold to their ASCII control code, and everything else -- space,
+// backquote, digits, punctuation, non-ASCII, and the value of a nested escape
+// such as `?\C-\n` -- keeps its own value with the 2^26 control bit set.
+// `value &= 0x1f` answered 31 for `?\C-?` and 5 for `?\C-%`.
+static int ApplyControlModifier(int value) {
+  if (value == '?') {
+    return 127;
+  }
+  if ((value >= '@' && value <= '_') || (value >= 'a' && value <= 'z')) {
+    return value & 0x1f;
+  }
+  return value | CharControlBit;
+}
+
+// `\S-`, `\s-`, `\A-` and `\H-` are Emacs character modifiers Fe does not
+// implement, and `\^` is Emacs' second spelling of `\C-`. Each is named in
+// its own rejection rather than misread.
+[[noreturn]] static void RejectCharacterModifier(FeContext* ctx, char letter) {
+  char message[64];
+  Format(message, sizeof(message),
+         "unsupported read syntax: \\%c character modifier", letter);
+  FeHandleError(ctx, message);
+}
+
+static int ReadEscapedCharacter(FeContext* ctx,
+                                FeReadFn fn,
+                                void* udata,
+                                bool* control,
+                                bool* meta);
+
+// The character a modifier applies to: either a nested escape (`?\C-\n`) or
+// one UTF-8 sequence (`?\C-a`, `?\C-é`).
+static int ReadModifiedCharacter(FeContext* ctx,
+                                 FeReadFn fn,
+                                 void* udata,
+                                 bool* control,
+                                 bool* meta) {
+  const char chr = fn(ctx, udata);
   if (chr == '\\') {
-    chr = fn(ctx, udata);
+    return ReadEscapedCharacter(ctx, fn, udata, control, meta);
+  }
+  return ReadUtf8(ctx, fn, udata, chr);
+}
+
+// Escape position inside a `?` literal, the `\` already consumed. `\C-` and
+// `\M-` are the two modifiers Fe implements and recurse back into character
+// position; the modifier letters it does not implement are rejected by name.
+// `\s` is the ordinary space escape unless a `-` follows it, which is the one
+// place a second character of lookahead is needed -- reading `?\s-a` as `\s`
+// plus a leftover `-a` made one character literal read as two forms.
+static int ReadEscapedCharacter(FeContext* ctx,
+                                FeReadFn fn,
+                                void* udata,
+                                bool* control,
+                                bool* meta) {
+  const char chr = fn(ctx, udata);
+  if (chr == 'C' || chr == 'M') {
+    const bool is_control = chr == 'C';
+    if (is_control ? *control : *meta) {
+      FeHandleError(ctx,
+                    "unsupported read syntax: duplicate character modifier");
+    }
+    if (fn(ctx, udata) != '-') {
+      FeHandleError(ctx,
+                    "unsupported read syntax: malformed character modifier");
+    }
+    *control |= is_control;
+    *meta |= !is_control;
+    return ReadModifiedCharacter(ctx, fn, udata, control, meta);
+  }
+  if (chr == '^') {
+    RejectCharacterModifier(ctx, chr);
+  }
+  if (chr == 'S' || chr == 's' || chr == 'A' || chr == 'H') {
+    const char peek = fn(ctx, udata);
+    if (peek == '-') {
+      RejectCharacterModifier(ctx, chr);
+    }
+    if (chr != 's') {
+      FeHandleError(ctx, "unsupported read syntax: unknown escape");
+    }
+    ctx->nextchr = peek;
+    return ' ';
+  }
+  ctx->nextchr = chr;
+  return ReadEscape(ctx, fn, udata);
+}
+
+// A `?` literal ends at a delimiter, as it does in Emacs, which reads `?ab`,
+// `?\1a` and `?\s-a` as `invalid-read-syntax`. Without this, each of them
+// yielded a character plus a leftover token: one form silently read as two.
+static void RequireCharacterDelimiter(FeContext* ctx,
+                                      FeReadFn fn,
+                                      void* udata) {
+  const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+  ctx->nextchr = chr;
+  if (chr != '\0' && strchr(" \n\t\r();`,\"'", chr) == NULL) {
+    FeHandleError(ctx, "unsupported read syntax: ? literal without delimiter");
+  }
+}
+
+static FeObject* ReadCharacter(FeContext* ctx, FeReadFn fn, void* udata) {
+  const char chr = fn(ctx, udata);
+  if (chr == '\0') {
+    FeHandleError(ctx, "unsupported read syntax: ? at end of input");
+  }
+  int value;
+  if (chr == '\\') {
     bool control = false;
     bool meta = false;
-    while (chr == 'C' || chr == 'M') {
-      const bool is_control = chr == 'C';
-      if (is_control ? control : meta) {
-        FeHandleError(ctx,
-                      "unsupported read syntax: duplicate character modifier");
-      }
-      if (fn(ctx, udata) != '-') {
-        FeHandleError(ctx,
-                      "unsupported read syntax: malformed character modifier");
-      }
-      control |= is_control;
-      meta |= !is_control;
-      chr = fn(ctx, udata);
-    }
-    int value;
-    if ((control || meta) && chr == '\\') {
-      value = ReadEscape(ctx, fn, udata).value;
-    } else if (!control && !meta) {
-      ctx->nextchr = chr;
-      value = ReadEscape(ctx, fn, udata).value;
-    } else {
-      value = ReadUtf8(ctx, fn, udata, chr);
-    }
+    value = ReadEscapedCharacter(ctx, fn, udata, &control, &meta);
     if (control) {
-      if (value > 0x7f)
-        FeHandleError(ctx, "unsupported read syntax: control character");
-      value &= 0x1f;
+      value = ApplyControlModifier(value);
     }
-    if (meta)
-      value |= 1 << 27;
-    return FeMakeInteger(ctx, value);
+    if (meta) {
+      value |= CharMetaBit;
+    }
+  } else {
+    value = ReadUtf8(ctx, fn, udata, chr);
   }
-  return FeMakeInteger(ctx, ReadUtf8(ctx, fn, udata, chr));
+  RequireCharacterDelimiter(ctx, fn, udata);
+  return FeMakeInteger(ctx, value);
 }
 
 typedef struct RadixDigits {
@@ -1497,17 +1616,16 @@ static RadixDigits ReadRadixDigits(FeContext* ctx,
                                    void* udata,
                                    int base,
                                    char chr) {
-  char buf[64];
-  size_t length = 0;
   RadixDigits result = {0};
+  // No digit cap: the digits are accumulated into a `uint64_t` with an
+  // overflow flag and a `double` fallback, never into a buffer, so a long
+  // literal follows the recorded radix-overflow policy instead of reporting
+  // the 63-byte *symbol* limit for something that is not a symbol.
   while (chr && !strchr(" \n\t\r();`,", chr)) {
-    if (length == sizeof(buf) - 1)
-      FeHandleError(ctx, "symbol too long (63-byte limit)");
     const int digit = HexDigit(chr);
     if (digit < 0 || digit >= base) {
       FeHandleError(ctx, "unsupported read syntax: malformed radix integer");
     }
-    buf[length++] = chr;
     result.digits++;
     if (!result.overflow) {
       if (result.magnitude > (UINT64_MAX - (unsigned)digit) / (unsigned)base) {
@@ -1577,6 +1695,26 @@ static FeObject* ReadHash(FeContext* ctx, FeReadFn fn, void* udata) {
   FeHandleError(ctx, "unsupported read syntax: #");
 }
 
+// A Fe string is a byte string, so a string escape has to land in one byte.
+// `BuildString` writes at `strlen`, which made a decoded NUL a silent no-op
+// that shifted every later character down -- `"\0a"` read as `"a"` and
+// `"a\0b"` as `"ab"` -- and a value above 255 was truncated the same way,
+// which is what `"\400"` did. Both are named errors now. Emacs stores a NUL
+// (and reads `"\400"` as the character U+0100); that divergence is recorded
+// in `compat/features.json` and `doc/language.md`, and it is the same rule
+// the reader already applied to a literal NUL byte in the source text.
+static int ReadStringEscape(FeContext* ctx, FeReadFn fn, void* udata) {
+  const int value = ReadEscape(ctx, fn, udata);
+  if (value == 0) {
+    FeHandleError(ctx, "unsupported read syntax: NUL character in string");
+  }
+  if (value > 0xff) {
+    FeHandleError(ctx,
+                  "unsupported read syntax: character above 255 in string");
+  }
+  return value;
+}
+
 static FeObject* ReadStringLiteral(FeContext* ctx, FeReadFn fn, void* udata) {
   FeObject* res = BuildString(ctx, NULL, '\0');
   FeObject* value = res;
@@ -1584,8 +1722,9 @@ static FeObject* ReadStringLiteral(FeContext* ctx, FeReadFn fn, void* udata) {
   while (chr != '"') {
     if (chr == '\0')
       FeHandleError(ctx, "unclosed string");
-    if (chr == '\\')
-      chr = (char)ReadEscape(ctx, fn, udata).value;
+    if (chr == '\\') {
+      chr = (char)ReadStringEscape(ctx, fn, udata);
+    }
     value = BuildString(ctx, value, chr);
     chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
     ctx->nextchr = '\0';
@@ -1664,28 +1803,31 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
   char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
   ctx->nextchr = '\0';
 
-  // Skip whitespace:
-  while (chr && strchr(" \n\t\r", chr)) {
-    chr = fn(ctx, udata);
+  // Skip whitespace and comments. Both have to be out of the way *before* the
+  // top-level form's line is latched: `RecordTopFormLine` keeps the first
+  // value it is given, so recording ahead of the comment arm reported the line
+  // of the leading `;` for every form a comment block precedes -- which is how
+  // every real init file begins.
+  while (true) {
+    while (chr && strchr(" \n\t\r", chr)) {
+      chr = fn(ctx, udata);
+    }
+    if (chr != ';') {
+      break;
+    }
+    while (chr && chr != '\n') {
+      chr = fn(ctx, udata);
+    }
   }
   RecordTopFormLine(ctx);
   if (chr == '?')
     return ReadCharacter(ctx, fn, udata);
   if (chr == '[' || chr == ']')
     FeHandleError(ctx, "unsupported read syntax: vector brackets");
-  if (chr == '\\')
-    FeHandleError(ctx, "unsupported read syntax: symbol escape");
 
   switch (chr) {
     case '\0':
       return NULL;
-
-    case ';':
-      while (chr && chr != '\n') {
-        chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
-        ctx->nextchr = '\0';
-      }
-      return Read(ctx, fn, udata);
 
     case ')':
       return &rparen;

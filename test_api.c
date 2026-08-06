@@ -106,7 +106,8 @@ static bool IsRendered(FeContext* context,
   const char* expected = state->expected_message;
   state->called = state->context == context && strcmp(message, expected) == 0;
   if (!state->called && state->context == context) {
-    fprintf(stderr, "unexpected error message\n  expected: %s\n  actual:   %s\n",
+    fprintf(stderr,
+            "unexpected error message\n  expected: %s\n  actual:   %s\n",
             expected, message);
   }
   state->stack_was_nil = FeIsNil(stack);
@@ -807,6 +808,184 @@ static bool TestStringInput(void) {
   return true;
 }
 
+// Sub-plan 08C's headline is "nothing is silently misread", so every row
+// below is one of two things: a spelling Fe reads to the value GNU Emacs
+// 31.0.90 reads it to (measured with `emacs -Q --batch` against
+// /opt-3/emacs-31-lucid, TERM=xterm-256color), or a spelling Fe refuses with
+// an error that names the syntax. Nothing in between.
+static bool TestReaderLiterals(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define READS(source, expected)                                                \
+  CHECK(IsRendered(context,                                                    \
+                   FeReadString(context, source, sizeof(source) - 1, nullptr), \
+                   expected))
+#define REJECTS(source, message)                                    \
+  CHECK(ExpectEvaluationError(context, &state, "reader.fe", source, \
+                              sizeof(source) - 1, "reader.fe:1: " message))
+
+  // The control modifier. Emacs' rule is not `& 0x1f`: `?` is DEL, `@`..`_`
+  // and `a`..`z` fold, and every other character -- punctuation, digits,
+  // space, non-ASCII, and the value of a nested escape -- keeps its value
+  // with the 2^26 control bit. `& 0x1f` answered 31 for `?\C-?` and 5 for
+  // `?\C-%`.
+  READS("?\\C-?", "127");
+  READS("?\\C-%", "67108901");
+  READS("?\\C-@", "0");
+  READS("?\\C-A", "1");
+  READS("?\\C-a", "1");
+  READS("?\\C-_", "31");
+  READS("?\\C-z", "26");
+  READS("?\\C-1", "67108913");
+  READS("?\\C-s", "19");
+  READS("?\\C-\xC3\xA9", "67109097");
+  READS("?\\C-\\n", "67108874");
+  READS("?\\C-\\t", "67108873");
+  READS("?\\C-\\d", "67108991");
+  READS("?\\M-a", "134217825");
+  READS("?\\M-\\n", "134217738");
+  READS("?\\M-\\C-a", "134217729");
+  READS("?\\C-\\M-a", "134217729");
+
+  // The accepted plain set.
+  READS("?a", "97");
+  READS("? ", "32");
+  READS("?\\n", "10");
+  READS("?\\t", "9");
+  READS("?\\e", "27");
+  READS("?\\\\", "92");
+  READS("?\\s", "32");
+  READS("?\\d", "127");
+  READS("?\\0", "0");
+  READS("?\\1", "1");
+  READS("?\\101", "65");
+  READS("?\xC3\xA9", "233");
+
+  // `\x` is greedy and variable-width in Emacs. Two fixed digits read
+  // `?\x41f` as 65 with an `f` left over and `?\x0041` as 4 with `1` left
+  // over -- both silent misreads.
+  READS("?\\x41", "65");
+  READS("?\\x41f", "1055");
+  READS("?\\x0041", "65");
+  READS("\"\\x0041\"", "A");
+  READS("\"\\x41\\101\\e\\d\\s\"", "AA\x1b\x7f ");
+  READS("\"\\377\"", "\xff");
+
+  // Radix integers, including both bounds of the int64 window: INT64_MIN is
+  // the one magnitude that only fits with the sign applied, and the first
+  // magnitude past UINT64_MAX takes the recorded pre-bignum double fallback.
+  READS("#x10", "16");
+  READS("#xff", "255");
+  READS("#o17", "15");
+  READS("#b101", "5");
+  READS("#x-10", "-16");
+  READS("#x7fffffffffffffff", "9223372036854775807");
+  READS("#x-8000000000000000", "-9223372036854775808");
+  READS("#x8000000000000000", "9.223372036854776e+18");
+  READS("#xFFFFFFFFFFFFFFFF", "1.8446744073709552e+19");
+
+  // Emacs ends a `?` literal at a delimiter and reads each of these as
+  // `invalid-read-syntax`. Without that rule they were one character plus a
+  // leftover token: `(?\s-a)` read as `(32 -a)` where Emacs reads
+  // `(8388705)`, and `(?\1a)` and `(?ab)` read as two forms each.
+  REJECTS("(?\\s-a)", "unsupported read syntax: \\s character modifier");
+  REJECTS("(?\\1a)", "unsupported read syntax: ? literal without delimiter");
+  REJECTS("(?ab)", "unsupported read syntax: ? literal without delimiter");
+  REJECTS("?\\S-a", "unsupported read syntax: \\S character modifier");
+  REJECTS("?\\A-a", "unsupported read syntax: \\A character modifier");
+  REJECTS("?\\H-a", "unsupported read syntax: \\H character modifier");
+  REJECTS("?\\^a", "unsupported read syntax: \\^ character modifier");
+  REJECTS("?\\C-\\C-a",
+          "unsupported read syntax: duplicate character modifier");
+  REJECTS("?\\M-\\M-a",
+          "unsupported read syntax: duplicate character modifier");
+  REJECTS("?\\Ca", "unsupported read syntax: malformed character modifier");
+  REJECTS("?\\q", "unsupported read syntax: unknown escape");
+  REJECTS("?", "unsupported read syntax: ? at end of input");
+  REJECTS("?\\x", "unsupported read syntax: \\x");
+  REJECTS("?\\x110000", "unsupported read syntax: \\x character out of range");
+  REJECTS("?\\x3fffffff",
+          "unsupported read syntax: \\x character out of range");
+
+  // A Fe string is a byte string. `BuildString` writes at `strlen`, so a
+  // decoded NUL was a no-op that shifted the rest of the string down --
+  // `(list "\0a" "a\0b")` answered `("a" "ab")` -- and a value above 255 was
+  // truncated into the same hole, which is what `"\400"` did.
+  REJECTS("\"\\0a\"", "unsupported read syntax: NUL character in string");
+  REJECTS("\"a\\0b\"", "unsupported read syntax: NUL character in string");
+  REJECTS("\"\\x00\"", "unsupported read syntax: NUL character in string");
+  REJECTS("\"\\400\"",
+          "unsupported read syntax: character above 255 in string");
+  REJECTS("\"\\x41f\"",
+          "unsupported read syntax: character above 255 in string");
+  REJECTS("\"\\q\"", "unsupported read syntax: unknown escape");
+
+  // A backslash was rejected only at the start of a token, so `(cdr '(a\ b))`
+  // answered `(b)` -- two symbols -- where Emacs reads the one symbol `a b`
+  // and answers nil.
+  REJECTS("(cdr '(a\\ b))", "unsupported read syntax: symbol escape");
+  REJECTS("\\a", "unsupported read syntax: symbol escape");
+
+  // The remaining named reject arms, each asserted to name its syntax.
+  REJECTS("#q", "unsupported read syntax: #");
+  REJECTS("[1 2]", "unsupported read syntax: vector brackets");
+  REJECTS("]", "unsupported read syntax: vector brackets");
+  REJECTS("#xg", "unsupported read syntax: malformed radix integer");
+  REJECTS("#x", "unsupported read syntax: malformed radix integer");
+  REJECTS("#x0g", "unsupported read syntax: malformed radix integer");
+  REJECTS("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "symbol too long (63-byte limit)");
+  // The three `ReadUtf8` call sites: an impossible lead byte, a continuation
+  // byte that is not one, and a well-formed encoding of a value that is not
+  // a character (a surrogate).
+  REJECTS("?\x80", "unsupported read syntax: invalid UTF-8 character");
+  REJECTS("?\xC3(", "unsupported read syntax: invalid UTF-8 character");
+  REJECTS("?\xED\xA0\x80", "unsupported read syntax: invalid UTF-8 character");
+
+#undef READS
+#undef REJECTS
+
+  // The top-level form's line, which is what a `(load "init.el")` failure
+  // reports. `RecordTopFormLine` latches the first line it is given, and it
+  // used to be given one before the comment arm ran, so every form a comment
+  // preceded reported the comment's line. Every real init file opens with a
+  // comment block.
+  static const struct {
+    const char* source;
+    const char* expected;
+  } line_cases[] = {
+      {"(car 2)", "lines.fe:1: expected pair, got integer"},
+      {"\n(car 2)", "lines.fe:2: expected pair, got integer"},
+      {"(+ 1\n 2)\n(car 2)", "lines.fe:3: expected pair, got integer"},
+      {"; a comment\n; another\n(car 2)",
+       "lines.fe:3: expected pair, got integer"},
+      {"(print 1)\n; c\n(car 2)", "lines.fe:3: expected pair, got integer"},
+      {";; one\n;; two\n\n(setq x 1)\n(car 2)",
+       "lines.fe:5: expected pair, got integer"},
+      // Past nine, which is where the harness's old single-digit line test
+      // corrupted the expectation.
+      {"\n\n\n\n\n\n\n\n\n\n(car 2)",
+       "lines.fe:11: expected pair, got integer"},
+      {";1\n;2\n;3\n;4\n;5\n;6\n;7\n;8\n;9\n;10\n(car 2)",
+       "lines.fe:11: expected pair, got integer"},
+      // A *read* error after a comment block, not a runtime one.
+      {"; a\n; b\n[", "lines.fe:3: unsupported read syntax: vector brackets"},
+  };
+  for (size_t i = 0; i < sizeof(line_cases) / sizeof(line_cases[0]); i++) {
+    CHECK(ExpectEvaluationError(
+        context, &state, "lines.fe", line_cases[i].source,
+        strlen(line_cases[i].source), line_cases[i].expected));
+  }
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestFileInput(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -891,9 +1070,9 @@ static bool TestEvaluationControl(void) {
                                  .cancel_after = 1};
   const FeEvalOptions default_poll_options = {.interrupt = Interrupt,
                                               .userdata = &default_poll};
-  CHECK(ExpectEvaluationOptionsError(context, &state, "default-poll.fe", loop,
-                                     sizeof(loop) - 1, &default_poll_options,
-                                     "default-poll.fe:1: evaluation cancelled"));
+  CHECK(ExpectEvaluationOptionsError(
+      context, &state, "default-poll.fe", loop, sizeof(loop) - 1,
+      &default_poll_options, "default-poll.fe:1: evaluation cancelled"));
   CHECK(default_poll.polls == 1);
   CHECK(default_poll.userdata_seen);
 
@@ -1845,7 +2024,8 @@ static bool TestFunctionCells(void) {
   CHK("(fset s (lambda () 4))", "(lambda nil 4)");
   CHK("(k)", "4");
   // The target is validated as a symbol before the function form evaluates.
-  LISP2_ERR("(fset 1 (lambda () 2))", "lisp2.fe:1: expected symbol, got integer");
+  LISP2_ERR("(fset 1 (lambda () 2))",
+            "lisp2.fe:1: expected symbol, got integer");
 
   // `funcall` takes a value: a closure directly, a lexical value, and a
   // symbol designator resolved through the function cell (04D's cut removed
@@ -1929,7 +2109,8 @@ static bool TestFunctionCells(void) {
   CHK("(fset 'inc-macro (macro (x) (list '+ x 1)))",
       "(macro (x) (list (quote +) x 1))");
   LISP2_ERR("(funcall 'inc-macro 5)", "lisp2.fe:1: invalid-function inc-macro");
-  LISP2_ERR("(apply 'inc-macro '(5))", "lisp2.fe:1: invalid-function inc-macro");
+  LISP2_ERR("(apply 'inc-macro '(5))",
+            "lisp2.fe:1: invalid-function inc-macro");
   // A designator chain ending in a macro is rejected at the name the caller
   // used, and the context is reusable after every one of these.
   CHK("(defalias 'macro-alias 'inc-macro)", "macro-alias");
@@ -2216,7 +2397,7 @@ static bool TestConstantsAndKeywords(void) {
   do {                                                                 \
     CHECK(ExpectEvaluationError(context, &state, "constants.fe", expr, \
                                 strlen(expr),                          \
-                                "constants.fe:1: setting-constant"));    \
+                                "constants.fe:1: setting-constant"));  \
     CHECK(IsRendered(context, FeGetCondition(context), condition));    \
   } while (false)
 
@@ -2377,7 +2558,8 @@ static bool TestSetqAndSet(void) {
   // validating the first value's type, so a type error never erases a side
   // effect the second form already had.
   CHECK(!FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
-  SET_ERR("(set 1 (do (setq set-probe2 t) 2))", "set.fe:1: wrong-type-argument");
+  SET_ERR("(set 1 (do (setq set-probe2 t) 2))",
+          "set.fe:1: wrong-type-argument");
   CHECK(FeIsBound(context, FeMakeSymbol(context, "set-probe2")));
 
   SET_ERR("(set 'x)", "set.fe:1: wrong-number-of-arguments");
@@ -5742,7 +5924,8 @@ static bool TestPrimitiveOrder(void) {
   // `(boundp 'car 'extra)` is `(wrong-number-of-arguments boundp 2)` and
   // `(car 1 2)` is `(wrong-number-of-arguments car 2)`.
   ORDER_ERR("(boundp 'car 'extra)", "order.fe:1: wrong-number-of-arguments");
-  ORDER_ERR("(makunbound 'car 'extra)", "order.fe:1: wrong-number-of-arguments");
+  ORDER_ERR("(makunbound 'car 'extra)",
+            "order.fe:1: wrong-number-of-arguments");
   ORDER_ERR("(integerp)", "order.fe:1: wrong-number-of-arguments");
   ORDER_ERR("(symbol-value 'a 'b)", "order.fe:1: wrong-number-of-arguments");
 
@@ -6304,7 +6487,7 @@ static bool TestGcStackConstantInNesting(void) {
 
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
-                 TestStringInput() && TestFileInput() &&
+                 TestStringInput() && TestReaderLiterals() && TestFileInput() &&
                  TestEvaluationControl() && TestCompletionKinds() &&
                  TestExtensionAPI() && TestRootsAndCalls() &&
                  TestCallWithOptions() && TestMathNatives() &&
