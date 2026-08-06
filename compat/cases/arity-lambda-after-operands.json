@@ -1,6 +1,8 @@
 {
  "id": "arity-lambda-after-operands",
- "setup": [],
- "expr": "(condition-case nil (do (setq n 0) ((lambda (x) x) (setq n 1) (setq n 2))) (error n))",
- "note": "07B: lambda operands evaluate left-to-right before binding diagnoses arity, so the caught result is 2."
+ "setup": [
+  "(setq n 0)"
+ ],
+ "expr": "(condition-case nil ((lambda (x) x) (setq n 1) (setq n 2)) (error n))",
+ "note": "07A A7: lambda operands evaluate left-to-right before binding diagnoses arity, so the caught result is 2. `setup` carries the initialisation for the same reason as arity-car-before-operands: no sequencing special form is spelled the same way in both dialects."
 }

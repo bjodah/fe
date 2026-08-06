@@ -597,10 +597,11 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "arity-not-strict"
+    "arity-not-strict",
+    "arity-lambda-direct-nargs"
    ],
    "kg_test": null,
-   "rationale": "Phase 7, 07B: strict lambda and macro arity is now unconditional; the former opt-in divergence is closed.",
+   "rationale": "Phase 7, 07B: strict lambda and macro arity is now unconditional; the former opt-in divergence is closed. The condition symbol is compared on arity-not-strict and the count on arity-lambda-direct-nargs, for the closure-rendering reason recorded in phase7-arity-condition-rendering.",
    "source_name": null
   },
   {
@@ -1665,174 +1666,204 @@
    "kg_test": null,
    "rationale": "Phase 6, 06A: Fe has no `error-message-string` and none is planned -- a condition reaches a Fe host as a completion with a message already formatted by the raise site, not as an object a Lisp program renders afterwards. The row is kept as the recorded oracle for the rendering (`Wrong type argument: listp, 5`), and to record that Emacs uses a right single quote in some texts (void-function/void-variable) where Fe pins ASCII. `unsupported` rather than `planned` because the exclusion is the decision, not a pending slice.",
    "source_name": null
-   },
-   {
-    "id": "phase7-lambda-arity",
-    "category": "functions-and-macros",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "arity-lambda-too-few",
-     "arity-lambda-too-many",
-      "arity-lambda-after-operands",
-      "lambda-list-rest-empty",
-      "lambda-list-non-symbol",
-     "lambda-optional-missing",
-     "lambda-rest-fresh-empty"
-    ],
-    "kg_test": null,
-    "rationale": "07B closes strict lambda and macro arity, optional/rest binding, and the supported malformed-list conditions from 07A; the deliberate L3/L4/L7 divergences remain separate rows.",
-    "source_name": null
-   },
-    {
-     "id": "phase7-lambda-rest-trailing",
-     "category": "functions-and-macros",
-     "status": "divergent",
-     "owner": "fe-core",
-     "comparison": "emacs",
-     "cases": [
-      "lambda-list-rest-trailing"
-     ],
-     "kg_test": null,
-     "rationale": "07B deliberately keeps Fe's stricter policy: &rest must be the final declaration, while Emacs accepts and ignores trailing names.",
-     "source_name": null
-    },
-   {
-    "id": "phase7-primitive-car-arity",
-    "category": "functions-and-macros",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "arity-car-before-operands",
-     "primitive-car-too-many",
-     "primitive-car-too-few"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A rows A6 and V2/V3: fixed primitive arity is preflighted before operands and reports actual argument counts.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-lambda-malformed-optional",
-    "category": "functions-and-macros",
-    "status": "divergent",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "lambda-list-double-optional"
-    ],
-    "kg_test": null,
-    "rationale": "07B deliberately rejects repeated &optional markers as invalid-function; Emacs' measured answer is also invalid-function, but its malformed-list data/rendering is not part of Fe's compatibility contract.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-lambda-fe-rest-spellings",
-    "category": "functions-and-macros",
-    "status": "divergent",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "lambda-list-dotted-rest"
-    ],
-    "kg_test": null,
-    "rationale": "07B preserves Fe's deliberate dotted-tail rest spelling; Emacs rejects the measured lambda-list shape.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-cons-arity",
-    "category": "functions-and-macros",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-cons-too-many",
-     "primitive-cons-too-few"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A rows V2/V3: the exact two-argument cons contract is pinned ahead of 07B.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-not-arity",
-    "category": "functions-and-macros",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-not-too-many"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A row V2: the unary not contract rejects extras before evaluation.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-quote-arity",
-    "category": "functions-and-macros",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-quote-too-many"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A row V2: quote's one raw-form contract is pinned ahead of 07B.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-and-arity",
-    "category": "control-flow",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-and-zero-arity"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A row V1: and's zero-argument identity is t, a correctness fix as well as an arity contract.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-if-arity",
-    "category": "control-flow",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-if-too-few",
-     "primitive-if-one-argument"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A row V4: if requires at least a test and consequent.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-print-arity",
-    "category": "values-and-equality",
-    "status": "divergent",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-print-zero",
-     "primitive-print-two",
-     "primitive-print-three"
-    ],
-    "kg_test": null,
-    "rationale": "07B narrows print to one or more values, but Fe deliberately retains its multi-value stdout policy rather than Emacs buffer output.",
-    "source_name": null
-   },
-   {
-    "id": "phase7-primitive-signal-arity",
-    "category": "errors-and-non-local-exits",
-    "status": "supported",
-    "owner": "fe-core",
-    "comparison": "emacs",
-    "cases": [
-     "primitive-signal-one"
-    ],
-    "kg_test": null,
-    "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
-    "source_name": null
-   }
+  },
+  {
+   "id": "phase7-lambda-arity",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "arity-lambda-too-few",
+    "arity-lambda-too-few-nargs",
+    "arity-lambda-too-many",
+    "arity-lambda-too-many-nargs",
+    "arity-lambda-after-operands",
+    "lambda-list-rest-empty",
+    "lambda-list-non-symbol",
+    "lambda-optional-missing",
+    "lambda-rest-fresh-empty"
+   ],
+   "kg_test": null,
+   "rationale": "07B closes strict lambda and macro arity, optional/rest binding, and the supported malformed-list conditions from 07A; the deliberate L3/L4/L7 divergences remain separate rows. Per 07A Decision 2 the too-few/too-many cases compare the condition symbol while their `-nargs` siblings compare the count extracted Lisp-side, because Fe cannot render Emacs' `#[...]` closure printing (phase7-arity-condition-rendering).",
+   "source_name": null
+  },
+  {
+   "id": "phase7-lambda-rest-trailing",
+   "category": "functions-and-macros",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "lambda-list-rest-trailing"
+   ],
+   "kg_test": null,
+   "rationale": "07B deliberately keeps Fe's stricter policy: &rest must be the final declaration, while Emacs accepts and ignores trailing names.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-car-arity",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "arity-car-before-operands",
+    "primitive-car-too-many",
+    "primitive-car-too-few"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A rows A6 and V2/V3: fixed primitive arity is preflighted before operands and reports actual argument counts.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-lambda-malformed-optional",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "lambda-list-double-optional"
+   ],
+   "kg_test": null,
+   "rationale": "07B rejects a repeated &optional marker as invalid-function, which is also Emacs' measured answer, so the condition symbols agree and the runner reports this row as agreeing. Fe attaches no data to malformed-list conditions, which the runner records on its `# condition data:` census line rather than as a disagreement; Fe's stricter-than-Emacs malformed-list policy is recorded on phase7-lambda-rest-trailing and phase7-lambda-fe-rest-spellings, which really do diverge.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-lambda-fe-rest-spellings",
+   "category": "functions-and-macros",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "lambda-list-dotted-rest"
+   ],
+   "kg_test": null,
+   "rationale": "07B preserves Fe's deliberate dotted-tail rest spelling; Emacs rejects the measured lambda-list shape.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-arity-condition-rendering",
+   "category": "functions-and-macros",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "arity-condition-function-rendering",
+    "arity-condition-quote-rendering"
+   ],
+   "kg_test": null,
+   "rationale": "Measured, not assumed: the FUNCTION element of a lambda's wrong-number-of-arguments data prints as `#[(x) (x) (t)]` under Emacs 31.0.90 and as `(lambda (x) x)` under Fe, and `(quote 2)` prints as `'2` under Emacs and as `(quote 2)` under Fe. Both are writer differences over the same objects -- Fe has no byte-code-function object to print and does not abbreviate `quote` -- so the arity rows that would otherwise compare a rendered condition object set `compare_data: false` and point here, and their `-nargs` siblings compare the identity and count that both writers agree on.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-arity-identity-policy",
+   "category": "functions-and-macros",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "arity-defalias-identity"
+   ],
+   "kg_test": null,
+   "rationale": "Which object a symbol-headed call names in `(FUNCTION NARGS)`. Measured on Emacs 31.0.90: after `(defalias 'aliased (lambda (x) x))`, both `(aliased)` and `(funcall 'aliased)` report the closure `#[(x) (x) (t)]`, never the symbol. 07A Decision 2 chose the other policy for Fe -- a direct symbol-head call reports the symbol the program wrote -- because the call frame retains the original designator rather than reconstructing one after resolution. A deliberate divergence, recorded here with the measured Emacs answer instead of left implicit in the rows that opt out of comparing FUNCTION.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-cons-arity",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-cons-too-many",
+    "primitive-cons-too-few"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A rows V2/V3: the exact two-argument cons contract is pinned ahead of 07B.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-not-arity",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-not-too-many"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A row V2: the unary not contract rejects extras before evaluation.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-quote-arity",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-quote-too-many",
+    "primitive-quote-too-many-nargs"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A row V2: `quote` rejects a second raw form with wrong-number-of-arguments naming the symbol and the actual count. Both sides' data is the list `(quote 2)`; only Emacs' printer abbreviates it to `'2`, so the byte comparison lives on the `-nargs` case, which extracts the three elements Lisp-side.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-and-arity",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-and-zero-arity"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A row V1: and's zero-argument identity is t, a correctness fix as well as an arity contract.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-if-arity",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-if-too-few",
+    "primitive-if-one-argument"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A row V4: if requires at least a test and consequent.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-print-arity",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-print-zero",
+    "primitive-print-two",
+    "primitive-print-three"
+   ],
+   "kg_test": null,
+   "rationale": "07B narrows print to one or more values, but Fe deliberately retains its multi-value stdout policy rather than Emacs buffer output. primitive-print-two keeps its `(let ((standard-output ...)) ...)` sink: Emacs' `print` writes to `standard-output`, so without the sink the oracle shim emits a second line and utils/run-emacs-oracle.py fails for the whole corpus. Fe's answer to that expression is a `let` arity error rather than a print result, which is part of the same recorded divergence -- Fe's print arity itself is pinned by primitive-print-zero, primitive-print-three and scripts/arity.fe.",
+   "source_name": null
+  },
+  {
+   "id": "phase7-primitive-signal-arity",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "primitive-signal-one"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 7, 07A row V6: signal accepts one or two arguments, with nil data for the one-argument form.",
+   "source_name": null
+  }
  ]
 }

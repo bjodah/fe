@@ -5,7 +5,7 @@
  "record": {
   "kind": "condition",
   "condition": "wrong-number-of-arguments",
-  "data": "(quote 2)",
+  "data": "'2",
   "condition_source": "structured"
  }
 }

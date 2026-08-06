@@ -2,5 +2,6 @@
  "id": "arity-not-strict",
  "setup": [],
  "expr": "((lambda (x) x))",
- "note": "Fe's default (non `-a`) arity checking is lenient: calling a one-parameter lambda with zero arguments binds x to nil rather than erroring. Emacs signals wrong-number-of-arguments."
+ "note": "07B: lambda arity is unconditional -- calling a one-parameter lambda with zero arguments raises wrong-number-of-arguments, where Fe's pre-Phase-7 default bound x to nil. The long-standing divergence this row recorded is closed. compare_data is off for this row: the condition symbol and the count agree, but Emacs renders the closure as `#[(x) (x) (t)]` where Fe renders `(lambda (x) x)`, which is a printer Fe does not have rather than a disagreement it could fix (feature phase7-arity-condition-rendering records it, and the *-nargs case beside this one compares the count itself, extracted Lisp-side per 07A Decision 2).",
+ "compare_data": false
 }

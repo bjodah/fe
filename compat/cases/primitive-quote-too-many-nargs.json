@@ -1,0 +1,6 @@
+{
+ "id": "primitive-quote-too-many-nargs",
+ "setup": [],
+ "expr": "(condition-case e (quote 1 2) (wrong-number-of-arguments (list (car e) (car (cdr e)) (car (cdr (cdr e))))))",
+ "note": "07A V2, the comparable half of primitive-quote-too-many: FUNCTION is the symbol `quote` on both sides, so all three elements are compared here -- it is only the printer's `'2` abbreviation of the whole data list that the byte comparison could not survive."
+}

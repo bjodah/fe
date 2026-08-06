@@ -1,6 +1,6 @@
 {
  "id": "primitive-print-two",
  "setup": [],
- "expr": "(print 1 nil)",
- "note": "07B: print accepts two arguments, while Fe retains its distinct multi-value stdout policy."
+ "expr": "(let ((standard-output (get-buffer-create \" *phase7-print-sink*\"))) (print 1 nil))",
+ "note": "07A V5: print accepts two arguments. The oracle binds standard-output to a private buffer so the accepted form remains one record; Fe's distinct stdout policy stays planned until 07B."
 }

@@ -1,0 +1,6 @@
+{
+ "id": "arity-condition-function-rendering",
+ "setup": [],
+ "expr": "(condition-case e (funcall (lambda (x) x)) (wrong-number-of-arguments (car (cdr e))))",
+ "note": "The FUNCTION element of a lambda's wrong-number-of-arguments data, printed. Emacs answers `#[(x) (x) (t)]`, its closure object; Fe answers `(lambda (x) x)`. Same object, different printer -- this is the divergence the arity rows opt out of comparing."
+}

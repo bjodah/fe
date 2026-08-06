@@ -1,0 +1,6 @@
+{
+ "id": "arity-lambda-too-few-nargs",
+ "setup": [],
+ "expr": "(condition-case e (funcall (lambda (x) x)) (wrong-number-of-arguments (list (car e) (car (cdr (cdr e))))))",
+ "note": "07A Decision 2, the comparable half of arity-lambda-too-few: the condition symbol and NARGS are pulled out of the condition object in Lisp, so neither side's rendering of the FUNCTION element takes part in the comparison."
+}

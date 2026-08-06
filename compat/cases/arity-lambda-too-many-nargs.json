@@ -1,0 +1,6 @@
+{
+ "id": "arity-lambda-too-many-nargs",
+ "setup": [],
+ "expr": "(condition-case e (funcall (lambda (x) x) 1 2) (wrong-number-of-arguments (list (car e) (car (cdr (cdr e))))))",
+ "note": "07A Decision 2, the comparable half of arity-lambda-too-many: the actual argument count, both sides, with no FUNCTION rendering involved."
+}

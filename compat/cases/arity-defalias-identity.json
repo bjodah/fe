@@ -1,0 +1,8 @@
+{
+ "id": "arity-defalias-identity",
+ "setup": [
+  "(defalias 'aliased (lambda (x) x))"
+ ],
+ "expr": "(condition-case e (aliased) (wrong-number-of-arguments (car (cdr e))))",
+ "note": "Which object a symbol-headed call names in its arity condition. Emacs reports the closure the symbol resolves to (`#[(x) (x) (t)]`); Fe reports the symbol the program wrote (`aliased`), which is 07A Decision 2's stated policy for direct symbol-head calls. A deliberate identity-policy divergence, recorded rather than compared."
+}

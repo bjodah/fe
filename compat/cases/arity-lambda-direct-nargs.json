@@ -1,0 +1,6 @@
+{
+ "id": "arity-lambda-direct-nargs",
+ "setup": [],
+ "expr": "(condition-case e ((lambda (x) x)) (wrong-number-of-arguments (list (car e) (car (cdr (cdr e))))))",
+ "note": "07A Decision 2, the comparable half of arity-not-strict: a direct call to a one-parameter lambda with no arguments reports NARGS 0."
+}

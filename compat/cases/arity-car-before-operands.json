@@ -1,6 +1,8 @@
 {
  "id": "arity-car-before-operands",
- "setup": [],
- "expr": "(condition-case nil (do (setq n 0) (car (setq n 1) (setq n 2))) (error n))",
- "note": "07B: fixed primitive arity is rejected before operand evaluation, so the caught result is 0."
+ "setup": [
+  "(setq n 0)"
+ ],
+ "expr": "(condition-case nil (car (setq n 1) (setq n 2)) (error n))",
+ "note": "07A A6: fixed primitive arity is rejected before operand evaluation, so the caught result is 0. The sequencing lives in `setup` rather than a wrapper because Emacs has no `do` and Fe has no `progn`: either spelling makes the retained snapshot the answer to an expression only one of the two dialects can run."
 }

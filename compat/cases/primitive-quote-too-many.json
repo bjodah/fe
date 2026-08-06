@@ -2,5 +2,6 @@
  "id": "primitive-quote-too-many",
  "setup": [],
  "expr": "(quote 1 2)",
- "note": "07A V2: quote rejects two raw forms with wrong-number-of-arguments. Planned Fe gap until 07B."
+ "note": "07A V2: quote rejects two raw forms with wrong-number-of-arguments, naming the symbol and the count. compare_data is off for this row: both sides' data *is* the list `(quote 2)`, but Emacs' printer abbreviates it to `'2` and Fe's does not, so the byte comparison would be about the writer. primitive-quote-too-many-nargs compares the same two values extracted Lisp-side, where no abbreviation applies, and phase7-arity-condition-rendering records the printer difference itself.",
+ "compare_data": false
 }
