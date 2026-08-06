@@ -1562,12 +1562,6 @@ static bool DispatchPrimitive(FeContext* ctx,
     // evaluated operands dispatch the mid-stack unwind from
     // `ResumeEvalList`'s PThrow arm.
     case PThrow:
-      frame->kind = FeFrameEvalList;
-      frame->fn = fn;
-      frame->rest = arguments;
-      frame->accumulator = &nil;
-      frame->callee = &unbound;
-      return false;
     case PSignal:
     case PError:
       frame->kind = FeFrameEvalList;
@@ -1601,67 +1595,43 @@ static bool DispatchPrimitive(FeContext* ctx,
       frame->accumulator = &unbound;
       frame->callee = &unbound;
       return false;
+    // Every remaining function-shaped primitive: `FeFrameEvalList` evaluates
+    // the whole raw operand list as a batch and the arm in `ResumeEvalList`
+    // does the rest. The arity contracts differ from label to label and each
+    // is noted below, but the arity table has already enforced all of them
+    // before this point, so the setup itself is one body rather than six
+    // copies of the same six assignments.
+    //
     // `set`: exact two-argument raw arity is rejected before either side
-    // effect can run, matching the recursive arm; the two raw forms are
-    // then evaluated left to right by the shared `FeFrameEvalList` machinery
-    // an ordinary call's argument list also uses.
+    // effect can run, matching the recursive arm; the two raw forms are then
+    // evaluated left to right by this same machinery an ordinary call's
+    // argument list also uses.
     case PSet:
-      frame->kind = FeFrameEvalList;
-      frame->fn = fn;
-      frame->rest = arguments;
-      frame->accumulator = &nil;
-      frame->callee = &unbound;
-      return false;
     // `=` and the chained comparators `<`/`<=`/`>`/`>=` (05C): zero raw
     // arguments is rejected before anything evaluates; one or more are
-    // evaluated as a batch (`FeFrameEvalList`) before any operand is
-    // type-checked or compared. `/=` is strictly binary (05A row C3), so its
-    // raw arity is also checked before anything evaluates -- a third operand
-    // is `wrong-number-of-arguments`, not a chain.
+    // evaluated as a batch before any operand is type-checked or compared.
     case PNumericEqual:
     case PLess:
     case PLessEqual:
     case PGreater:
     case PGreaterEqual:
-      frame->kind = FeFrameEvalList;
-      frame->fn = fn;
-      frame->rest = arguments;
-      frame->accumulator = &nil;
-      frame->callee = &unbound;
-      return false;
+    // `(/= a b)` is strictly binary (05A row C3, confirmed by the pinned
+    // Emacs: `(/= 5)` is `wrong-number-of-arguments` too), so its raw arity
+    // -- exactly two operands -- is checked before anything evaluates. A
+    // third operand is `wrong-number-of-arguments`, not a chain.
     case PNotEqual:
-      // `(/= a b)` is strictly binary (05A row C3, confirmed by the pinned
-      // Emacs: `(/= 5)` is `wrong-number-of-arguments` too), so the raw
-      // arity -- exactly two operands -- is checked before anything
-      // evaluates. A third operand is `wrong-number-of-arguments`, not a
-      // chain.
-      frame->kind = FeFrameEvalList;
-      frame->fn = fn;
-      frame->rest = arguments;
-      frame->accumulator = &nil;
-      frame->callee = &unbound;
-      return false;
     case PList:
-      frame->kind = FeFrameEvalList;
-      frame->fn = fn;
-      frame->rest = arguments;
-      frame->accumulator = &nil;
-      frame->callee = &unbound;
-      return false;
     // `funcall`/`apply` (sub-plan 04C) are function-shaped special forms:
-    // they evaluate every operand with the shared EvalList machinery an
-    // ordinary call's argument list uses, then dispatch the first result
+    // they evaluate every operand here, then dispatch the first result
     // through the designator resolver -- the redispatch shape, chosen over a
     // dedicated apply frame kind because it adds no frame-kind and no new
     // GC-per-state row while costing only the few conses `MakeCallForm`
     // builds (see `ResumeEvalList`'s `PFuncall`/`PApply` arm and
-    // doc/implementation.md's note).
+    // doc/implementation.md's note). Zero raw operands has no callable to
+    // dispatch, so `(funcall)`/`(apply)` are an arity error before anything
+    // evaluates -- the arity table's `{1, SIZE_MAX}` row.
     case PFuncall:
     case PApply:
-      // Zero raw operands has no callable to dispatch, so it is an arity
-      // error before anything evaluates (`(funcall)`/`(apply)`), matching
-      // Emacs' wrong-number-of-arguments for both -- the arity table's
-      // `{1, SIZE_MAX}` row.
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1689,15 +1659,10 @@ static bool DispatchPrimitive(FeContext* ctx,
     // `eq`/`eql` (05D): strictly binary, matching the pinned Emacs and the
     // `/=` rule (05A row C3) -- the raw arity, exactly two operands, is
     // checked before anything evaluates, so `(eq 1)` and `(eq 1 2 3)` are
-    // `wrong-number-of-arguments`.
+    // `wrong-number-of-arguments`. The rest of the binary family below is
+    // the same `{2, 2}` contract and the same frame setup.
     case PEq:
     case PEql:
-      frame->kind = FeFrameBinary;
-      frame->fn = fn;
-      frame->rest = arguments;
-      frame->accumulator = &unbound;
-      frame->callee = &unbound;
-      return false;
     case PCons:
     case PSetCar:
     case PSetCdr:
