@@ -234,8 +234,12 @@ static bool ExpectCompletionKind(FeContext* context,
   // The kind survives the host's recovery longjmp: nothing resets it until
   // the next run's outermost barrier or a normal top-level return.
   CHECK(FeGetCompletion(context_v) == expected_kind);
+  // The condition object is deliberate for every kind, never left over from
+  // an earlier completion: an error and a quit both have one (a quit's is
+  // `(quit)`, the object `(signal 'quit nil)` builds), and Budget -- the one
+  // kind with no Emacs counterpart and nothing to construct -- has none.
   CHECK(FeIsNil(FeGetCondition(context_v)) ==
-        (expected_kind != FeCompletionError));
+        (expected_kind == FeCompletionBudget));
   return true;
 }
 
@@ -825,8 +829,8 @@ static bool TestEvaluationControl(void) {
 // through Decision 5's accessors. Each case pins the kind the error callback
 // observes (step limit -> Budget, interrupt -> Quit, the frame and re-entry
 // walls -> Budget, an ordinary error -> Error), the same kind after the
-// host's recovery, the nil condition object, and the reset to Normal that a
-// normal top-level return performs. It also carries the
+// host's recovery, the condition object that goes with the kind, and the
+// reset to Normal that a normal top-level return performs. It also carries the
 // `CleanupFrameReserve` coupling from the plan's item 2: a cleanup provoked
 // by frame exhaustion must be pushable regardless of which wall tripped,
 // because the frame wall now assigns Budget (a non-Normal kind) before the
@@ -866,6 +870,10 @@ static bool TestCompletionKinds(void) {
                              "interrupt.fe: evaluation cancelled",
                              FeCompletionQuit));
   CHECK(interrupt.polls == interrupt.cancel_after);
+  // A real interrupt carries the same `(quit)` condition object
+  // `(signal 'quit nil)` constructs, so a host reading `FeGetCondition`
+  // after a C-g never sees whatever the last *error* signalled.
+  CHECK(IsRendered(context, FeGetCondition(context), "(quit)"));
 
   // Frame wall -> Budget. The fixed expression measures its own peak first
   // (the same push-before-write trick `TestFrameLimits` uses), so "one below
@@ -3420,6 +3428,70 @@ static bool TestUnwindCleanupBudget(void) {
   return true;
 }
 
+// A real host interrupt is a `quit` a Lisp program can catch, exactly as
+// Emacs' C-g is: `(quit ...)` and `t` handlers see it, an `(error ...)`
+// handler does not, and the object bound is the same `(quit)` cons
+// `(signal 'quit nil)` builds. The interrupt path has no signalled
+// condition object to walk, so the matcher has to decide on the completion
+// *kind* before it looks at one -- testing the object first made a genuine
+// C-g catchable by `t` alone.
+static bool TestQuitIsCatchable(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  InterruptState interrupt = {
+      .context = context, .expected_userdata = &interrupt, .cancel_after = 3};
+  const FeEvalOptions options = {
+      .poll_interval = 2, .interrupt = Interrupt, .userdata = &interrupt};
+
+#define QUIT_CASE(expr, expected)                                             \
+  do {                                                                        \
+    interrupt.polls = 0;                                                      \
+    static const char source[] = expr;                                        \
+    CHECK(                                                                    \
+        IsRendered(context,                                                   \
+                   FeEvaluateStringWithOptions(context, "quit.fe", source,    \
+                                               sizeof(source) - 1, &options), \
+                   expected));                                                \
+  } while (false)
+
+  // A `(quit ...)` handler catches it, and so does `t`.
+  QUIT_CASE("(condition-case nil (while t 1) (quit 'caught))", "caught");
+  QUIT_CASE("(condition-case nil (while t 1) (t 'caught-t))", "caught-t");
+  // The variable is bound to the `(quit)` condition object.
+  QUIT_CASE("(condition-case v (while t 1) (quit v))", "(quit)");
+  // A handler list containing `quit` matches too.
+  QUIT_CASE("(condition-case nil (while t 1) ((arith-error quit) 'listed))",
+            "listed");
+
+#undef QUIT_CASE
+
+  // An `(error ...)` handler does not: quit is not under `error`, so the
+  // completion passes the handler by and reaches the host as Quit.
+  interrupt.polls = 0;
+  static const char uncaught[] =
+      "(condition-case nil (while t 1) (error 'not-this-one))";
+  CHECK(ExpectCompletionKind(
+      context, &state, "quit.fe", uncaught, sizeof(uncaught) - 1, &options,
+      "quit.fe: evaluation cancelled", FeCompletionQuit));
+
+  // Budget is catchable by nothing at all, `t` included: it is fe's own
+  // ceiling, not an Emacs condition, and a program must not be able to sit
+  // inside the limit the host set.
+  static const char budget[] = "(condition-case nil (while t 1) (t 'nope))";
+  const FeEvalOptions step = {.step_limit = 64};
+  CHECK(ExpectCompletionKind(
+      context, &state, "quit.fe", budget, sizeof(budget) - 1, &step,
+      "quit.fe: evaluation step limit exceeded", FeCompletionBudget));
+
+  FeCloseContext(context);
+  return true;
+}
+
 // A caught condition *resumes* the interrupted program, so everything the
 // host configured for it has to survive the catch: the step budget (with the
 // steps already spent still spent), the frame wall, the native-reentry
@@ -5548,7 +5620,8 @@ int main(void) {
                  TestCleanupRunGC() && TestPrimitiveOrder() &&
                  TestResumableFrameBudget() && TestResumableFrameCancel() &&
                  TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestCatchThrow() && TestConditionCaseResumesControl()
+                 TestCatchThrow() && TestConditionCaseResumesControl() &&
+                 TestQuitIsCatchable()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

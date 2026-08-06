@@ -185,11 +185,19 @@ static bool ConditionMatches(const FeObject* condition,
   if (IsNamedSymbol(spec, "t")) {
     return true;
   }
-  if (FeGetType(spec) != FeTSymbol || FeGetType(condition) != FeTPair) {
+  if (FeGetType(spec) != FeTSymbol) {
     return false;
   }
+  // Quit is decided by the completion *kind*, before anything looks at the
+  // condition object: a real C-g arrives through `EvaluationStep`, where
+  // there is no signalled condition to walk, and Emacs still lets `(quit
+  // ...)` catch it. Testing the object first is what made a genuine
+  // interrupt catchable by `t` but not by the handler that names it.
   if (kind == FeCompletionQuit) {
     return IsNamedSymbol(spec, "quit");
+  }
+  if (FeGetType(condition) != FeTPair) {
+    return false;
   }
   for (const ConditionParent* entry = FindConditionParent(CAR(condition));
        entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
@@ -547,6 +555,17 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   RaiseCompletionCore(ctx, kind, msg);
 }
 
+// The three host-configured ceilings (step budget, frame wall, native
+// re-entry) raise Budget, which Emacs has no counterpart for and which
+// `condition-case` deliberately cannot catch. There is no condition object
+// to construct for one, so the field is cleared rather than left holding
+// whatever the last error signalled: `FeGetCondition` must never answer with
+// a stale object for a completion that has none.
+[[noreturn]] static void RaiseBudget(FeContext* ctx, const char* msg) {
+  ctx->condition = &nil;
+  RaiseCompletion(ctx, FeCompletionBudget, msg);
+}
+
 // The public raise entry point: an ordinary Error completion, which is what
 // every one of the 100+ call sites through fe.c/fex_*.c and kg's 112 raise
 // sites means. The signature is pinned (kg calls it directly); the four wall
@@ -590,8 +609,7 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     RaiseCondition(ctx, FeCompletionQuit, "quit", &nil, msg);
   }
   if (kind == FeCompletionBudget) {
-    ctx->condition = &nil;
-    RaiseCompletion(ctx, FeCompletionBudget, msg);
+    RaiseBudget(ctx, msg);
   }
   FeHandleError(ctx, msg);
 }
@@ -660,8 +678,7 @@ void EvaluationStep(FeContext* ctx) {
     if (ctx->evaluation_steps == 0) {
       // Step-budget exhaustion is a Budget completion (06B): the host set a
       // ceiling and the program hit it. Message text is pinned verbatim.
-      RaiseCompletion(ctx, FeCompletionBudget,
-                      "evaluation step limit exceeded");
+      RaiseBudget(ctx, "evaluation step limit exceeded");
     }
     ctx->evaluation_steps--;
   }
@@ -671,7 +688,11 @@ void EvaluationStep(FeContext* ctx) {
     if (ctx->evaluation_interrupt(ctx, ctx->evaluation_userdata)) {
       // The interrupt path is a Quit completion (06B): the user asked to
       // stop, which the host must be able to tell from a genuine error.
-      RaiseCompletion(ctx, FeCompletionQuit, "evaluation cancelled");
+      // It carries a real `(quit)` condition object, the same one
+      // `(signal 'quit nil)` builds, so a host or a `(quit ...)` handler
+      // never reads a stale object left by an earlier error.
+      RaiseCondition(ctx, FeCompletionQuit, "quit", &nil,
+                     "evaluation cancelled");
     }
   }
 }
@@ -696,8 +717,7 @@ static void EnterNativeReentry(FeContext* ctx) {
     // The re-entry wall is a Budget completion (06B), grouped with the
     // other host-configured ceilings: the parent's resource-exhaustion rule
     // puts it beside the step and frame limits, not beside ordinary errors.
-    RaiseCompletion(ctx, FeCompletionBudget,
-                    "native evaluation re-entry limit exceeded");
+    RaiseBudget(ctx, "native evaluation re-entry limit exceeded");
   }
   ctx->native_reentry_depth++;
   if (ctx->native_reentry_depth > ctx->arena_peak_native_reentry) {
@@ -1043,7 +1063,7 @@ static FeEvalFrame* AllocateFrame(FeContext* ctx) {
     // makes the reserve above load-bearing for a frame-wall drain: this raise
     // sets `completion` before the drain runs, so the cleanup's own pushes
     // are not refused by the same wall the body just hit.
-    RaiseCompletion(ctx, FeCompletionBudget, "evaluation frame limit exceeded");
+    RaiseBudget(ctx, "evaluation frame limit exceeded");
   }
   FeEvalFrame* const frame = &ctx->frame_stack[ctx->frame_stack_index++];
   if (ctx->frame_stack_index > ctx->arena_peak_frame_depth) {
