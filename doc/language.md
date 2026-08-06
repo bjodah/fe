@@ -536,7 +536,8 @@ untouched, so the pair with `makunbound` keeps the two namespaces disjoint:
 #### `(and ...)`
 
 Evaluates each argument until one results in `nil` — the last argument’s value
-is returned if all the arguments are true.
+is returned if all the arguments are true. `(and)` with no arguments at all is
+`t`, Emacs' identity element for the operator, not `nil`.
 
 ```clojure
 fe > (and 1 2 3)
@@ -883,7 +884,11 @@ Returns true if `x` is not a pair, otherwise `nil`.
 #### `(print ...)`
 
 Prints all its arguments to `stdout`, each separated by a space and followed by
-a newline.
+a newline. At least one value is required: `(print)` is
+`wrong-number-of-arguments`, so the bare blank line it used to write is gone.
+Accepting more than one value is a deliberate Fe divergence -- Emacs' `print`
+takes one object and an optional output stream -- and is recorded as such in
+`compat/features.json` under `phase7-primitive-print-arity`.
 
 ### Numbers
 
@@ -1073,8 +1078,9 @@ enclosing context, which is what makes the replacement policy above work.
 The rule has no Emacs analogue -- Emacs has no equivalent of a host native
 starting a fresh evaluator -- so it is pinned by `test_api.c`
 (`TestCatchThrow`'s re-entry wall and `TestProtectedCall`) rather than by an
-oracle row. `signal` evaluates its two operands and raises
-`(condition . data)`. Unknown condition symbols raise `(error "Invalid error
+oracle row. `signal` evaluates one or two operands and raises `(condition . data)`; the
+data is nil when the second operand is omitted, matching Emacs, where
+`(signal 'error)` is accepted and answers the condition `(error)`. Unknown condition symbols raise `(error "Invalid error
 symbol" SYMBOL)`. `error` formats its message at signal time and raises an
 `error` condition. Its supported directives are `%%`, `%d` (integer), `%s`
 and `%S`. `%s` is Emacs' `princ` and `%S` its `prin1`, and the difference

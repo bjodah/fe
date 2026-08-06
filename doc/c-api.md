@@ -13,7 +13,8 @@ break; a host should assert both.
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
 types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-version 4 is the numeric contract of the Emacs-subset cut: the reader
+version 6 is the strict-arity contract described below; version 4 was the
+numeric contract of the Emacs-subset cut: the reader
 classifies `42` as an integer and `42.0` as a float (05A Decision 3), floats
 print shortest-round-trip with a `.` or an exponent always present (`42.0`,
 `1e+20` -- an appended `.0` only when neither is there already), integer
@@ -38,6 +39,28 @@ deliberately deferred to the cut so the whole numeric contract moves as one
 visible break, and kg's existing `static_assert(FE_API_VERSION == 3)` fails
 at the 05E pin as the designed tripwire. `FeVersion` moves "4.0" -> "5.0"
 with the same break.
+
+Both macros moved 4 -> 5 together in sub-plan 06D, the condition cut, for
+different reasons on each axis -- which is the case the two-axes rule exists
+for. On the C side `FeCompletion`, `FeGetCompletion`, `FeGetCondition`,
+`FeRaiseCompletion` and `FeResignal` are new surface and an error a host used
+to see only as text now also carries an `(error-symbol . data)` object. On
+the Lisp side `condition-case`, `signal` and a condition hierarchy exist, and
+every evaluator raise carries a symbol and a data list. `FeVersion` moves
+"5.0" -> "6.0".
+
+Both moved 5 -> 6 in sub-plan 07B, the strict-arity cut, with `FeVersion`
+"6.0" -> "7.0". The C break is a removal: `FeSetStrictArity()` and
+`FeGetStrictArity()` are gone outright -- no deprecated no-op, no lax mode --
+so a host that called either gets a compile error, which is the only honest
+notification, since there is no runtime answer that would still be true. The
+language break is that existing programs change meaning rather than failing
+to compile: `((lambda (x) x))`, `((lambda () 1) 2)`, `(car 1 2)` and
+`(quote 1 2)` all used to answer and are now `wrong-number-of-arguments`;
+`(and)` was nil and is `t`; `(signal 'error)` was an arity error and is now
+accepted with nil data; `print` gains a one-argument minimum; and malformed
+parameter lists raise `invalid-function` rather than prose errors. Fe's
+dotted-tail and bare-symbol rest spellings are unaffected.
 
 `FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
 kg's Emacs-subset program: the frame machine's Lisp-nesting and native
@@ -143,11 +166,20 @@ parameters bind `nil`, and `&rest` receives a fresh list. Fe's dotted-tail and
 bare-symbol parameter spellings remain variadic. A malformed proper parameter
 list raises `invalid-function` when the callable is invoked.
 
-Native helpers retain their historical `too few arguments` and `too many
-arguments` messages. During a native callback, `FeGetNextArgument()` and
-`FeRequireNoArguments()` publish the callable and original argument count in
-the `wrong-number-of-arguments` condition data. The record is scoped across
-nested native re-entry and is cleared before a non-local raise abandons it.
+Every *core primitive* reports a wrong argument count the same way, with no
+exceptions: `wrong-number-of-arguments` carrying `(FUNCTION NARGS)`, checked
+from the raw argument list before any operand is evaluated.
+
+*Native helpers* are the separate contract, because a native declares no
+arity: their checks necessarily happen after operands have been evaluated,
+and they retain their historical `too few arguments` and `too many arguments`
+messages while raising the same condition. During a native callback,
+`FeGetNextArgument()` and `FeRequireNoArguments()` read a per-call record --
+the callable and the original argument count -- and put it in the condition
+data. That record is saved and restored around nested native re-entry, is
+restored when a `condition-case` inside a run the native started catches, and
+is cleared before a non-local raise abandons the activation that published
+it.
 
 An Fe native callback may re-enter the reader or evaluator on the same context.
 This nesting is supported on the same thread. The callback must observe the GC
@@ -855,7 +887,8 @@ Since sub-plan 04D's namespace cut, the native binding lands in the symbol's
 directly, and `(symbol-function 'name)` observes it. Before the cut the
 binding went to the value cell and call position reached it through the
 transitional fallback; `FeDefineNative`'s new home is the meaning change the
-`FE_API_VERSION` 3 bump carried (the 05D numeric cut moved both versions to 4).
+`FE_API_VERSION` 3 bump carried (05D's numeric cut then moved both versions
+to 4, 06D's condition cut to 5, and 07B's strict-arity cut to 6).
 
 Consume required arguments with `FeGetNextArgument()`, which raises `too few
 arguments` for a missing value. After consuming the supported arguments, call

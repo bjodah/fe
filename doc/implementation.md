@@ -279,6 +279,32 @@ today it bounds only the reader's and writer's own native C recursion, not
 evaluation. Because the array lives in the arena, its size is still the
 dominant term in `FeMinimumArenaSize()`.
 
+It does not grow with a call's *argument count* either, which is the same
+property one width down: an argument frame's accumulator, an EvalList frame's
+accumulator, and `apply`'s rebuilt operand list are all frame fields and
+therefore mark-phase roots, so each pass restores the frame's own checkpoint
+instead of leaving a slot per operand behind. `TestLongArgumentLists` pins
+that as a constant across 1500- and 3000-argument calls through `&rest`, the
+dotted tail and `apply`.
+
+Overflowing it is reported without allocating. An ordinary push stops
+`GcStackReserve` (64) slots short of the array and only a completion already
+in flight may spend the rest -- `AllocateFrame`'s `CleanupFrameReserve`,
+applied to the other bounded stack -- because reporting the overflow is
+itself a rooting operation: the raise protects the condition object across
+the cleanup drain, and a cleanup entry evaluates Lisp of its own. The raise
+carries the nil condition object arena exhaustion uses rather than building
+one, since building one would allocate, which would push, which is what
+overflowed.
+
+"Arena exhausted", where a raise gives up on building a condition object at
+all, means `ArenaCanAllocate()`: the free list is empty *and* a collection
+cannot refill it. A bare free-list test answers a narrower question -- whether
+the list happens to be empty at this instant, which is true after any
+allocation that took the last cell -- and reading that as exhaustion silently
+replaced the condition object with nil, which matches no handler, so a
+`condition-case` could be escaped by its own body under memory pressure.
+
 Sub-plan 03F replaced the single, transitional `max_depth`/
 `evaluation_depth` pair -- itself a stand-in the frame machine's own
 migration (03C-03E) kept alive only for API continuity while it moved
@@ -413,11 +439,28 @@ when the next one is evaluated (`doc/language.md` and
 grouped by evaluation *shape*, not by primitive:
 
 Primitive arity is checked in one raw-form preflight table before a
-continuation push, so fixed-arity failures do not evaluate an operand. Lambda
-and macro operands are evaluated completely before `ArgsToEnv` validates and
-binds the parameter list. Both paths use the same condition builder, rooting
-the original designator/callable and original argument count while constructing
-`(FUNCTION NARGS)` data.
+continuation push, so fixed-arity failures do not evaluate an operand. That
+preflight runs exactly once per call, at `DispatchResolvedCall` -- it has to
+be there, because `quote`'s fast path is taken before `DispatchPrimitive` is
+reached -- and the table has no exception rows: every primitive raises
+`wrong-number-of-arguments` with `(FUNCTION NARGS)`, which is also what Emacs
+answers for each of them. Host natives are the deliberate exception class,
+and for a structural reason rather than a historical one: a native declares
+no arity, so `FeGetNextArgument`/`FeRequireNoArguments` can only check after
+operands have been evaluated, and they keep their own message text.
+
+Lambda and macro operands are evaluated completely before `ArgsToEnv`
+validates and binds the parameter list. Both paths use the same condition
+builder, rooting the original designator/callable and original argument count
+while constructing `(FUNCTION NARGS)` data. An improper argument list is not
+routed through any of this: it has no argument count, so `(car 1 . 2)` is
+`wrong-type-argument listp` naming the tail, as in Emacs.
+
+A rest parameter binds the argument list itself, never a copy. For an
+ordinary call that list is the evaluated-operand list the argument frame just
+consed, so it is fresh per call without copying; for a macro it is the
+caller's raw source tail, which is what Emacs binds too and what makes a
+macro able to rewrite the form it was given.
 
 - `FeFrameIf`, `FeFrameWhile`, `FeFrameAndOr`, `FeFrameLet`, `FeFrameSetq`
   and `FeFrameRelay` (`do` and `unwind-protect`'s body) are each their own

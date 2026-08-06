@@ -37,8 +37,20 @@
 // was deliberately deferred to the cut so the whole numeric contract moves as
 // one visible break -- a "compatible" break that silently reinterprets `42`
 // is the worst kind (05D).
-// Version 6 (sub-plan 07B) makes strict arity unconditional and removes the
-// per-context arity switch from the public embedding API.
+//
+// Version 5 (sub-plan 06D of kg's Emacs-subset program) is the condition
+// cut: `FeCompletion`, `FeGetCompletion`, `FeGetCondition`,
+// `FeRaiseCompletion` and `FeResignal` join the surface, and an error a host
+// used to see only as text now also carries an `(error-symbol . data)`
+// object. Existing calls keep compiling; the bump is the two-axes rule 06D
+// set, where the language version moves for programs and this one for hosts,
+// and both moved.
+//
+// Version 6 (sub-plan 07B) removes `FeSetStrictArity` and
+// `FeGetStrictArity` outright -- no deprecated no-op, no lax mode -- because
+// arity is now unconditional. A host that called either gets a compile
+// error, which is the whole notification: there is no runtime answer that
+// would still be true.
 #define FE_API_VERSION 6
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
@@ -55,8 +67,26 @@
 // `1.0e+INF`/`0.0e+NaN` family) read as their own types instead of every
 // number reading as a double, floats print shortest-round-trip with an
 // explicit `.0`, integer division truncates, `(/ 1 0)` is `arith-error`, and
-// `eq`/`eql` are core primitives with Emacs' identity semantics. See
-// doc/language.md and doc/c-api.md.
+// `eq`/`eql` are core primitives with Emacs' identity semantics.
+//
+// Version 5 (sub-plan 06D) is the condition cut: `condition-case`, `signal`
+// and a condition hierarchy exist, and every raise the evaluator makes now
+// carries a symbol and a data list. A program that only ever printed the
+// message text still runs; one that branched on that text can now branch on
+// the symbol instead.
+//
+// Version 6 (sub-plan 07B) is the strict-arity cut, and it changes what
+// existing programs *mean*. Calls that used to answer are now errors:
+// `((lambda (x) x))` bound `x` to nil and is `wrong-number-of-arguments`;
+// `((lambda () 1) 2)` dropped the extra argument and is the same; `(car 1 2)`
+// and `(quote 1 2)` ignored their surplus operands and now reject them
+// before evaluating any of them. Two answers changed rather than
+// disappearing: `(and)` was nil and is `t`, and `(signal 'error)` was an
+// arity error and is now accepted with nil data. `print` gains a
+// one-argument minimum, so the zero-argument blank line is gone. Malformed
+// parameter lists raise `invalid-function` instead of prose errors. Fe's
+// dotted-tail and bare-symbol rest spellings are unaffected.
+// See doc/language.md and doc/c-api.md.
 #define FE_LANGUAGE_VERSION 6
 
 extern const char* FeVersion;
