@@ -1476,6 +1476,19 @@ static bool TestParameterLists(void) {
       "(wrong-number-of-arguments (macro (x) x) 0)");
   CHK("(condition-case e (car 1 2) (wrong-number-of-arguments e))",
       "(wrong-number-of-arguments car 2)");
+  // 07A Decision 4: every arity raise carries identity and count, `setq`'s
+  // dangling-target one included. Emacs 31.0.90, measured: `(setq a 1 b)` is
+  // `(wrong-number-of-arguments setq 3)` -- the whole form's raw count -- and
+  // `a` is left assigned to 1, so the count is not what remained unconsumed.
+  CHK("(condition-case e (setq q 1 r) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments setq 3)");
+  CHK("q", "1");
+  CHK("(condition-case e (setq q) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments setq 1)");
+  CHK("(condition-case e (boundp 'car 'extra) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments boundp 2)");
+  CHK("(condition-case e (integerp) (wrong-number-of-arguments e))",
+      "(wrong-number-of-arguments integerp 0)");
   // An improper argument list is a type error about its tail, not an arity
   // report: there is no argument count to name. Emacs 31.0.90 answers
   // `(wrong-type-argument listp 2)` for all three.
@@ -1933,7 +1946,7 @@ static bool TestFunctionCells(void) {
   CHK("(is (function (lambda (x) x)) (function (lambda (x) x)))", "nil");
   LISP2_ERR("(function 5)", "lisp2.fe: unsupported-function-form");
   LISP2_ERR("(function (car 1))", "lisp2.fe: unsupported-function-form");
-  LISP2_ERR("(function f 1)", "lisp2.fe: too many arguments");
+  LISP2_ERR("(function f 1)", "lisp2.fe: wrong-number-of-arguments");
 
   // Cycles in the designator chain are named, in call position, in funcall,
   // and through the public API -- never left to exhaust the step budget.
@@ -5571,11 +5584,17 @@ static bool TestPrimitiveOrder(void) {
   CHECK(FeIsBound(context, FeMakeSymbol(context, "less-probe")));
   CHK("(makunbound 'less-probe)", "less-probe");
 
-  // `boundp`/`makunbound` reject a leftover extra argument, unlike the
-  // other primitives sharing their frame kind (`not`/`atom`/`car`/`cdr`/
-  // `assert`), which silently ignore extras.
-  ORDER_ERR("(boundp 'car 'extra)", "order.fe: too many arguments");
-  ORDER_ERR("(makunbound 'car 'extra)", "order.fe: too many arguments");
+  // Every primitive sharing this frame kind rejects a leftover argument now,
+  // through the one table, with one condition: the pre-Phase-7 split where
+  // `boundp`/`makunbound` said "too many arguments" and `not`/`atom`/`car`/
+  // `cdr`/`assert` silently dropped extras is gone. Emacs 31.0.90 agrees on
+  // both the condition and the data for all of them -- measured,
+  // `(boundp 'car 'extra)` is `(wrong-number-of-arguments boundp 2)` and
+  // `(car 1 2)` is `(wrong-number-of-arguments car 2)`.
+  ORDER_ERR("(boundp 'car 'extra)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(makunbound 'car 'extra)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(integerp)", "order.fe: wrong-number-of-arguments");
+  ORDER_ERR("(symbol-value 'a 'b)", "order.fe: wrong-number-of-arguments");
 
   // `cons`'s two operands evaluate left to right.
   CHK("(setq cons-order '())", "nil");

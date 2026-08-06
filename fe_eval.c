@@ -1097,6 +1097,16 @@ static FeObject* MakeClosure(FeContext* ctx,
   return obj;
 }
 
+// The identity a `(FUNCTION NARGS)` condition names, per 07A Decision 2: the
+// symbol the program actually wrote when the head is one, and the resolved
+// callable otherwise -- a computed head, or a host `FeCall*` entry. One
+// helper rather than the same conditional spelled out at each call site,
+// which is how the rule stays the same rule everywhere.
+static FeObject* CallIdentity(FeObject* expr, FeObject* fn) {
+  FeObject* const head = CAR(expr);
+  return FeGetType(head) == FeTSymbol ? head : fn;
+}
+
 static bool DispatchPrimitive(FeContext* ctx,
                               FeEvalFrame* frame,
                               FeObject* fn,
@@ -1125,10 +1135,8 @@ static bool DispatchResolvedCall(FeContext* ctx,
                                  FeObject** frame_bind,
                                  FeObject** result) {
   if (FeGetType(fn) == FeTPrimitive) {
-    FeObject* const head = CAR(frame->expr);
-    FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
-    PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn), identity,
-                       CDR(frame->expr));
+    PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn),
+                       CallIdentity(frame->expr, fn), CDR(frame->expr));
     if (PRIM(fn) == PQuote) {
       FeObject* arguments = CDR(frame->expr);
       *result = FeGetNextArgument(ctx, &arguments);
@@ -1166,8 +1174,7 @@ static bool DispatchResolvedCall(FeContext* ctx,
     // never-evaluating helper, charging one step per parameter walk exactly
     // as the recursive arm did.
     FeObject* const caller_env = frame->env;
-    FeObject* const head = CAR(frame->expr);
-    FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
+    FeObject* const identity = CallIdentity(frame->expr, fn);
     const size_t argc = CountRawArguments(ctx, CDR(frame->expr));
     frame->env =
         ArgsToEnv(ctx, CAR(vb), CDR(frame->expr), CAR(va), identity, argc);
@@ -1397,6 +1404,19 @@ static size_t CountRawArguments(FeContext* ctx, FeObject* arguments) {
   return count;
 }
 
+// One rule for every primitive: the table decides, and a violation is
+// `wrong-number-of-arguments` carrying 07A Decision 2's `(FUNCTION NARGS)`.
+//
+// This deliberately has no exception list. The nine primitives that once kept
+// the prose "too few arguments"/"too many arguments" here were exactly the
+// nine whose pre-Phase-7 assertions would otherwise have had to change --
+// which is a record of the order the work was done in, not a policy anyone
+// could state. Those messages are fe-only prose that no oracle row pins, so
+// the assertions moved instead. Decision 2's byte-identical native messages
+// are a different contract and live where they belong, in
+// `FeGetNextArgument`/`FeRequireNoArguments`: a host native declares no
+// arity, so its helper-driven checks stay post-evaluation and keep their own
+// text.
 static void PreflightPrimitive(FeContext* ctx,
                                Primitive primitive,
                                FeObject* function,
@@ -1404,15 +1424,6 @@ static void PreflightPrimitive(FeContext* ctx,
   const size_t count = CountRawArguments(ctx, arguments);
   const PrimitiveArity arity = primitive_arities[primitive];
   if (count < arity.minimum || count > arity.maximum) {
-    if (primitive == PFunction || primitive == PBoundp ||
-        primitive == PMakeUnbound || primitive == PSymbolFunction ||
-        primitive == PSymbolValue || primitive == PFboundp ||
-        primitive == PFmakunbound || primitive == PIntegerp ||
-        primitive == PFloatp) {
-      RaiseNativeArity(
-          ctx, function, count,
-          count < arity.minimum ? "too few arguments" : "too many arguments");
-    }
     RaiseWrongNumber(ctx, function, count);
   }
 }
@@ -1587,6 +1598,9 @@ static bool DispatchPrimitive(FeContext* ctx,
     }
     case PSetq:
       frame->kind = FeFrameSetq;
+      // Kept for `RaiseSetqFormCount`'s identity fallback when the head was a
+      // computed form rather than the symbol `setq`.
+      frame->fn = fn;
       frame->rest = arguments;
       frame->accumulator = &unbound;
       frame->callee = &unbound;
@@ -1786,8 +1800,7 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
   FeObject* va = CDR(fn);  // (env params ...)
   FeObject* vb = CDR(va);  // (params ...)
   frame->kind = FeFrameLambda;
-  FeObject* const head = CAR(frame->expr);
-  FeObject* const identity = FeGetType(head) == FeTSymbol ? head : fn;
+  FeObject* const identity = CallIdentity(frame->expr, fn);
   const size_t argc = CountRawArguments(ctx, CDR(frame->expr));
   // Keep the evaluated list rooted across `ArgsToEnv`'s own allocations: the
   // GC-stack slots that used to hold it are released once per delivered
@@ -2047,6 +2060,19 @@ static bool ResumeLet(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // evaluating anything; a dangling final SYMBOL is diagnosed only once every
 // earlier complete pair has already assigned. Assignment goes through
 // `GetBound(ctx, target, env)`, exactly as the recursive arm's did.
+// `(setq a 1 b)`: the trailing target has no value form. 07A Decision 4 says
+// every arity raise carries the call's identity and its actual count, and
+// Emacs 31.0.90 measures this one as `(wrong-number-of-arguments setq 3)` --
+// the whole form's raw count, which is why it is recomputed from `expr`
+// rather than read off `rest`, which the walk has already advanced past.
+// Emacs also assigns every complete pair before raising, as `ResumeSetq`
+// does; measured, `(setq a 1 b)` leaves `a` at 1.
+[[noreturn]] static void RaiseSetqFormCount(FeContext* ctx,
+                                            const FeEvalFrame* frame) {
+  RaiseWrongNumber(ctx, CallIdentity(frame->expr, frame->fn),
+                   CountRawArguments(ctx, CDR(frame->expr)));
+}
+
 static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (frame->callee != &unbound) {
     CDR(GetBound(ctx, frame->accumulator, frame->env)) = frame->callee;
@@ -2060,8 +2086,7 @@ static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
     return true;
   }
   if (FeGetType(frame->rest) != FeTPair) {
-    RaiseNamedError(ctx, "wrong-number-of-arguments",
-                    "wrong-number-of-arguments");
+    RaiseSetqFormCount(ctx, frame);
   }
   FeObject* const target = CAR(frame->rest);
   if (FeGetType(target) != FeTSymbol) {
@@ -2069,8 +2094,7 @@ static bool ResumeSetq(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   }
   frame->rest = CDR(frame->rest);
   if (FeGetType(frame->rest) != FeTPair) {
-    RaiseNamedError(ctx, "wrong-number-of-arguments",
-                    "wrong-number-of-arguments");
+    RaiseSetqFormCount(ctx, frame);
   }
   frame->accumulator = target;
   PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
@@ -3446,8 +3470,7 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         FeObject* const saved_identity = ctx->native_identity;
         const size_t saved_argc = ctx->native_argc;
         const bool saved_active = ctx->native_call_active;
-        FeObject* const head = CAR(frame->expr);
-        ctx->native_identity = FeGetType(head) == FeTSymbol ? head : frame->fn;
+        ctx->native_identity = CallIdentity(frame->expr, frame->fn);
         ctx->native_argc = CountRawArguments(ctx, CDR(frame->expr));
         ctx->native_call_active = true;
         result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
