@@ -1007,9 +1007,11 @@ argument is `wrong-number-of-arguments`.
 handler. A handler receives the condition object, a cons whose car is the
 condition symbol and whose cdr is its data, bound to `variable` (or no binding
 for `nil`), and its forms are an implicit `do`. `error` catches ordinary
-conditions including `wrong-type-argument` and `arith-error`; hierarchy
-matching is transitive (`overflow-error` is a `range-error`, an
-`arith-error`, and an `error`). `quit` is separate and requires a `quit` or
+conditions including `wrong-type-argument`, `arith-error` and `no-catch`,
+because every condition Fe registers names `error` as its parent: the
+hierarchy is one level deep, and Emacs' deeper chains (`overflow-error` is
+a `range-error` is an `arith-error`) are deliberately out of scope until a
+producer needs them. `quit` is separate and requires a `quit` or
 `t` handler. An error raised by a handler bypasses that active handler and
 searches an enclosing one. `signal` evaluates its two operands and raises
 `(condition . data)`. Unknown condition symbols raise `(error "Invalid error

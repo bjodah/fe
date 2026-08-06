@@ -14,8 +14,8 @@
   (condition-case nil (signal 'quit nil) (quit 'quit)))
 (assert-equals 'multi
   (condition-case nil (/ 1 0) ((wrong-type-argument arith-error) 'multi)))
-(assert-equals 'transitive
-  (condition-case nil (signal 'overflow-error nil) (arith-error 'transitive)))
+(assert-equals 'caught-no-catch
+  (condition-case nil (throw 'nowhere 1) (error 'caught-no-catch)))
 (assert-equals '(error "value 7")
   (condition-case e (error "value %d" 7) (error e)))
 (assert-equals '(error "cleanup")

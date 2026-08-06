@@ -80,8 +80,6 @@ static const ConditionParent condition_parents[] = {
     {"void-function", "error"},
     {"args-out-of-range", "error"},
     {"arith-error", "error"},
-    {"range-error", "arith-error"},
-    {"overflow-error", "range-error"},
     {"file-error", "error"},
     {"cyclic-function-indirection", "error"},
     {"invalid-function", "error"},
@@ -496,9 +494,11 @@ FeObject* FeGetCondition(const FeContext* ctx) {
     RaiseCompletion(ctx, kind, message);
   }
   const size_t gc = FeSaveGC(ctx);
+  // `data` is rooted first: it is usually a list the caller has just built
+  // and nothing else refers to, and `FeMakeSymbol` can collect.
+  FePushGC(ctx, data);
   FeObject* symbol = FeMakeSymbol(ctx, name);
   FePushGC(ctx, symbol);
-  FePushGC(ctx, data);
   ctx->condition = FeCons(ctx, symbol, data);
   FeRestoreGC(ctx, gc);
   RaiseCompletion(ctx, kind, message);
