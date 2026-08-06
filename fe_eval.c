@@ -1366,11 +1366,17 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PError] = {1, SIZE_MAX},
 };
 
+// An improper argument list has no argument *count*, so it is not an arity
+// question at all: `(car 1 . 2)` is `(wrong-type-argument listp 2)` in Emacs,
+// naming the tail that is not a list, and was `wrong-type-argument listp`
+// here before Phase 7 too. Reporting it as `wrong-number-of-arguments` with
+// a nil FUNCTION -- which is what a partially walked list can honestly say
+// about the call -- claimed an identity and a count that mean nothing.
 static size_t CountRawArguments(FeContext* ctx, FeObject* arguments) {
   size_t count = 0;
   while (!FeIsNil(arguments)) {
     if (FeGetType(arguments) != FeTPair) {
-      RaiseWrongNumber(ctx, &nil, count);
+      RaiseWrongType(ctx, "listp", arguments);
     }
     count++;
     arguments = CDR(arguments);

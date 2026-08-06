@@ -1468,9 +1468,26 @@ static bool TestParameterLists(void) {
       "(wrong-number-of-arguments (macro (x) x) 0)");
   CHK("(condition-case e (car 1 2) (wrong-number-of-arguments e))",
       "(wrong-number-of-arguments car 2)");
+  // An improper argument list is a type error about its tail, not an arity
+  // report: there is no argument count to name. Emacs 31.0.90 answers
+  // `(wrong-type-argument listp 2)` for all three.
+  CHK("(condition-case e (car 1 . 2) (wrong-type-argument e))",
+      "(wrong-type-argument listp 2)");
+  CHK("(condition-case e (list 1 . 2) (wrong-type-argument e))",
+      "(wrong-type-argument listp 2)");
 
 #undef CHK
 
+  // Recorded divergence, unchanged by Phase 7: an improper argument list to a
+  // *closure* is diagnosed by `FeGetNextArgument` while collecting operands,
+  // which is a plain `error`, where Emacs 31.0.90 answers
+  // `(wrong-type-argument listp 2)` here too. The primitive path above is the
+  // one Phase 7 touched; the closure path's text is a host-API message
+  // natives share and is left alone.
+  CHECK(ExpectEvaluationError(context, &state, "dotted.fe",
+                              "((lambda (a) a) 1 . 2)",
+                              strlen("((lambda (a) a) 1 . 2)"),
+                              "dotted.fe: dotted pair in argument list"));
   CHECK(ExpectEvaluationError(
       context, &state, "rest.fe", "((lambda (a &rest) a) 1)",
       strlen("((lambda (a &rest) a) 1)"), "rest.fe: invalid-function"));
