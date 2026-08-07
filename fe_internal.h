@@ -787,9 +787,27 @@ struct FeContext {
   // lands). In both of those `run_base` is still the enclosing run's, and
   // without this floor the search would reach outside the `unwind-protect`
   // and transfer to a handler with the frame stack and the remaining drain
-  // in the wrong state. For a native cleanup the floor equals the current
-  // index, nothing is above it, and no handler is ever accepted -- which is
-  // exactly the pre-existing behaviour.
+  // in the wrong state.
+  //
+  // For a native cleanup the floor equals the frame index the entry started
+  // at. What is above it depends on what the cleanup does, and 12B Part 1
+  // stated only half of that; the other half is Phase 12's fix cycle's
+  // correction. A cleanup that honours `FeCleanupFn`'s contract -- "must not
+  // call back into the evaluator" -- pushes no frames at all, so nothing is
+  // ever above the floor, no handler is ever accepted, and the arm is
+  // bit-identical to the pre-existing behaviour; that is what
+  // `TestNativeCleanupHandlerFloor`'s first three cases assert. A cleanup
+  // that VIOLATES that contract and re-enters the evaluator does put frames
+  // above the floor, and a `condition-case` among them is honored where
+  // before the fix it was not. That is not a native special case: it is this
+  // floor's own rule -- a handler established by the cleanup's own work
+  // belongs to the cleanup, not to the computation the drain is abandoning
+  // -- and it is what the pure-Lisp `unwind-protect` form and Emacs 31.0.90
+  // both answer. Measured, `(condition-case o (with-lisp-cleanup (fn ()
+  // 'body) (fn () (condition-case e (car 6) (error 'inner)))) (error (list
+  // 'outer o)))`: `(outer (wrong-type-argument listp 6))` before the fix,
+  // `body` after, and `body` in Emacs for the pure-Lisp analogue. The last
+  // three cases of `TestNativeCleanupHandlerFloor` pin it.
   size_t cleanup_frame_floor;
   char cleanup_error_message[256];
   // The kind that goes with `cleanup_error_message`. A cleanup that runs out

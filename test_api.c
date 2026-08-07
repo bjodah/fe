@@ -4156,10 +4156,46 @@ static FeObject* WithRaisingCleanup(FeContext* context, FeObject* args) {
   return FeCall(context, thunk, nullptr, 0);
 }
 
+// A native cleanup that CALLS BACK INTO LISP. `FeCleanupFn`'s documented
+// contract forbids this outright ("must not call back into the evaluator"),
+// and the four such cleanups kg registers are all pure C state restores that
+// evaluate nothing -- so this is out-of-contract, unreachable from the one
+// real embedder, and pinned anyway, because 12B Part 1 stated a bit-identity
+// claim over the native arm that is false for exactly this shape and offered
+// `TestNativeCleanupHandlerFloor` as the assertion of it.
+//
+// The thunk needs a root of its own: the cleanup registry does not mark a
+// native entry's `data`, and the frames that held the argument are gone by
+// the time the drain reaches the cleanup. The roots are deliberately never
+// released -- the context is closed at the end of the test -- because
+// releasing one before `FeCall` would leave the thunk unrooted for the call
+// and releasing it after is unreachable when the call raises.
+static FeRoot* lisp_cleanup_thunk;
+
+static void LispCallingNativeCleanup(FeContext* context, void* data) {
+  (void)data;
+  (void)FeCall(context, FeGetRoot(lisp_cleanup_thunk), nullptr, 0);
+}
+
+// `(with-lisp-cleanup BODY CLEANUP)`: `unwind-protect`, but the cleanup is a
+// native one that runs CLEANUP as Lisp.
+static FeObject* WithLispCleanup(FeContext* context, FeObject* arguments) {
+  FeObject* const body = FeGetNextArgument(context, &arguments);
+  FeObject* const cleanup = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  lisp_cleanup_thunk = FeCreateRoot(context, cleanup);
+  FeProtectWithCleanup(context, LispCallingNativeCleanup, nullptr);
+  return FeCall(context, body, nullptr, 0);
+}
+
 // The native half of 12B Part 1: honoring handlers established inside a
-// running cleanup must leave the native arm bit-identical, because a native
-// cleanup establishes none. Every expectation here was measured on the
-// commit *before* the ordering fix and is unchanged by it.
+// running cleanup leaves the native arm bit-identical for every native
+// cleanup that honours `FeCleanupFn`'s contract, because such a cleanup
+// establishes no frames at all. It is NOT bit-identical for one that
+// violates the contract by re-entering the evaluator, which is the
+// correction Phase 12's fix cycle made to the claim and which the last
+// three cases here pin. Every other expectation was measured on the commit
+// *before* the ordering fix and is unchanged by it.
 static bool TestNativeCleanupHandlerFloor(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -4168,6 +4204,7 @@ static bool TestNativeCleanupHandlerFloor(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
   FeDefineNative(context, "with-raising-cleanup", WithRaisingCleanup);
+  FeDefineNative(context, "with-lisp-cleanup", WithLispCleanup);
 
 #define CHK(expr, expected)                                                    \
   CHECK(IsRendered(                                                            \
@@ -4210,6 +4247,36 @@ static bool TestNativeCleanupHandlerFloor(void) {
                               "native.fe:1: native cleanup failed"));
   CHECK(!resource_state.open);
   CHECK(resource_state.close_count == 1);
+
+  // THE CORRECTION. Every case above registers a cleanup that runs no Lisp,
+  // and for those the floor equals the frame index the entry started at,
+  // nothing is ever above it, and no handler is ever accepted -- which is
+  // what "the native arm is bit-identical" means and all it can mean. A
+  // native cleanup that calls back into Lisp DOES push frames above that
+  // floor, and a `condition-case` among them is now honored where before
+  // the fix it was not. Measured on the commit before 95965f0 this answered
+  // `(outer (wrong-type-argument listp 6))`; it answers `body` now.
+  //
+  // The new answer is the right one, and is not a native special case at
+  // all: it is the same rule the Lisp arm follows -- a handler established
+  // by the cleanup's OWN work belongs to the cleanup, not to the
+  // computation the drain is abandoning -- and it is what the pure-Lisp
+  // analogue below and Emacs 31.0.90 both answer.
+  CHK("(condition-case o"
+      "  (with-lisp-cleanup (fn () 'body)"
+      "    (fn () (condition-case e (car 6) (error 'inner))))"
+      "  (error (list 'outer o)))",
+      "body");
+  CHK("(condition-case o"
+      "  (unwind-protect 'body (condition-case e (car 6) (error 'inner)))"
+      "  (error (list 'outer o)))",
+      "body");
+  // And the control: with no handler inside the cleanup's Lisp, 06A
+  // Decision 4 is unchanged -- the cleanup's raise replaces the completion
+  // and reaches the ENCLOSING handler, exactly as before the fix.
+  CHK("(condition-case o (with-lisp-cleanup (fn () 'body) (fn () (car 6)))"
+      "  (error (list 'outer o)))",
+      "(outer (wrong-type-argument listp 6))");
 
 #undef CHK
 

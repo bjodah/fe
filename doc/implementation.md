@@ -984,10 +984,43 @@ republishes `run_base` to the cleanup's own base, so for those the search is
 already confined and the floor is redundant. A *native* cleanup runs its
 `FeCleanupFn` directly and republishes nothing, and neither does the window
 inside `RunEvaluationBody()` before its loop starts, where a frame-limit
-raise lands. In both of those `run_base` is still the enclosing run's. For a
-native cleanup the floor equals the current frame index, nothing is above
-it, no handler is ever accepted, and the arm is bit-identical to what it was
-before the fix.
+raise lands. In both of those `run_base` is still the enclosing run's.
+
+For a native cleanup the floor equals the frame index the entry started at,
+and what sits above it depends on what the cleanup does. A cleanup that
+honours `FeCleanupFn`'s contract -- `fe.h`: "must not call back into the
+evaluator" -- pushes no frames, so nothing is ever above the floor, no
+handler is ever accepted, and that arm is bit-identical to what it was
+before the fix. A cleanup that violates the contract and re-enters the
+evaluator does push frames above the floor, and a `condition-case`
+established in that Lisp is honored where before the fix it was not.
+
+That second half is a correction Phase 12's fix cycle made: 12B Part 1
+stated the bit-identity unconditionally and offered
+`test_api.c:TestNativeCleanupHandlerFloor` as its proof, and that test
+covered only cleanups that run no Lisp. The behaviour is not a native
+special case and is not a defect. It is this floor's own rule -- a handler
+established by the cleanup's OWN work belongs to the cleanup, not to the
+computation the drain is abandoning -- and it agrees with both the
+pure-Lisp `unwind-protect` form and Emacs 31.0.90. Measured:
+
+```lisp
+(condition-case o
+  (with-lisp-cleanup (fn () 'body)
+    (fn () (condition-case e (car 6) (error 'inner))))
+  (error (list 'outer o)))
+;; before 95965f0  (outer (wrong-type-argument listp 6))
+;; after           body
+(condition-case o
+  (unwind-protect 'body (condition-case e (car 6) (error 'inner)))
+  (error (list 'outer o)))
+;; fe and Emacs 31.0.90 alike   body
+```
+
+The last three cases of `TestNativeCleanupHandlerFloor` pin all of it,
+including the control: with no handler inside the cleanup's Lisp, 06A
+Decision 4 is unchanged and the cleanup's raise still replaces the
+completion and reaches the enclosing handler.
 
 `RunOneCleanupEntry()` saves and restores `ctx->completion` with the rest of
 the ambient state for the same reason. An entry whose own handler catches

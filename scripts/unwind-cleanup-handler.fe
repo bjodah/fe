@@ -147,16 +147,34 @@
 (assert-equals '(outer inner) drain-log)
 
 ;; Rooting: the condition object a cleanup's handler binds must survive
-;; collections the cleanup itself provokes.
+;; collections the cleanup itself provokes -- and the cleanup has to
+;; actually provoke some.  The cons count is the whole evidentiary value of
+;; this case and was measured, not guessed: on the standalone interpreter's
+;; 1 MiB arena 4000 conses -- the count this case carried until Phase 12's
+;; fix cycle -- collect NOTHING, so it asserted nothing about the collector
+;; at all; 20000 collect once, 40000 twice and 60000 four times.  60000 is
+;; the count here, for margin, and costs about 20 ms.  Change it only by
+;; re-measuring `FeArenaStats.collection_count' over this case.
+;;
+;; What the collector can falsify: `c' is bound by the handler BEFORE the
+;; allocations and read after them, and its only root while they run is the
+;; GC-stack slot `RaiseCompletionCore' pushes for the in-flight condition
+;; (`ctx->condition' is at the mercy of the drain).  Reading `(car (cdr c))'
+;; and `(car (cdr (cdr c)))' back out is what a collected or half-swept
+;; object cannot survive; asserting only `c' against nil would not be.
 (setq gc-seen 'unset)
+(setq gc-parts 'unset)
 (assert-equals 'body
   (unwind-protect 'body
     (condition-case c (car 6)
       (error (do (setq gc-i 0)
-                 (while (< gc-i 4000)
+                 (while (< gc-i 60000)
                    (cons gc-i gc-i)
                    (setq gc-i (+ gc-i 1)))
-                 (setq gc-seen c))))))
+                 (setq gc-seen c)
+                 (setq gc-parts
+                       (list (car c) (car (cdr c)) (car (cdr (cdr c))))))))))
 (assert-equals '(wrong-type-argument listp 6) gc-seen)
+(assert-equals '(wrong-type-argument listp 6) gc-parts)
 
 (print "unwind-cleanup-handler: all cases passed")
