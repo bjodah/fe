@@ -6760,6 +6760,50 @@ static bool TestExhaustionCatchability(void) {
       budget_context, &budget_state, "budget.fe", budget_source,
       sizeof(budget_source) - 1, &tiny_budget,
       "budget.fe:1: evaluation step limit exceeded"));
+
+  // The step limit is one of three walls that raise Budget, and it was the
+  // only one asserted here -- so "Budget stays uncatchable" was pinned for a
+  // third of what it claims. The other two, same `(t ...)` handler, same
+  // refusal.
+  //
+  // The frame wall, measured rather than guessed: run the recursion once
+  // unrestricted to learn its peak, then again one frame below it, so the
+  // wall trips *inside* the `condition-case` whose handler must not run.
+  static const char frame_source[] =
+      "(do (fset (quote r) (fn (n) (if (= n 0) 0 (r (- n 1))))) "
+      "(condition-case nil (r 20) (t (quote caught))))";
+  CHECK(IsRendered(budget_context,
+                   FeEvaluateString(budget_context, "measure.fe", frame_source,
+                                    sizeof(frame_source) - 1),
+                   "0"));
+  const size_t frame_peak = FeGetArenaStats(budget_context).peak_frame_depth;
+  CHECK(frame_peak > 1);
+  const FeEvalOptions one_frame_short = {.max_frames = frame_peak - 1};
+  CHECK(ExpectEvaluationOptionsError(
+      budget_context, &budget_state, "frames.fe", frame_source,
+      sizeof(frame_source) - 1, &one_frame_short,
+      "frames.fe:1: evaluation frame limit exceeded"));
+
+  // The native re-entry wall: a native that synchronously re-enters
+  // `FeCallWithOptions` on itself once more than `max_native_reentry` allows,
+  // called from inside the same `(t ...)`.
+  FeObject* const reentrant = FeMakeNativeFn(budget_context, ReentrantNative);
+  budget_state.reentry_self = FeCreateRoot(budget_context, reentrant);
+  CHECK(budget_state.reentry_self != nullptr);
+  FeSetFunction(budget_context,
+                FeMakeSymbol(budget_context, "reentrant-native"), reentrant);
+  budget_state.reentry_remaining = 9;
+  budget_state.reentry_max_native_reentry = 8;
+  budget_state.reentry_current = 0;
+  budget_state.reentry_max_seen = 0;
+  static const char reentry_source[] =
+      "(condition-case nil (reentrant-native) (t (quote caught)))";
+  const FeEvalOptions reentry_wall = {.max_native_reentry = 8};
+  CHECK(ExpectEvaluationOptionsError(
+      budget_context, &budget_state, "reentry.fe", reentry_source,
+      sizeof(reentry_source) - 1, &reentry_wall,
+      "reentry.fe:1: native evaluation re-entry limit exceeded"));
+
   FeCloseContext(budget_context);
   return true;
 }
@@ -7041,9 +7085,16 @@ static bool TestMarkStackProbe(void) {
     // regression that sent the mark phase back through a recursive C call
     // would miss this by megabytes at n=100000, not by bytes of noise.
     CHECK(delta < 2048);
-    // ... and the run really was that deep, so a flat delta is not the two
-    // collections having quietly done the same amount of work.
-    CHECK(peak_live > depths[i]);
+    // `peak_live` is printed, not asserted on. It used to carry a
+    // `CHECK(peak_live > depths[i])` described as proving "the run really was
+    // that deep" -- which it never did: `ForceCollection` allocates until the
+    // arena collects, so this is the slot count of the arena for every run,
+    // n=0 included (3772113 here at all four depths). What actually witnesses
+    // the depth is inside `MeasureMarkDepth`: the callback fires only from the
+    // `ptr` object at the *bottom* of the chain (`CHECK(mark_probe_calls >
+    // 0)`), and `IsCarChainIntact` then walks all `depths[i]` levels back down
+    // and checks the pointer at the end.
+    (void)peak_live;
   }
 
   free(storage);
