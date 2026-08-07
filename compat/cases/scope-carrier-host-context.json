@@ -1,0 +1,9 @@
+{
+ "id": "scope-carrier-host-context",
+ "setup": [
+  "(internal--mark-special 'sch nil)",
+  "(fset 'sch-read (fn () (if (boundp 'sch) sch 'unbound)))"
+ ],
+ "expr": "(let ((sch 'bound)) (sch-read))",
+ "note": "12C Part 2: a let-dynamic-only mark is scoped to the INPUT UNIT that made it -- one FeEvaluateString/FeEvaluateFile call, i.e. one kg `load'. Fe's standalone driver is not an input unit: it reads and evaluates form by form, so `ctx->input_scope' is 0 throughout and every mark is visible, which is what this case pins and why the scoping itself cannot be exercised from this corpus (fe/test_api.c:TestOneArgDefvarScope is where it is). kg-policy: the marking primitive is fe's and Emacs has no host context to compare against."
+}

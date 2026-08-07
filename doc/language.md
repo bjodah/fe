@@ -1024,6 +1024,30 @@ marked at all (`setting-constant`). Fe has no `defvar` of its own: the
 Emacs-shaped `defvar`/`defconst` macros are kg's, in its prelude, and they
 call this primitive.
 
+The two flags differ in *scope* as well as in strength. A full mark is
+global and permanent. A let-dynamic-only mark belongs to the **input unit**
+that made it — one `FeEvaluateString()` or `FeEvaluateFile()` call, which
+for an embedder is one loaded file — and a `let` in a later unit over the
+same name is lexical again. Units nest: a unit loaded from inside another
+gets a scope of its own, does not see the enclosing unit's let-dynamic
+marks, does not leak its own back out when it returns, and leaves the
+enclosing unit's intact — including when it exits by raising, provided the
+embedder contained the failure with `FeTryEvaluateStringWithOptions()`.
+That is Emacs' rule for the one-argument `defvar`, measured on 31.0.90 in
+all four directions.
+
+Two things it is not. Outside any input unit — a `FeCall()` into a
+callable, a host-driven `let`, the standalone interpreter, which reads and
+evaluates form by form and enters no unit at all — every mark is visible;
+there is no unit there for one to be foreign to. And the marking is
+consulted where the `let` *runs*, not where it was *written*: in Emacs the
+one-argument `defvar` is an entry in the lexical environment, so a function
+defined after it in the same file keeps binding the name dynamically when
+it is called from elsewhere, and one defined before it does not. Fe has
+nowhere to record a closure's unit, so it answers those two by execution
+site. Both are recorded in `compat/features.json`
+(`one-arg-defvar-scope-carrier`).
+
 Binding is *shallow*. Binding a marked symbol saves the current contents of
 its global value cell -- or the fact that it had none -- writes the new
 value into that same cell, and records the obligation to put the old one

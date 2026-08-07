@@ -668,7 +668,29 @@ struct FeContext {
   // by `CollectGarbage` as a root in its own right; membership is one linear
   // scan, the same shape `FeMakeSymbol`'s interning and `GetBound`'s
   // environment walk already are.
+  //
+  // Sub-plan 12C Part 2 gave each entry a third slot: `(SYMBOL FULL-P .
+  // SCOPE)`, where SCOPE is nil for a mark that is global and an integer
+  // naming an input unit for a let-dynamic-only mark made inside one. Still
+  // ordinary conses and an ordinary integer, so `CollectGarbage`'s existing
+  // walk needs no new shape. A full mark is always global, which is Emacs'
+  // rule for the two-argument `defvar` and `defconst`.
   FeObject* special_list;
+  // The input unit currently being evaluated, and the monotone source of
+  // those numbers (sub-plan 12C Part 2). `EvaluateInput` -- entered exactly
+  // once per `FeEvaluateString`/`FeEvaluateFile`, i.e. once per kg `load`,
+  // `require`, batch file or prelude install -- takes the next number on the
+  // way in and puts the enclosing one back on the way out, so nested loads
+  // stack. Zero means "no input unit", which is a *host* context, and a mark
+  // made there is global.
+  //
+  // This is what scopes a one-argument `(defvar v)` to the unit it appears
+  // in, which is Emacs' rule as measured on 31.0.90 -- in both directions
+  // across a nested load, and in neither of them by half. See
+  // `SymbolIsLetDynamic` for the comparison and for the residual this model
+  // does not capture.
+  size_t input_scope;
+  size_t input_scope_next;
   FeEvalFrame* frame_stack;
   size_t frame_stack_capacity;
   size_t frame_stack_index;

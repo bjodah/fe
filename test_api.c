@@ -8169,6 +8169,98 @@ static FeObject* CollectNow(FeContext* context,
   return FeMakeBool(context, ForceCollection(context));
 }
 
+// Sub-plan 12C Part 2: a one-argument `defvar`'s let-dynamic-only mark is
+// scoped to the input unit that made it. A unit is one
+// `FeEvaluateString`/`FeEvaluateFile` call -- one kg `load`, `require`,
+// batch file or prelude install -- so this is the only place the property
+// can be tested: `scripts/*.fe` all run through the standalone driver, which
+// reads and evaluates form by form and never enters an input unit at all,
+// and `compat/` drives that same binary.
+//
+// Every expectation is the answer measured from Emacs 31.0.90 with real
+// files under `lexical-binding: t` on 2026-08-07, `internal--mark-special`
+// standing in for the `(defvar v)` that calls it in kg's prelude.
+static bool TestOneArgDefvarScope(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "load-string", ContainEvaluateString);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "unit.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // Unit A marks, defines a reader, and sees its own `let` bind dynamically.
+  CHK("(internal--mark-special 'sv nil)"
+      "(fset 'sv-read (fn () (if (boundp 'sv) sv 'unbound)))"
+      "(let ((sv 'from-A)) (sv-read))",
+      "from-A");
+  // Unit B is a separate call, i.e. a separate file, and its `let` over the
+  // same name is LEXICAL -- the leak Phase 11 recorded and could not pin.
+  // Emacs: `(A from-A B unbound)`.
+  CHK("(let ((sv 'from-B)) (sv-read))", "unbound");
+  // `special-variable-p` is unchanged by any of this: a one-argument mark
+  // never set it, and scoping does not make it start.
+  CHK("(special-variable-p 'sv)", "nil");
+
+  // A FULL mark (Emacs' two-argument `defvar`, and `defconst`) is global in
+  // Emacs too, and stays global here -- across units, both flags intact.
+  CHK("(internal--mark-special 'fv t)"
+      "(fset 'fv-read (fn () (if (boundp 'fv) fv 'unbound)))"
+      "(let ((fv 'from-A)) (fv-read))",
+      "from-A");
+  CHK("(let ((fv 'from-B)) (fv-read))", "from-B");
+  CHK("(special-variable-p 'fv)", "t");
+
+  // The upgrade path keeps working and takes the global scope with it: a
+  // one-argument mark followed by a two-argument one in the same unit is
+  // visible from the next one.
+  CHK("(internal--mark-special 'uv nil)"
+      "(fset 'uv-read (fn () (if (boundp 'uv) uv 'unbound)))"
+      "(internal--mark-special 'uv t)",
+      "uv");
+  CHK("(let ((uv 'from-B)) (uv-read))", "from-B");
+  CHK("(special-variable-p 'uv)", "t");
+
+  // NESTED UNITS, the question the Phase 12 audit left open and this slice
+  // measured. An outer unit's mark does NOT reach a unit it loads, the
+  // outer unit still has its own mark after that unit returns, and a nested
+  // unit's mark does not reach back out. Emacs answers all three the same
+  // way: measured with a file A that loads C, and a file B that marks and
+  // then loads D.
+  CHK("(internal--mark-special 'nv nil)"
+      "(fset 'nv-read (fn () (if (boundp 'nv) nv 'unbound)))"
+      "(list (let ((nv 'outer)) (nv-read))"
+      "      (load-string \"(let ((nv 'inner)) (nv-read))\")"
+      "      (let ((nv 'after)) (nv-read)))",
+      "(outer unbound after)");
+  CHK("(fset 'mv-read (fn () (if (boundp 'mv) mv 'unbound)))"
+      "(list (load-string \"(internal--mark-special 'mv nil)"
+      "                     (let ((mv 'inner)) (mv-read))\")"
+      "      (let ((mv 'out)) (mv-read)))",
+      "(inner unbound)");
+
+  // ABNORMAL EXIT from a nested unit. `EvaluateInput` restores the scope on
+  // its normal return only, so the containment barrier has to do it here --
+  // and it does: the outer unit's own mark still binds dynamically after a
+  // nested unit raised halfway through.
+  CHK("(internal--mark-special 'av nil)"
+      "(fset 'av-read (fn () (if (boundp 'av) av 'unbound)))"
+      "(list (let ((av 'before)) (av-read))"
+      "      (load-string \"(internal--mark-special 'zz nil) (car 6)\")"
+      "      (let ((av 'after)) (av-read)))",
+      "(before (contained (wrong-type-argument listp 6)) after)");
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestDynamicBinding(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -8517,7 +8609,8 @@ int main(void) {
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion() &&
-                 TestDynamicBinding() && TestProtectedEvaluateString()
+                 TestDynamicBinding() && TestOneArgDefvarScope() &&
+                 TestProtectedEvaluateString()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

@@ -137,6 +137,19 @@
    "source_name": "internal--mark-special"
   },
   {
+   "id": "one-arg-defvar-scope-carrier",
+   "category": "bindings",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "scope-carrier-host-context"
+   ],
+   "kg_test": "fe/test_api.c:TestOneArgDefvarScope",
+   "rationale": "Sub-plan 12C Part 2, closing the approximation Phase 11 recorded and said could not be closed. A let-dynamic-only mark -- what Emacs' ONE-argument `(defvar v)' sets, and what `internal--mark-special' with a nil FULL-P sets here -- is now scoped to the input unit that made it. `EvaluateInput' takes the next number of a monotone counter on the way in and hands the enclosing one back on the way out, so nested units stack; the registry entry grew a third slot holding that number, and `SymbolIsLetDynamic' compares it for EQUALITY with the ambient one. A full mark (Emacs' two-argument `defvar', and `defconst') carries no scope and stays global, which is Emacs' rule too, and `special-variable-p' answers exactly what it answered before. MEASURED on Emacs 31.0.90 with real files, lexical-binding: t, 2026-08-07: file A's one-argument defvar makes `let' over the name dynamic in A and LEXICAL in a file B loaded afterwards; a file C that A loads does not see A's mark; A does not see C's after C returns; A's own mark survives the nested load; and each `eval' is its own scope. Equality is what gives all five -- a `>=' test would let an outer unit's mark reach a nested load, which the B-loads-D probe measured false. TWO RESIDUALS, recorded rather than defended. FIRST, and the important one: Emacs' mechanism is not a per-unit registry at all. A one-argument `(defvar v)' adds v to the LEXICAL ENVIRONMENT being threaded through the file, and a `lambda' captures it -- measured, a `defun' written BEFORE the defvar in the same file binds v lexically, one written after it binds v dynamically even when it is called from another file. Fe consults the flag where the `let' RUNS and has nowhere to record a closure's unit, so it answers those two by execution site rather than by definition site. Against the five-probe grid this model is right where the old global one was wrong (the other file, and both directions of a nested load) and wrong where the old one was right (a function defined after the defvar in unit A and called from unit B: Emacs and the old model say dynamic, this says lexical). That case is NARROWER than Emacs, which is the direction the Phase 11 row warned about, and it is the reason the host-context rule below exists. Closing it means the marking becoming a lexical-environment entry -- a different and larger design, in fe_eval.c rather than fe.c. SECOND: one registry entry per symbol, so re-marking a symbol already marked let-dynamic-only RE-STAMPS its scope instead of adding an entry. Last mark wins. That keeps the registry bounded by the number of marked symbols, as it has always been, rather than growing by a cell pair every time a file that declares a name is loaded again; the edge it loses is an outer unit's mark surviving a nested unit that declares the same name. THE HOST-CONTEXT RULE: outside any input unit -- `ctx->input_scope' 0, which is a `FeCall' into a callable, a host-driven `let', or the predicate asked straight from C -- every mark is visible. There is no unit there for a mark to be foreign to, and answering no would narrow the host's view of names a file legitimately declared, including kg's hook and process callbacks. It also means fe's own standalone driver, which never enters an input unit, sees no scoping at all -- which is what scope-carrier-host-context pins, and why the scoping itself is tested in test_api.c and not in this corpus.",
+   "source_name": null
+  },
+  {
    "id": "primitive-if",
    "category": "control-flow",
    "status": "supported",

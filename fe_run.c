@@ -272,6 +272,12 @@ bool FeTryCallWithOptions(FeContext* ctx,
   const size_t volatile saved_run_base = ctx->run_base;
   const size_t volatile saved_reentry = ctx->native_reentry_depth;
   const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
+  // The input unit (sub-plan 12C Part 2). `EvaluateInput` restores it on its
+  // own normal return; this is the abnormal path, and it is the one that
+  // matters -- a contained failure is exactly how an outer `load` keeps
+  // evaluating after an inner one raised, and without this its own
+  // let-dynamic marks would stop matching for the rest of the file.
+  const size_t volatile saved_input_scope = ctx->input_scope;
   FeObject* const volatile saved_call_list = ctx->call_list;
   jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
   jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
@@ -305,6 +311,7 @@ bool FeTryCallWithOptions(FeContext* ctx,
   ctx_v->run_base = saved_run_base;
   ctx_v->native_reentry_depth = saved_reentry;
   ctx_v->cleanup_floor = saved_cleanup_floor;
+  ctx_v->input_scope = saved_input_scope;
   ctx_v->call_list = saved_call_list;
   ctx_v->evaluator_catch = saved_evaluator_catch;
   ctx_v->condition_catch = saved_condition_catch;
@@ -383,6 +390,12 @@ bool FeTryEvaluateStringWithOptions(FeContext* ctx,
   const size_t volatile saved_run_base = ctx->run_base;
   const size_t volatile saved_reentry = ctx->native_reentry_depth;
   const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
+  // The input unit (sub-plan 12C Part 2). `EvaluateInput` restores it on its
+  // own normal return; this is the abnormal path, and it is the one that
+  // matters -- a contained failure is exactly how an outer `load` keeps
+  // evaluating after an inner one raised, and without this its own
+  // let-dynamic marks would stop matching for the rest of the file.
+  const size_t volatile saved_input_scope = ctx->input_scope;
   FeObject* const volatile saved_call_list = ctx->call_list;
   jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
   jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
@@ -410,6 +423,7 @@ bool FeTryEvaluateStringWithOptions(FeContext* ctx,
   ctx_v->run_base = saved_run_base;
   ctx_v->native_reentry_depth = saved_reentry;
   ctx_v->cleanup_floor = saved_cleanup_floor;
+  ctx_v->input_scope = saved_input_scope;
   ctx_v->call_list = saved_call_list;
   ctx_v->evaluator_catch = saved_evaluator_catch;
   ctx_v->condition_catch = saved_condition_catch;

@@ -1405,8 +1405,9 @@ void SetSymbolFunction(FeObject* sym, FeObject* fn) {
 }
 
 // The special-variable registry (sub-plan 11B of kg's Emacs-subset program).
-// `ctx->special_list` is a list of `(SYMBOL . FULL-P)` pairs; see its comment
-// on `struct FeContext` for why it is a list and not a bit in the symbol.
+// `ctx->special_list` is a list of `(SYMBOL FULL-P . SCOPE)` triples; see its
+// comment on `struct FeContext` for why it is a list and not a bit in the
+// symbol, and for what SCOPE is.
 static FeObject* FindSpecialEntry(FeContext* ctx, const FeObject* sym) {
   for (FeObject* rest = ctx->special_list; !FeIsNil(rest); rest = CDR(rest)) {
     if (CAR(CAR(rest)) == sym) {
@@ -1416,31 +1417,94 @@ static FeObject* FindSpecialEntry(FeContext* ctx, const FeObject* sym) {
   return nullptr;
 }
 
+// The scope an entry made *now* should carry: nil -- global -- for a full
+// mark and for one made outside any input unit (a host context, where there
+// is no unit to scope it to), and this unit's number otherwise.
+static FeObject* CurrentMarkScope(FeContext* ctx, bool full) {
+  if (full || ctx->input_scope == 0) {
+    return &nil;
+  }
+  return FeMakeInteger(ctx, (int64_t)ctx->input_scope);
+}
+
 void MarkSpecialSymbol(FeContext* ctx, FeObject* sym, bool full) {
   FeObject* entry = FindSpecialEntry(ctx, sym);
   if (entry != nullptr) {
-    // Idempotent, and one-way in both directions it can go: marking full
-    // over let-dynamic-only upgrades (a one-arg `defvar` followed by a
-    // two-arg one), and marking let-dynamic-only over full does nothing.
-    // Emacs has no unmarking, so neither does this.
+    // Idempotent, and one-way in the direction the flags can go: marking
+    // full over let-dynamic-only upgrades (a one-arg `defvar` followed by a
+    // two-arg one) and takes the global scope with it, while marking
+    // let-dynamic-only over full does nothing at all. Emacs has no
+    // unmarking, so neither does this.
+    //
+    // The SCOPE of a still-let-dynamic-only entry is *re-stamped* rather
+    // than added to: one entry per symbol keeps the registry bounded by the
+    // number of marked symbols, as it has always been, instead of growing by
+    // one cell pair every time a file that declares a name is loaded again.
+    // The cost is the last-mark-wins edge, recorded in the manifest.
     if (full) {
-      CDR(entry) = ctx->t;
+      CAR(CDR(entry)) = ctx->t;
+      CDR(CDR(entry)) = &nil;
+    } else if (FeIsNil(CAR(CDR(entry)))) {
+      CDR(CDR(entry)) = CurrentMarkScope(ctx, false);
     }
     return;
   }
   const size_t gc = FeSaveGC(ctx);
-  entry = FeCons(ctx, sym, full ? ctx->t : &nil);
+  FeObject* const scope = CurrentMarkScope(ctx, full);
+  FePushGC(ctx, scope);
+  entry = FeCons(ctx, sym, FeCons(ctx, full ? ctx->t : &nil, scope));
   ctx->special_list = FeCons(ctx, entry, ctx->special_list);
   FeRestoreGC(ctx, gc);
 }
 
 bool SymbolIsSpecial(FeContext* ctx, const FeObject* sym) {
   const FeObject* const entry = FindSpecialEntry(ctx, sym);
-  return entry != nullptr && !FeIsNil(CDR(entry));
+  return entry != nullptr && !FeIsNil(CAR(CDR(entry)));
 }
 
+// Whether `let` over `sym` binds dynamically. A full mark (Emacs' two-arg
+// `defvar`/`defconst`) is global and always answers yes; a let-dynamic-only
+// mark (Emacs' one-arg `(defvar v)`) answers yes only while the input unit
+// that made it is the one being evaluated -- sub-plan 12C Part 2.
+//
+// Measured on Emacs 31.0.90, `lexical-binding: t`, real files, 2026-08-07:
+// a one-argument `(defvar v)` in file A makes `let` over v dynamic in A and
+// leaves it lexical in a file B loaded afterwards; a file C that A loads
+// does NOT see A's mark, and A does not see C's after C returns; and each
+// `eval` is its own scope. All four are what a save-and-restore of one
+// number gives, with an equality test rather than a `>=` one -- a `>=` test
+// would let an outer unit's mark reach a nested load, which is the direction
+// the B-loads-D probe measured false.
+//
+// THE RESIDUAL, measured in the same session and recorded rather than
+// defended (see the manifest row `one-arg-defvar-scope-carrier`): Emacs'
+// mechanism is not a per-unit registry at all but an entry in the *lexical
+// environment*, which a `lambda` captures. So in Emacs a function defined in
+// A after the `defvar` still binds v dynamically when it is called from B,
+// and a function defined in A *before* the `defvar` does not. Fe consults
+// this at `let` execution time and has nowhere to record a closure's unit,
+// so it answers those two by where the `let` runs rather than by where it
+// was written. Closing that means the marking becoming a lexical-environment
+// entry, which is a different and larger design.
+//
+// Outside any input unit -- `ctx->input_scope` 0, which is a host context: a
+// `FeCall` into a callable, a host-driven `let`, or this predicate asked
+// straight from C -- every mark is visible. There is no unit there for a
+// mark to be foreign to, and answering no would narrow the host's view of
+// names a file legitimately declared. That keeps the scoping aimed at the
+// divergence that was measured, one file's mark reaching another file's
+// `let`, and off the paths that never had it.
 bool SymbolIsLetDynamic(FeContext* ctx, const FeObject* sym) {
-  return FindSpecialEntry(ctx, sym) != nullptr;
+  const FeObject* const entry = FindSpecialEntry(ctx, sym);
+  if (entry == nullptr) {
+    return false;
+  }
+  FeObject* const flags = CDR(entry);
+  if (!FeIsNil(CAR(flags)) || ctx->input_scope == 0) {
+    return true;
+  }
+  FeObject* const scope = CDR(flags);
+  return FeIsNil(scope) || (size_t)FeToInteger(ctx, scope) == ctx->input_scope;
 }
 
 static FeObject rparen;
@@ -2225,6 +2289,14 @@ static FeObject* EvaluateInput(FeContext* ctx,
   const bool saved_has_offset = ctx->error_has_offset;
   const size_t saved_line = ctx->error_line;
   const bool saved_has_line = ctx->error_has_line;
+  // The input unit this evaluation is (sub-plan 12C Part 2). Taken on the
+  // way in and handed back on the way out, so nested loads stack: a file C
+  // that A loads gets a number of its own, and A's comes back when C
+  // returns. An *abnormal* exit past this restore is put back by the
+  // containment barriers in fe_run.c, which are the only way an outer unit
+  // keeps evaluating after an inner one failed.
+  const size_t saved_scope = ctx->input_scope;
+  ctx->input_scope = ++ctx->input_scope_next;
   const size_t gc = FeSaveGC(ctx);
   ctx->error_label = label;
   ctx->error_has_offset = true;
@@ -2253,6 +2325,7 @@ static FeObject* EvaluateInput(FeContext* ctx,
   ctx->error_has_offset = saved_has_offset;
   ctx->error_line = saved_line;
   ctx->error_has_line = saved_has_line;
+  ctx->input_scope = saved_scope;
   return ctx->evaluation_result;
 }
 

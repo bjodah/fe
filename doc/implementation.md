@@ -175,10 +175,34 @@ the writer rather than impersonating a value.
 
 A symbol's *metadata* -- as opposed to its name, function cell and value
 cell, all of which live in the symbol object above -- is one registry on the
-context: `ctx->special_list`, a list of `(SYMBOL . FULL-P)` pairs with one
-entry per marked symbol, marked by `CollectGarbage` as a root in its own
-right. `MarkSpecialSymbol`, `SymbolIsSpecial` and `SymbolIsLetDynamic` (fe.c,
-beside the symbol accessors) are its whole interface.
+context: `ctx->special_list`, a list of `(SYMBOL FULL-P . SCOPE)` triples
+with one entry per marked symbol, marked by `CollectGarbage` as a root in
+its own right. `MarkSpecialSymbol`, `SymbolIsSpecial` and
+`SymbolIsLetDynamic` (fe.c, beside the symbol accessors) are its whole
+interface.
+
+`SCOPE` is sub-plan 12C's addition and is what scopes a let-dynamic-only
+mark -- Emacs' one-argument `(defvar v)` -- to the file it appears in. It is
+nil for a mark that is global (every full mark, and any mark made outside an
+input unit) and otherwise an integer naming an input unit: `ctx->input_scope`,
+which `EvaluateInput` takes from a monotone counter on the way in and hands
+back on the way out, so nested units stack and an outer unit's marks come
+back when a nested one returns. `SymbolIsLetDynamic` compares it for
+equality, not for ordering -- an ordering test would let an outer unit's
+mark reach a unit it loads, which Emacs measurably does not. The abnormal
+exit is `FeTryEvaluateStringWithOptions`/`FeTryCallWithOptions`' job: they
+save and restore `input_scope` with the rest of the contained state, because
+`EvaluateInput` restores it only on its normal return, and a contained
+failure is exactly how an outer unit keeps evaluating after an inner one
+raised.
+
+A triple, not a longer list or a second registry, because the slot is two
+ordinary conses and an ordinary integer: `CollectGarbage`'s existing walk
+needs no new shape for it, which was the constraint. One entry per symbol is
+kept, so re-marking a symbol that is already let-dynamic-only re-stamps its
+scope rather than adding an entry -- last mark wins, and the registry stays
+bounded by the number of marked symbols instead of growing every time a file
+that declares a name is loaded again.
 
 It is a list, and not a bit in the symbol object, for two reasons. A
 symbol's `car` word is a tag whose spare bits the collector's pointer
