@@ -262,7 +262,23 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # slice lands in fe_eval.c (495/520) and fe.c (150/520). The last commit of
 # this slice re-sets this number to the measured actual, as 10A Decision 8
 # requires and every phase since 08 has done.
-SCC_COMPLEXITY_MAX ?= 795
+# Set 795 -> 787 at the sub-plan 10B close (2026-08-07): the measured actual
+# after the `macroexpand-1`/`macroexpand` primitives, the `macroexpand-all`
+# rejection, the compat corpus and the alias-rule correction -- not an
+# estimate, and proved the way this repository's convention requires, by
+# temporarily lowering the cap by one and watching the gate fire. At 786
+# `make complexity-check` reports "FAIL: total complexity 787 exceeds limit
+# 786"; at 787 it passes. The slice spent 22 of the 30 points the raise
+# funded (765 -> 787, against a +15..30 price), so the 8 unspent ones go back
+# rather than sitting as unearned headroom.
+# `SCC_FILE_COMPLEXITY_MAX` was not raised, and one number here is a warning
+# rather than a result: fe_eval.c is at **517 of 520**, three points of
+# headroom, up from 495. It crossed 520 once during this slice and was
+# brought back by collapsing three functions into one rather than by raising
+# this cap. The next change to that file of any size should expect to price a
+# file-cap raise or a translation-unit split rather than assume the room is
+# there. fe.c is at 150.
+SCC_COMPLEXITY_MAX ?= 787
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -394,7 +410,18 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # per-symbol increase this slice needs is banked explicitly, with its reason,
 # in the commit that causes it. The last commit of this slice re-sets this
 # number to the measured actual.
-PMCCABE_TOTAL_MAX ?= 1105
+# Set 1105 -> 1088 at the sub-plan 10B close (2026-08-07), the measured
+# actual across 347 symbols (343 before, four new: `EnterMacroBody` at 1,
+# `MacroexpandStep` at 6, `MacroexpandContinue` at 4, `DispatchMacroexpand`
+# at 3 -- all inside PMCCABE_NEW_FUNCTION_MAX). Proved the same way: at 1087
+# `make pmccabe-check` reports "FAIL: total complexity 1088 exceeds funded
+# budget 1087 (+1)"; at 1088 it passes. The slice spent 16 of the 33 funded
+# points; the other 17 go back. Three per-symbol increases were banked in the
+# commits that caused them, with reasons: `ResumeMacroBody` 3 -> 5 -> 4,
+# `RunEvaluationLoop` 14 -> 15, and `MacroexpandStep` 5 -> 6. The worst
+# function in the tree is `RunEvaluationLoop` at 15 of the 22 per-function
+# cap.
+PMCCABE_TOTAL_MAX ?= 1088
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
