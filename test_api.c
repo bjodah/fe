@@ -8102,6 +8102,26 @@ static bool TestDynamicBinding(void) {
   return true;
 }
 
+// `doc/c-api.md`'s `Load` example, literally: contain, unwind the loader's
+// own bookkeeping while this frame is still live, then hand the value back.
+// The bookkeeping here is a forced collection, because "unwinds its own
+// bookkeeping" means "allocates", and an allocation between the containment
+// returning and `*result` being used is the only interval in which an
+// unrooted result is observable. Before the fix this aborted in
+// `WriteObject` on a cell the collector had already freed.
+static FeObject* LoadAndUnwind(FeContext* ctx, FeObject* arguments) {
+  const FeObject* text = FeGetNextArgument(ctx, &arguments);
+  char source[256];
+  const size_t length = CopyLoadText(ctx, text, source, sizeof(source));
+  FeObject* value = FeNil(ctx);
+  if (FeTryEvaluateStringWithOptions(ctx, "load.fe", source, length, nullptr,
+                                     &value)) {
+    (void)ForceCollection(ctx);
+    return value;
+  }
+  FeResignal(ctx);
+}
+
 // Sub-plan 11C Part 2: `FeTryEvaluateStringWithOptions`, the protected
 // *string* evaluation. Everything `TestProtectedCall` asserts about the
 // protected call is asserted here about the protected evaluation, because the
@@ -8118,6 +8138,7 @@ static bool TestProtectedEvaluateString(void) {
   FeSetErrorFn(context, HandleError);
   FeDefineNative(context, "load-string", ContainEvaluateString);
   FeDefineNative(context, "load-string-resignal", WrapEvaluateString);
+  FeDefineNative(context, "load-string-unwinding", LoadAndUnwind);
   FeDefineNative(context, "raise-host-quit", RaiseHostQuit);
   FeDefineNative(context, "raise-host-budget", RaiseHostBudget);
 
@@ -8208,15 +8229,31 @@ static bool TestProtectedEvaluateString(void) {
   CHK("(list (load-string \"(car 5)\") 'still-running)",
       "((contained (wrong-type-argument listp 5)) still-running)");
 
-  // The enclosing run's result is the caller's, not the loaded text's. This
-  // holds with or without the protected entry's `evaluation_result`
-  // save/restore -- `EvaluateInput` re-assigns that field after every form,
-  // so it cannot be caught by a test; see the comment on
-  // `FeTryEvaluateStringWithOptions` for why the restore is there anyway.
-  // What this case does pin is the observable part: a nested evaluation does
-  // not become the enclosing one's value.
+  // The enclosing run's result is the caller's, not the loaded text's: a
+  // nested evaluation does not become the enclosing one's value. This holds
+  // because `EvaluateInput` re-assigns `ctx->evaluation_result` after every
+  // form it evaluates, which is also why the protected entry must *not*
+  // restore that field -- see the two cases below, and the comment on
+  // `FeTryEvaluateStringWithOptions`.
   CHK("(do (load-string \"'from-the-load\") 'from-the-caller)",
       "from-the-caller");
+
+  // The value handed back in `*result` is rooted on the same terms as
+  // `FeEvaluateString`'s -- by `ctx->evaluation_result`, the context-owned
+  // root `doc/c-api.md` promises -- so a collection between the containment
+  // returning and the value being used does not free it. Every other case
+  // in this function renders `*result` immediately, which is exactly the
+  // one shape that cannot see an unrooted result: this one allocates first.
+  contained_string_result = nullptr;
+  CHECK(ContainString(context, "load.fe", "(cons 12345 nil)", true));
+  CHECK(ForceCollection(context));
+  CHECK(FeGetType(contained_string_result) == FeTPair);
+  CHECK(IsRendered(context, contained_string_result, "(12345)"));
+
+  // And the same through `doc/c-api.md`'s own `Load` shape, from Lisp: the
+  // loader contains, unwinds its bookkeeping (which allocates), and answers
+  // with the value -- which the evaluator then prints, walks and returns.
+  CHK("(load-string-unwinding \"(list 111 222 333)\")", "(111 222 333)");
 
   CHECK(FeSaveGC(context) == gc);
 

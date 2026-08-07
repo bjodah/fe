@@ -765,7 +765,12 @@ handles raise `root is not active`.
 Multi-form string and file evaluation uses `evaluation_result` for its final
 value. Each helper restores its entry GC-stack index between forms and before
 returning, then keeps the returned value alive through this root. The next
-multi-form evaluation replaces it. Length-aware input is fed through the
+multi-form evaluation replaces it. `FeTryEvaluateStringWithOptions()` runs a
+string evaluation inside a containment barrier and hands its value back
+through an out-parameter, so it depends on the same root and must leave the
+field alone: it restores the enclosing run's frame stack, floors, barriers
+and GC stack, but restoring this field too would leave the value it just
+returned with no root at all. Length-aware input is fed through the
 existing callback reader; its adapter treats the supplied length as the only
 end-of-input marker and raises an error when a NUL byte occurs inside that
 range. The adapter updates a zero-based byte offset before each read, allowing

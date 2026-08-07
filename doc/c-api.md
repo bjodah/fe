@@ -904,7 +904,13 @@ static FeObject* CallHook(FeContext* ctx, FeObject* arguments) {
 `FeTryEvaluateStringWithOptions()` (`FE_API_VERSION` 7, sub-plan 11C) is the
 same contract over *text* instead of a callable: every bullet above applies
 to it word for word, with `*result` holding the value of the last form on the
-`true` path. It exists because a host that **loads** Lisp from inside an
+`true` path. That value is rooted exactly as `FeEvaluateString()`'s is --
+by the context-owned root described under "Evaluating input", replaced by
+the next string or file evaluation -- and `FeTryCallWithOptions()`'s is
+rooted the same way by its own. Neither result needs a GC-stack slot, and
+neither is freed by a collection the host causes between the call returning
+and the value being used, which is what makes the `Load` shape below (unwind
+first, then hand the value back) safe. It exists because a host that **loads** Lisp from inside an
 evaluation has the problem the paragraph above describes, and could not fix
 it the same way: `FeEvaluateString()` is a nested run dressed as a top-level
 call, so a completion raised by the loaded text transfers to the outermost

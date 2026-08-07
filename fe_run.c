@@ -344,20 +344,28 @@ bool FeTryCallWithOptions(FeContext* ctx,
 // be a primitive with a frame kind of its own and is deliberately out of
 // scope (11A Decision 5).
 //
-// One thing this does that the protected call does not need to: it saves and
-// restores `ctx->evaluation_result`. `EvaluateInput` (fe.c) assigns that
-// field on entry and after every form it evaluates, and it is both the value
-// `FeEvaluateString` returns and a collector root, so a nested protected
-// evaluation leaves the enclosing one's field holding a value from the text
-// *this* call read. That is defensive rather than observable today, and it
-// is worth saying which: an enclosing `EvaluateInput` re-assigns the field
-// immediately after every `FeEvaluate` it makes, so its own return value is
-// unaffected however deeply this is nested inside one, and no test in
-// `test_api.c` distinguishes the two versions. What the restore buys is that
-// the invariant "this field holds the enclosing run's own last value" does
-// not depend on that argument -- and the field is a GC root, so a version of
-// `EvaluateInput` that stopped re-assigning it would lose an object here
-// rather than fail visibly.
+// The one thing this must NOT do -- and did, until an acceptance review
+// measured it -- is save and restore `ctx->evaluation_result` around the
+// containment. That field is the *only* root the value handed back in
+// `*result` has. `EvaluateInput` (fe.c) assigns it after every form, which
+// is what lets `FeEvaluateString`'s result survive the caller's next
+// allocation without costing a GC-stack slot per call (doc/c-api.md: "their
+// returned value is held by a context-owned root"); `FeTryCallWithOptions`
+// is rooted the same way by `ctx->call_result`, and its epilogue likewise
+// leaves that field alone. Restoring the field here, and then popping every
+// GC-stack slot the evaluation took with `FeRestoreGC`, strips the value of
+// every root it has at once: it survives until the next collection and no
+// longer, so a caller that allocates anything at all between this returning
+// and using `*result` -- the loader shape doc/c-api.md prescribes, which
+// unwinds its own bookkeeping first -- reads a cell on the free list.
+//
+// So the invariant this entry point cannot have is "the field holds the
+// enclosing run's own last value". What it has instead is the one the two
+// evaluation helpers already publish: the field holds the last value any
+// string or file evaluation produced. That costs an enclosing
+// `EvaluateInput` nothing, because it re-assigns the field immediately
+// after every `FeEvaluate` it makes, so its own return value is unaffected
+// however deeply this is nested inside one.
 bool FeTryEvaluateStringWithOptions(FeContext* ctx,
                                     const char* label,
                                     const char* source,
@@ -376,7 +384,6 @@ bool FeTryEvaluateStringWithOptions(FeContext* ctx,
   const size_t volatile saved_reentry = ctx->native_reentry_depth;
   const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
   FeObject* const volatile saved_call_list = ctx->call_list;
-  FeObject* const volatile saved_evaluation_result = ctx->evaluation_result;
   jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
   jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
   jmp_buf* const volatile saved_cleanup_catch = ctx->cleanup_catch;
@@ -404,7 +411,6 @@ bool FeTryEvaluateStringWithOptions(FeContext* ctx,
   ctx_v->native_reentry_depth = saved_reentry;
   ctx_v->cleanup_floor = saved_cleanup_floor;
   ctx_v->call_list = saved_call_list;
-  ctx_v->evaluation_result = saved_evaluation_result;
   ctx_v->evaluator_catch = saved_evaluator_catch;
   ctx_v->condition_catch = saved_condition_catch;
   ctx_v->cleanup_catch = saved_cleanup_catch;
