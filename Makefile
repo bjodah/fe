@@ -238,7 +238,16 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # 756". `SCC_FILE_COMPLEXITY_MAX` is not raised and does not need to be: all
 # of it lands in fe.c (147/520) and fe_eval.c (490/520). The final commit of
 # this cycle re-sets this number to the measured actual.
-SCC_COMPLEXITY_MAX ?= 775
+# Set 775 -> 765 at the Phase 9 fe fix cycle's close (2026-08-07): the measured
+# actual after F1, F2, F8, F9 and F10, not an estimate, and proved the way this
+# repository's convention requires -- the cap sits *on* the number, checked by
+# temporarily lowering it by one and watching the gate fire. At 764
+# `make complexity-check` reports "FAIL: total complexity 765 exceeds limit
+# 764"; at 765 it passes. The cycle spent 8 of the 18 points the raise funded
+# (757 -> 765 against a +6..14 price), so the 10 unspent ones go back rather
+# than sitting as unearned headroom. `SCC_FILE_COMPLEXITY_MAX` was not raised
+# and stays where it is; the worst file is fe_eval.c at 495.
+SCC_COMPLEXITY_MAX ?= 765
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -346,7 +355,19 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # per-symbol increase this cycle needs is banked explicitly, with its reason,
 # in the commit that causes it. The final commit re-sets this number to the
 # measured actual.
-PMCCABE_TOTAL_MAX ?= 1082
+# Set 1082 -> 1072 at the Phase 9 fe fix cycle's close (2026-08-07), the
+# measured actual across 343 symbols. Proved the same way: at 1071
+# `make pmccabe-check` reports "FAIL: total complexity 1072 exceeds funded
+# budget 1071 (+1)"; at 1072 it passes. The cycle spent 7 of the 17 funded
+# points, across two new symbols (`FatalCollectorViolation` at 2,
+# `PublishExhaustion` at 1) and four banked per-symbol increases -- fe.c's
+# `CollectGarbage` 6 -> 8 (the collector re-entry guard, then F10's sweep
+# assert), `WriteObject` 9 -> 10 (the step charge's `&& !collecting`), and
+# fe_eval.c's `RaiseCompletionCore` 3 -> 4 (the raise guard) -- each recorded
+# in `.ci/pmccabe-baseline.json` by the commit that caused it, with its reason
+# in that commit's body. The manifest remains the ratchet that stops a symbol
+# growing inside this envelope; this number stops the tree growing as a whole.
+PMCCABE_TOTAL_MAX ?= 1072
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
