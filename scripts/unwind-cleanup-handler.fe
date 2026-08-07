@@ -153,8 +153,10 @@
 ;; 1 MiB arena 4000 conses -- the count this case carried until Phase 12's
 ;; fix cycle -- collect NOTHING, so it asserted nothing about the collector
 ;; at all; 20000 collect once, 40000 twice and 60000 four times.  60000 is
-;; the count here, for margin, and costs about 20 ms.  Change it only by
-;; re-measuring `FeArenaStats.collection_count' over this case.
+;; the count here, for margin.  It takes the whole script from 6 ms to
+;; 53 ms plain, and to 1.7 s under valgrind, which is why the margin is
+;; four collections and not forty.  Change it only by re-measuring
+;; `FeArenaStats.collection_count' over this case.
 ;;
 ;; What the collector can falsify: `c' is bound by the handler BEFORE the
 ;; allocations and read after them, and its only root while they run is the
