@@ -334,8 +334,23 @@ void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 // itself is unchanged, so every existing host compiles and behaves as before
 // without edits.
 [[nodiscard]] FeCompletion FeGetCompletion(const FeContext* ctx);
-// The completion's `(SYMBOL . DATA)` condition object. It is nil when the
-// completion cannot construct an object, such as arena exhaustion.
+// The completion's `(SYMBOL . DATA)` condition object.
+//
+// Every `FeCompletionError` has one, arena exhaustion included: since
+// sub-plan 09B the two raises that cannot allocate signal pre-built
+// `(arena-exhaustion)` and `(evaluation-stack-exhaustion)` conditions
+// interned once by `FeOpenContext`, both children of `error` in the
+// hierarchy, rather than the nil this comment used to promise. (They are
+// shared objects re-stamped before each raise; a caught one is yours to read,
+// not to keep or mutate. See `doc/c-api.md`.)
+//
+// It is nil for a completion that has no condition to describe: any
+// `FeCompletionBudget` (the step, frame and native-re-entry walls, which
+// `condition-case` deliberately cannot catch and which have no Emacs
+// counterpart to name), a `FeCompletionQuit` raised while the arena is
+// exhausted (`condition-case` decides a quit by completion *kind* before it
+// looks at the object, and calling an interrupt an out-of-memory would be
+// worse than saying nothing), and `FeCompletionNormal`.
 [[nodiscard]] FeObject* FeGetCondition(const FeContext* ctx);
 // The fully formatted text of that completion -- source label included --
 // the same string `FeErrorFn` is handed. Valid until the next completion in

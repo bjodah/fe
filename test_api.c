@@ -6591,6 +6591,9 @@ static ErrorState pressure_state;
   FillArenaThenRaise(ctx, false);
 }
 
+// The condition object the host saw on the last escape, rendered.
+static char pressure_escape_condition[64];
+
 // Evaluates `source` in a fresh, deliberately small context and reports what
 // happened: either the form completed, and `rendered` holds its value, or the
 // completion escaped every handler and reached the host error callback, which
@@ -6628,6 +6631,17 @@ static bool EvaluateUnderPressure(const char* source,
     did_escape = true;
   }
   *escaped = did_escape;
+  // What the *host* is handed on the escape path, rendered before the context
+  // closes. `fe.h`'s `FeGetCondition` used to promise nil here for "a
+  // completion that cannot construct an object, such as arena exhaustion";
+  // since 09B that is exactly the case that has a real object, and this is
+  // what checks the corrected claim from the C side rather than from Lisp.
+  pressure_escape_condition[0] = '\0';
+  if (did_escape) {
+    (void)FeToString(context_v, FeGetCondition(context_v),
+                     pressure_escape_condition,
+                     sizeof(pressure_escape_condition));
+  }
   const bool reported_as_expected = !did_escape || pressure_state.called;
   FeCloseContext(context_v);
   CHECK(reported_as_expected);
@@ -6679,6 +6693,9 @@ static bool TestExhaustionCatchability(void) {
   CHECK(ExpectPressureEscapes("(condition-case nil " LocalExhaustion
                               " (arith-error (quote caught)))",
                               "pressure.fe:1: out of memory"));
+  // ... and the host reading `FeGetCondition` after that escape sees the
+  // object, not the nil `fe.h` used to promise for exactly this case.
+  CHECK(strcmp(pressure_escape_condition, "(arena-exhaustion)") == 0);
 
   // Row 2 -- the GC root stack, provoked directly from a native so the
   // overflow report is what is under test. Its own name is the second
@@ -6698,6 +6715,8 @@ static bool TestExhaustionCatchability(void) {
   CHECK(ExpectPressureEscapes(
       "(condition-case nil (push-roots) (arena-exhaustion (quote caught)))",
       "pressure.fe:1: GC stack overflow"));
+  CHECK(strcmp(pressure_escape_condition, "(evaluation-stack-exhaustion)") ==
+        0);
 
   // Row 3 -- a *named* raise that happens while the arena is full. The name
   // it asked for cannot be built, so it arrives as the out-of-memory

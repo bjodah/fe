@@ -824,8 +824,11 @@ FeCompletion FeGetCompletion(const FeContext* ctx) {
   return ctx->completion;
 }
 
-// The condition object is nil only for completions that cannot construct one,
-// such as arena exhaustion; otherwise it is the current `(SYMBOL . DATA)`.
+// Nil only for a completion with no condition to describe: a Budget (which
+// has no name in Emacs and which `condition-case` cannot catch), a Quit
+// raised from an exhausted arena, or Normal. An Error always has one -- an
+// exhausted arena signals a pre-built `(arena-exhaustion)` or
+// `(evaluation-stack-exhaustion)` rather than nil since 09B.
 FeObject* FeGetCondition(const FeContext* ctx) {
   return ctx->condition;
 }
