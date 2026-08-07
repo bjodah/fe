@@ -1,0 +1,13 @@
+'x
+'x
+''x
+'(a b)
+(a 'b c)
+(quote x y)
+(quote)
+(quote . x)
+(quote x . y)
+(x quote y)
+(quoted x)
+#'f
+'#'f

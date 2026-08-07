@@ -909,7 +909,12 @@ error: expected pair, got integer
 `condition:` is the condition symbol -- the car of `FeGetCondition()` -- and
 `data:` on the next line is the cdr, rendered exactly as Emacs'
 `prin1-to-string` renders it, so the two can be compared character for
-character. A quit is the one special case: it prints `condition: quit` and
+character. Since sub-plan 11C that is true without qualification: the one
+remaining printer difference over data a condition can carry was
+`(quote X)`, which Emacs abbreviates to `'X` and fe wrote out in full, and
+the writer now abbreviates it too. The compat corpus's
+`primitive-quote-too-many` case, which used to opt out of comparing its
+data for exactly that reason, compares it. A quit is the one special case: it prints `condition: quit` and
 no `data:` line, because a quit is a completion kind a host may need to tell
 apart from every condition, not a condition to be inspected. A completion
 with no condition object at all (budget exhaustion) prints

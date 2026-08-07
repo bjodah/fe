@@ -3,4 +3,4 @@ error: out of memory
 (setq l (cons 1 l))
 (while t (setq l (cons 1 l)))
 (let ((l nil)) (while t (setq l (cons 1 l))))
-(condition-case nil (let ((l nil)) (while t (setq l (cons 1 l)))) (arith-error (quote not-this-handler)))
+(condition-case nil (let ((l nil)) (while t (setq l (cons 1 l)))) (arith-error 'not-this-handler))

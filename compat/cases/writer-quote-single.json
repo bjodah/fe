@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-single",
+ "setup": [],
+ "expr": "'(quote x)",
+ "note": "11C, 11A Decision 4: the single-element proper `(quote X)` form prints as `'X`, which is what Emacs' printer has always done and what fe did not do until this slice. The sibling `(function X)` -> `#'X` abbreviation has been in the writer since sub-plan 04D and is the template."
+}

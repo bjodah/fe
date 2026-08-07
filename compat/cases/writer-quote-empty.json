@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-empty",
+ "setup": [],
+ "expr": "'(quote)",
+ "note": "11C: `(quote)` has no operand to abbreviate and prints as an ordinary pair on both sides."
+}

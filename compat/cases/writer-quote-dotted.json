@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-dotted",
+ "setup": [],
+ "expr": "'(quote . x)",
+ "note": "11C: an improper `(quote . x)` prints as an ordinary dotted pair on both sides -- the abbreviation requires a proper single-element tail."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-inner",
+ "setup": [],
+ "expr": "'(a (quote b) c)",
+ "note": "11C: the abbreviation applies wherever the form appears, not only at the top of what is printed -- `(a 'b c)` on both sides."
+}

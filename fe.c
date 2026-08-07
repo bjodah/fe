@@ -1058,6 +1058,45 @@ static void WriteClosure(Writer* w, FeObject* obj, size_t depth) {
   Emit(w, ')');
 }
 
+// The two reader-macro abbreviations the writer produces: `(function X)` as
+// `#'X` (the writer half of sub-plan 04D's `#'` change, and the exact shape
+// the pinned `reader-sharp-quote-identity` snapshot compares against) and
+// `(quote X)` as `'X` (sub-plan 11C, 11A Decision 4 -- what Emacs' printer
+// has always done, and the divergence the compat manifest recorded as
+// `writer-quote-abbreviation`).
+//
+// Both fire only for the single-element *proper* form, which is the one the
+// special form itself accepts. `(quote x y)`, `(quote)` and `(quote . x)`
+// print as the ordinary pairs they are -- measured on Emacs 31.0.90, which
+// prints all three that way too. The recursion through `WriteObject` is what
+// makes `''x` and `(a 'b c)` come out as Emacs prints them, and it spends
+// `depth` exactly as the pair arm below would, so an abbreviation cannot buy
+// a level of depth the bounded writer would otherwise have refused.
+//
+// Backquote is deliberately not here (11A Decision 4): kg's reader expands
+// to the ordinary symbols `quasiquote`/`unquote`/`unquote-splicing` where
+// Emacs uses `` \` ``/`\,`/`\,@`, and Emacs' comma abbreviation is
+// context-sensitive, so closing that half means changing what the *reader*
+// produces. It stays the recorded `phase8-reader-backquote-symbol-names`
+// divergence.
+static bool EmitAbbreviation(Writer* w, FeObject* obj, size_t depth) {
+  const char* prefix;
+  if (IsNamedSymbol(CAR(obj), "function")) {
+    prefix = "#'";
+  } else if (IsNamedSymbol(CAR(obj), "quote")) {
+    prefix = "'";
+  } else {
+    return false;
+  }
+  FeObject* const form = CDR(obj);
+  if (FeGetType(form) != FeTPair || !FeIsNil(CDR(form))) {
+    return false;
+  }
+  EmitString(w, prefix);
+  WriteObject(w, CAR(form), w->nested_qt, depth - 1);
+  return true;
+}
+
 static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
   char buf[32];
   // Printing is work: during a controlled evaluation it spends the step budget
@@ -1096,19 +1135,8 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
       break;
 
     case FeTPair:
-      // `(function X)` prints as `#'X`, the reader macro's abbreviation --
-      // the writer half of sub-plan 04D's `#'` change, and the exact shape
-      // the pinned `reader-sharp-quote-identity` snapshot compares against.
-      // The abbreviation fires only for the single-element proper form, the
-      // one the `function` special form accepts; `(function X . tail)` and
-      // `(function)` print as ordinary pairs, as they are.
-      if (IsNamedSymbol(CAR(obj), "function")) {
-        FeObject* const form = CDR(obj);
-        if (FeGetType(form) == FeTPair && FeIsNil(CDR(form))) {
-          EmitString(w, "#'");
-          WriteObject(w, CAR(form), w->nested_qt, depth - 1);
-          break;
-        }
+      if (EmitAbbreviation(w, obj, depth)) {
+        break;
       }
       Emit(w, '(');
       WriteElements(w, obj, depth - 1);

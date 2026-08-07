@@ -1779,11 +1779,31 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "arity-condition-function-rendering",
+    "arity-condition-function-rendering"
+   ],
+   "kg_test": null,
+   "rationale": "Measured, not assumed: the FUNCTION element of a lambda's wrong-number-of-arguments data prints as `#[(x) (x) (t)]` under Emacs 31.0.90 and as `(lambda (x) x)` under Fe. Fe has no byte-code-function object to print, so the arity row that would otherwise compare a rendered condition object sets `compare_data: false` and points here, and its `-nargs` sibling compares the identity and count both writers agree on. This row was split by sub-plan 11C: it used to carry the `(quote 2)` rendering too, and that half now agrees -- the writer abbreviates `(quote X)` to `'X` (see writer-quote-forms), so arity-condition-quote-rendering moved there and this row is the byte-code half alone.",
+   "source_name": null
+  },
+  {
+   "id": "writer-quote-forms",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "writer-quote-single",
+    "writer-quote-nested",
+    "writer-quote-extra-operand",
+    "writer-quote-empty",
+    "writer-quote-dotted",
+    "writer-quote-dotted-tail",
+    "writer-quote-inner",
+    "writer-quote-quoted-list",
     "arity-condition-quote-rendering"
    ],
    "kg_test": null,
-   "rationale": "Measured, not assumed: the FUNCTION element of a lambda's wrong-number-of-arguments data prints as `#[(x) (x) (t)]` under Emacs 31.0.90 and as `(lambda (x) x)` under Fe, and `(quote 2)` prints as `'2` under Emacs and as `(quote 2)` under Fe. Both are writer differences over the same objects -- Fe has no byte-code-function object to print and does not abbreviate `quote` -- so the arity rows that would otherwise compare a rendered condition object set `compare_data: false` and point here, and their `-nargs` siblings compare the identity and count that both writers agree on.",
+   "rationale": null,
    "source_name": null
   },
   {
@@ -1837,7 +1857,7 @@
     "primitive-quote-too-many-nargs"
    ],
    "kg_test": null,
-   "rationale": "Phase 7, 07A row V2: `quote` rejects a second raw form with wrong-number-of-arguments naming the symbol and the actual count. Both sides' data is the list `(quote 2)`; only Emacs' printer abbreviates it to `'2`, so the byte comparison lives on the `-nargs` case, which extracts the three elements Lisp-side.",
+   "rationale": "Phase 7, 07A row V2: `quote` rejects a second raw form with wrong-number-of-arguments naming the symbol and the actual count. Both sides' data is the list `(quote 2)` and, since sub-plan 11C taught the writer Emacs' `'X` abbreviation, both sides print it as `'2` -- so `primitive-quote-too-many` compares the data directly and no longer opts out. The `-nargs` sibling, which extracts the three elements Lisp-side, is kept: it was the byte comparison's stand-in and is now an independent check that the identity and the count are what the condition carries, whatever the printer does with them.",
    "source_name": null
   },
   {

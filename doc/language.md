@@ -401,6 +401,16 @@ fe > '(hello world)
 (hello world)
 ```
 
+The writer prints the sugar too: a `(quote X)` pair is written `'X`, which is
+what Emacs' printer does. Only the single-element proper form abbreviates --
+`(quote x y)`, `(quote)`, `(quote . x)` and `(quote x . y)` are not forms
+`quote` accepts and print as the ordinary pairs they are, again matching
+Emacs. The abbreviation is recursive, so `(quote (quote x))` prints as `''x`
+and `(a (quote b) c)` as `(a 'b c)`. `(function X)` prints as `#'X` under the
+same rule. Backquote is *not* abbreviated: fe's reader expands
+`` `x ``/`,x`/`,@x` to the ordinary symbols `quasiquote`, `unquote` and
+`unquote-splicing`, and those print as themselves.
+
 #### Reader macros
 
 Five more prefixes are syntactic sugar for ordinary forms. Only the reader

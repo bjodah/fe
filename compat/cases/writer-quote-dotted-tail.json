@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-dotted-tail",
+ "setup": [],
+ "expr": "'(quote x . y)",
+ "note": "11C: the other improper shape, whose second element is a dotted tail rather than nil. Emacs prints it out in full too."
+}

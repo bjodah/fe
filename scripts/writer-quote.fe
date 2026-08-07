@@ -1,0 +1,31 @@
+;; The writer's `(quote X)` -> `'X` abbreviation (sub-plan 11C of kg's
+;; Emacs-subset program, 11A Decision 4).  Every line of the grid below was
+;; measured on Emacs 31.0.90 with `prin1`/`%S` before it was implemented; the
+;; printed output in tests/writer-quote.fe.out is what Emacs prints for the
+;; same object.  The sibling `(function X)` -> `#'X` abbreviation has been in
+;; the writer since sub-plan 04D and is the template.
+;;
+;; Only the single-element *proper* form abbreviates.  `(quote x y)`,
+;; `(quote)` and the improper tails are not forms `quote` accepts and print
+;; as the ordinary pairs they are -- which is also what Emacs does with them.
+;; Backquote is deliberately not abbreviated (see doc/language.md).
+
+(print '(quote x))
+(print ''x)
+(print '(quote (quote x)))
+(print '(quote (a b)))
+(print '(a (quote b) c))
+(print '(quote x y))
+(print '(quote))
+(print '(quote . x))
+(print '(quote x . y))
+(print '(x quote y))
+(print '(quoted x))
+(print '(function f))
+(print '(quote (function f)))
+
+;; The abbreviation is what the *writer* does; nothing about reading or
+;; evaluating a quote form changes, so the round trip still holds.
+(assert-equals '(quote x) ''x)
+(assert-equals 'x (car (cdr ''x)))
+(assert-is 3 (car '(3 4)))

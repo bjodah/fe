@@ -1617,6 +1617,36 @@ static bool TestWriter(void) {
   const FeWriteOptions shallower = {.max_depth = 3};
   CHECK(Renders(context, "'(((1)))", &shallower, "(((#<deep>)))", false));
 
+  // Sub-plan 11C: `(quote X)` prints as `'X`, the sibling of `(function X)`
+  // -> `#'X`. The script suite (scripts/writer-quote.fe) carries the whole
+  // grid against the Emacs answers; what is here is the shapes a golden
+  // cannot easily state -- the improper forms built with `cons`, which the
+  // reader cannot spell in one datum, and the depth interaction.
+  CHECK(Renders(context, "''x", nullptr, "'x", true));
+  CHECK(Renders(context, "'(quote (quote x))", nullptr, "''x", true));
+  CHECK(Renders(context, "'(a (quote b) c)", nullptr, "(a 'b c)", true));
+  // Not the single-element proper form, so not abbreviated: an extra
+  // operand, no operand at all, and the two improper tails. Emacs 31.0.90
+  // prints all four out in full too (measured).
+  CHECK(Renders(context, "'(quote x y)", nullptr, "(quote x y)", true));
+  CHECK(Renders(context, "'(quote)", nullptr, "(quote)", true));
+  CHECK(Renders(context, "(cons 'quote 'x)", nullptr, "(quote . x)", true));
+  CHECK(Renders(context, "(cons 'quote (cons 'x 'y))", nullptr, "(quote x . y)",
+                true));
+  // A symbol merely *named* quote in a non-head position is untouched, and
+  // so is a head that only starts with the name.
+  CHECK(Renders(context, "'(x quote y)", nullptr, "(x quote y)", true));
+  CHECK(Renders(context, "'(quoted x)", nullptr, "(quoted x)", true));
+  // The abbreviation spends `depth` exactly as the pair arm it replaces
+  // would, so it cannot buy a level the bounded writer would otherwise have
+  // refused. `'''1` is three nested pairs around an atom and needs a
+  // max_depth of 4 -- the same figure `'(((1)))`, the same shape written
+  // out, needs against `shallow` above.
+  const FeWriteOptions quote_depth_ok = {.max_depth = 4};
+  const FeWriteOptions quote_depth_short = {.max_depth = 3};
+  CHECK(Renders(context, "''''1", &quote_depth_ok, "'''1", true));
+  CHECK(Renders(context, "''''1", &quote_depth_short, "'''#<deep>", false));
+
   // Shared but acyclic structure is printed in full, every time it appears.
   CHECK(Renders(context, "(do (setq s '(1 2)) (list s s s))", nullptr,
                 "((1 2) (1 2) (1 2))", true));
@@ -2109,7 +2139,7 @@ static bool TestFunctionCells(void) {
   LISP2_ERR("(funcall 'let 'z 1)", "lisp2.fe:1: invalid-function let");
   LISP2_ERR("(apply 'and '(1 2))", "lisp2.fe:1: invalid-function and");
   CHK("(fset 'inc-macro (macro (x) (list '+ x 1)))",
-      "(macro (x) (list (quote +) x 1))");
+      "(macro (x) (list '+ x 1))");
   LISP2_ERR("(funcall 'inc-macro 5)", "lisp2.fe:1: invalid-function inc-macro");
   LISP2_ERR("(apply 'inc-macro '(5))",
             "lisp2.fe:1: invalid-function inc-macro");

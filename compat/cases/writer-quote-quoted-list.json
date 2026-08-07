@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-quoted-list",
+ "setup": [],
+ "expr": "'(quote (a b))",
+ "note": "11C: the abbreviated operand may itself be a list, printed as `'(a b)`."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-nested",
+ "setup": [],
+ "expr": "'(quote (quote x))",
+ "note": "11C: the abbreviation recurses, so a quoted quote prints as `''x` on both sides rather than as `'(quote x)`."
+}

@@ -310,6 +310,19 @@ printer uses, and the shape the `function` special form accepts -- while
 what makes the `reader-sharp-quote-identity` comparison match. Neither touches
 the frame machine or the object layout.
 
+Sub-plan 11C added the sibling that had been missing since: `(quote X)`
+prints as `'X`, under the same single-element-proper-form rule, and the two
+share one helper (`EmitAbbreviation`, fe.c) rather than two copies of the
+same shape test. Both recurse through `WriteObject`, which is what makes
+`''x` and `(a 'b c)` come out as Emacs prints them, and both spend `depth`
+exactly as the pair arm they replace would, so an abbreviation cannot buy a
+level of nesting the bounded writer would otherwise have refused.
+Backquote is deliberately not abbreviated: kg's reader expands to the
+ordinary symbols `quasiquote`/`unquote`/`unquote-splicing` where Emacs uses
+`` \` ``/`\,`/`\,@`, and Emacs' comma abbreviation is context-sensitive,
+so closing that half means changing what the reader produces and breaking
+any Lisp that pattern-matches on those names.
+
 ## Garbage Collection
 
 Fe uses a simple mark-and-sweep garbage collector in conjunction with a

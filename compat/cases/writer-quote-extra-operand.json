@@ -1,0 +1,6 @@
+{
+ "id": "writer-quote-extra-operand",
+ "setup": [],
+ "expr": "'(quote x y)",
+ "note": "11C: the abbreviation is for the single-element form only. A two-element `(quote x y)` is not something `quote` accepts and prints as the ordinary pair it is -- measured on Emacs 31.0.90, which prints it the same way."
+}
