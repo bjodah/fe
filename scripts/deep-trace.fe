@@ -1,0 +1,17 @@
+;; Sub-plan 09A Decision 5: the escaping-raise trace is bounded.
+;;
+;; A raise from deep inside a recursion has as many frames as the arena can
+;; hold -- an out-of-memory in a self-recursive `cons` chain printed 316 lines
+;; on a 300 KB arena, and that grows with arena size -- so the message the
+;; reader needs ends up buried under the trace. `main.c` prints at most
+;; `MaxPrintedTraceFrames` of them and then says how many it dropped, rather
+;; than stopping in silence.
+;;
+;; Nothing exercised the dropping arm: every other script's trace is shorter
+;; than the bound, so `tests/*.err` recorded only traces that fit. This one
+;; recurses far enough to overrun it. Each Lisp self-call costs about two
+;; evaluator frames, so 130 levels is a little over 260 frames against a
+;; bound of 256 -- past it, but not so far past that the count stops being
+;; readable as "the recursion this file asks for".
+(fset 'd (fn (n) (if (= n 0) (error "deep") (d (- n 1)))))
+(d 130)
