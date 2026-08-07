@@ -825,6 +825,87 @@ static FeObject* BuildFmakunboundForm(FeContext* ctx,
       3);
 }
 
+// Sub-plan 11B's shallow dynamic binding, and specifically its unwind path.
+// The grammar had no defvar-family arm at all -- fe has no `defvar`, and the
+// marking primitive it does have is new -- so the one property worth fuzzing
+// here was unreachable by construction: a dynamic binding is a *pending
+// restore obligation on the cleanup stack*, and what breaks such a thing is
+// leaving it behind, or honouring it twice, when the body it belongs to
+// completes abnormally.
+//
+// The generated form marks one of two names special (both arities of the
+// mark, so the let-dynamic-only flag is exercised too), binds it over a body
+// that raises, throws or returns normally, and then reads the global value
+// back. A wrong answer at that read, or an entry left on the cleanup stack,
+// is what this arm exists to find:
+//
+//   (do (internal--mark-special 'sp0 t)
+//       (setq sp0 <expr>)
+//       (condition-case nil (let ((sp0 <expr>)) <raising body>) (t nil))
+//       sp0)
+//
+// The `condition-case`/`catch` wrapper is deliberate: an uncontained
+// completion would end the whole input at the harness's `setjmp`, and the
+// read-back afterwards -- the assertion, such as it is -- would never run.
+static FeObject* BuildDynamicBinding(FeContext* ctx,
+                                     FuzzInput* input,
+                                     unsigned depth) {
+  FeObject* const name =
+      FeMakeSymbol(ctx, FuzzTakeByte(input) % 2 == 0 ? "sp0" : "sp1");
+  FeObject* const quoted = MakeUnary(ctx, "quote", name);
+  FeObject* const mark = MakeBinary(
+      ctx, "internal--mark-special", quoted,
+      FuzzTakeByte(input) % 2 == 0 ? FeMakeSymbol(ctx, "t") : (FeObject*)&nil);
+  FeObject* const seed =
+      MakeBinary(ctx, "setq", name, BuildExpression(ctx, input, depth + 1));
+  FeObject* const bindings = FeMakeList(
+      ctx,
+      (FeObject*[]){FeMakeList(
+          ctx, (FeObject*[]){name, BuildExpression(ctx, input, depth + 1)}, 2)},
+      1);
+  FeObject* body;
+  FeObject* wrapped;
+  switch (FuzzTakeByte(input) % 3) {
+    case 0:
+      // An ordinary error out of the binding, contained by a handler outside
+      // it: the drain that carries the condition must restore on the way.
+      body = MakeBinary(ctx, "let", bindings,
+                        MakeUnary(ctx, "car", FeMakeInteger(ctx, 5)));
+      wrapped = MakeForm(
+          ctx, "condition-case",
+          (FeObject*[]){
+              &nil, body,
+              FeMakeList(ctx,
+                         (FeObject*[]){FeMakeSymbol(ctx, "t"),
+                                       BuildExpression(ctx, input, depth + 1)},
+                         2)},
+          3);
+      break;
+    case 1:
+      // A throw out of the binding to a catch outside it: a mid-stack unwind
+      // rather than a raise, which reaches the cleanup stack by a different
+      // route (`PerformThrow`, not `RaiseCompletionCore`).
+      body = MakeBinary(
+          ctx, "let", bindings,
+          MakeBinary(ctx, "throw",
+                     MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "tg0")),
+                     BuildExpression(ctx, input, depth + 1)));
+      wrapped =
+          MakeBinary(ctx, "catch",
+                     MakeUnary(ctx, "quote", FeMakeSymbol(ctx, "tg0")), body);
+      break;
+    default:
+      // The normal-return control, with an `unwind-protect` inside so the
+      // binding restore and a Lisp cleanup interleave on one registry.
+      wrapped = MakeBinary(ctx, "let", bindings,
+                           MakeBinary(ctx, "unwind-protect",
+                                      BuildExpression(ctx, input, depth + 1),
+                                      BuildExpression(ctx, input, depth + 1)));
+      break;
+  }
+  return MakeForm(ctx, "do", (FeObject*[]){mark, seed, wrapped, name}, 4);
+}
+
 static FeObject* BuildExpression(FeContext* ctx,
                                  FuzzInput* input,
                                  unsigned depth) {
@@ -832,7 +913,7 @@ static FeObject* BuildExpression(FeContext* ctx,
     return BuildAtom(ctx, input);
   }
 
-  switch (FuzzTakeByte(input) % 36) {
+  switch (FuzzTakeByte(input) % 37) {
     case 0:
       return BuildAtom(ctx, input);
     case 1:
@@ -922,6 +1003,8 @@ static FeObject* BuildExpression(FeContext* ctx,
       return BuildExhaustionForm(ctx, input, depth);
     case 34:
       return BuildDeepGraph(ctx, input);
+    case 35:
+      return BuildDynamicBinding(ctx, input, depth);
     default:
       return BuildNumericExpression(ctx, input, depth + 1);
   }

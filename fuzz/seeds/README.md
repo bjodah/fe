@@ -51,11 +51,23 @@ when the grammar moves.
   operand buffer in the EvalList frame's `accumulator` and the relay frame's
   fields -- the 04C instance of the class 03F's `cons-second-operand-gc`
   found, which is why the plan gates this slice on the fuzz lane.
-  Re-derived in the Phase 9 fix cycle: the 3000-byte original built 357 forms
-  under the current grammar and reached neither `funcall` nor `apply`. The
-  359-byte replacement builds 9 forms and reaches all four shapes -- 4
-  `funcall`s (2 closure, 2 designator) and 6 `apply`s (4 closure, 2
-  designator).
+  Re-derived twice. Phase 9: the 3000-byte original built 357 forms and
+  reached neither `funcall` nor `apply`; its 359-byte replacement built 9
+  forms and reached all four shapes. Sub-plan 11B's modulus 36 -> 37 left
+  that one building a single form that reached none of them, and the
+  27-byte constructed replacement is one *nested* form holding all four:
+
+      (do (do (funcall (fn (x) (cons x nil)) nil)
+              (apply (fn (x) (cons x nil)) (list nil)))
+          (do (funcall cons nil nil)
+              (apply cons nil (list nil))))
+
+  Nested rather than sequential because `(funcall cons ...)` raises
+  `void-variable` -- the grammar emits the bare symbol, whose *value* cell
+  is empty since the 04D namespace cut put callables in the function cell --
+  and a raise ends the input, so no form after it would ever be built. The
+  two closure shapes are ordered first for the same reason: they evaluate,
+  and only the designator half is built-but-not-evaluated.
 - `strict-arity-optional`, `strict-arity-rest`, `strict-arity-malformed`,
   `strict-arity-primitive`, `strict-arity-native`,
   `strict-arity-native-too-few` -- Phase 7's coverage seeds, one per shape
@@ -68,21 +80,39 @@ when the grammar moves.
   text "strict-arity", which steers the grammar somewhere else entirely, and
   every counter stayed at zero.
 
-  Five of the six were re-derived in the Phase 9 fix cycle, having stopped
-  reaching their shape when the grammar moved. Measured on the current
-  grammar, replayed without mutation:
+  Five of the six were re-derived in the Phase 9 fix cycle, and four of them
+  again in sub-plan 11B's, both times having stopped reaching their shape
+  when the grammar moved. Measured on the current grammar (modulus 37),
+  replayed without mutation:
 
   | seed | bytes | reaches |
   |---|---|---|
-  | `strict-arity-optional` | 512 | `(x &optional y)` x1 (was recorded as 3) |
+  | `strict-arity-optional` | 30 | `(x &optional y)` x1 |
   | `strict-arity-rest` | 97 | `(x &rest y)` x3, `(x &optional y)` x2 |
   | `strict-arity-malformed` | 59 | `(&rest y x)` x2 |
-  | `strict-arity-primitive` | 83 | `(car)`, `(not t ...)` x3 operands, `(if ...)` x1 operand |
-  | `strict-arity-native` | 53 | `(native-arity nil nil nil)`, i.e. `FeRequireNoArguments`' "too many arguments" |
-  | `strict-arity-native-too-few` | 2 | `(native-arity)`, i.e. `FeGetNextArgument`'s "too few arguments" |
+  | `strict-arity-primitive` | 8 | `(not t)` then `(car)` |
+  | `strict-arity-native` | 9 | `(native-arity nil nil nil)`, i.e. `FeRequireNoArguments`' "too many arguments" |
+  | `strict-arity-native-too-few` | 3 | `(native-arity)`, i.e. `FeGetNextArgument`'s "too few arguments" |
 
-  `strict-arity-optional` is the original file, kept: it still reaches its
-  shape, only fewer times than recorded. The other five are new bytes.
+  `strict-arity-rest` and `strict-arity-malformed` are the files Phase 9
+  left; the other four are 11B's bytes.
+
+  11B's four were *constructed* rather than searched for, which is a change
+  of method worth recording: the grammar is a deterministic decoder of the
+  seed's bytes (`FuzzTakeByte` reads them in order and answers 0 past the
+  end), so the byte string that reaches a given arm can be read straight off
+  `BuildExpression`'s `switch`, and the result is minimal by construction
+  instead of by shrinking. `strict-arity-primitive` is
+  `20 03 01 00 01 | 20 00 00` -- arity form, name index 3 (`not`), one
+  operand, atom, `t`; then arity form, name index 0 (`car`), no operands --
+  and its *order* is load-bearing: `(car)` raises, and a raise ends the whole
+  input at the harness's `setjmp`, so a raising form must come last or the
+  forms after it are never built. That same rule is why
+  `funcall-apply-redispatch` is now one nested form rather than four
+  sequential ones (below). `strict-arity-optional` was searched for and
+  shrunk in the usual way and kept, because the bytes that reach it also
+  build a deep-graph churn form ahead of it, which the constructed
+  five-byte alternative does not.
 
 - `exhaustion-under-condition-case` -- Phase 9 sub-plan 09B's seed, in the
   same tradition: 25 bytes that walk `BuildExhaustionForm`'s four handler
@@ -106,3 +136,25 @@ when the grammar moves.
   Not every bucket has a dedicated seed: the empty and single-required
   parameter lists are what the pre-Phase-7 grammar generated unconditionally
   and are reached by any mutation, so they get no file of their own.
+
+- `dynamic-binding-unwind` -- sub-plan 11B's seed, in the same tradition and
+  constructed the same way as the four above: 32 bytes, three top-level
+  forms, one per way out of a live dynamic binding. A shallow binding is a
+  pending restore obligation on the cleanup stack, so what breaks one is
+  leaving it behind, or honouring it twice, when the body completes
+  abnormally:
+
+      (do (internal--mark-special 'sp0 t) (setq sp0 nil)
+          (condition-case nil (let ((sp0 nil)) (car 5)) (t nil)) sp0)
+      (do (internal--mark-special 'sp1 nil) (setq sp1 nil)
+          (catch 'tg0 (let ((sp1 nil)) (throw 'tg0 nil))) sp1)
+      (do (internal--mark-special 'sp0 t) (setq sp0 nil)
+          (let ((sp0 nil)) (unwind-protect nil nil)) sp0)
+
+  An error contained by a handler outside the binding; a throw to a catch
+  outside it, which reaches the registry through `PerformThrow` rather than
+  `RaiseCompletionCore`; and a normal return with an `unwind-protect` inside,
+  so a Lisp cleanup and a binding restore interleave on one registry. Both
+  mark arities appear, so the let-dynamic-only flag is steered too. Before
+  the arm existed the shape was unreachable by construction: fe has no
+  `defvar`, and the marking primitive the grammar now calls is 11B's.

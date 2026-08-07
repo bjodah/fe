@@ -183,7 +183,7 @@ rather than relying on incidental symbol generation.
 (`error-format-directives`, `condition-case-handlers`,
 `catch-throw-cleanup-gap`, the six `strict-arity-*` shapes,
 `funcall-apply-redispatch`, `exhaustion-under-condition-case`,
-`deep-car-collection`, `cyclic-collection`);
+`deep-car-collection`, `cyclic-collection`, `dynamic-binding-unwind`);
 `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints the forms each one builds.
 
 **A grammar change invalidates seeds.** A seed is opaque bytes that steer this
@@ -199,6 +199,18 @@ phase, while `fuzz/seeds/README.md` went on recording the old counts.
 `FE_FUZZ_DUMP=1` and checks. Touching the grammar means running that target
 and re-deriving whatever it reports, in the same commit.
 
+Sub-plan 11B is the first grammar change made under that rule rather than
+in spite of it: modulus 36 -> 37 for the dynamic-binding arm invalidated
+**4** of the 14 tracked seeds (`funcall-apply-redispatch`,
+`strict-arity-optional`, `strict-arity-primitive`, `strict-arity-native`,
+`strict-arity-native-too-few` -- five reported failures across four files,
+since one seed claims two constructs), and all of them were re-derived in
+the commit that moved the modulus, with `make fuzz-eval-seed-verify` green
+before it landed. `fuzz/seeds/README.md` records the method that replaced
+random search for four of them: the grammar is a deterministic decoder of
+the seed's bytes, so the byte string reaching a given arm can be read off
+`BuildExpression`'s `switch` directly.
+
 **What the grammar deliberately does not reach: `macroexpand`.** Sub-plan
 10B added `macroexpand-1`, `macroexpand` and `macroexpand-all`, and the
 sub-plan predicted they would be reachable "as an ordinary symbol already
@@ -211,7 +223,10 @@ that is in no list cannot appear.
 
 The arm was not added, and the reason is the paragraph above: taking
 `BuildExpression`'s modulus from 36 to 37 re-steers all fourteen tracked
-seeds for one primitive's coverage. What replaces it is deterministic and
+seeds for one primitive's coverage.  (Sub-plan 11B has since spent that
+modulus move on dynamic binding, which needed it for an unwind path rather
+than for a name's coverage, and paid the re-derivation.  `macroexpand` is
+still not in the grammar and the argument above still holds.) What replaces it is deterministic and
 stronger for the property that actually matters here -- rooting across the
 allocations an expansion makes -- `test_api.c:TestMacroexpandUnderCollection`
 runs four expansion shapes at 32 different arena headrooms each, so a
