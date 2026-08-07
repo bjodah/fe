@@ -320,14 +320,29 @@ static FeObject* TakeMarkLink(FeObject* obj) {
 
 // The mark phase, with the C stack out of it (sub-plan 09C).
 //
-// The old walk recursed once per `car` level -- 48 bytes a frame in this
-// tree's default build, 32 at `-Os`, 64 under ASan, 80 under MSan -- so a
-// chain of `car`s cost C stack in proportion to its depth, and a deep enough
-// one took the process down inside the collector: measured by bisection on an
-// 8 MiB stack, between 130 000 and 150 000 levels, reachable from pure Lisp in
-// any arena of about 4.9 MiB, and reachable in kg's 1 MiB arena as soon as the
-// process stack limit fell to 1280 KiB. The `cdr` spine was already a loop;
-// this makes the `car` edge one too, for every shape, with no bound to tune.
+// The old walk recursed once per `car` level, so a chain of `car`s cost C
+// stack in proportion to its depth and a deep enough one took the process
+// down inside the collector. Every figure below carries the build it was
+// measured in, because the frame size differs by nearly a factor of three
+// across them: 48 bytes a frame in this tree's default build (clang, `-O1`),
+// 32 at `-Os`, 64 under ASan, 80 under MSan.
+//
+// In fe's own default build, bisection on an 8 MiB stack put the SIGSEGV
+// between 130 000 and 150 000 levels, which is reachable from pure Lisp in
+// any arena of about 4.9 MiB. (A figure of ~262 000 levels appears in older
+// notes; that is the same 8 MiB stack divided by the `-Os` frame, an
+// extrapolation rather than a measurement, and it is not this build's
+// answer.)
+//
+// In kg the failure was measured directly rather than derived, on two kg
+// binaries differing only in their fe (kg's `-Os` gcc build, 1 MiB arena):
+// at `ulimit -s 1280` *neither* crashed, and the old walk's crash reproduces
+// at 512 and at 256. An earlier note here claimed 1280, which the
+// measurement falsifies -- the point stands with the correct number, since a
+// 256 KiB thread stack is an ordinary thing for an embedder to have.
+//
+// The `cdr` spine was already a loop; this makes the `car` edge one too, for
+// every shape, with no bound to tune.
 //
 // The mechanism is Deutsch-Schorr-Waite pointer reversal: the walk stores its
 // own return path in the objects it is walking, so it needs no stack and

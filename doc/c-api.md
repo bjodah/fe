@@ -871,9 +871,9 @@ no `data:` line, because a quit is a completion kind a host may need to tell
 apart from every condition, not a condition to be inspected. A completion
 with no condition object at all (budget exhaustion) prints
 neither line, only `error:`; an arena or GC-stack exhaustion prints its own
-`condition:`/`data:` lines like any other error. The variable changes nothing else: the `error:`
-line and the call trace are printed exactly as they are without it, and the
-exit status is unchanged.
+`condition:`/`data:` lines like any other error. The variable changes nothing
+else: the `error:` line and the call trace are printed exactly as they are
+without it, and the exit status is unchanged.
 
 The kind also has one internal effect a host can rely on: while a
 non-Normal completion is draining, a cleanup's own frame pushes get the

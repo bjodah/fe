@@ -911,12 +911,28 @@ drain.
 The collector's mark phase walks the object graph without recursion and
 without allocating: it is Deutsch-Schorr-Waite pointer reversal, and it stores
 its own return path inside the objects it is walking. Until sub-plan 09C it
-recursed once per `car` level -- the `cdr` spine was already a loop -- which
-cost 48 bytes of C stack per level in the default build (32 at `-Os`, 64 under
-ASan, 80 under MSan) and took the process down inside the collector at, measured
-by bisection on an 8 MiB stack, between 130 000 and 150 000 levels. That depth
-is reachable from pure Lisp in any arena of about 4.9 MiB, and was reachable in
-kg's 1 MiB arena as soon as the process stack limit dropped to 1280 KiB.
+recursed once per `car` level -- the `cdr` spine was already a loop -- so the
+depth at which it took the process down is a function of the frame size, and
+the frame size differs by nearly a factor of three across the builds this
+project runs: 48 bytes per level in fe's default build (clang, `-O1`), 32 at
+`-Os`, 64 under ASan, 80 under MSan. Every figure here therefore names its
+build.
+
+In fe's default build, bisection on an 8 MiB stack put the SIGSEGV between
+130 000 and 150 000 levels, which is reachable from pure Lisp in any arena of
+about 4.9 MiB. A figure of about 262 000 levels appears in older notes: that
+is the same 8 MiB stack divided by the `-Os` frame -- an extrapolation, not a
+measurement, and not this build's answer.
+
+In kg the failure was measured rather than derived, on two kg binaries
+differing only in their fe (kg's `-Os` gcc build, 1 MiB arena): at
+`ulimit -s 1280` *neither* crashed, and the old walk's crash reproduces at
+`ulimit -s 512` and at 256. An earlier version of this paragraph said the
+crash arrived "as soon as the process stack limit dropped to 1280 KiB", which
+the measurement falsifies. The claim it was making survives the correction:
+a 256 KiB thread stack is an ordinary thing for an embedder to hand a worker,
+and a garbage collector that dies on one is a defect wherever the exact
+threshold sits.
 `test_api.c`'s `TestMarkStackProbe` is the gate: the collector's C-stack
 high-water mark, read from inside a `mark_fn` at the bottom of a `car` chain
 10, 1 000 and 100 000 levels deep, must stay within 2 KiB of the same probe
@@ -982,7 +998,7 @@ to keep the implementation concise, but should not hinder normal usage.
   nesting with an explicit depth budget and walks the `cdr` spine with two
   pointers, so the two are not the same shape and should not be changed as if
   they were. (The collector's own `car` recursion, which this entry used to
-  describe as a known issue, is gone -- see "The Mark Phase" below.)
+  describe as a known issue, is gone -- see "The Mark Phase" above.)
 * The storage of an object’s type and GC mark assumes a little-endian system and
   will not work correctly on systems of other endianness.
 * Proper tailcalls are not implemented — `while` can be used for iterating over

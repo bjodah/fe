@@ -431,10 +431,12 @@ static FeObject* BuildErrorForm(FeContext* ctx,
 // grammar can fill the arena: every generated form is bounded by `MaxDepth`,
 // and the harness restores the GC stack between forms, so all of it is
 // collectable again by the next one. Measured before this builder existed:
-// **zero** arena-exhaustion raises across 600 random inputs of 32..512 bytes
-// and one 4096-byte input -- the whole catchable-exhaustion path 09B builds
-// was structurally unreachable from this lane, which is what 09A Decision 6
-// asks this slice to fix.
+// **zero** arena-exhaustion raises, and in fact zero collections of any kind,
+// over 1500 random inputs of 16..128 bytes -- the whole catchable-exhaustion
+// path 09B builds was structurally unreachable from this lane, which is what
+// 09A Decision 6 asks this slice to fix. That census, its generator and its
+// seed are in `doc/FUZZING.md`; this comment used to cite a different,
+// undocumented run (600 inputs of 32..512 bytes) that disagreed with it.
 //
 // The body is `(let ((l nil)) (while t (setq l (cons 1 l))))`: a loop that
 // terminates only by exhausting the arena. That does not breach the

@@ -93,15 +93,13 @@ because the shape before it was unreachable by construction:
 
 Phase 9's exhaustion arm (09B) is the same story once more. Every other form
 this grammar builds is bounded by `MaxDepth`, and the harness restores the GC
-stack between forms, so all of it is collectable again by the next one:
-measured before the arm existed, **zero** of 1500 random inputs of 16..128
-bytes reached an arena exhaustion at all, and neither did a 4096-byte one, so
-the catchable-exhaustion path 09B built was unreachable from this lane.
-`BuildExhaustionForm` emits
+stack between forms, so all of it is collectable again by the next one: before
+the arm existed, the whole catchable-exhaustion path 09B built was unreachable
+from this lane. `BuildExhaustionForm` emits
 `(condition-case VAR (let ((l nil)) (while t (setq l (cons 1 l)))) (SPEC ...))`
 with SPEC drawn from `t`, `error`, `arena-exhaustion` and `arith-error` -- the
 three handlers that must match and one that must not, so the escape path is
-generated too. With the arm, 178 of the same 1500 inputs reach it.
+generated too.
 
 That loop is the one place this grammar admits a `while` (see the exclusion
 list below), and the exclusion is not weakened by it: the loop terminates only
@@ -127,10 +125,48 @@ unreachable by construction. `BuildDeepGraph` emits
 enough churn over the top of it to force several collections while it is live.
 Both loops are bounded by constants compiled into the form rather than by the
 input, and the form returns a number, so nothing deep or cyclic reaches the
-harness's own `FeToString`. Measured over the same 800 random inputs: 184 reach
-the arm, building 226 graphs of which 118 are cyclic, up to 206 levels deep,
-across 838 collections. `MaxDepth` also went 4 -> 6 in the same slice, so the
-rest of the grammar builds structures the collector has to walk further into.
+harness's own `FeToString`. `MaxDepth` also went 4 -> 6 in the same slice, so
+the rest of the grammar builds structures the collector has to walk further
+into.
+
+### What both arms bought, measured
+
+An earlier version of this file gave these counts with no generator and no
+seed, so nobody could reproduce them or tell what had changed if they moved.
+The census below is one run of one generator, stated in full, over the
+pre-Phase-9 grammar (`MaxDepth` 4, `BuildExpression` modulus 34) and today's
+(`MaxDepth` 6, modulus 36), with everything else -- fe, the harness, the
+64 KiB arena -- held fixed:
+
+| over 1500 inputs of 16..128 bytes | before (acc94f7) | after (09B + 09C) |
+|---|---|---|
+| inputs that raise an arena exhaustion | **0** | 182 (201 raises) |
+| inputs reaching `BuildExhaustionForm` | 0 (no such arm) | 392 (477 forms) |
+| inputs reaching `BuildDeepGraph` | 0 (no such arm) | 396 (451 graphs, 235 cyclic, up to 206 levels) |
+| collections performed, in total | **0** | 2215 |
+
+The zero row is the finding, not the arms: with no arm that fills the arena,
+this lane never collected *at all*, so every collector path -- not only 09C's
+new one -- was untested from here.
+
+The generator, so the numbers are checkable rather than quoted. Link the
+harness with a `main` that drives `LLVMFuzzerTestOneInput` directly (no
+libFuzzer, so no mutation and no corpus) and feed it xorshift64\*:
+
+```c
+static uint64_t s = 0x9e3779b97f4a7c15;   // the seed the table used
+static uint64_t rnd(void) {
+  s ^= s >> 12; s ^= s << 25; s ^= s >> 27;
+  return s * 2685821657736338717ULL;
+}
+// per input: len = 16 + rnd() % 113, then len bytes of (uint8_t)(rnd() >> 33)
+```
+
+Counting "reaches an arm" needs a counter in the builder and counting "raises
+an arena exhaustion" needs one in `PublishExhaustion` (fe_eval.c); both are
+temporary instrumentation, not tracked code. Anything that changes the
+grammar changes these numbers, and re-running is cheaper than reasoning about
+them: re-measure rather than adjust.
 
 The harness's arena stays 64 KiB deliberately, and is *not* enlarged for this:
 the tracked `cons-second-operand-gc` seed reproduces only at that arena's
