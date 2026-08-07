@@ -220,7 +220,25 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # +30..50 price), so the 63 unspent ones go back rather than sitting as
 # unearned headroom. `SCC_FILE_COMPLEXITY_MAX` was never raised for Phase 9
 # and stays where it is; the worst file is fe_eval.c at 490.
-SCC_COMPLEXITY_MAX ?= 757
+# Raised a ninth time, 757 -> 775, by the Phase 9 fe fix cycle (2026-08-07),
+# funding the adversarial review's F1, F2, F9 and F10 by name:
+#   F1  a collector guard (`collecting` in `FeContext`, set across
+#       `CollectGarbage`) plus the two places that read it -- `WriteObject`'s
+#       step charge and `RaiseCompletionCore`'s fatal arm.
+#   F2  re-stamping the two shared exhaustion conditions before they are
+#       published, so a handler's `setcar`/`setcdr` cannot disable them.
+#   F9  a `static_assert` on the pointer-reversal alignment premise.
+#   F10 a sweep-time assert that no `GcMarkCdrBit` leaked.
+# The fix cycle is priced +6..14 scc against the real tree; the measured
+# starting total is 757/757 -- the cap sits *exactly* on the number, so the
+# first of those fixes breaches it. 775 is the top of the band plus the same
+# small margin 03A/04A/05A/06A/07A/09A used. Proved live before this raise
+# landed by temporarily setting the cap to 756 and watching
+# `make complexity-check` report "FAIL: total complexity 757 exceeds limit
+# 756". `SCC_FILE_COMPLEXITY_MAX` is not raised and does not need to be: all
+# of it lands in fe.c (147/520) and fe_eval.c (490/520). The final commit of
+# this cycle re-sets this number to the measured actual.
+SCC_COMPLEXITY_MAX ?= 775
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -315,7 +333,20 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # points. The per-symbol manifest under .ci/pmccabe-baseline.json is unchanged
 # by this commit and remains the ratchet that stops a symbol growing inside
 # this envelope.
-PMCCABE_TOTAL_MAX ?= 1065
+# Raised 1065 -> 1082 by the Phase 9 fe fix cycle (2026-08-07), funding the
+# same four review findings the scc row above names (F1, F2, F9, F10). The
+# measured starting total is 1065 across 341 symbols -- again exactly on the
+# cap -- and the cycle is priced +5..12 pmccabe: one new helper apiece for F1
+# and F2, one extra branch in `WriteObject` and one in `RaiseCompletionCore`,
+# and asserts (which pmccabe does not count) for F9/F10. 1082 is the top of
+# that band plus the usual small margin. Proved live before this raise landed
+# by temporarily setting it to 1064 and watching `make pmccabe-check` report
+# "FAIL: total complexity 1065 exceeds funded budget 1064 (+1)". The
+# per-symbol manifest under .ci/pmccabe-baseline.json is untouched here; every
+# per-symbol increase this cycle needs is banked explicitly, with its reason,
+# in the commit that causes it. The final commit re-sets this number to the
+# measured actual.
+PMCCABE_TOTAL_MAX ?= 1082
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
