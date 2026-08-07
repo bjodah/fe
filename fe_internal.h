@@ -214,6 +214,16 @@ struct FeObject {
   Value car, cdr;
 };
 
+// Sub-plan 09C's pointer reversal stores its links in a pair's `car`/`cdr`
+// words with the collector's flags in the low bits, so it needs bits 0, 1 and
+// 2 of an object pointer to be free -- i.e. every object at least 8-byte
+// aligned. That was prose in `FeMark`'s comment and nowhere else, and
+// `FeArenaAlignment()` answers 8, so bit 2 is the *last* free one: a layout
+// change that took the alignment to 4 would silently start writing the half
+// flag over an address bit. Stated here, beside the `sizeof(Value)` assert
+// the integer object stands on, because both are the same kind of claim.
+static_assert(alignof(FeObject) > GcMarkCdrBit);
+
 // One pending `unwind-protect`/`FeProtectWithCleanup` registration. Lisp and
 // C cleanups interleave in one registry so they share a single ordering, per
 // `doc/unwind-design.md`: unwinding always drains the most recently pushed

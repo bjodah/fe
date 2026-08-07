@@ -417,6 +417,17 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 [[nodiscard]] FeObject* FeCar(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeCdr(FeContext* ctx, FeObject* obj);
 
+// The writer's default `car`-nesting bound: how deep `FeWrite()` and
+// `FeToString()` descend into one object before emitting `#<truncated>`. It
+// is public because it is the only sensible answer to "how much of a chain
+// is a reader ever shown", and a host printing a bounded *sequence* of
+// objects -- `main.c`'s escaping-raise trace is the one in this repository --
+// should apply the printer's own number rather than restate it and let the
+// two drift.
+enum { FeWriteDefaultMaxDepth = 256 };
+
+// Zero in any field selects that field's default; `max_depth`'s is
+// `FeWriteDefaultMaxDepth` above.
 typedef struct FeWriteOptions {
   size_t max_bytes;
   size_t max_nodes;

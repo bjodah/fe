@@ -376,6 +376,12 @@ descend:
     // where `car` is a tag -- and never dereferenced there, exactly as in the
     // recursive walk this replaces.)
     FeObject* const car = CAR(current);
+    // The `FeTPair` arm below overwrites this whole word with the reversed
+    // link and puts the bit back itself, so for a pair this store is dead. It
+    // stays because the alternative is the same store repeated in each of the
+    // three arms that do keep it, and because "mark, then decide what kind of
+    // cell this is" is the order the recursive walk had and the order the
+    // invariant is stated in: every intermediate state has `GcMarkBit` set.
     TAG(current) |= GcMarkBit;
     switch (FeGetType(current)) {
       case FeTPair:
@@ -509,6 +515,18 @@ static void CollectGarbage(FeContext* ctx) {
     if (FeGetType(obj) == FeTFree) {
       continue;
     }
+    // Nothing else in the tree notices a leaked half flag: the sweep below
+    // clears `GcMarkBit` and never touches bit 2, so a `FeMark` path that
+    // forgot to restore one would leave a pair permanently claiming the walk
+    // is inside its cdr -- and the *next* collection would take the wrong
+    // branch on the ascent. Every path out of `FeMark` restores it; this is
+    // the check that says so. It costs one comparison per live object in a
+    // loop that already does several, and it is compiled out by `NDEBUG` for
+    // an embedder that wants even that back -- nothing in this repository
+    // defines it, so every fe build and every CI lane runs the check. The
+    // test is restricted to pairs because on any other cell that bit is the
+    // low bit of the type (`type << GcMarkBit | OtherCell`), not a flag.
+    assert(FeGetType(obj) != FeTPair || (~TAG(obj) & GcMarkCdrBit));
     if (~TAG(obj) & GcMarkBit) {
       if (ctx->gc_fn != nullptr) {
         ctx->gc_fn(ctx, obj);
@@ -840,7 +858,9 @@ FeObject* FeCdr(FeContext* ctx, FeObject* obj) {
 enum {
   DefaultWriteMaxBytes = 64u << 20,
   DefaultWriteMaxNodes = 8u << 20,
-  DefaultWriteMaxDepth = 256,
+  // Public, because `main.c` bounds its escaping-raise trace by the same
+  // number and used to say "256" a second time to do it (09A Decision 5).
+  DefaultWriteMaxDepth = FeWriteDefaultMaxDepth,
 };
 
 typedef struct Writer {

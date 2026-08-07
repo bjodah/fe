@@ -24,12 +24,13 @@ static const char* InterpreterVersion = "1.0";
 // out-of-memory in a self-recursive `cons` chain printed 316 lines on a
 // 300 KB arena and grows with arena size, burying the message the reader
 // actually needs underneath its own stack. The printer already refuses to
-// walk deeper than 256 levels into a single object for the same reason; this
-// applies the same number across the trace, and reports how many frames it
-// dropped rather than stopping in silence. Sub-plan 09A Decision 5: the
-// 1024-byte per-form truncation `FeToString` below applies stays as it is --
-// that is truncation, not failure.
-enum { MaxPrintedTraceFrames = 256 };
+// walk deeper than that into a single object for the same reason; this
+// applies the printer's own number across the trace --
+// `FeWriteDefaultMaxDepth`, not a second copy of it -- and reports how many
+// frames it dropped rather than stopping in silence. Sub-plan 09A Decision 5:
+// the 1024-byte per-form truncation `FeToString` below applies stays as it is
+// -- that is truncation, not failure.
+enum { MaxPrintedTraceFrames = FeWriteDefaultMaxDepth };
 
 static jmp_buf top_level;
 

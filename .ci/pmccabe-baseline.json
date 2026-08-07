@@ -14,7 +14,7 @@
   "fe.c:CheckWritableSymbol": 3,
   "fe.c:ClassifyExponent": 8,
   "fe.c:ClassifyNumber": 10,
-  "fe.c:CollectGarbage": 7,
+  "fe.c:CollectGarbage": 8,
   "fe.c:CopyStoredStringBytes": 4,
   "fe.c:DoublesEqualByBits": 1,
   "fe.c:Emit": 2,
