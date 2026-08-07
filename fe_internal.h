@@ -670,13 +670,28 @@ struct FeContext {
   // out-of-memory and only `(t ...)` could. `GetCoreObjectCount` counts both
   // names and both pairs, so the minimum arena still holds them.
   //
-  // They are shared objects: a handler that mutates the condition it caught
-  // with `setcar`/`setcdr` would change what every later exhaustion signals.
-  // Both carry nil data for exactly that reason -- there is nothing in them
-  // worth reading destructively -- and nothing in fe writes to them after
-  // `FeOpenContext`.
+  // They are shared objects, and a handler is handed the object itself, so a
+  // `setcar`/`setcdr` on a caught one used to change what every *later*
+  // exhaustion signalled -- for the life of the context. Measured before the
+  // fix: `(condition-case e BIG (error (setcar e 'poisoned)))` left the next
+  // out-of-memory escaping `(error ...)` and `(arena-exhaustion ...)` alike,
+  // and `(setcdr e (list 9 9 9))` made the next one signal
+  // `(arena-exhaustion 9 9 9)` with that list permanently rooted through a
+  // context-lifetime root. Carrying nil data was never a defence, only a
+  // reason there is nothing worth mutating.
+  //
+  // So every raise re-stamps the object before publishing it
+  // (`PublishExhaustion`, fe_eval.c), which is why the two names are kept
+  // here as well as inside the pairs: the pair's own `car` is exactly what a
+  // poisoning handler overwrote, so it cannot be its own source of truth.
+  // Re-stamping costs two stores and no allocation, which is the whole point
+  // of these objects.
   FeObject* arena_exhaustion_condition;
   FeObject* evaluation_stack_exhaustion_condition;
+  // The interned names of the two conditions above. Reachable anyway through
+  // `symbol_list`, which is a root, so these need no marking of their own.
+  FeObject* arena_exhaustion_name;
+  FeObject* evaluation_stack_exhaustion_name;
   // The native currently being invoked.  This is published only for the
   // duration of the callback so the generic argument helpers can construct
   // the same wrong-number condition as Lisp calls.

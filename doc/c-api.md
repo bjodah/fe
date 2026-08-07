@@ -738,10 +738,19 @@ carries `nil`: `condition-case` decides a quit by completion *kind* before it
 looks at the object, so `(quit ...)` catches it either way, and an interrupt
 is not an exhaustion.
 
-Both objects are shared. A handler that mutates the condition it caught with
-`setcar`/`setcdr` would change what every later exhaustion signals; both
-carry `nil` data for exactly that reason, and nothing in fe writes to them
-after `FeOpenContext()`.
+Both objects are shared, and a handler is handed the object itself, not a
+copy. Every raise therefore re-stamps the condition -- symbol back in the
+`car`, `nil` back in the `cdr` -- before publishing it. Two stores and no
+allocation, so it is still safe on the path where allocation has already
+failed, and it is what keeps a `setcar`/`setcdr` from a handler out of the
+*next* exhaustion: without it, `(condition-case e BIG (error (setcar e
+'poisoned)))` permanently disabled the mechanism, since `ConditionMatches()`
+reads the condition's `car` to place it in the hierarchy, and
+`(setcdr e (list 9 9 9))` made the next unrelated exhaustion signal
+`(arena-exhaustion 9 9 9)` with that list rooted for the life of the context.
+A caught condition is still yours to read; if you want to keep or mutate one,
+copy what you need out of it, exactly as with any other condition whose
+lifetime ends at the next completion.
 
 The object lives in the context (`ctx->condition`) and is a GC root for as
 long as it is there, so it stays valid across the cleanup drain, inside

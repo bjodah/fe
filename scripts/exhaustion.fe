@@ -29,6 +29,39 @@
     (let ((l nil)) (while t (setq l (cons 1 l))))
     (t 'caught-t)))
 
+;; The conditions are shared objects for the life of the context, and a
+;; handler is handed the object itself rather than a copy. Every raise
+;; therefore re-stamps the object before publishing it -- two stores, no
+;; allocation, so it is still safe on the path where allocation has already
+;; failed. Without that, `(setcar e ...)` in one handler permanently disabled
+;; the whole mechanism: measured, the next out-of-memory then escaped both
+;; `(error ...)` and `(arena-exhaustion ...)`.
+(assert-equals 'poisoned
+  (condition-case e
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (error (setcar e 'poisoned) (car e))))
+(assert-equals 'still-by-name
+  (condition-case nil
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (arena-exhaustion 'still-by-name)))
+
+;; The `setcdr` half. Data attached by a handler used to reach the *next*,
+;; unrelated exhaustion -- which signalled `(arena-exhaustion 9 9 9)` -- and,
+;; because the condition is a context-lifetime GC root, kept that list alive
+;; for good. `(setcdr e e)` is the same bug with a cycle attached.
+(assert-equals 'attached
+  (condition-case e
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (error (setcdr e (list 9 9 9)) 'attached)))
+(assert-equals 'self-referential
+  (condition-case e
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (error (setcdr e e) 'self-referential)))
+(assert-equals '(arena-exhaustion)
+  (condition-case e
+    (let ((l nil)) (while t (setq l (cons 1 l))))
+    (error e)))
+
 ;; The uncaught tail, in the same shape `conditions.fe` uses: an unrelated
 ;; condition name is still not a match, so this one reaches the host and
 ;; `tests/exhaustion.fe.err` records what an uncaught exhaustion looks like on

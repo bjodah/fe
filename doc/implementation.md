@@ -345,10 +345,19 @@ it looks at the object's shape and an interrupt is not an exhaustion.
 `GetCoreObjectCount()` counts both names and both pairs, so
 `FeMinimumArenaSize()` still describes an arena that can open.
 
-Both objects are shared, and `setcar`/`setcdr` on a caught condition would
-therefore change what every later exhaustion signals. Both carry nil data for
-exactly that reason, and nothing in fe writes to them after
-`FeOpenContext()`.
+Both objects are shared, and a handler receives the object itself, so
+`setcar`/`setcdr` on a caught condition would otherwise change what every
+later exhaustion signals -- for the rest of the context's life, since these
+are context-lifetime roots. `PublishExhaustion()` re-stamps the pair from
+`arena_exhaustion_name` / `evaluation_stack_exhaustion_name` before every
+publish: `car` back to the symbol, `cdr` back to nil. The names are held
+separately for the obvious reason that the pair's own `car` is exactly what a
+poisoning handler overwrote. Two stores, no allocation, so the property these
+objects exist for -- raiseable from a state where nothing can be allocated --
+is unchanged. Measured before this: `(setcar e 'poisoned)` in one handler
+left the next out-of-memory escaping `(error ...)` and `(arena-exhaustion
+...)` alike, and `(setcdr e (list 9 9 9))` made the next one signal
+`(arena-exhaustion 9 9 9)`. `scripts/exhaustion.fe` pins both.
 
 Sub-plan 03F replaced the single, transitional `max_depth`/
 `evaluation_depth` pair -- itself a stand-in the frame machine's own

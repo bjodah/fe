@@ -2534,6 +2534,8 @@ static FeContext* OpenContext(void* arena, size_t size) {
   ctx->root_list = &nil;
   ctx->arena_exhaustion_condition = &nil;
   ctx->evaluation_stack_exhaustion_condition = &nil;
+  ctx->arena_exhaustion_name = &nil;
+  ctx->evaluation_stack_exhaustion_name = &nil;
 
   // Populate the free_list:
   for (size_t i = 0; i < ctx->object_count; i++) {
@@ -2552,10 +2554,18 @@ static FeContext* OpenContext(void* arena, size_t size) {
   // from `CollectGarbage` for the rest of the context's life. `FeMakeSymbol`
   // roots its result on the symbol list before `FeCons` can collect, so no
   // explicit GC-stack save is needed around either pair.
+  // The names are kept as well as the pairs because a handler may `setcar`
+  // the object it caught, so the pair's own `car` cannot be what a later
+  // raise restores it from; `PublishExhaustion` re-stamps both halves from
+  // here. Symbols are interned on `symbol_list`, itself a root, so these two
+  // fields need no marking.
+  ctx->arena_exhaustion_name = FeMakeSymbol(ctx, ArenaExhaustionName);
   ctx->arena_exhaustion_condition =
-      FeCons(ctx, FeMakeSymbol(ctx, ArenaExhaustionName), &nil);
+      FeCons(ctx, ctx->arena_exhaustion_name, &nil);
+  ctx->evaluation_stack_exhaustion_name =
+      FeMakeSymbol(ctx, EvaluationStackExhaustionName);
   ctx->evaluation_stack_exhaustion_condition =
-      FeCons(ctx, FeMakeSymbol(ctx, EvaluationStackExhaustionName), &nil);
+      FeCons(ctx, ctx->evaluation_stack_exhaustion_name, &nil);
 
   // Register the built-in primitives (sub-plan 04D's cut): every callable --
   // the primitives, the `fn` alias, and the math natives registered through
@@ -2610,6 +2620,8 @@ void FeCloseContext(FeContext* ctx) {
   ctx->root_list = &nil;
   ctx->arena_exhaustion_condition = &nil;
   ctx->evaluation_stack_exhaustion_condition = &nil;
+  ctx->arena_exhaustion_name = &nil;
+  ctx->evaluation_stack_exhaustion_name = &nil;
   ctx->frame_stack_index = 0;
   CollectGarbage(ctx);
 }

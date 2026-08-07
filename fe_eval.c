@@ -667,6 +667,33 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   RaiseCompletion(ctx, FeCompletionBudget, msg);
 }
 
+// Publishes one of the two pre-built exhaustion conditions (09B), after
+// putting it back the way `FeOpenContext` built it.
+//
+// The objects are shared for the life of the context and a handler receives
+// the object itself, so `(condition-case e BIG (error (setcar e 'poisoned)))`
+// used to disable the whole mechanism permanently: measured, the *next*
+// out-of-memory then escaped `(error ...)` and `(arena-exhaustion ...)`
+// alike, because `ConditionMatches` reads the condition's `car` to find its
+// place in the hierarchy. `(setcdr e (list 9 9 9))` was the other half --
+// the next unrelated exhaustion signalled `(arena-exhaustion 9 9 9)`, with
+// that list rooted for good through a context-lifetime root.
+//
+// Re-stamping here is the whole defence, and it fits the one constraint
+// these objects exist under: two stores, no allocation, so it is still safe
+// on the path where allocation has already failed. It runs before every
+// publish rather than after every catch, because a handler is not the only
+// thing that can reach the object -- `FeGetCondition` hands it to the host
+// too -- and because "the object is correct when it is signalled" is a
+// property one place can own.
+static void PublishExhaustion(FeContext* ctx,
+                              FeObject* condition,
+                              FeObject* name) {
+  CAR(condition) = name;
+  CDR(condition) = &nil;
+  ctx->condition = condition;
+}
+
 // The public raise entry point: an ordinary Error completion, which is what
 // every one of the 100+ call sites through fe.c/fex_*.c and kg's 112 raise
 // sites means. The signature is pinned (kg calls it directly); the four wall
@@ -681,7 +708,8 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   // only `(t ...)` could contain it. `ArenaCanAllocate` -- not a bare
   // free-list test -- is what "exhausted" means here; see its own comment.
   if (!ArenaCanAllocate(ctx)) {
-    ctx->condition = ctx->arena_exhaustion_condition;
+    PublishExhaustion(ctx, ctx->arena_exhaustion_condition,
+                      ctx->arena_exhaustion_name);
     RaiseCompletion(ctx, FeCompletionError, msg);
   }
   RaiseCondition(ctx, FeCompletionError, "error",
@@ -742,7 +770,8 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     }
     abort();
   }
-  ctx->condition = ctx->evaluation_stack_exhaustion_condition;
+  PublishExhaustion(ctx, ctx->evaluation_stack_exhaustion_condition,
+                    ctx->evaluation_stack_exhaustion_name);
   RaiseCompletion(ctx, FeCompletionError, "GC stack overflow");
 }
 
@@ -821,8 +850,12 @@ FeObject* FeGetCondition(const FeContext* ctx) {
   // exhaustion would be the one thing worse than saying nothing.
   if (!ArenaCanAllocate(ctx)) {
     FeRestoreGC(ctx, gc);
-    ctx->condition =
-        kind == FeCompletionError ? ctx->arena_exhaustion_condition : &nil;
+    if (kind == FeCompletionError) {
+      PublishExhaustion(ctx, ctx->arena_exhaustion_condition,
+                        ctx->arena_exhaustion_name);
+    } else {
+      ctx->condition = &nil;
+    }
     RaiseCompletion(ctx, kind, message);
   }
   FeObject* symbol = FeMakeSymbol(ctx, name);
