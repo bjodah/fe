@@ -1,0 +1,6 @@
+{
+ "id": "cond-u6-cleanup-replacement-handler-in-abandoned-body",
+ "setup": [],
+ "expr": "(condition-case o (catch 'tg (unwind-protect (condition-case nil (throw 'tg 'body) (error 'IN)) (error \"cleanup\"))) (error (list 'OUT o)))",
+ "note": "U6: which handler an UNHANDLED cleanup raise reaches when it replaces the completion being unwound (06A Decision 4). Emacs delivers the replacement to the ENCLOSING handler, `(OUT (error \"cleanup\"))'. Fe delivers it to a handler established in the ABANDONED BODY -- here the body's own `condition-case', which the `throw' had already left -- and answers `IN'. Cause: `RunOneCleanupEntry' replays the completion after restoring the frame stack the drain started from, which still holds the abandoned computation's handler frames; Emacs unwinds as it goes and no longer has them. Pre-existing on every revision since the rule was implemented, and found post-close by a review that re-measured the area, not introduced by Phase 12."
+}

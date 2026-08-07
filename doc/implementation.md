@@ -1039,6 +1039,21 @@ replay goes to `RaiseCompletionCore()` rather than to `RaiseCompletion()`,
 which is the half that applies the `error_label` prefix, so the source label
 already in the saved text is not applied a second time.
 
+Where the replay lands is *not* byte-identical to Emacs, in two shapes, and
+the qualification belongs here rather than in the rule above because it is a
+consequence of this mechanism. The restore puts back the frame stack the
+drain started from, which still holds the abandoned computation's own
+handler and catch frames; Emacs, unwinding as it goes, no longer has them.
+So a `condition-case` or a `catch` the in-flight completion had already left
+can take the cleanup's replacement, where Emacs gives it to the enclosing
+handler or answers `no-catch`. Both divergences are pre-existing, were found
+by a post-close review rather than by the phase that wrote this, and are
+recorded in `doc/language.md`, pinned by
+`scripts/unwind-cleanup-handler.fe`, and carried in the manifest as
+`unwind-protect-cleanup-raise-residuals`. Closing them means discarding
+frames as the drain descends instead of at the replay, which is a different
+unwind model, not a bug fix.
+
 A completion a cleanup entry *contains* rather than raises is the opposite
 case, and does not replace anything. `FeTryCallWithOptions()` and
 `FeTryEvaluateStringWithOptions()` publish the contained completion's kind

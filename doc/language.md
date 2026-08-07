@@ -880,9 +880,15 @@ fe > (condition-case e
 ```
 
 A handler *outside* the `unwind-protect` is not a candidate from inside the
-cleanup, because it belongs to the computation the drain is abandoning: the
-raise leaves the cleanup first, so the rest of the cleanup registry still
-unwinds, and only then is that handler reached.
+cleanup, and the reason is the floor rather than what the handler belongs
+to: candidates are the frames the running cleanup entry established, which
+are the ones above the frame index it started at, and an outer handler is
+below that whether or not the drain is abandoning it. (When the body
+returned normally and only the cleanup raised, nothing is being abandoned at
+all, and the outer handler still is not a direct candidate.) It is still
+reached, the long way: the raise leaves the cleanup first, so the rest of
+the cleanup registry unwinds, and the completion is replayed in the
+enclosing context, where that handler sees it.
 
 If a cleanup form raises and nothing the cleanup itself established handles
 it, its completion **replaces** whatever was already unwinding -- Emacs'
@@ -896,6 +902,45 @@ fe > (condition-case e (unwind-protect (error "orig") (error "cleanup"))
        (error e))
 (error "cleanup")
 ```
+
+**Two measured divergences from Emacs in this rule**, both pre-existing --
+present unchanged since the rule was implemented -- and both found after
+Phase 12 closed, by a review that re-measured the area. They are recorded
+here rather than defended, pinned by `scripts/unwind-cleanup-handler.fe`,
+and carried in the manifest as `unwind-protect-cleanup-raise-residuals`.
+
+The first is *which* handler the replacing completion reaches. Emacs
+delivers it to the enclosing one; Fe delivers it to a handler in the
+**abandoned body**, if that body established one that is still on the frame
+stack when the drain replays:
+
+```clojure
+fe > (condition-case o
+       (catch 'tg (unwind-protect (condition-case nil (throw 'tg 'body)
+                                    (error 'IN))
+                    (error "cleanup")))
+       (error (list 'OUT o)))
+IN
+;; Emacs 31.0.90:  (OUT (error "cleanup"))
+```
+
+The body's `condition-case` is on its way out -- the `throw` was already
+past it -- but the replay happens in a context where its frame has not been
+discarded yet, so it matches first.
+
+The second is the throw twin: a cleanup's `throw` can reach a `catch` the
+in-flight completion had **already exited**, where Emacs answers `no-catch`:
+
+```clojure
+fe > (catch 'a (unwind-protect (catch 'b (throw 'a 1)) (throw 'b 2)))
+2
+;; Emacs 31.0.90:  (no-catch b 2)
+```
+
+This is the same frame-lifetime question read from the `catch` side, and the
+paragraph below -- "a catch the original throw was on its way *past* is
+still a candidate" -- states Fe's side of it as the rule it is. Emacs' rule
+is narrower: a catch the throw has already left is gone.
 
 The kind travels with it: a cleanup that runs out of its own bounded budget,
 or that answers a second host interrupt, reaches the host as a budget or a

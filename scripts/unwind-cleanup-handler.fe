@@ -177,4 +177,29 @@
 (assert-equals '(wrong-type-argument listp 6) gc-seen)
 (assert-equals '(wrong-type-argument listp 6) gc-parts)
 
+;; TWO DIVERGENCES FROM EMACS, pinned rather than defended.  Both are
+;; pre-existing -- byte-identical on every revision since the replacement
+;; rule was implemented -- and both were found after Phase 12 closed, by a
+;; review that re-measured this area.  Manifest row:
+;; `unwind-protect-cleanup-raise-residuals'.  Oracle measured on Emacs
+;; 31.0.90, lexical-binding: t, 2026-08-07.
+;;
+;; DIVERGENCE 1: which handler the replacing completion reaches.  Emacs
+;; gives it to the ENCLOSING one; fe gives it to a handler in the ABANDONED
+;; BODY, because the drain replays with the frame stack it started from and
+;; that handler's frame has not been discarded yet.
+;;   Emacs:  (OUT (error "cleanup"))
+(assert-equals 'IN
+  (condition-case o
+    (catch 'tg (unwind-protect (condition-case nil (throw 'tg 'body)
+                                 (error 'IN))
+                 (error "cleanup")))
+    (error (list 'OUT o))))
+
+;; DIVERGENCE 2: the throw twin.  A cleanup's `throw' can reach a `catch'
+;; the in-flight completion had ALREADY EXITED.
+;;   Emacs:  (no-catch b 2)
+(assert-equals 2
+  (catch 'a (unwind-protect (catch 'b (throw 'a 1)) (throw 'b 2))))
+
 (print "unwind-cleanup-handler: all cases passed")

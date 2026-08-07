@@ -1707,6 +1707,20 @@
    "source_name": null
   },
   {
+   "id": "unwind-protect-cleanup-raise-residuals",
+   "category": "errors-and-non-local-exits",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-u6-cleanup-replacement-handler-in-abandoned-body",
+    "cond-u6-cleanup-throw-to-exited-catch"
+   ],
+   "kg_test": null,
+   "rationale": "Two divergences in 06A Decision 4's replacement rule -- the rule the `unwind-protect-cleanup-handlers' row above says is `measured correct against Emacs on every probe' and which doc/implementation.md and doc/language.md stated unconditionally. Both are PRE-EXISTING: byte-identical on every revision since the replacement rule was implemented, unchanged by sub-plan 12B Part 1, and DISCOVERED POST-CLOSE, by the acceptance review that re-measured this area rather than by the phase that wrote about it. The rule itself holds -- an unhandled cleanup raise does replace the completion being unwound, and the remaining cleanups do still run -- and what diverges is WHERE the replacement is delivered. (1) Emacs delivers it to the ENCLOSING handler; fe delivers it to a `condition-case' established in the ABANDONED BODY if that frame is still on the stack. Measured on 31.0.90, lexical-binding: t, 2026-08-07: `(condition-case o (catch 'tg (unwind-protect (condition-case nil (throw 'tg 'body) (error 'IN)) (error \"cleanup\"))) (error (list 'OUT o)))' is `(OUT (error \"cleanup\"))' there and `IN' here. (2) The throw twin: a cleanup's `throw' can reach a `catch' the in-flight completion had already exited. `(catch 'a (unwind-protect (catch 'b (throw 'a 1)) (throw 'b 2)))' is `(no-catch b 2)' there and 2 here. ONE CAUSE, on both: `RunOneCleanupEntry' replays the cleanup's completion after restoring the frame stack the drain STARTED FROM, which still holds the abandoned computation's handler and catch frames, while Emacs unwinds as it goes and no longer has them to match. Closing it means discarding frames as the drain descends rather than at the replay, which is a different unwind model and not a bug fix; it is recorded here, qualified in doc/language.md and doc/implementation.md, and pinned by `scripts/unwind-cleanup-handler.fe' so a change of answer is visible. Note that fe's answer to (2) is the direct consequence of a rule doc/language.md states positively and deliberately -- `a catch the original throw was on its way past is still a candidate for the cleanup's own throw' -- so this row is what makes that rule's disagreement with Emacs explicit rather than implicit.",
+   "source_name": null
+  },
+  {
    "id": "primitive-eval",
    "category": "control-flow",
    "status": "supported",

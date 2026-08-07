@@ -1,0 +1,6 @@
+{
+ "id": "cond-u6-cleanup-throw-to-exited-catch",
+ "setup": [],
+ "expr": "(catch 'a (unwind-protect (catch 'b (throw 'a 1)) (throw 'b 2)))",
+ "note": "U6, the throw twin of the case above: a cleanup's `throw' reaching a `catch' the in-flight completion had ALREADY EXITED. The inner `(catch 'b ...)' was left by `(throw 'a 1)' before the cleanup ran, so Emacs answers `(no-catch b 2)'. Fe's `FindCatchFrame' still sees that catch frame -- the same frame-lifetime cause as the handler case -- and answers 2. doc/language.md states Fe's side as its own rule (`a catch the original throw was on its way past is still a candidate'); Emacs' rule is narrower. Pre-existing, found post-close by review."
+}
