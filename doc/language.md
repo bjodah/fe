@@ -656,6 +656,22 @@ fe > (macroexpand-1 '(w t 1))
 (my-when t 1)
 ```
 
+The head is rewritten only when the alias target is itself a macro. An alias
+to an ordinary function, or to a name nothing is bound to, is not an
+expansion step at all and the form is returned untouched:
+
+```clojure
+fe > (fset 'plain (lambda (x) x))
+fe > (defalias 'p 'plain)
+p
+fe > (macroexpand-1 '(p 1))
+(p 1)
+```
+
+Deciding that resolves the whole alias chain, so a `defalias` ring raises the
+`cyclic-function-indirection` a call to it already raises, rather than
+looping. (Emacs cannot reach this: its `defalias` refuses to close the ring.)
+
 The transformer is applied with the same strict arity as a direct call, so a
 macro call with the wrong number of arguments raises
 `wrong-number-of-arguments` here too, naming the macro.
@@ -684,9 +700,10 @@ Expansion is *not* recursive into sub-forms: only the form's own head is
 expanded, exactly as in Emacs.
 
 Every step charges against the host's evaluation-step budget, so a macro whose
-expansion is another call to itself, or a cycle of `defalias` indirections,
-ends with `evaluation step limit exceeded` rather than hanging. The fixpoint
-reuses a single evaluator frame however many steps it takes.
+expansion is another call to itself ends with `evaluation step limit
+exceeded` rather than hanging -- the one shape with no fixpoint, since an
+alias ring raises instead of looping. The fixpoint reuses a single evaluator
+frame however many steps it takes.
 
 #### `(macroexpand-all form &optional environment)`
 

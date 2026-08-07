@@ -2156,14 +2156,23 @@ typedef enum MacroexpandOutcome {
 //   (macroexpand-1 42)        => 42          not a cons
 //   (macroexpand-1 '(ali 7))  => (one-arg 7) one alias indirection is a step
 //   (macroexpand-1 '(one-arg 7)) => '7       the transformer's own answer
+//   (macroexpand-1 '(pf 1))   => (pf 1)      pf is an alias to a *function*
+//   (macroexpand-1 '(a2 1))   => (a2 1)      a2 is an alias to an unbound name
 //
-// The alias arm is the reason this does not simply call
-// `ResolveFunctionCallable`: the evaluator resolves a whole `defalias` chain
-// before it calls anything, but Emacs' expander stops at each link and hands
-// the rewritten form back, so `macroexpand-1` through a two-link chain
-// answers the middle link and only `macroexpand`'s fixpoint reaches the
-// transformer. Each substitution charges an evaluation step, so a cyclic
-// alias ends at the step budget instead of spinning.
+// The alias arm is the reason this does not simply resolve the chain and
+// apply: the evaluator resolves a whole `defalias` chain before it calls
+// anything, but Emacs' `macroexpand-1` (subr.el) rewrites the head one link
+// at a time, so through a two-link chain it answers the middle link and only
+// `macroexpand`'s fixpoint reaches the transformer. The rewrite happens only
+// when the target *is* a macro -- Emacs' `(and (symbolp def) (macrop def))`,
+// which is why the last two rows above are unchanged rather than rewritten to
+// `(plainfn 1)` and `(nosuch 1)`. That test is what `ResolveFunctionCallable`
+// is doing here: it answers the same question `macrop` does, including
+// raising `cyclic-function-indirection` on an alias ring, which is what call
+// position already raises for the same names (Emacs never gets there -- its
+// `defalias` refuses to build the ring in the first place). So no alias shape
+// can spin inside the fixpoint; only a transformer that expands to a call to
+// itself can, and that charges its body's evaluation steps.
 //
 // `*form` must be rooted by the caller (a GC-stack slot or a frame field)
 // across the call: both arms allocate.
@@ -2180,6 +2189,9 @@ static MacroexpandOutcome MacroexpandStep(FeContext* ctx,
   }
   FeObject* const cell = SymbolFunction(head);
   if (FeGetType(cell) == FeTSymbol) {
+    if (FeGetType(ResolveFunctionCallable(ctx, cell, nullptr)) != FeTMacro) {
+      return MacroexpandNone;
+    }
     EvaluationStep(ctx);
     *form = FeCons(ctx, cell, CDR(*form));
     return MacroexpandSubstituted;
@@ -2191,34 +2203,41 @@ static MacroexpandOutcome MacroexpandStep(FeContext* ctx,
   return MacroexpandBody;
 }
 
-// `macroexpand`'s fixpoint: keep taking single steps while the form is still
-// a macro call, which is Emacs' own rule. A substitution is taken here, in a
-// loop, because it produces a new form without evaluating anything; a
-// transformer body is not, because running it is the frame machine's job and
-// its result re-enters this function from `ResumeMacroBody`'s reflective
-// tail. Returns true when the frame is now evaluating a transformer body,
-// false when the fixpoint is reached and `*result` holds it.
+// The whole of a reflective expansion's control flow, for both primitives and
+// from both of its entry points -- `DispatchMacroexpand`, which starts one,
+// and `ResumeMacroBody`, which re-enters after a transformer body produced
+// its expansion. `step` says whether another step is due at all: the starting
+// call always steps once, and a resuming call steps again only for
+// `macroexpand`, whose rule is Emacs' fixpoint (keep going while the form is
+// still a macro call). `macroexpand-1` therefore falls straight through to
+// the answer, which is what makes one step one step.
 //
-// The GC stack cost is one slot no matter how many steps the fixpoint takes:
+// A substitution is taken here, in the loop, because it produces a new form
+// without evaluating anything; a transformer body is not, because running it
+// is the frame machine's job. Returns true when the frame is now evaluating
+// such a body, false when there is nothing left to do and `*result` holds the
+// expansion.
+//
+// The GC stack cost is one slot no matter how many steps a fixpoint takes:
 // each pass restores the frame's own checkpoint and re-pushes the current
 // form, the same idiom `SpreadApplyArgs` uses.
-static bool MacroexpandToFixpoint(FeContext* ctx,
-                                  FeEvalFrame* frame,
-                                  FeObject* form,
-                                  FeObject* mode,
-                                  FeObject** result) {
-  for (;;) {
+static bool MacroexpandContinue(FeContext* ctx,
+                                FeEvalFrame* frame,
+                                FeObject* form,
+                                FeObject* mode,
+                                bool step,
+                                FeObject** result) {
+  while (step) {
     const MacroexpandOutcome outcome = MacroexpandStep(ctx, frame, &form, mode);
     if (outcome == MacroexpandBody) {
       return true;
     }
-    if (outcome == MacroexpandNone) {
-      *result = form;
-      return false;
-    }
+    step = outcome == MacroexpandSubstituted && PRIM(mode) == PMacroexpand;
     FeRestoreGC(ctx, frame->gc_checkpoint);
     FePushGC(ctx, form);
   }
+  *result = form;
+  return false;
 }
 
 // One macro-body step: append `callee` -- the just-delivered body form's
@@ -2267,11 +2286,8 @@ static bool ResumeMacroBody(FeContext* ctx,
   FeRestoreGC(ctx, frame->gc_checkpoint);
   FePushGC(ctx, expansion);  // Nothing else refers to the expansion now.
   if (FeGetType(frame->fn) == FeTPrimitive) {
-    if (PRIM(frame->fn) == PMacroexpand) {
-      return !MacroexpandToFixpoint(ctx, frame, expansion, frame->fn, result);
-    }
-    *result = expansion;
-    return true;
+    return !MacroexpandContinue(ctx, frame, expansion, frame->fn,
+                                PRIM(frame->fn) == PMacroexpand, result);
   }
   ctx->call_list = CDR(&frame->trace_cell);
   frame->kind = FeFrameMacroExpansion;
@@ -3223,15 +3239,7 @@ static bool DispatchMacroexpand(FeContext* ctx,
   }
   FeObject* const mode = frame->fn;
   FePushGC(ctx, form);
-  if (PRIM(mode) == PMacroexpand) {
-    return !MacroexpandToFixpoint(ctx, frame, form, mode, result);
-  }
-  FeObject* stepped = form;
-  if (MacroexpandStep(ctx, frame, &stepped, mode) == MacroexpandBody) {
-    return false;
-  }
-  *result = stepped;
-  return true;
+  return !MacroexpandContinue(ctx, frame, form, mode, true, result);
 }
 
 // `(catch TAG BODY...)` (sub-plan 06C): the frame's `accumulator` holds the

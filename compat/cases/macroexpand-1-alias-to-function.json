@@ -1,0 +1,16 @@
+{
+ "id": "macroexpand-1-alias-to-function",
+ "setup": [
+  "(fset 'my-when (if (fboundp 'defmacro) (cons 'macro (lambda (c b) (list 'if c b))) (macro (c b) (list 'if c b))))",
+  "(fset 'inner (if (fboundp 'defmacro) (cons 'macro (lambda (x) (list '+ x 1))) (macro (x) (list '+ x 1))))",
+  "(fset 'outer (if (fboundp 'defmacro) (cons 'macro (lambda (x) (list 'inner x))) (macro (x) (list 'inner x))))",
+  "(fset 'one-arg (if (fboundp 'defmacro) (cons 'macro (lambda (a) (list 'not a))) (macro (a) (list 'not a))))",
+  "(defalias 'ali 'one-arg)",
+  "(defalias 'ali2 'ali)",
+  "(fset 'plain (if (fboundp 'defmacro) (lambda (x) x) (lambda (x) x)))",
+  "(defalias 'pf 'plain)",
+  "(defalias 'dangling 'no-such-name)"
+ ],
+ "expr": "(macroexpand-1 '(pf 1))",
+ "note": "10B, the other half of the alias rule: the head is rewritten only when the alias target is itself a macro (Emacs' `(and (symbolp def) (macrop def))` in subr.el). `pf` aliases a plain function, so the form is left completely alone -- `(pf 1)`, not `(plain 1)`. Getting this wrong is invisible until someone aliases a function. The setup is dialect-neutral by construction: Emacs stores a macro as a `(macro . FUNCTION)` cons in the function cell and fe has a distinct macro object, so each transformer is installed through whichever spelling the running dialect has, selected by `(fboundp 'defmacro)` -- t in Emacs, nil in standalone fe. Nothing else about the case differs between the sides."
+}

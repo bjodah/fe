@@ -42,6 +42,26 @@
 (assert-equals '(if t (do 1)) (macroexpand '(ali t 1)))
 (assert-equals '(if t (do 1)) (macroexpand '(ali2 t 1)))
 
+;; ...but only when the target is a macro. An alias to a plain function, or
+;; to a name nobody defined, leaves the form completely alone -- measured.
+(defalias 'pf 'plain)
+(defalias 'dangling 'no-such-name)
+(assert-equals '(pf 1) (macroexpand-1 '(pf 1)))
+(assert-equals '(pf 1) (macroexpand '(pf 1)))
+(assert-equals '(dangling 1) (macroexpand-1 '(dangling 1)))
+(assert-equals '(dangling 1) (macroexpand '(dangling 1)))
+
+;; Deciding that resolves the chain, so an alias ring raises the same
+;; `cyclic-function-indirection` a call to it raises, rather than spinning
+;; inside the fixpoint. (Emacs' `defalias` refuses to build the ring at all,
+;; so this is fe policy, pinned here rather than measured there.)
+(defalias 'ring-a 'ring-b)
+(defalias 'ring-b 'ring-a)
+(assert-is 'cyclic-function-indirection
+  (condition-case e (macroexpand-1 '(ring-a 1)) (error (car e))))
+(assert-is 'cyclic-function-indirection
+  (condition-case e (macroexpand '(ring-a 1)) (error (car e))))
+
 ;; ENVIRONMENT defaults to nil and may be passed as nil.
 (assert-equals '(if t (do 1)) (macroexpand-1 '(my-when t 1) nil))
 (assert-equals '(if t (do 1)) (macroexpand '(my-when t 1) nil))
@@ -72,7 +92,8 @@
 ;; `macroexpand` on it runs until the host's evaluation-step budget stops it;
 ;; this script has no budget configured, so it is not called here. `test_api.c`
 ;; owns that case (TestMacroexpandBudget), which is the only place a step
-;; limit can be set.
+;; limit can be set. It is the only nonterminating shape there is: an alias
+;; ring raises above rather than looping.
 
 ;; A non-nil ENVIRONMENT and `macroexpand-all` are both rejected by name --
 ;; not `void-function`, which is what a typo produces.

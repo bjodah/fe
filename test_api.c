@@ -3385,8 +3385,11 @@ static bool TestMacroexpandPrimitives(void) {
       // Two links of `defalias` indirection over that transformer.
       "(defalias 'ali 'one-arg)"
       "(defalias 'ali2 'ali)"
-      // A plain function, not a macro: a call to it is its own expansion.
-      "(fset 'plain (fn (x) x))";
+      // A plain function, not a macro: a call to it is its own expansion,
+      // and so is a call through an alias to it, or to nothing at all.
+      "(fset 'plain (fn (x) x))"
+      "(defalias 'pf 'plain)"
+      "(defalias 'dangling 'no-such-name)";
   CHECK(FeEvaluateString(context, "setup.fe", setup, sizeof(setup) - 1) !=
         nullptr);
 
@@ -3423,6 +3426,15 @@ static bool TestMacroexpandPrimitives(void) {
   EXPANDS_AS("(macroexpand-1 '(ali2 7))", "(ali 7)");
   EXPANDS_AS("(macroexpand '(ali 7))", "(not 7)");
   EXPANDS_AS("(macroexpand '(ali2 7))", "(not 7)");
+  // The head is rewritten only when the target is itself a macro (Emacs'
+  // `(and (symbolp def) (macrop def))`). An alias to a plain function and an
+  // alias to an unbound name both leave the form completely alone --
+  // measured: (macroexpand-1 '(pf 1)) is (pf 1), not (plainfn 1), and
+  // (macroexpand-1 '(dangling 1)) is (dangling 1), not (no-such-name 1).
+  EXPANDS_AS("(macroexpand-1 '(pf 1))", "(pf 1)");
+  EXPANDS_AS("(macroexpand '(pf 1))", "(pf 1)");
+  EXPANDS_AS("(macroexpand-1 '(dangling 1))", "(dangling 1)");
+  EXPANDS_AS("(macroexpand '(dangling 1))", "(dangling 1)");
 
   // ENVIRONMENT is accepted and must be nil; the nil-default path is the
   // one Emacs was measured on -- (macroexpand-1 '(when t 1) nil) is the
@@ -3538,33 +3550,40 @@ static bool TestMacroexpandBudget(void) {
       context, &state, "selfy.fe", "(macroexpand '(selfy))",
       strlen("(macroexpand '(selfy))"), &budget,
       "selfy.fe:1: evaluation step limit exceeded", FeCompletionBudget));
-  CHECK(ExpectCompletionKind(
-      context, &state, "ring.fe", "(macroexpand '(ring-a 1))",
-      strlen("(macroexpand '(ring-a 1))"), &budget,
-      "ring.fe:1: evaluation step limit exceeded", FeCompletionBudget));
 
-  // It is the *step* budget that stops them, not the frame wall: the
-  // fixpoint reuses one frame per pass, so the frame stack stays shallow
-  // however many expansions it takes. The peak below is the whole session's
-  // high-water mark, including the setup forms.
+  // It is the *step* budget that stops it, not the frame wall: the fixpoint
+  // reuses one frame per pass, so the frame stack stays shallow however many
+  // expansions it takes. The peak below is the whole session's high-water
+  // mark, including the setup forms.
   const FeArenaStats stats = FeGetArenaStats(context);
   CHECK(stats.peak_frame_depth < 16);
 
-  // `macroexpand-1` takes exactly one step and terminates on both, with a
-  // budget far smaller than the one the fixpoint exhausted.
+  // The other route to a nonterminating expansion cannot even start: an
+  // alias ring is refused by the same `cyclic-function-indirection` call
+  // position raises for it, because deciding whether a head's alias target
+  // is a macro resolves the chain. Emacs never reaches this shape at all --
+  // its `defalias` refuses to close the ring -- so this is fe's own policy,
+  // and the load-bearing half is that it is an immediate raise rather than a
+  // spin inside the fixpoint loop.
+  CHECK(ExpectEvaluationError(context, &state, "ring.fe",
+                              "(macroexpand '(ring-a 1))",
+                              strlen("(macroexpand '(ring-a 1))"),
+                              "ring.fe:1: cyclic-function-indirection"));
+  CHECK(ExpectEvaluationError(context, &state, "ring.fe",
+                              "(macroexpand-1 '(ring-a 1))",
+                              strlen("(macroexpand-1 '(ring-a 1))"),
+                              "ring.fe:1: cyclic-function-indirection"));
+
+  // `macroexpand-1` takes exactly one step and terminates, with a budget far
+  // smaller than the one the fixpoint exhausted.
   const FeEvalOptions one_step = {.step_limit = 64};
   CHECK(IsRendered(context,
                    FeEvaluateStringWithOptions(
                        context, "one.fe", "(macroexpand-1 '(selfy))",
                        strlen("(macroexpand-1 '(selfy))"), &one_step),
                    "(selfy)"));
-  CHECK(IsRendered(context,
-                   FeEvaluateStringWithOptions(
-                       context, "one.fe", "(macroexpand-1 '(ring-a 1))",
-                       strlen("(macroexpand-1 '(ring-a 1))"), &one_step),
-                   "(ring-b 1)"));
 
-  // The context is still usable after both budget exhaustions.
+  // The context is still usable after the budget exhaustion and the raises.
   CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
                    "3"));
 

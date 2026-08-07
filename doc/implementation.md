@@ -484,8 +484,12 @@ its type: a primitive there means "the expansion is this frame's value,
 never evaluate it", and the `macroexpand` tag additionally means "and take
 another step if it is still a macro call". A `defalias` link is a step of
 its own -- Emacs stops at each indirection -- taken in a loop rather than
-through the frame stack, since substituting a head symbol evaluates
-nothing; it charges an evaluation step so a cyclic alias hits the budget.
+through the frame stack, since substituting a head symbol evaluates nothing.
+The link is only taken when the target resolves to a macro, which is Emacs'
+rule and also what bounds the loop: resolving the chain raises
+`cyclic-function-indirection` on a ring, so the only shape that can run
+without a fixpoint is a transformer expanding to a call to itself, and that
+charges its body's evaluation steps.
 The fixpoint reuses the one frame, so its cost in frames is constant no
 matter how many expansions it takes, and the step budget is what bounds it.
 A native call is the one remaining ordinary callable that is not a Lisp

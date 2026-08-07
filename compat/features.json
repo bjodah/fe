@@ -2174,10 +2174,12 @@
     "macroexpand-1-atom",
     "macroexpand-1-symbol",
     "macroexpand-1-alias-step",
-    "macroexpand-1-environment-nil"
+    "macroexpand-1-environment-nil",
+    "macroexpand-1-alias-to-function",
+    "macroexpand-1-alias-to-unbound"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 10B: one expansion step, returned and never evaluated. The alias case is the one that had to be measured rather than derived -- Emacs stops at each `defalias` link and hands back the rewritten form, so `macroexpand-1` through a two-link chain answers the middle link, which is not what resolving the chain the way call position does would give.",
+   "rationale": "Sub-plan 10B: one expansion step, returned and never evaluated. The alias cases are the ones that had to be measured rather than derived. Emacs rewrites the head one `defalias` link at a time, so `macroexpand-1` through a two-link chain answers the middle link -- not what resolving the chain the way call position does would give -- and it rewrites at all only when the target is itself a macro, so an alias to a function or to an unbound name leaves the form untouched. fe's own policy fills the one gap Emacs has no answer for: an alias ring, which Emacs' `defalias` refuses to build, raises `cyclic-function-indirection` here exactly as a call to it does (pinned in test_api.c:TestMacroexpandBudget and scripts/macroexpand.fe, not by an oracle case).",
    "source_name": "macroexpand-1"
   },
   {
