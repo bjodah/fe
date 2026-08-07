@@ -247,7 +247,22 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # (757 -> 765 against a +6..14 price), so the 10 unspent ones go back rather
 # than sitting as unearned headroom. `SCC_FILE_COMPLEXITY_MAX` was not raised
 # and stays where it is; the worst file is fe_eval.c at 495.
-SCC_COMPLEXITY_MAX ?= 765
+# Raised a tenth time, 765 -> 795, by Phase 10 sub-plan 10A's Decision 8
+# (2026-08-07), funding 10B -- `macroexpand-1` and `macroexpand` as
+# primitives, `macroexpand-all` rejected by its own name -- and nothing else.
+# The measured starting total is 765/765: the cap sits *exactly* on the
+# number, so the phase's first C line breaches it. Phase 10's fe share is
+# priced +15..30 scc (exposure of the evaluator's existing expansion path
+# plus a fixpoint loop, not new machinery), and 795 is the top of that band
+# with no margin at all -- the price table's own instruction, since the
+# work is bounded to three primitives. Proved live before this raise landed
+# by temporarily setting the cap to 764 and watching `make complexity-check`
+# report "FAIL: total complexity 765 exceeds limit 764", then restoring.
+# `SCC_FILE_COMPLEXITY_MAX` is not raised and does not need to be: the whole
+# slice lands in fe_eval.c (495/520) and fe.c (150/520). The last commit of
+# this slice re-sets this number to the measured actual, as 10A Decision 8
+# requires and every phase since 08 has done.
+SCC_COMPLEXITY_MAX ?= 795
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -367,7 +382,19 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # in `.ci/pmccabe-baseline.json` by the commit that caused it, with its reason
 # in that commit's body. The manifest remains the ratchet that stops a symbol
 # growing inside this envelope; this number stops the tree growing as a whole.
-PMCCABE_TOTAL_MAX ?= 1072
+# Raised 1072 -> 1105 by Phase 10 sub-plan 10A's Decision 8 (2026-08-07),
+# funding 10B by name and nothing else. The measured starting total is 1072
+# across 343 symbols -- exactly on the cap, so the slice breaches it at its
+# first point. Phase 10's fe share is priced +15..30 in both units; 1105 is
+# the top of that band plus the small margin this file's raises have used
+# since 03A. Proved live before this raise landed by temporarily setting it
+# to 1071 and watching `make pmccabe-check` report "FAIL: total complexity
+# 1072 exceeds funded budget 1071 (+1)", then restoring. The per-symbol
+# manifest under .ci/pmccabe-baseline.json is untouched here; every
+# per-symbol increase this slice needs is banked explicitly, with its reason,
+# in the commit that causes it. The last commit of this slice re-sets this
+# number to the measured actual.
+PMCCABE_TOTAL_MAX ?= 1105
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
