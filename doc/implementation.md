@@ -942,6 +942,20 @@ object the walk is inside is already marked, so a nested walk stops at it
 immediately -- but must not read `car`/`cdr` of anything but the object it was
 handed; `doc/c-api.md` says so.
 
+It also must not leave non-locally. A `longjmp` or a raise out of `mark_fn`
+(or out of `gc_fn`, during the sweep) jumps past the ascent that would put the
+graph back, and the walk has no state anywhere else to restore it from -- the
+reversed graph *is* the state. The recursive walk had no such rule because it
+only set mark bits. `FeContext::collecting` is true for exactly the duration of
+`CollectGarbage()`, and `RaiseCompletionCore()` treats a raise while it is set
+as fatal: it prints the contract and aborts, without calling `error_fn` (whose
+whole job is to leave non-locally). `WriteObject()` reads the same flag and
+skips its `EvaluationStep()` charge while it is set, which is what keeps the
+in-tree route closed -- `main.c`'s `mark`/`gc` tracers print the object they
+are handed, and a step budget or an interrupt would otherwise raise from
+inside the walk. `test_api.c`'s `TestMarkAbortsOnRaise` forks and pins both
+halves: the abort, and the fact that a printing callback does not reach it.
+
 The alternative considered and rejected was an explicit worklist. Bounding one
 for *any* data shape costs one slot per object, which for kg's 1 MiB arena is
 56 224 pointers -- 439 KiB, 43% of the whole arena -- and growing one on demand

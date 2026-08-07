@@ -460,7 +460,22 @@ static void MarkCleanupRoots(FeContext* ctx) {
 }
 
 static void CollectGarbage(FeContext* ctx) {
+  // Re-entering here means a `mark_fn` or `gc_fn` allocated, which the
+  // contract forbids. It is not survivable: this call's sweep would clear the
+  // *outer* walk's mark bits, and the outer walk would then descend back into
+  // cells whose `car` holds a tagged parent pointer. Measured: the route is
+  // `mark_fn` -> `FeHandleError` -> `ArenaCanAllocate`, which collects
+  // precisely because the free list is what ran out and started the outer
+  // collection in the first place.
+  if (ctx->collecting) {
+    FatalCollectorViolation("a callback allocated", nullptr);
+  }
   ctx->arena_collection_count++;
+  // Stop-the-world means exactly this flag: from here to the last line of
+  // the sweep the graph is the mark phase's own working state, and a raise
+  // out of `mark_fn` or `gc_fn` would abandon it half-reversed. See
+  // `collecting`'s comment on `struct FeContext`.
+  ctx->collecting = true;
   // Mark:
   for (size_t i = 0; i < ctx->gc_stack_index; i++) {
     FeMark(ctx, ctx->gc_stack[i]);
@@ -506,6 +521,7 @@ static void CollectGarbage(FeContext* ctx) {
       TAG(obj) &= ~GcMarkBit;
     }
   }
+  ctx->collecting = false;
 }
 
 // Translated from [the original
@@ -992,8 +1008,12 @@ static void WriteClosure(Writer* w, FeObject* obj, size_t depth) {
 static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
   char buf[32];
   // Printing is work: during a controlled evaluation it spends the step budget
-  // and polls the interrupt, so `(print cyclic-thing)` answers C-g.
-  if (w->ctx->evaluation_active) {
+  // and polls the interrupt, so `(print cyclic-thing)` answers C-g. Not while
+  // collecting, though: `mark_fn`/`gc_fn` may print the object they were
+  // handed (`main.c` does), a step charge or an interrupt poll raises, and a
+  // raise from inside the mark phase is fatal by contract. Collection is not
+  // evaluation and does not charge for one.
+  if (w->ctx->evaluation_active && !w->ctx->collecting) {
     EvaluationStep(w->ctx);
   }
   if (w->nodes == 0 || w->bytes == 0) {

@@ -196,6 +196,25 @@ it must not read `car`/`cdr` of anything else, and must not allocate. The
 collector puts every field back before it returns, so nothing outside the
 callback can observe any of it.
 
+A mark or GC callback must also **return normally**. It may not `longjmp` out,
+and it may not raise: no `FeHandleError()`, no `FeRaiseCompletion()`, and
+nothing that raises on its behalf, `FeCar()`/`FeCdr()` on a non-pair included.
+The walk keeps its return path in the reversed graph rather than on the C
+stack, so a non-local exit has nothing to unwind it with and abandons the arena
+half-reversed; the next reader of one of those chains dereferences a tagged
+parent pointer. Under the recursive walk this rule did not exist, because that
+walk only ever set mark bits and a `longjmp` past it left a valid heap. Fe
+detects a raise from inside collection and calls `abort()` after printing a
+line naming this contract -- a loud stop rather than a silent corruption that
+faults later somewhere unrelated. `error_fn` is deliberately not consulted on
+that path: leaving non-locally is exactly what an `error_fn` does.
+
+Printing from a callback is safe. `FeToString()` on the object it was handed
+does not charge the evaluation step budget and does not poll the interrupt
+while a collection is running, precisely so that the obvious diagnostic
+callback -- `main.c`'s own `mark`/`gc` tracers are this -- cannot trip the rule
+above through a step-limit or interrupt raise.
+
 Lambda and macro arity is always strict. Missing required arguments and
 leftover arguments raise `wrong-number-of-arguments`; missing `&optional`
 parameters bind `nil`, and `&rest` receives a fresh list. Fe's dotted-tail and

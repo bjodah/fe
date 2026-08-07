@@ -526,6 +526,28 @@ struct FeContext {
   FeErrorFn* error_fn;
   FeNativeFn* mark_fn;
   FeNativeFn* gc_fn;
+  // True for exactly as long as `CollectGarbage` is running, which is the
+  // one window in which the object graph is not in a state anything else may
+  // read: since 09C the mark phase reverses the pointers it walks, so a
+  // `car` chain the walk is inside holds parent links, not its own cars,
+  // until the walk climbs back out. Two places read this flag.
+  //
+  // `RaiseCompletionCore` treats a raise from here as fatal. A raise
+  // `longjmp`s past the walk's ascent, and there is no stack to unwind it
+  // from -- the walk's return path *is* the scrambled graph -- so the arena
+  // stays reversed and the next reader dereferences a tagged parent
+  // pointer. The recursive walk this replaced only set mark bits, so a
+  // `longjmp` out of it left a valid heap; the contract had never had to be
+  // written down. It is written down now (`fe.h`, `doc/c-api.md`), and this
+  // is what makes a violation a loud abort instead of a silent corruption
+  // that surfaces as a SIGSEGV somewhere else entirely.
+  //
+  // `WriteObject` reads it so fe's own `mark_fn`/`gc_fn` callbacks cannot
+  // trip that abort: printing charges the step budget and polls the
+  // interrupt, both of which raise, and printing the object it was handed is
+  // the obvious thing for such a callback to do (`main.c` does exactly
+  // that). Collection is not evaluation, so it does not charge.
+  bool collecting;
   void* userdata;
   FeObject* gc_stack[GcStackSize];
   size_t gc_stack_index;
@@ -741,6 +763,13 @@ size_t RenderObject(FeContext* ctx,
                                    size_t argc,
                                    const char* message);
 [[noreturn]] void RaiseGcStackOverflow(FeContext* ctx);
+// The collector's contract, broken (sub-plan 09C; see `FeContext::collecting`
+// and `FeSetMarkFn` in fe.h). `what` names the violation and `detail`, when
+// non-null, is whatever text goes with it. Prints both and aborts: there is
+// nothing to recover to, because the mark phase's return path is the
+// half-reversed graph itself. Deliberately does not call `error_fn` -- an
+// `error_fn` leaves non-locally, which is the failure being reported.
+[[noreturn]] void FatalCollectorViolation(const char* what, const char* detail);
 bool ArenaCanAllocate(FeContext* ctx);
 
 #endif

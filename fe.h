@@ -290,6 +290,32 @@ void FeCloseContext(FeContext* ctx);
 void FeSetUserData(FeContext* ctx, void* userdata);
 [[nodiscard]] void* FeGetUserData(const FeContext* ctx);
 void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
+// The two collector callbacks. `mark_fn` is called once per reachable
+// pointer-carrying object (`FeTPtr`, `FeTFex0`..`FeTFex2`) during the mark
+// phase so the host can `FeMark()` whatever that object refers to; `gc_fn`
+// is called once per object about to be freed, during the sweep.
+//
+// Both run *inside* collection, and collection is the one window in which
+// the object graph is not readable. The mark phase stores its return path in
+// the objects it is walking (Deutsch-Schorr-Waite pointer reversal), so
+// while it is inside a `car` chain those cells hold parent links rather than
+// their own cars. Two rules follow, and neither is advisory:
+//
+//   - A callback may call `FeMark()` and may read the object it was handed.
+//     It must not read `car`/`cdr` of anything else, and must not allocate.
+//   - A callback must return normally. It may not `longjmp` out, and it may
+//     not raise -- no `FeHandleError()`, no `FeRaiseCompletion()`, and
+//     nothing that raises on its behalf, including `FeCar`/`FeCdr` on a
+//     non-pair. There is no stack to unwind the walk from: its state *is*
+//     the reversed graph, so leaving non-locally abandons the arena
+//     half-reversed. fe detects a raise from inside collection and aborts
+//     with a message naming this contract rather than continuing on a heap
+//     that will fault later somewhere unrelated.
+//
+// Printing is safe from a callback (`FeToString()` on the object it was
+// handed): the writer does not charge the evaluation step budget or poll the
+// interrupt while collecting, precisely so that the obvious diagnostic
+// callback cannot trip the rule above.
 void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
@@ -329,6 +355,12 @@ void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 void FePushGC(FeContext* ctx, FeObject* obj);
 void FeRestoreGC(FeContext* ctx, size_t idx);
 [[nodiscard]] size_t FeSaveGC(const FeContext* ctx);
+// Marks `obj` and everything reachable from it. The only thing a host calls
+// it for is a `mark_fn` callback reporting what its pointer object refers
+// to; see `FeSetMarkFn` above for the two rules such a callback lives under.
+// It uses no C stack proportional to the graph and allocates nothing, but it
+// does temporarily reverse the pointers of the objects it is walking, which
+// is why those rules exist.
 void FeMark(FeContext* ctx, FeObject* obj);
 
 // Registers a C cleanup that runs exactly once, in the same last-in-first-out

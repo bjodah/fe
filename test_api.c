@@ -1,11 +1,13 @@
 #include <inttypes.h>
 #include <math.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdckdint.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "fe.h"
@@ -7029,6 +7031,219 @@ static bool TestMarkStackProbe(void) {
   return true;
 }
 
+// Sub-plan 09C's mark-phase contract, both halves (Phase 9 fix-brief F1).
+//
+// Pointer reversal keeps the walk's return path inside the graph it is
+// walking, so a `longjmp` or a raise out of `mark_fn` abandons the arena
+// half-reversed: measured on a 2 000-level `car` chain against the tree
+// before this fix, the recovered process read a tagged parent pointer out of
+// the first cell and took SIGSEGV. The recursive walk this replaced only ever
+// set mark bits, so a jump past it left a valid heap and the rule never had
+// to exist. It exists now, and this pins it.
+
+static jmp_buf mark_raise_recovery;
+
+// The host behaviour the contract forbids: recover from the raise and carry
+// on. If fe ever lets one through, the child reaches this and reports it as a
+// distinct exit status rather than as a crash somewhere later.
+[[noreturn]] static void MarkRaiseErrorFn(
+    // cppcheck-suppress constParameterCallback
+    FeContext* context,
+    const char* message,
+    // cppcheck-suppress constParameterCallback
+    FeObject* stack) {
+  (void)context;
+  (void)message;
+  (void)stack;
+  longjmp(mark_raise_recovery, 1);
+}
+
+// Two ways for a callback to break the contract, and they are caught by two
+// different guards.
+//
+// `MarkRaiseAllocating` is the ordinary shape: `FeHandleError` builds a
+// condition object, so it asks `ArenaCanAllocate` first -- and the free list
+// is empty, because running out of it is what started this collection. That
+// re-enters `CollectGarbage`, whose sweep would clear the mark bits the outer
+// walk is relying on, so the nested-collection guard stops it.
+//
+// `MarkRaiseNonAllocating` reaches the raise guard itself: a Budget
+// completion carries no condition object, so nothing on the way to
+// `RaiseCompletionCore` allocates and the collection is never re-entered.
+enum { MarkRaiseAllocating = 0, MarkRaiseNonAllocating = 1 };
+
+static int mark_raise_mode;
+
+static FeObject* MarkRaiseProbe(FeContext* context, FeObject* object) {
+  (void)object;
+  mark_probe_calls++;
+  if (mark_raise_mode == MarkRaiseNonAllocating) {
+    FeRaiseCompletion(context, FeCompletionBudget, "host wall from mark_fn");
+  }
+  FeHandleError(context, "host bail-out from mark_fn");
+}
+
+enum {
+  MarkRaiseChainDepth = 2000,
+  MarkRaiseNoAbort = 80,
+  MarkRaiseNoCollection = 81,
+  MarkRaiseSetupFailed = 82,
+};
+
+// The forked half. Never returns: fe has to abort before it can.
+[[noreturn]] static void RunMarkRaiseChild(int mode) {
+  unsigned char* const storage = malloc(MarkProbeArenaSize);
+  if (storage == nullptr) {
+    _exit(MarkRaiseSetupFailed);
+  }
+  FeContext* const context = FeOpenContext(storage, MarkProbeArenaSize);
+  if (context == nullptr) {
+    _exit(MarkRaiseSetupFailed);
+  }
+  FeSetErrorFn(context, MarkRaiseErrorFn);
+  if (setjmp(mark_raise_recovery) != 0) {
+    _exit(MarkRaiseNoAbort);
+  }
+  FeObject* const chain = BuildCarChain(context, MarkRaiseChainDepth);
+  if (FeCreateRoot(context, chain) == nullptr) {
+    _exit(MarkRaiseSetupFailed);
+  }
+  FeRestoreGC(context, 0);
+  mark_probe_calls = 0;
+  mark_raise_mode = mode;
+  FeSetMarkFn(context, MarkRaiseProbe);
+  (void)ForceCollection(context);
+  _exit(MarkRaiseNoCollection);
+}
+
+// Runs one child with its stderr on a pipe, so the diagnostic is evidence
+// rather than noise in the suite's own output.
+static bool CheckMarkRaiseAborts(int mode, const char* expected_detail) {
+  int pipe_fds[2] = {-1, -1};
+  CHECK(pipe(pipe_fds) == 0);
+  fflush(stdout);
+  fflush(stderr);
+  const pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    (void)close(pipe_fds[0]);
+    (void)dup2(pipe_fds[1], STDERR_FILENO);
+    (void)close(pipe_fds[1]);
+    RunMarkRaiseChild(mode);
+  }
+  CHECK(close(pipe_fds[1]) == 0);
+  char captured[512] = {0};
+  size_t used = 0;
+  while (used + 1 < sizeof(captured)) {
+    const ssize_t got =
+        read(pipe_fds[0], captured + used, sizeof(captured) - 1 - used);
+    if (got <= 0) {
+      break;
+    }
+    used += (size_t)got;
+  }
+  CHECK(close(pipe_fds[0]) == 0);
+  int status = 0;
+  CHECK(waitpid(child, &status, 0) == child);
+  printf("mark raise (mode %d): signalled=%d signal=%d exit=%d\n", mode,
+         WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : -1,
+         WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+  // A clean, named abort. Not a SIGSEGV -- which is what the tree before this
+  // fix did, once the recovered process read the reversed chain back -- and
+  // not a normal return, which would mean the raise was honoured and the
+  // arena left half-reversed.
+  CHECK(WIFSIGNALED(status));
+  CHECK(WTERMSIG(status) == SIGABRT);
+  // And it says which contract broke, not merely that something did.
+  CHECK(strstr(captured, expected_detail) != nullptr);
+  CHECK(strstr(captured, "FeSetMarkFn") != nullptr);
+  return true;
+}
+
+static bool TestMarkRaiseIsFatal(void) {
+  CHECK(CheckMarkRaiseAborts(MarkRaiseAllocating,
+                             "fe: fatal: a callback allocated"));
+  CHECK(CheckMarkRaiseAborts(MarkRaiseNonAllocating,
+                             "fe: fatal: a completion was raised"));
+  return true;
+}
+
+// The contract's other half: the *in-tree* route to that abort is closed.
+// `main.c`'s `mark`/`gc` tracers print the object they were handed, printing
+// charges the evaluation step budget and polls the interrupt, and either of
+// those raises -- so before this fix a step limit or a C-g arriving during a
+// collection turned fe's own `-d` tracing into the fatal path above. The
+// writer does not charge while collecting, so the collection here finishes
+// and the cancellation is delivered afterwards, as an ordinary catchable quit
+// at the next evaluator step.
+static bool mark_print_armed;
+static size_t mark_print_polls;
+
+static bool MarkPrintInterrupt(FeContext* context, void* userdata) {
+  (void)context;
+  (void)userdata;
+  mark_print_polls++;
+  return mark_print_armed;
+}
+
+static FeObject* MarkPrintProbe(FeContext* context, FeObject* object) {
+  mark_probe_calls++;
+  // Anything that polls from here on cancels. If `WriteObject` still charged
+  // a step while collecting, the poll below would raise from inside the mark
+  // phase and `RaiseCompletionCore` would abort this process.
+  mark_print_armed = true;
+  char rendered[64];
+  (void)FeToString(context, object, rendered, sizeof(rendered));
+  return FeNil(context);
+}
+
+static bool TestMarkPrintingCallbackIsSafe(void) {
+  enum { PrintProbeArenaSize = 512u << 10 };
+  unsigned char* const storage = malloc(PrintProbeArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = FeOpenContext(storage, PrintProbeArenaSize);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context,
+                      .expected_message = "mark-print:1: evaluation cancelled"};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  FeObject* const chain = BuildCarChain(context, 64);
+  CHECK(FeCreateRoot(context, chain) != nullptr);
+  FeRestoreGC(context, 0);
+  mark_probe_calls = 0;
+  mark_print_polls = 0;
+  mark_print_armed = false;
+  FeSetMarkFn(context, MarkPrintProbe);
+
+  // A loop that allocates until the 512 KiB arena collects, several times
+  // over. `poll_interval` of 1 means the very next evaluator step after the
+  // callback arms the interrupt delivers the cancellation.
+  static const char source[] =
+      "(let ((i 0)) (while (< i 100000) (do (setq i (+ i 1)) (cons i i))))";
+  const FeEvalOptions options = {.poll_interval = 1,
+                                 .interrupt = MarkPrintInterrupt};
+  if (setjmp(state.jump) == 0) {
+    (void)FeEvaluateStringWithOptions(context, "mark-print", source,
+                                      sizeof(source) - 1, &options);
+    CHECK(false);
+  }
+  printf("mark print: mark_calls=%zu polls=%zu completion=%d\n",
+         mark_probe_calls, mark_print_polls, (int)state.observed_completion);
+  // The callback really did run and really did print from inside the walk...
+  CHECK(mark_probe_calls > 0);
+  // ... the process survived it, the cancellation arrived as an ordinary
+  // quit at the next evaluator step, ...
+  CHECK(state.called);
+  CHECK(state.observed_completion == FeCompletionQuit);
+  // ... and the chain the walk reversed on the way past is whole.
+  CHECK(IsCarChainIntact(context, chain, 64));
+
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
 // The shapes the walk has to get right, each built, collected through, and
 // then read back: a deep `car` spine, a deep `cdr` spine, an alternating
 // structure that uses both halves of every pair, and four cyclic graphs --
@@ -7213,6 +7428,7 @@ int main(void) {
                  TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
+                 TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&
                  TestMarkGraphShapes() && TestCollectionStatsPinned() &&
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&

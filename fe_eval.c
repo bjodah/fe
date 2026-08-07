@@ -473,6 +473,40 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   longjmp(*ctx->evaluator_catch, 1);
 }
 
+// Sub-plan 09C's mark-phase contract, broken. Lives here rather than in fe.c
+// because this translation unit already reports to `stderr`; `fe.c` reaches
+// it through `fe_internal.h`.
+//
+// The two violations that end here both leave the arena in the mark phase's
+// working state, which is not a state anything can continue from: pointer
+// reversal keeps the walk's return path inside the objects it is walking, so
+// a `car` chain the walk is inside holds tagged parent pointers, not its own
+// cars. A raise `longjmp`s past the ascent that would put them back; an
+// allocation from a callback re-enters `CollectGarbage`, whose sweep would
+// clear the outer walk's mark bits and send it back down into the reversed
+// cells. Neither is recoverable, and neither is detectable later by anything
+// except a fault somewhere unrelated -- so this names the contract and stops
+// here, where the evidence still points at the callback.
+//
+// `error_fn` is deliberately not consulted: an `error_fn` leaves non-locally,
+// which is the failure being reported.
+[[noreturn]] void FatalCollectorViolation(const char* what,
+                                          const char* detail) {
+  fputs("fe: fatal: ", stderr);
+  fputs(what, stderr);
+  fputs(" from inside garbage collection.\n", stderr);
+  if (detail != nullptr) {
+    fputs("fe: detail: ", stderr);
+    fputs(detail, stderr);
+    fputc('\n', stderr);
+  }
+  fputs(
+      "fe: a mark_fn or gc_fn callback must return normally and must not\n"
+      "fe: allocate; see FeSetMarkFn in fe.h and doc/c-api.md.\n",
+      stderr);
+  abort();
+}
+
 // The core of every completion raise (sub-plan 06B of kg's Emacs-subset
 // program): assigns the completion kind, then does what `FeHandleError` has
 // always done -- drain the cleanup registry under a fresh budget and transfer
@@ -502,6 +536,16 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
 [[noreturn]] static void RaiseCompletionCore(FeContext* ctx,
                                              FeCompletion kind,
                                              const char* msg) {
+  // A raise from inside the collector cannot be honoured (sub-plan 09C's
+  // contract, stated in `fe.h` at `FeSetMarkFn` and in `doc/c-api.md`).
+  // Every route out of here `longjmp`s, and the mark phase keeps its return
+  // path in the objects it is walking, so a jump past its ascent leaves a
+  // `car` chain holding tagged parent pointers instead of its own cars --
+  // and the next reader of that chain dereferences one. There is nothing to
+  // recover: the state that would un-reverse the graph is the graph.
+  if (ctx->collecting) {
+    FatalCollectorViolation("a completion was raised", msg);
+  }
   FeObject* cl = ctx->call_list;
   // A longjmp abandons the C activation that published this record. Clearing
   // the identity too, rather than only the flag, keeps `native_identity`'s
