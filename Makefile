@@ -413,7 +413,38 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # 808 exceeds limit 807" and exits 2; at 808, and at the 835 below, it
 # passes. At 510 it reports "FAIL: 1 file(s) exceed per-file limit 510" and
 # exits 2.
-SCC_COMPLEXITY_MAX ?= 835
+#
+# Set 835 -> 808 at the close of Phase 12's fe FIX CYCLE (2026-08-07),
+# pre-pin: that IS the measured actual after the cycle -- the input-unit
+# unwind fix, the loader entry trio, and three review majors that were
+# documentation, manifest and test evidence. The cycle spent ZERO of the 27
+# points the raise funded, and all 27 go back rather than sitting as
+# unearned headroom, exactly as 12C's close handed 27 back and 11C handed 29.
+#
+# Zero is the honest number and it is an artefact, not an achievement: scc's
+# string-state machine desynchronizes on fe.c's '"' character literal and
+# stops counting keywords below it, and every line this cycle added to fe.c
+# -- `SaveInputUnit`, `RestoreInputUnit`, `EnterHostInputContext`,
+# `EnterInputUnit`, `FeEnterInputUnit`, `FeLeaveInputUnit` and
+# `FeReadInputForm`, three `if`s and eleven `return`s among them -- is below
+# it. `PMCCABE_TOTAL_MAX` below is the authoritative core measure and it did
+# move (+13); read the two together and believe that one. The Makefile has
+# said scc is "a floor, not a measurement" since 03A and this is what that
+# means in practice.
+#
+# `SCC_FILE_COMPLEXITY_MAX` is again deliberately NOT re-set to its actual
+# and stays at 520. Per-file at the close: fe_eval.c 511, fe.c 152, main.c
+# 37, fex_io.c 28, fe_run.c 25 -- identical to 12C's close, for the same
+# undercount reason on fe.c. fe_eval.c is unmoved at 511 with 9 points left,
+# so the seam-split warning above stands exactly as written; the cycle's own
+# work landed in fe.c deliberately.
+#
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire, exit status checked: at 807 `make complexity-check` reports
+# "FAIL: total complexity 808 exceeds limit 807" and exits 2, and at 808 it
+# passes; at 510 it reports "FAIL: 1 file(s) exceed per-file limit 510" and
+# exits 2.
+SCC_COMPLEXITY_MAX ?= 808
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -682,7 +713,34 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1 function(s)
 # exceed complexity limit 14" and exits 2, the one function being
 # `RunEvaluationLoop` at 15.
-PMCCABE_TOTAL_MAX ?= 1155
+#
+# Set 1155 -> 1146 at the close of Phase 12's fe FIX CYCLE (2026-08-07),
+# pre-pin: that IS the measured actual, 1146 across 368 symbols, and this is
+# the authoritative core measure, so it is the one that says what the cycle
+# cost. It spent 13 of the funded 22 (1133 -> 1146), all of it in new
+# straight-line code and none of it in an existing symbol -- not one
+# per-symbol baseline entry moved in either direction over the whole cycle:
+#
+#   +1  fe.c:SaveInputUnit          )  the blocker fix: five scattered
+#   +1  fe.c:RestoreInputUnit       )  save/restore pairs behind one named
+#   +1  fe.c:EnterHostInputContext  )  value, plus the store at the host
+#   +1  fe.c:EnterInputUnit         )  exit. No new branch anywhere.
+#   +1  fe.c:FeEnterInputUnit       )  the loader entry trio. The branching
+#   +1  fe.c:FeLeaveInputUnit       )  is all in the reader: two argument
+#   +7  fe.c:FeReadInputForm        )  checks and the pushback bookkeeping.
+#
+# The 9 unspent points go back. Seven symbols were added (361 -> 368), each
+# banked in the commit that added it, and every one arrived at or under
+# `PMCCABE_NEW_FUNCTION_MAX`. That macro stays at 15 and
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22, with the worst function in
+# the tree still `RunEvaluationLoop` at 15 -- unchanged by this cycle.
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1145 `make pmccabe-check` reports "FAIL:
+# total complexity 1146 exceeds funded budget 1145 (+1)" and exits 2, and at
+# 1146 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1
+# function(s) exceed complexity limit 14" and exits 2, the one function being
+# `RunEvaluationLoop` at 15.
+PMCCABE_TOTAL_MAX ?= 1146
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
