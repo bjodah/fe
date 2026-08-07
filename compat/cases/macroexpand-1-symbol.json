@@ -1,0 +1,6 @@
+{
+ "id": "macroexpand-1-symbol",
+ "setup": [],
+ "expr": "(macroexpand-1 'no-such-name)",
+ "note": "10B: a symbol is its own expansion even when nothing is bound to it -- macro expansion asks about a form's head, and a bare symbol has none."
+}

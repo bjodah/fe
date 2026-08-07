@@ -199,6 +199,26 @@ phase, while `fuzz/seeds/README.md` went on recording the old counts.
 `FE_FUZZ_DUMP=1` and checks. Touching the grammar means running that target
 and re-deriving whatever it reports, in the same commit.
 
+**What the grammar deliberately does not reach: `macroexpand`.** Sub-plan
+10B added `macroexpand-1`, `macroexpand` and `macroexpand-all`, and the
+sub-plan predicted they would be reachable "as an ordinary symbol already
+once defined". They are not, and the probe it asked for is what showed it:
+`FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval` over 2000 generated inputs (a seeded
+`random.Random(20260807)` byte generator, 1-64 bytes each) dumped 6639
+forms, of which **0** name any of the three and 379 build a `(macro ...)`
+call. Every head this grammar emits comes from a fixed name list, so a name
+that is in no list cannot appear.
+
+The arm was not added, and the reason is the paragraph above: taking
+`BuildExpression`'s modulus from 36 to 37 re-steers all fourteen tracked
+seeds for one primitive's coverage. What replaces it is deterministic and
+stronger for the property that actually matters here -- rooting across the
+allocations an expansion makes -- `test_api.c:TestMacroexpandUnderCollection`
+runs four expansion shapes at 32 different arena headrooms each, so a
+collection lands inside `ArgsToEnv`, inside the alias step's `FeCons`, and
+between two passes of the fixpoint. A future grammar change that does want
+`macroexpand` should add it *with* the seed re-derivation, not without.
+
 The evaluator grammar's lambda builder covers zero, one, and two required
 parameters, `&optional`, `&rest`, malformed declarations, and deliberate
 under/over-arity calls. Macro calls use the same builder and receive raw forms.

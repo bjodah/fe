@@ -1,0 +1,6 @@
+{
+ "id": "macroexpand-1-non-macro-form",
+ "setup": [],
+ "expr": "(macroexpand-1 '(+ 1 2))",
+ "note": "10B: a form whose head names no macro is its own expansion -- the expansion is returned, not evaluated, so this is `(+ 1 2)` and not `3`. No setup: the answer must not depend on anything being defined."
+}

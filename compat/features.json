@@ -2160,6 +2160,80 @@
    "kg_test": "fe/test_api.c:TestConstantsAndKeywords",
    "source_name": null,
    "rationale": "Emacs binds a variable literally named `&rest` and answers 2. Fe compiles a `let` binding list into a lambda application, so the name reached the parameter decoder and bound one value to a rest parameter: `(let ((&rest 1) (x 2)) x)` answered `(1 2)`. Fe now raises `lambda-list keyword in let binding` rather than meaning something else. Only `&optional` and `&rest` are refused -- any other `&`-prefixed name binds normally in both, so `(let ((&foo 1)) &foo)` is 1 either side."
+  },
+  {
+   "id": "macroexpand-1",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "macroexpand-1-user-macro",
+    "macroexpand-1-nested-macro",
+    "macroexpand-1-non-macro-form",
+    "macroexpand-1-atom",
+    "macroexpand-1-symbol",
+    "macroexpand-1-alias-step",
+    "macroexpand-1-environment-nil"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 10B: one expansion step, returned and never evaluated. The alias case is the one that had to be measured rather than derived -- Emacs stops at each `defalias` link and hands back the rewritten form, so `macroexpand-1` through a two-link chain answers the middle link, which is not what resolving the chain the way call position does would give.",
+   "source_name": "macroexpand-1"
+  },
+  {
+   "id": "macroexpand-fixpoint",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "macroexpand-user-macro",
+    "macroexpand-nested-macro",
+    "macroexpand-non-macro-form",
+    "macroexpand-alias-fixpoint"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 10B: Emacs' fixpoint rule -- keep taking single steps while the result is still a macro call. Bounded by the host's evaluation-step budget like all evaluation, so a self-expanding macro and a `defalias` cycle both end at `evaluation step limit exceeded`; that half has no oracle case because Emacs hangs on it, and is pinned in test_api.c:TestMacroexpandBudget.",
+   "source_name": "macroexpand"
+  },
+  {
+   "id": "macroexpand-transformer-arity",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "macroexpand-1-arity-nargs"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 10B: a transformer applied through `macroexpand-1`/`macroexpand` goes through the evaluator's own `EnterMacroBody`, so strict arity is the same check with the same count as a direct macro call. The FUNCTION element of the condition data renders differently on the two sides, which phase7-arity-condition-rendering already records; this case compares the symbol and the count only.",
+   "source_name": null
+  },
+  {
+   "id": "macroexpand-environment",
+   "category": "functions-and-macros",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "macroexpand-environment-alist"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 10B, deliberate: fe accepts the ENVIRONMENT operand and requires it to be nil. Emacs' environments are an internal alist that shadows the function cell for the duration of one expansion -- a second name-resolution path, which nothing in this program uses. A non-nil value is rejected by name (`unsupported feature: macroexpand environment`) instead of being silently ignored, so the divergence is loud rather than an answer computed as if the argument were not there.",
+   "source_name": null
+  },
+  {
+   "id": "macroexpand-all",
+   "category": "functions-and-macros",
+   "status": "unsupported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "macroexpand-all-unsupported"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 10B / 10A Decision 2, deliberate and recorded in TODO.md: expanding every sub-form needs a code walker that knows the shape of each special form, which fe does not have. The name exists as a primitive purely so that calling it raises `unsupported feature: macroexpand-all` -- naming the missing feature, the reader's own reject-by-name convention -- rather than `void-function`, which is byte-identical to what a typo produces (10A Decision 5). The runner short-circuits this entry and never invokes fe; test_api.c:TestMacroexpandPrimitives and scripts/macroexpand.fe pin the raise itself.",
+   "source_name": "macroexpand-all"
   }
  ]
 }

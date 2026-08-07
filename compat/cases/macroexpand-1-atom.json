@@ -1,0 +1,6 @@
+{
+ "id": "macroexpand-1-atom",
+ "setup": [],
+ "expr": "(macroexpand-1 42)",
+ "note": "10B: an atom is its own expansion. Deliberately an integer rather than a symbol, so no name resolution takes part in the answer at all."
+}

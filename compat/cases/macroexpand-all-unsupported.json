@@ -1,0 +1,13 @@
+{
+ "id": "macroexpand-all-unsupported",
+ "setup": [
+  "(fset 'my-when (if (fboundp 'defmacro) (cons 'macro (lambda (c b) (list 'if c b))) (macro (c b) (list 'if c b))))",
+  "(fset 'inner (if (fboundp 'defmacro) (cons 'macro (lambda (x) (list '+ x 1))) (macro (x) (list '+ x 1))))",
+  "(fset 'outer (if (fboundp 'defmacro) (cons 'macro (lambda (x) (list 'inner x))) (macro (x) (list 'inner x))))",
+  "(fset 'one-arg (if (fboundp 'defmacro) (cons 'macro (lambda (a) (list 'not a))) (macro (a) (list 'not a))))",
+  "(defalias 'ali 'one-arg)",
+  "(defalias 'ali2 'ali)"
+ ],
+ "expr": "(macroexpand-all '(my-when t 1))",
+ "note": "10B: `macroexpand-all` expands every sub-form and needs a code walker that knows each special form's shape; fe has none. The snapshot is Emacs' answer, recorded so the target is on file; the manifest status is `unsupported`, so the runner never invokes fe for it. What fe actually does -- raise `unsupported feature: macroexpand-all`, by name, never `void-function` -- is pinned in test_api.c and scripts/macroexpand.fe. The setup is dialect-neutral by construction: Emacs stores a macro as a `(macro . FUNCTION)` cons in the function cell and fe has a distinct macro object, so each transformer is installed through whichever spelling the running dialect has, selected by `(fboundp 'defmacro)` -- t in Emacs, nil in standalone fe. Nothing else about the case differs between the sides. The transformers deliberately expand to forms both dialects spell identically (`if`, `+`, `not`): fe's implicit body is `do` where Emacs' is `progn`, and fe prints `(quote x)` where Emacs prints `'x`, and neither of those is what these cases are about."
+}

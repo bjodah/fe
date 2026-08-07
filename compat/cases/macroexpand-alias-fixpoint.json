@@ -1,0 +1,13 @@
+{
+ "id": "macroexpand-alias-fixpoint",
+ "setup": [
+  "(fset 'my-when (if (fboundp 'defmacro) (cons 'macro (lambda (c b) (list 'if c b))) (macro (c b) (list 'if c b))))",
+  "(fset 'inner (if (fboundp 'defmacro) (cons 'macro (lambda (x) (list '+ x 1))) (macro (x) (list '+ x 1))))",
+  "(fset 'outer (if (fboundp 'defmacro) (cons 'macro (lambda (x) (list 'inner x))) (macro (x) (list 'inner x))))",
+  "(fset 'one-arg (if (fboundp 'defmacro) (cons 'macro (lambda (a) (list 'not a))) (macro (a) (list 'not a))))",
+  "(defalias 'ali 'one-arg)",
+  "(defalias 'ali2 'ali)"
+ ],
+ "expr": "(macroexpand '(ali2 7))",
+ "note": "10B: the fixpoint walks both `defalias` links and then applies the transformer, reaching `(not 7)`. The setup is dialect-neutral by construction: Emacs stores a macro as a `(macro . FUNCTION)` cons in the function cell and fe has a distinct macro object, so each transformer is installed through whichever spelling the running dialect has, selected by `(fboundp 'defmacro)` -- t in Emacs, nil in standalone fe. Nothing else about the case differs between the sides. The transformers deliberately expand to forms both dialects spell identically (`if`, `+`, `not`): fe's implicit body is `do` where Emacs' is `progn`, and fe prints `(quote x)` where Emacs prints `'x`, and neither of those is what these cases are about."
+}

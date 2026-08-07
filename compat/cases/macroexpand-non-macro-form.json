@@ -1,0 +1,6 @@
+{
+ "id": "macroexpand-non-macro-form",
+ "setup": [],
+ "expr": "(macroexpand '(+ 1 2))",
+ "note": "10B: the fixpoint terminates immediately on a form that is not a macro call, with the form itself."
+}
