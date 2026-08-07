@@ -45,12 +45,13 @@ $(shell [ "$$(cat $(BUILD_STAMP) 2>/dev/null)" = '$(BUILD_ID)' ] || \
 
 PROG = fe
 TARGET = $(PROG)
-SRCS = main.c auto.c fe.c fe_eval.c fex.c fex_io.c fex_math.c fex_process.c \
-	fex_re.c fex_time.c
+SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fex.c fex_io.c fex_math.c \
+	fex_process.c fex_re.c fex_time.c
 # The evaluator's own object list, shared by every link rule that used to
-# name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split): a list
-# so every consumer below stays a one-line change.
-FE_CORE_OBJS = fe.o fe_eval.o
+# name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split, and
+# sub-plan 11B's fe_eval.c -> fe_eval.c + fe_run.c one): a list so every
+# consumer below stays a one-line change.
+FE_CORE_OBJS = fe.o fe_eval.o fe_run.o
 HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
@@ -65,7 +66,7 @@ CORE_GCC ?= gcc
 CORE_CLANG ?= clang
 CORE_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x
 CORE_OBJS = fe-core-gcc.o fe-core-clang.o fe-eval-core-gcc.o \
-	fe-eval-core-clang.o
+	fe-eval-core-clang.o fe-run-core-gcc.o fe-run-core-clang.o
 
 # Fuzzing
 FUZZ_DIR ?= fuzz
@@ -278,7 +279,27 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # this cap. The next change to that file of any size should expect to price a
 # file-cap raise or a translation-unit split rather than assume the room is
 # there. fe.c is at 150.
-SCC_COMPLEXITY_MAX ?= 787
+# Raised an eleventh time, 787 -> 835, by Phase 11 sub-plan 11A's Decision 8
+# (2026-08-07), funding 11B (special variables and shallow dynamic binding),
+# 11C (the `(quote X)` -> `'X` writer abbreviation and
+# `FeTryEvaluateStringWithOptions`) and nothing else. The measured starting
+# total is 787/787 -- the cap sits exactly on the number again, so the phase
+# breaches it at its first C line. The priced band is +15..30 for 11B and
+# +10..19 for 11C, so 835 is 787 plus the top of both, with no margin.
+# Proved live before this raise landed by temporarily setting the cap to 786
+# and watching `make complexity-check` report "FAIL: total complexity 787
+# exceeds limit 786", then restoring. The last commit of sub-plan 11C re-sets
+# this number to the measured actual, pre-pin, as 11A Decision 8 requires.
+# `SCC_FILE_COMPLEXITY_MAX` is *not* raised, and 10B's warning above is why:
+# fe_eval.c was at 517 of 520 and the whole of 11B's binding work lands in
+# its binding section. 11A Decision 8 answers that with a translation-unit
+# split rather than a raise, and this commit is it -- fe_eval.c 517 -> 494
+# and a new fe_run.c at 23, summing to the same 517, because
+# `utils/check_scc_complexity.py` sums per file and a split therefore moves
+# no total. The per-file cap goes on binding at full strength; proved live
+# the same way, by setting `SCC_FILE_COMPLEXITY_MAX=493` and watching
+# "FAIL: 1 file(s) exceed per-file limit 493".
+SCC_COMPLEXITY_MAX ?= 835
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -421,7 +442,22 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # `RunEvaluationLoop` 14 -> 15, and `MacroexpandStep` 5 -> 6. The worst
 # function in the tree is `RunEvaluationLoop` at 15 of the 22 per-function
 # cap.
-PMCCABE_TOTAL_MAX ?= 1088
+# Raised 1088 -> 1140 by Phase 11 sub-plan 11A's Decision 8 (2026-08-07),
+# funding 11B and 11C by name and nothing else. The measured starting total
+# is 1088 across 347 symbols -- exactly on the cap, so the phase breaches it
+# at its first point. Phase 11's fe share is priced +20..35 (11B) and
+# +10..25 (11C) in this unit; 1140 is 1088 plus the middle of the two bands
+# summed, not the top, because the shallow-binding design reuses the cleanup
+# registry's teardown rather than adding a second unwind mechanism. Proved
+# live before this raise landed by temporarily setting it to 1087 and
+# watching `make pmccabe-check` report "FAIL: total complexity 1088 exceeds
+# funded budget 1087 (+1)", then restoring. The per-symbol manifest under
+# .ci/pmccabe-baseline.json is migrated in this commit for the twelve symbols
+# the translation-unit split moved from fe_eval.c to fe_run.c -- path keys
+# only, every value unchanged -- and every later per-symbol increase is
+# banked explicitly, with its reason, in the commit that causes it. The last
+# commit of sub-plan 11C re-sets this number to the measured actual, pre-pin.
+PMCCABE_TOTAL_MAX ?= 1140
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -540,6 +576,12 @@ fe-eval-core-gcc.o: fe_eval.c fe.h fe_internal.h $(BUILD_STAMP)
 fe-eval-core-clang.o: fe_eval.c fe.h fe_internal.h $(BUILD_STAMP)
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_eval.c -o $@
 
+fe-run-core-gcc.o: fe_run.c fe.h fe_internal.h $(BUILD_STAMP)
+	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_run.c -o $@
+
+fe-run-core-clang.o: fe_run.c fe.h fe_internal.h $(BUILD_STAMP)
+	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_run.c -o $@
+
 %.o: %.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -547,22 +589,22 @@ tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(RE_CFLAGS) -c $< -o $@
 
 $(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe.h fe_internal.h \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe.h fe_internal.h \
 		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c fe_eval.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c $(LDLIBS)
 
 $(FUZZ_EVAL_BIN): $(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe.h fe_internal.h \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe.h fe_internal.h \
 		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c fe_eval.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c $(LDLIBS)
 
 $(FUZZ_WRITE_BIN): $(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe.h fe_internal.h \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe.h fe_internal.h \
 		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c fe_eval.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c $(LDLIBS)
 
 sizes:
 	wc *.[ch]

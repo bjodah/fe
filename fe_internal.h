@@ -771,6 +771,26 @@ struct FeContext {
   size_t arena_allocation_failures;
 };
 
+// The whole ambient evaluation-control record, as one value: everything
+// `ClearEvaluationControl` clears, so a raise that ends up *resuming* the
+// interrupted program (a `condition-case` handler, a cleanup that runs and
+// returns) can put back exactly what it found -- including the steps still
+// remaining, not a fresh budget. Deliberately does not carry
+// `native_reentry_depth`, which is a census of live C activations rather
+// than a configured ceiling; see its own comment on `struct FeContext`.
+typedef struct FeEvaluationControl {
+  FeInterruptFn* interrupt;
+  void* userdata;
+  size_t steps;
+  size_t poll_interval;
+  size_t poll_countdown;
+  size_t cleanup_step_limit;
+  size_t max_frames_limit;
+  size_t native_reentry_limit;
+  bool active;
+  bool limited;
+} FeEvaluationControl;
+
 // Evaluation-control helpers, defined with the rest of the evaluator in
 // fe_eval.c. Declared here instead of kept `static` because `GetBound`
 // (above, defined in fe.c) charges its environment walk against the same
@@ -808,5 +828,43 @@ size_t RenderObject(FeContext* ctx,
 // `error_fn` leaves non-locally, which is the failure being reported.
 [[noreturn]] void FatalCollectorViolation(const char* what, const char* detail);
 bool ArenaCanAllocate(FeContext* ctx);
+
+// The run driver's seam (sub-plan 11B of kg's Emacs-subset program). fe_run.c
+// holds the two places an evaluator run's error barrier is installed
+// (`RunEvaluation`, `RunEvaluationBody`), the `Evaluate` seam every
+// evaluator-internal caller reaches them through, and the public
+// `FeEvaluate*`/`FeCall*` surface; fe_eval.c keeps the loop those drive, the
+// frame pushes, the barrier helper and the raise core. Nothing below is new
+// or moved code -- each was `static` in fe_eval.c until the split, and the
+// split exists so the 520-per-file complexity cap keeps binding on the
+// evaluator at full strength. Both directions are listed here because the
+// seam has two of them, and it is the only cross-TU coupling the split
+// created.
+//
+// fe_run.c -> fe_eval.c:
+FeObject* RunEvaluationLoop(FeContext* ctx, size_t base);
+jmp_buf* BeginRunBarrier(FeContext* ctx, jmp_buf* jump);
+[[noreturn]] void TransferRunError(FeContext* ctx, jmp_buf* saved_catch);
+void EnterNativeReentry(FeContext* ctx);
+void PushEvaluationFrame(FeContext* ctx,
+                         FeObject* obj,
+                         FeObject* env,
+                         FeObject** bind);
+void PushBodyFrame(FeContext* ctx, FeObject* env, FeObject* forms);
+FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn, bool* cycle);
+bool IsRawFormCallable(const FeObject* fn);
+FeEvaluationControl SaveEvaluationControl(const FeContext* ctx);
+void RestoreEvaluationControl(FeContext* ctx,
+                              const FeEvaluationControl* control);
+[[noreturn]] void RaiseCompletionCore(FeContext* ctx,
+                                      FeCompletion kind,
+                                      const char* msg);
+//
+// fe_eval.c -> fe_run.c:
+FeObject* Evaluate(FeContext* ctx,
+                   FeObject* obj,
+                   FeObject* env,
+                   FeObject** bind);
+FeObject* RunEvaluationBody(FeContext* ctx, FeObject* forms, FeObject* env);
 
 #endif
