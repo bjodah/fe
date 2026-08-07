@@ -195,6 +195,42 @@
 (assert-equals 'wrong-type-argument
   (condition-case e (special-variable-p 5) (error (car e))))
 
+;; A value form that mutates the binding list its own `let` is walking.  The
+;; dynamic path is the one binding walk that crosses an evaluation boundary
+;; -- a value form runs between one binding and the next -- so the shape
+;; `let` validated on entry has expired by the time the walk resumes, and a
+;; form that shares structure with the list can steer the rest of it.  Until
+;; the walk was checked, `(setcdr blist 5)` made it dereference the integer 5
+;; as an object pointer: SIGSEGV on address 0x11 under a plain build, a
+;; wild READ at fe.c's `FeGetType` under ASan and a misaligned-access report
+;; under UBSan.  It is now the `wrong-type-argument` a literally improper
+;; binding list raises, which is what every sibling walk in the evaluator
+;; already answers -- `ResumeArguments` contains the identical input through
+;; `FeGetNextArgument`.
+(internal--mark-special 'mut t)
+(setq mut 1)
+(setq blist (list (list 'mut '(do (setcdr blist 5) 1)) (list 'lex 2)))
+(fset 'mut-form (macro () (cons 'let (cons blist '((list mut lex))))))
+(assert-equals 'wrong-type-argument
+  (condition-case e (mut-form) (error (car e))))
+(assert-equals 1 mut)
+
+;; Truncating the list mid-walk is contained the same way, and the binding
+;; already in force when the raise happens is still restored.
+(setq blist2 (list (list 'mut '(do (setcdr blist2 nil) 1)) (list 'lex 2)))
+(fset 'mut-short (macro () (cons 'let (cons blist2 '((list mut lex))))))
+(assert-equals 'wrong-type-argument
+  (condition-case e (mut-short) (error (car e))))
+(assert-equals 1 mut)
+
+;; The same form over unmarked targets takes the lexical path, which builds
+;; its parameters and values in one synchronous loop right after validation
+;; and so never sees the mutation at all.  This is the control: the check
+;; above is about the dynamic frame, not about `let`.
+(setq blist3 (list (list 'lexa '(do (setcdr blist3 5) 1)) (list 'lexb 2)))
+(fset 'mut-lexical (macro () (cons 'let (cons blist3 '((list lexa lexb))))))
+(assert-equals '(1 2) (mut-lexical))
+
 ;; Arena exhaustion composes with the binding restore (sub-plan 09B's
 ;; conditions plus 11B's bindings): a dynamic binding in force when the arena
 ;; runs out is undone by the same drain that carries the condition to its

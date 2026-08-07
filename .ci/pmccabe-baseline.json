@@ -220,6 +220,7 @@
   "fe_eval.c:MacroexpandStep": 6,
   "fe_eval.c:MakeCallForm": 3,
   "fe_eval.c:MakeClosure": 1,
+  "fe_eval.c:NextLetBinding": 1,
   "fe_eval.c:NumericSatisfies": 5,
   "fe_eval.c:PerformThrow": 4,
   "fe_eval.c:PreflightPrimitive": 3,

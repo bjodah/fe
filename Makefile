@@ -494,7 +494,20 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # decrease was banked as an improvement, `WriteObject` 10 -> 8, when the two
 # writer abbreviations were folded into one helper. The worst function in
 # the tree is still `RunEvaluationLoop` at 15 of the 22 per-function cap.
-PMCCABE_TOTAL_MAX ?= 1120
+# Raised 1120 -> 1121 by the Phase 11 fe fix cycle (2026-08-07) for the one
+# new symbol a rejected blocker's fix needs: `NextLetBinding`, complexity 1,
+# the checked list advance `ResumeDynamicLet` and `InstallLetBindings` walk
+# their binding list through so a value form that mutates that list cannot
+# steer them off it. This is a ratchet raise and not funded headroom -- one
+# point, one symbol, named -- and the fix cycle's last commit re-sets this
+# number to the measured actual, pre-pin, as the Phase 11 ordering rule
+# requires. Proved live before the raise landed by leaving the cap at 1120
+# and watching `make pmccabe-check` report "FAIL: total complexity 1121
+# exceeds funded budget 1120 (+1)". `SCC_COMPLEXITY_MAX` is *not* raised
+# with it: the accessor's type check is a `CheckType` call rather than an
+# `if`, so scc's keyword count is unchanged at 806 and the fix pays for
+# itself in the branch it removes from the two walks.
+PMCCABE_TOTAL_MAX ?= 1121
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

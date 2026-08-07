@@ -1117,6 +1117,30 @@ static bool BindingsHaveDynamic(FeContext* ctx, FeObject* bindings) {
   return false;
 }
 
+// `FeGetNextArgument`'s contract, for a binding list: check the cell,
+// advance past it, hand back the element. The dynamic `let` frame is the
+// one binding walk that crosses evaluation boundaries -- a value form runs
+// between one binding and the next -- so `ValidateLetBindings`' proof about
+// the list's shape expires the moment the first value form starts, and a
+// form that mutates the list it is a member of steers the rest of the walk
+// wherever it likes. Raw `CAR`/`CDR` there dereferenced whatever word the
+// mutation stored: `(setcdr blist 5)` inside the first value form made the
+// walk read the integer 5 as an `FeObject*`, which is type confusion on a
+// wholly caller-controlled value, not a bounded overflow.
+//
+// The lexical `let` path does not need this -- it builds parameters and
+// values in one synchronous loop inside `StartBindingLet`, immediately
+// after validation -- and `ResumeArguments`, the frame this one is modelled
+// on, has had it all along, in `FeGetNextArgument`. A tail that is no longer
+// a pair raises the `(wrong-type-argument listp X)` a literally improper
+// binding list raises at validation time, so the mutated form and the
+// written-out one answer with the same condition object.
+static FeObject* NextLetBinding(FeContext* ctx, FeObject** rest) {
+  FeObject* const cell = CheckType(ctx, *rest, FeTPair);
+  *rest = CDR(cell);
+  return CAR(cell);
+}
+
 // The frame's collected values, in binding order, become its bindings
 // (sub-plan 11B): a let-dynamic target swaps the global value cell and
 // pushes the restore obligation, any other target extends the environment
@@ -1130,12 +1154,22 @@ static bool BindingsHaveDynamic(FeContext* ctx, FeObject* bindings) {
 // each environment cell `Bind` makes is on the GC stack until the frame's
 // own checkpoint is restored. The cleanup entries hold the shadowed globals
 // and `MarkCleanupRoots` marks them.
+//
+// This is the frame's *second* walk of the source binding list, and every
+// value form has run since the first one, so it is driven off the value
+// list -- which the frame consed itself and nothing outside the evaluator
+// can reach -- and pulls one target per value through `NextLetBinding`
+// rather than walking the source list to its own end. A binding list a
+// value form shortened, lengthened or made improper therefore raises
+// `wrong-type-argument` here instead of pairing a value with whatever the
+// mutation left in binding position.
 static void InstallLetBindings(FeContext* ctx, FeEvalFrame* frame) {
   frame->accumulator = ReverseList(frame->accumulator);
   FeObject* values = frame->accumulator;
   FeObject* env = frame->env;
-  for (FeObject* rest = CAR(frame->fn); !FeIsNil(rest); rest = CDR(rest)) {
-    FeObject* const target = LetBindingTarget(ctx, CAR(rest));
+  FeObject* rest = CAR(frame->fn);
+  while (!FeIsNil(values)) {
+    FeObject* const target = LetBindingTarget(ctx, NextLetBinding(ctx, &rest));
     FeObject* const value = CAR(values);
     values = CDR(values);
     if (SymbolIsLetDynamic(ctx, target)) {
@@ -1161,20 +1195,24 @@ static void InstallLetBindings(FeContext* ctx, FeEvalFrame* frame) {
 // One `FeFrameDynamicLet` step: collect the delivered value, start the next
 // binding's value form, or -- once every one is in -- install the bindings.
 // Deliberately the same shape as `ResumeArguments`, including the GC-stack
-// restore per operand: the accumulator is a frame field and therefore a
+// restore per operand (the accumulator is a frame field and therefore a
 // mark-phase root already, so a long binding list costs arena, not root
-// slots.
+// slots) and including the checked advance: `ResumeArguments` reads its next
+// operand through `FeGetNextArgument`, which is where its type check lives,
+// and this reads its next binding through `NextLetBinding` for the same
+// reason and against the same input -- a form that mutates the list being
+// walked while the walk is suspended.
 static bool ResumeDynamicLet(FeContext* ctx, FeEvalFrame* frame) {
   if (frame->callee != &unbound) {
     frame->accumulator = FeCons(ctx, frame->callee, frame->accumulator);
     frame->callee = &unbound;
-    frame->rest = CDR(frame->rest);
   }
   if (!FeIsNil(frame->rest)) {
     EvaluationStep(ctx);
     FeRestoreGC(ctx, frame->gc_checkpoint);
-    PushEvaluationFrame(ctx, LetBindingValue(ctx, CAR(frame->rest)), frame->env,
-                        NULL);
+    PushEvaluationFrame(ctx,
+                        LetBindingValue(ctx, NextLetBinding(ctx, &frame->rest)),
+                        frame->env, NULL);
     return false;
   }
   InstallLetBindings(ctx, frame);
