@@ -606,12 +606,24 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   FeObject* handler;
   if (FindConditionHandler(ctx, kind, &handler_index, &handler)) {
     FeEvalFrame* const frame = &ctx->frame_stack[handler_index];
-    FePushGC(ctx, ctx->condition);
+    // The condition that is unwinding is held in a local, not re-read from
+    // `ctx->condition`, across the drain below: a cleanup entry can run
+    // arbitrary Lisp, and a host native it calls can *contain* a completion
+    // of its own (`FeTryCallWithOptions`, `FeTryEvaluateStringWithOptions`),
+    // which leaves the contained condition in that field for the host to
+    // read. Without this the handler bound the contained call's condition
+    // object instead of the one in flight -- handler selection was right,
+    // because it is decided above, and only the object `e` named was wrong.
+    // The push is the same root it always was: the field is the object's
+    // only root, and the field is exactly what a containment overwrites.
+    FeObject* const in_flight = ctx->condition;
+    FePushGC(ctx, in_flight);
     RunCleanups(ctx, frame->cleanup_checkpoint, &cleanup_budget);
     FeRestoreGC(ctx, frame->gc_checkpoint);
-    FePushGC(ctx, ctx->condition);
+    FePushGC(ctx, in_flight);
+    ctx->condition = in_flight;
     frame->fn = handler;
-    frame->callee = ctx->condition;
+    frame->callee = in_flight;
     ctx->frame_stack_index = handler_index + 1;
     ctx->call_list = &frame->trace_cell;
     ctx->completion = FeCompletionNormal;
@@ -626,7 +638,22 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   // the host takes over. Only now is the record cleared, and only now is the
   // source label dropped -- keeping a label alive past the host boundary
   // would prefix a later, unrelated raise with a stale file name.
+  //
+  // The kind and the condition object are held across the drain for the
+  // reason the handler path holds them, and for one more: what the host
+  // reads through `FeGetCompletion` and `FeGetCondition` after this arrives
+  // must describe *this* completion, not one a cleanup entry contained on
+  // the way out. The GC-stack slot is this object's only root while the
+  // field that normally holds it is at the mercy of the drain, and it is
+  // popped again before the local is put back, so the drain leaves the
+  // stack exactly as deep as it found it.
+  FeObject* const in_flight = ctx->condition;
+  const size_t drain_gc = FeSaveGC(ctx);
+  FePushGC(ctx, in_flight);
   RunCleanups(ctx, ctx->cleanup_floor, &cleanup_budget);
+  FeRestoreGC(ctx, drain_gc);
+  ctx->condition = in_flight;
+  ctx->completion = kind;
   ClearEvaluationControl(ctx);
   ctx->error_label = nullptr;
   ctx->error_has_offset = false;

@@ -949,6 +949,18 @@ replay goes to `RaiseCompletionCore()` rather than to `RaiseCompletion()`,
 which is the half that applies the `error_label` prefix, so the source label
 already in the saved text is not applied a second time.
 
+A completion a cleanup entry *contains* rather than raises is the opposite
+case, and does not replace anything. `FeTryCallWithOptions()` and
+`FeTryEvaluateStringWithOptions()` publish the contained completion's kind
+and condition object for the host to read, in the same two context fields
+the completion being unwound is using, so `RaiseCompletionCore()` holds both
+in locals across each of its two drains and puts them back afterwards --
+with the condition object on the GC stack for the duration, since the field
+that normally roots it is exactly what a containment overwrites. The
+handler a `condition-case` selects was never at risk (selection happens
+before the drain starts); the object it binds, and the pair a host reads
+through `FeGetCompletion()` and `FeGetCondition()`, were.
+
 A cleanup's `throw` takes the same route for the same reason. Its catch
 frame is below the cleanup run's floor, so the search inside the cleanup
 finds nothing; instead of raising `no-catch` there, `PerformThrow()` parks

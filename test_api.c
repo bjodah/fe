@@ -4469,6 +4469,31 @@ static bool TestProtectedCall(void) {
                               sizeof(uncaught) - 1,
                               "protect.fe:1: expected pair, got integer"));
 
+  // Containment from inside an *unwinding* host: the enclosing completion is
+  // in flight, its cleanup registry is draining, and one of the entries
+  // contains a completion of its own. The one already unwinding is the one
+  // the handler must bind -- handler *selection* was never at risk, because
+  // it is decided before the drain starts, so a test that checked only the
+  // clause taken would have passed while `e` named the contained call's
+  // condition object.
+  CHK("(condition-case e (unwind-protect (/ 1 0) "
+      "    (contain-call (lambda () (car 6)))) "
+      "  (arith-error (list 'arith e)) "
+      "  (wrong-type-argument (list 'wrong e)))",
+      "(arith (arith-error))");
+
+  // And with nothing to catch it: what the host reads after the final drain
+  // describes the completion that reached it, not one a cleanup contained on
+  // the way out. Before this was held across the drain, the kind and the
+  // message said `arith-error` while `FeGetCondition` answered
+  // `(wrong-type-argument listp 6)` -- one report contradicting itself.
+  static const char escaping[] =
+      "(unwind-protect (/ 1 0) (contain-call (lambda () (car 6))))";
+  CHECK(ExpectCompletionKind(context, &state, "protect.fe", escaping,
+                             sizeof(escaping) - 1, nullptr,
+                             "protect.fe:1: arith-error", FeCompletionError));
+  CHECK(IsRendered(context, FeGetCondition(context), "(arith-error)"));
+
 #undef CHK
 
   FeCloseContext(context);
@@ -8254,6 +8279,21 @@ static bool TestProtectedEvaluateString(void) {
   // loader contains, unwinds its bookkeeping (which allocates), and answers
   // with the value -- which the evaluator then prints, walks and returns.
   CHK("(load-string-unwinding \"(list 111 222 333)\")", "(111 222 333)");
+
+  // Containment from inside an unwinding host, the string entry's copy of
+  // `TestProtectedCall`'s pair: a loader called from a cleanup that is
+  // draining an enclosing completion must leave that completion's condition
+  // object alone, both for an enclosing handler and for the host.
+  CHK("(condition-case e (unwind-protect (/ 1 0) (load-string \"(car 6)\")) "
+      "  (arith-error (list 'arith e)) "
+      "  (wrong-type-argument (list 'wrong e)))",
+      "(arith (arith-error))");
+  static const char draining[] =
+      "(unwind-protect (/ 1 0) (load-string \"(car 6)\"))";
+  CHECK(ExpectCompletionKind(context, &state, "protect.fe", draining,
+                             sizeof(draining) - 1, nullptr,
+                             "protect.fe:1: arith-error", FeCompletionError));
+  CHECK(IsRendered(context, FeGetCondition(context), "(arith-error)"));
 
   CHECK(FeSaveGC(context) == gc);
 

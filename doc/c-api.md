@@ -872,7 +872,18 @@ It returns `true` when the call completed normally, with the value in
   caller's ambient evaluation-control record -- remaining steps included --
   is exactly as it was;
 - a `throw` cannot escape: the barrier is also a catch wall, so an unmatched
-  throw inside the call becomes `no-catch` there.
+  throw inside the call becomes `no-catch` there;
+- a completion already unwinding *outside* the call is untouched. Containment
+  is reachable from inside an enclosing completion's cleanup drain -- an
+  `unwind-protect` form, or a `FeProtectWithCleanup()` entry, that calls a
+  host native which contains -- and the enclosing completion's kind and
+  condition object survive it, so an enclosing `condition-case` still binds
+  the object that was in flight and a host that the enclosing completion
+  reaches still reads it from `FeGetCompletion()` and `FeGetCondition()`.
+  What a contained completion replaces is what a *cleanup's own* raise
+  replaces, and it is not one: an uncontained raise inside a cleanup does
+  still replace the completion being unwound, which is the long-standing
+  rule for cleanups and is unchanged.
 
 `options` bounds this call rather than being ignored in favour of an ambient
 record, which is the difference from `FeCallWithOptions()` when called from
