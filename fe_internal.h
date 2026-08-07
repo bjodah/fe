@@ -920,6 +920,36 @@ typedef struct FeEvaluationControl {
   bool limited;
 } FeEvaluationControl;
 
+// The identity of the input unit an evaluation is inside, as one value: the
+// scope number a one-argument-`defvar` mark made now carries (sub-plan 12C
+// Part 2) together with the source label and reader position a diagnostic
+// raised now is prefixed with. They are one thing because a unit is entered
+// and left as a whole -- `EvaluateInput` on its normal return, the two
+// containment barriers in fe_run.c on a contained abnormal exit, and
+// `FeEnterInputUnit`/`FeLeaveInputUnit` for a host that drives its own
+// read-eval loop -- and because the Phase 12 fix cycle found both halves
+// leaking on paths where only one of them was being put back: an
+// UNCONTAINED raise left the abandoned unit's scope number in the context
+// for the life of the context (so a legitimately-loaded one-argument
+// `defvar` mark became invisible to the host, and the abandoned unit's
+// became visible), and a CONTAINED one put the scope back but not the
+// label (so every later diagnostic in the enclosing file lost its file
+// name). `EnterHostInputContext` is the third case: leaving for the host,
+// where there is no enclosing unit to go back to.
+typedef struct FeInputUnit {
+  const char* label;
+  size_t scope;
+  size_t offset;
+  size_t line;
+  bool has_offset;
+  bool has_line;
+} FeInputUnit;
+
+// Defined in fe.c beside `EvaluateInput`, the unit machinery's own site.
+FeInputUnit SaveInputUnit(const FeContext* ctx);
+void RestoreInputUnit(FeContext* ctx, const FeInputUnit* saved);
+void EnterHostInputContext(FeContext* ctx);
+
 // Evaluation-control helpers, defined with the rest of the evaluator in
 // fe_eval.c. Declared here instead of kept `static` because `GetBound`
 // (above, defined in fe.c) charges its environment walk against the same

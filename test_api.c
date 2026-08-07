@@ -92,6 +92,23 @@ static bool IsRendered(FeContext* context,
   return strcmp(rendered, expected) == 0;
 }
 
+// Calls `(NAME)` from HOST CONTEXT -- an `FeCall` straight from C, with no
+// input unit in force -- and renders the result. This is the probe the
+// one-argument-`defvar` scope carrier's host-context rule is stated in
+// terms of ("outside any input unit every mark is visible"), and it is the
+// only way to ask that question: every `FeEvaluateString` is itself a unit.
+static bool HostCallIs(FeContext* context,
+                       const char* name,
+                       const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  FeObject* const callable =
+      FeGetFunction(context, FeMakeSymbol(context, name));
+  const bool ok =
+      IsRendered(context, FeCall(context, callable, nullptr, 0), expected);
+  FeRestoreGC(context, gc);
+  return ok;
+}
+
 [[noreturn]] static void HandleError(
     // cppcheck-suppress constParameterCallback
     FeContext* context,
@@ -8184,10 +8201,12 @@ static bool TestOneArgDefvarScope(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
   CHECK(context != nullptr);
-  ErrorState state = {.context = context};
+  static ErrorState state;
+  state = (ErrorState){.context = context};
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
   FeDefineNative(context, "load-string", ContainEvaluateString);
+  FeDefineNative(context, "raise-host-quit", RaiseHostQuit);
 
 #define CHK(expr, expected)                                                  \
   CHECK(IsRendered(                                                          \
@@ -8244,8 +8263,10 @@ static bool TestOneArgDefvarScope(void) {
       "      (let ((mv 'out)) (mv-read)))",
       "(inner unbound)");
 
-  // ABNORMAL EXIT from a nested unit. `EvaluateInput` restores the scope on
-  // its normal return only, so the containment barrier has to do it here --
+  // CONTAINED abnormal exit from a nested unit -- the half of "abnormal
+  // exit" the containment barriers cover, and (until the Phase 12 fix
+  // cycle) the only half this case named. `EvaluateInput` restores the
+  // scope on its normal return only, so the barrier has to do it here --
   // and it does: the outer unit's own mark still binds dynamically after a
   // nested unit raised halfway through.
   CHK("(internal--mark-special 'av nil)"
@@ -8254,6 +8275,75 @@ static bool TestOneArgDefvarScope(void) {
       "      (load-string \"(internal--mark-special 'zz nil) (car 6)\")"
       "      (let ((av 'after)) (av-read)))",
       "(before (contained (wrong-type-argument listp 6)) after)");
+
+  // The same barrier restores the enclosing unit's LABEL, not only its
+  // scope number: the raise the nested unit made cleared the label on its
+  // way to the host boundary, so without this the outer file's next
+  // diagnostic -- and every one after it -- came out with no file name at
+  // all. Line 2 is the point: the message names the OUTER unit and the
+  // outer unit's line, after an inner unit failed on its own line 1.
+  static const char after_contained[] = "(load-string \"(car 6)\")\n(car 7)\n";
+  CHECK(ExpectEvaluationError(context, &state, "unit.fe", after_contained,
+                              sizeof(after_contained) - 1,
+                              "unit.fe:2: expected pair, got integer"));
+
+  // UNCONTAINED abnormal exit -- the other half, and the Phase 12 fix
+  // cycle's blocker. A raise that no barrier holds reaches
+  // `TransferEvaluationError` and the host `error_fn`, `longjmp`ing past
+  // `EvaluateInput`'s restore and past the containment barriers alike (the
+  // same way it skips the `EndEvaluationControl` that would have put the
+  // control record back, which is why `RaiseCompletionCore` clears that
+  // record itself). Nothing put the scope back, so the abandoned unit's
+  // number stayed in the context for the life of the context, and the
+  // documented host-context rule -- outside any input unit every mark is
+  // visible -- silently stopped holding: a one-argument `defvar` mark a
+  // legitimately loaded file made became INVISIBLE to the host. In kg that
+  // is one mistyped `M-:` inverting the answers for the rest of the
+  // session. The fix is `EnterHostInputContext` at the host exit, and the
+  // probe is the host-context rule itself, asked before and after.
+  //
+  // Each of the three abnormal kinds is exercised, because all three leak
+  // the same way and only one of them is an ordinary error.
+  CHK("(internal--mark-special 'uc nil)"
+      "(fset 'uc-read (fn () (if (boundp 'uc) uc 'unbound)))"
+      "(fset 'uc-let (fn () (let ((uc 'set)) (uc-read))))"
+      "(uc-let)",
+      "set");
+  CHECK(HostCallIs(context, "uc-let", "set"));
+  CHECK(context->input_scope == 0);
+
+  static const char abandon_error[] =
+      "(internal--mark-special 'leaked nil) (car 6)";
+  CHECK(ExpectEvaluationError(context, &state, "abandoned.fe", abandon_error,
+                              sizeof(abandon_error) - 1,
+                              "abandoned.fe:1: expected pair, got integer"));
+  CHECK(context->input_scope == 0);
+  CHECK(HostCallIs(context, "uc-let", "set"));
+
+  static const char abandon_quit[] =
+      "(internal--mark-special 'leaked nil) (raise-host-quit)";
+  CHECK(ExpectCompletionKind(context, &state, "abandoned.fe", abandon_quit,
+                             sizeof(abandon_quit) - 1, nullptr,
+                             "abandoned.fe:1: host quit", FeCompletionQuit));
+  CHECK(context->input_scope == 0);
+  CHECK(HostCallIs(context, "uc-let", "set"));
+
+  static const char abandon_budget[] =
+      "(internal--mark-special 'leaked nil) (while t 1)";
+  const FeEvalOptions tiny_budget = {.step_limit = 64};
+  CHECK(ExpectCompletionKind(context, &state, "abandoned.fe", abandon_budget,
+                             sizeof(abandon_budget) - 1, &tiny_budget,
+                             "abandoned.fe:1: evaluation step limit exceeded",
+                             FeCompletionBudget));
+  CHECK(context->input_scope == 0);
+  CHECK(HostCallIs(context, "uc-let", "set"));
+
+  // And the unit that was abandoned does not keep evaluating in the next
+  // one: a fresh unit gets a fresh number, so the mark the abandoned unit
+  // made is foreign to it exactly as any other unit's would be.
+  CHK("(fset 'leaked-read (fn () (if (boundp 'leaked) leaked 'unbound)))"
+      "(let ((leaked 'here)) (leaked-read))",
+      "unbound");
 
 #undef CHK
 

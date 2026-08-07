@@ -272,12 +272,18 @@ bool FeTryCallWithOptions(FeContext* ctx,
   const size_t volatile saved_run_base = ctx->run_base;
   const size_t volatile saved_reentry = ctx->native_reentry_depth;
   const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
-  // The input unit (sub-plan 12C Part 2). `EvaluateInput` restores it on its
-  // own normal return; this is the abnormal path, and it is the one that
-  // matters -- a contained failure is exactly how an outer `load` keeps
-  // evaluating after an inner one raised, and without this its own
-  // let-dynamic marks would stop matching for the rest of the file.
-  const size_t volatile saved_input_scope = ctx->input_scope;
+  // The input unit (sub-plan 12C Part 2, completed by the Phase 12 fix
+  // cycle). `EvaluateInput` restores it on its own normal return; this is
+  // the CONTAINED abnormal path -- a contained failure is exactly how an
+  // outer `load` keeps evaluating after an inner one raised, and without
+  // this its own let-dynamic marks would stop matching, and its diagnostics
+  // would lose their file name, for the rest of the file. The UNCONTAINED
+  // abnormal path is not this one and never reaches here: a raise that no
+  // barrier holds `longjmp`s past this frame entirely, exactly as it skips
+  // the `EndEvaluationControl` that would otherwise put the control record
+  // back -- which is why `RaiseCompletionCore` clears that record, and
+  // leaves the input unit for the host, at the host exit itself.
+  const FeInputUnit saved_unit = SaveInputUnit(ctx);
   FeObject* const volatile saved_call_list = ctx->call_list;
   jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
   jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
@@ -311,7 +317,7 @@ bool FeTryCallWithOptions(FeContext* ctx,
   ctx_v->run_base = saved_run_base;
   ctx_v->native_reentry_depth = saved_reentry;
   ctx_v->cleanup_floor = saved_cleanup_floor;
-  ctx_v->input_scope = saved_input_scope;
+  RestoreInputUnit(ctx_v, &saved_unit);
   ctx_v->call_list = saved_call_list;
   ctx_v->evaluator_catch = saved_evaluator_catch;
   ctx_v->condition_catch = saved_condition_catch;
@@ -390,12 +396,18 @@ bool FeTryEvaluateStringWithOptions(FeContext* ctx,
   const size_t volatile saved_run_base = ctx->run_base;
   const size_t volatile saved_reentry = ctx->native_reentry_depth;
   const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
-  // The input unit (sub-plan 12C Part 2). `EvaluateInput` restores it on its
-  // own normal return; this is the abnormal path, and it is the one that
-  // matters -- a contained failure is exactly how an outer `load` keeps
-  // evaluating after an inner one raised, and without this its own
-  // let-dynamic marks would stop matching for the rest of the file.
-  const size_t volatile saved_input_scope = ctx->input_scope;
+  // The input unit (sub-plan 12C Part 2, completed by the Phase 12 fix
+  // cycle). `EvaluateInput` restores it on its own normal return; this is
+  // the CONTAINED abnormal path -- a contained failure is exactly how an
+  // outer `load` keeps evaluating after an inner one raised, and without
+  // this its own let-dynamic marks would stop matching, and its diagnostics
+  // would lose their file name, for the rest of the file. The UNCONTAINED
+  // abnormal path is not this one and never reaches here: a raise that no
+  // barrier holds `longjmp`s past this frame entirely, exactly as it skips
+  // the `EndEvaluationControl` that would otherwise put the control record
+  // back -- which is why `RaiseCompletionCore` clears that record, and
+  // leaves the input unit for the host, at the host exit itself.
+  const FeInputUnit saved_unit = SaveInputUnit(ctx);
   FeObject* const volatile saved_call_list = ctx->call_list;
   jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
   jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
@@ -423,7 +435,7 @@ bool FeTryEvaluateStringWithOptions(FeContext* ctx,
   ctx_v->run_base = saved_run_base;
   ctx_v->native_reentry_depth = saved_reentry;
   ctx_v->cleanup_floor = saved_cleanup_floor;
-  ctx_v->input_scope = saved_input_scope;
+  RestoreInputUnit(ctx_v, &saved_unit);
   ctx_v->call_list = saved_call_list;
   ctx_v->evaluator_catch = saved_evaluator_catch;
   ctx_v->condition_catch = saved_condition_catch;

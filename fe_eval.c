@@ -693,8 +693,18 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   ctx->condition = in_flight;
   ctx->completion = kind;
   ClearEvaluationControl(ctx);
-  ctx->error_label = nullptr;
-  ctx->error_has_offset = false;
+  // And only now is the input unit left. This is the whole of the fix for
+  // the Phase 12 fix cycle's blocker: `EvaluateInput` puts the enclosing
+  // unit back on its normal return and the two containment barriers put it
+  // back on a contained abnormal exit, but an UNCONTAINED raise -- one that
+  // reaches the host `error_fn` through `FeEvaluateStringWithOptions` or
+  // `FeEvaluateFileWithOptions` -- `longjmp`s past both, and left the
+  // abandoned unit's scope number in the context for the life of the
+  // context. There is nothing to restore here (every unit between the raise
+  // and the host is being abandoned at once, which is what the drain above
+  // just did), so this leaves for the host context, which is where control
+  // is actually going.
+  EnterHostInputContext(ctx);
 
   TransferEvaluationError(ctx, msg, cl);
 }

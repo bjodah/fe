@@ -2280,29 +2280,67 @@ void FeReleaseRoot(FeContext* ctx, FeRoot* root) {
   *link = CDR(object);
 }
 
-static FeObject* EvaluateInput(FeContext* ctx,
-                               const char* label,
-                               FeReadFn* read,
-                               void* input) {
-  const char* saved_label = ctx->error_label;
-  const size_t saved_offset = ctx->error_offset;
-  const bool saved_has_offset = ctx->error_has_offset;
-  const size_t saved_line = ctx->error_line;
-  const bool saved_has_line = ctx->error_has_line;
-  // The input unit this evaluation is (sub-plan 12C Part 2). Taken on the
-  // way in and handed back on the way out, so nested loads stack: a file C
-  // that A loads gets a number of its own, and A's comes back when C
-  // returns. An *abnormal* exit past this restore is put back by the
-  // containment barriers in fe_run.c, which are the only way an outer unit
-  // keeps evaluating after an inner one failed.
-  const size_t saved_scope = ctx->input_scope;
+// Saves the enclosing input unit, and installs the one an evaluation is
+// about to run inside. `SaveInputUnit`/`RestoreInputUnit` are the pair every
+// site that owns a unit uses; see `FeInputUnit` in fe_internal.h for why the
+// scope number and the diagnostic label travel together.
+FeInputUnit SaveInputUnit(const FeContext* ctx) {
+  return (FeInputUnit){
+      .label = ctx->error_label,
+      .scope = ctx->input_scope,
+      .offset = ctx->error_offset,
+      .line = ctx->error_line,
+      .has_offset = ctx->error_has_offset,
+      .has_line = ctx->error_has_line,
+  };
+}
+
+void RestoreInputUnit(FeContext* ctx, const FeInputUnit* saved) {
+  ctx->error_label = saved->label;
+  ctx->input_scope = saved->scope;
+  ctx->error_offset = saved->offset;
+  ctx->error_line = saved->line;
+  ctx->error_has_offset = saved->has_offset;
+  ctx->error_has_line = saved->has_line;
+}
+
+// Leaves for the host: no input unit at all. Called from the one place a
+// completion stops being any unit's business -- `RaiseCompletionCore`'s host
+// exit, after the drain -- where there is no enclosing unit to restore,
+// every unit between the raise and the host having been abandoned wholesale.
+// Scope 0 is the host context the manifest's `one-arg-defvar-scope-carrier`
+// row describes, where every mark is visible; dropping the label keeps a
+// later, unrelated raise from being prefixed with a stale file name.
+void EnterHostInputContext(FeContext* ctx) {
+  ctx->input_scope = 0;
+  ctx->error_label = nullptr;
+  ctx->error_has_offset = false;
+}
+
+// Enters the input unit this evaluation is (sub-plan 12C Part 2). The scope
+// number is taken on the way in and handed back on the way out, so nested
+// loads stack: a file C that A loads gets a number of its own, and A's comes
+// back when C returns. An *abnormal* exit past the restore below is covered
+// by the containment barriers in fe_run.c when the completion is contained
+// -- the only way an outer unit keeps evaluating after an inner one failed
+// -- and by `EnterHostInputContext` when it is not.
+static void EnterInputUnit(FeContext* ctx, const char* label) {
   ctx->input_scope = ++ctx->input_scope_next;
-  const size_t gc = FeSaveGC(ctx);
   ctx->error_label = label;
+  ctx->error_offset = 0;
   ctx->error_has_offset = true;
   ctx->error_has_line = true;
   ctx->error_line = 1;
   ctx->top_form_line = 0;
+}
+
+static FeObject* EvaluateInput(FeContext* ctx,
+                               const char* label,
+                               FeReadFn* read,
+                               void* input) {
+  const FeInputUnit enclosing = SaveInputUnit(ctx);
+  EnterInputUnit(ctx, label);
+  const size_t gc = FeSaveGC(ctx);
   ctx->nextchr = '\0';
   ctx->evaluation_result = &nil;
 
@@ -2320,12 +2358,7 @@ static FeObject* EvaluateInput(FeContext* ctx,
   }
 
   FeRestoreGC(ctx, gc);
-  ctx->error_label = saved_label;
-  ctx->error_offset = saved_offset;
-  ctx->error_has_offset = saved_has_offset;
-  ctx->error_line = saved_line;
-  ctx->error_has_line = saved_has_line;
-  ctx->input_scope = saved_scope;
+  RestoreInputUnit(ctx, &enclosing);
   return ctx->evaluation_result;
 }
 
