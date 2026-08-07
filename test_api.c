@@ -8689,9 +8689,10 @@ static bool TestHostedInputUnit(void) {
     CHECK(context->input_scope == 0);
   }
 
-  static const char past_end[] = "(hosted-open \"x\" \"1\")";
-  CHECK(FeEvaluateString(context, "unit.fe", past_end, sizeof(past_end) - 1) !=
-        nullptr);
+  // Its two rejections, asked from host context so the diagnostic carries
+  // no unit label: both raise through the ordinary error path rather than
+  // answering, which is what a host gets when it hands over a cursor it did
+  // not initialise or a source it did not have.
   {
     size_t offset = 9;
     size_t line = 1;
@@ -8703,8 +8704,15 @@ static bool TestHostedInputUnit(void) {
       CHECK(false);
     }
     CHECK(state.called);
-    FeLeaveInputUnit(context, &hosted_units[0].enclosing);
-    hosted_depth = 0;
+    offset = 0;
+    state.called = false;
+    state.expected_message = "null source";
+    if (setjmp(state.jump) == 0) {
+      (void)FeReadInputForm(context, nullptr, 4, &offset, &line);
+      CHECK(false);
+    }
+    CHECK(state.called);
+    CHECK(context->input_scope == 0 && hosted_depth == 0);
   }
 
 #undef CHK
