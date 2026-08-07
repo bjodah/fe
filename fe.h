@@ -61,7 +61,22 @@
 // version that does not move cannot tell kg whether the fe it is linking
 // against has the entry point at all -- the same reasoning version 3's
 // language bump used, and the same `static_assert` tripwire.
-#define FE_API_VERSION 7
+//
+// Version 8 (Phase 12's fe fix cycle) adds the input-unit trio --
+// `FeEnterInputUnit`, `FeReadInputForm`, `FeLeaveInputUnit`, with the
+// `FeInputUnit` token they pass between them -- and nothing is removed or
+// changed in meaning, so every existing call keeps compiling. It exists
+// because no composition of the surface before it let a host run its own
+// read-eval loop inside ONE input unit in the CURRENT run, which is what a
+// `load` written in Lisp needs: `FeEvaluateString*` drives the reader
+// itself and starts a nested run per form, `FeTryEvaluateString*` adds a
+// throw wall, and neither `ctx->input_scope` nor the diagnostic label had
+// any public setter at all. A host looping over `FeReadString` plus `eval`
+// got one shared scope for every form it evaluated -- re-opening the
+// divergence sub-plan 12C Part 2 had just closed -- and reported every
+// error at the position of its own `eval` call rather than at the form's.
+// The bump is the same `static_assert` tripwire the earlier ones are.
+#define FE_API_VERSION 8
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -500,6 +515,95 @@ void FeWriteFile(FeContext* ctx, FeObject* obj, FILE* fp);
                                      const char* source,
                                      size_t length,
                                      size_t* offset);
+
+// The INPUT UNIT a host drives itself (FE_API_VERSION 8). An input unit is
+// what `FeEvaluateString`/`FeEvaluateFile` each are: a source label errors
+// raised inside it are prefixed with, a position within that source, and --
+// since FE_LANGUAGE_VERSION 10 -- the scope a one-argument `defvar` mark
+// made inside it belongs to. These three entry points hand that concept to a
+// host that wants to run the read-eval loop itself, which is the shape a
+// `load` written in Lisp has:
+//
+//   (let ((h (host-open path)))          ; FeEnterInputUnit
+//     (unwind-protect
+//         (let ((cell (host-read h)))    ; FeReadInputForm
+//           (while cell
+//             (eval (car cell))          ; the CURRENT run, not a nested one
+//             (setq cell (host-read h))))
+//       (host-close h)))                 ; FeLeaveInputUnit
+//
+// What this buys, and what nothing before it could give: the forms are
+// evaluated by `eval`, in the run the loop is already inside, so a
+// `condition-case` or a `catch` established OUTSIDE the loop receives a
+// condition, throw or quit raised by a loaded form. `FeEvaluateString*`
+// cannot do that -- it starts a nested run per form -- and
+// `FeTryEvaluateString*` deliberately walls throws off. Meanwhile the label
+// and the scope are the unit's, so errors report `path:LINE` of the form and
+// a one-argument `defvar` in a loaded file does not leak into the next one.
+//
+// `FeInputUnit` is the ENCLOSING unit, saved by `FeEnterInputUnit` into
+// storage the caller owns and handed back to `FeLeaveInputUnit`. Its fields
+// are exposed only so the caller can allocate one; nothing outside fe should
+// read or write them. Units nest, and the token is what makes them nest: a
+// host that opens a unit inside a unit keeps one token per level.
+//
+// The unwind guarantee, which is the same one `FeEvaluateString` has and is
+// stated in full in doc/c-api.md: a NORMAL exit needs the matching
+// `FeLeaveInputUnit`; a CONTAINED abnormal exit (`FeTryCallWithOptions`,
+// `FeTryEvaluateStringWithOptions`) restores the enclosing unit at the
+// barrier whether or not the host got to leave; and an UNCONTAINED abnormal
+// exit leaves for the host context -- scope 0, no label -- because every
+// unit between the raise and the host is abandoned at once. A host that
+// wants its own bookkeeping unwound too should leave from an
+// `unwind-protect` cleanup or an `FeProtectWithCleanup` handler, which run
+// during the drain, before either of those.
+typedef struct FeInputUnit {
+  const char* label;
+  size_t scope;
+  size_t offset;
+  size_t line;
+  bool has_offset;
+  bool has_line;
+} FeInputUnit;
+
+// Enters a new input unit: takes the next scope number, publishes `label`
+// as the source label for diagnostics raised inside it, and sets the
+// position to line 1. Starts no run and drives no reader -- it is a state
+// change on the context and nothing else, which is exactly why the loop
+// above stays in the run it was already in. `label` is borrowed for the
+// unit's lifetime, so it must outlive the matching `FeLeaveInputUnit` (this
+// differs from `FeEvaluateString`, which borrows only for its own call).
+// Writes the enclosing unit into `*enclosing`.
+void FeEnterInputUnit(FeContext* ctx,
+                      const char* label,
+                      FeInputUnit* enclosing);
+
+// Reads one form for the current input unit, and publishes the line that
+// form STARTS on as the position an error raised while evaluating it will
+// report. `FeReadString` cannot be used for this: it saves and restores the
+// label and position around itself, so a host looping over it can publish
+// neither, and it restarts line counting at 1 on every call.
+//
+// `offset` and `line` are the caller's cursor over one source, both
+// in/out and both required: initialise them to 0 and 1 and hand the same
+// pair back for each successive form. `offset` ends at the first byte not
+// belonging to the returned form. Returns `nullptr` when no form remains,
+// leaving the position where the last form left it. `source` may be
+// `nullptr` only when `length` is zero, and Fe never reads at or beyond
+// `length`. An embedded NUL inside that length is an error, not
+// end-of-input, exactly as for `FeReadString`.
+//
+// The returned form has no root of its own, as `FeRead`'s and
+// `FeReadString`'s do not: push it before allocating anything else.
+[[nodiscard]] FeObject* FeReadInputForm(FeContext* ctx,
+                                        const char* source,
+                                        size_t length,
+                                        size_t* offset,
+                                        size_t* line);
+
+// Leaves the unit `FeEnterInputUnit` entered, restoring the enclosing one's
+// scope, label and position from the token it wrote.
+void FeLeaveInputUnit(FeContext* ctx, const FeInputUnit* enclosing);
 
 [[nodiscard]] size_t FeToString(FeContext* ctx,
                                 FeObject* obj,

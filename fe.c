@@ -2334,6 +2334,69 @@ static void EnterInputUnit(FeContext* ctx, const char* label) {
   ctx->top_form_line = 0;
 }
 
+// The host's half of the same machinery (FE_API_VERSION 8): a unit entered
+// and left around a read-eval loop the host drives itself, so that the
+// forms can be evaluated by `eval` -- in the run the loop is already inside
+// -- instead of by an entry point that starts one. See `FeInputUnit` in
+// fe.h for what that buys and for the unwind guarantee.
+void FeEnterInputUnit(FeContext* ctx,
+                      const char* label,
+                      FeInputUnit* enclosing) {
+  *enclosing = SaveInputUnit(ctx);
+  EnterInputUnit(ctx, label);
+}
+
+void FeLeaveInputUnit(FeContext* ctx, const FeInputUnit* enclosing) {
+  RestoreInputUnit(ctx, enclosing);
+}
+
+// One form for the current unit, with the line that form STARTS on left in
+// `ctx->error_line` for whoever evaluates it -- which is the whole reason
+// this is not `FeReadString`. That entry point saves and restores the label
+// and position around itself (a host that reads a form through it cannot
+// leave a label behind, which is right for a reader and wrong for a loader),
+// and its line counter restarts at 1 per call, so a caller reading form
+// after form out of one buffer has no way to learn any form's line at all.
+// This is the same latch `EvaluateInput`'s loop makes from `TopFormLine`
+// after each `FeRead`, published for a caller instead of consumed in place.
+FeObject* FeReadInputForm(FeContext* ctx,
+                          const char* source,
+                          size_t length,
+                          size_t* offset,
+                          size_t* line) {
+  if (source == nullptr && length != 0) {
+    FeHandleError(ctx, "null source");
+  }
+  if (*offset > length) {
+    FeHandleError(ctx, "offset exceeds source length");
+  }
+  ctx->error_has_offset = false;
+  ctx->error_has_line = true;
+  ctx->top_form_line = 0;
+  ctx->nextchr = '\0';
+  StringInput input = {
+      .source = source, .length = length, .offset = offset, .line = *line};
+  FeObject* const form = FeRead(ctx, ReadString, &input);
+  if (ctx->nextchr != '\0') {
+    // The reader's one-character pushback: an atom stops at the delimiter
+    // that ended it, having already consumed it. `FeReadString` hands that
+    // byte back through the caller's offset; this hands back the LINE too,
+    // because a pushed-back newline has already been counted and the next
+    // call would otherwise count it twice.
+    (*offset)--;
+    if (ctx->nextchr == '\n') {
+      input.line--;
+    }
+    ctx->nextchr = '\0';
+  }
+  *line = input.line;
+  if (form != nullptr) {
+    ctx->error_line = TopFormLine(ctx);
+  }
+  ctx->top_form_line = 0;
+  return form;
+}
+
 static FeObject* EvaluateInput(FeContext* ctx,
                                const char* label,
                                FeReadFn* read,

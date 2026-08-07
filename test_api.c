@@ -140,7 +140,7 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 7);
+  static_assert(FE_API_VERSION == 8);
   static_assert(FE_LANGUAGE_VERSION == 10);
   CHECK(strcmp(FeVersion, "11.0") == 0);
 
@@ -8351,6 +8351,301 @@ static bool TestOneArgDefvarScope(void) {
   return true;
 }
 
+// The loader the input-unit trio exists for (FE_API_VERSION 8), built out
+// of three natives and five lines of Lisp because that is exactly the shape
+// it is meant to be built in: the host owns the source, the unit and the
+// cursor, and the EVALUATION is `eval`, in the run the loop is already
+// inside. `HostedUnit` is the per-level state a real loader keeps beside
+// its buffer; the array is what makes nesting a `load` inside a `load`
+// work.
+enum { HostedUnitDepth = 4, HostedUnitSource = 512, HostedUnitLabel = 64 };
+
+typedef struct HostedUnit {
+  char label[HostedUnitLabel];
+  char source[HostedUnitSource];
+  size_t length;
+  size_t offset;
+  size_t line;
+  FeInputUnit enclosing;
+} HostedUnit;
+
+static HostedUnit hosted_units[HostedUnitDepth];
+static size_t hosted_depth;
+
+static HostedUnit* HostedUnitAt(FeContext* context, FeObject* handle) {
+  const int64_t index = FeToInteger(context, handle);
+  if (index < 1 || (size_t)index > hosted_depth) {
+    FeHandleError(context, "hosted unit: stale handle");
+  }
+  return &hosted_units[index - 1];
+}
+
+// `(hosted-open LABEL TEXT)` -> handle. Both strings are copied out of Fe
+// storage: the label is borrowed for the unit's whole lifetime, and the
+// source for the whole loop.
+static FeObject* HostedOpen(FeContext* context, FeObject* arguments) {
+  const FeObject* label = FeGetNextArgument(context, &arguments);
+  const FeObject* text = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  if (hosted_depth == HostedUnitDepth) {
+    FeHandleError(context, "hosted-open: too deep");
+  }
+  HostedUnit* const unit = &hosted_units[hosted_depth];
+  (void)CopyLoadText(context, label, unit->label, sizeof(unit->label));
+  unit->length =
+      CopyLoadText(context, text, unit->source, sizeof(unit->source));
+  unit->offset = 0;
+  unit->line = 1;
+  FeEnterInputUnit(context, unit->label, &unit->enclosing);
+  hosted_depth++;
+  return FeMakeInteger(context, (int64_t)hosted_depth);
+}
+
+// `(hosted-read HANDLE)` -> `(FORM)`, or nil when no form remains. The
+// one-element wrapper is how the Lisp loop tells end-of-input from a form
+// that IS nil.
+static FeObject* HostedRead(FeContext* context, FeObject* arguments) {
+  FeObject* const handle = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  HostedUnit* const unit = HostedUnitAt(context, handle);
+  FeObject* const form = FeReadInputForm(context, unit->source, unit->length,
+                                         &unit->offset, &unit->line);
+  if (form == nullptr) {
+    return FeNil(context);
+  }
+  const size_t gc = FeSaveGC(context);
+  FePushGC(context, form);
+  FeObject* const cell = FeCons(context, form, FeNil(context));
+  FeRestoreGC(context, gc);
+  return cell;
+}
+
+// `(hosted-close HANDLE)` -> nil. Called from an `unwind-protect` cleanup,
+// which is what makes it run on the abnormal paths too.
+static FeObject* HostedClose(FeContext* context, FeObject* arguments) {
+  FeObject* const handle = FeGetNextArgument(context, &arguments);
+  FeRequireNoArguments(context, arguments);
+  HostedUnit* const unit = HostedUnitAt(context, handle);
+  FeLeaveInputUnit(context, &unit->enclosing);
+  hosted_depth = (size_t)FeToInteger(context, handle) - 1;
+  return FeNil(context);
+}
+
+static bool TestHostedInputUnit(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "hosted-open", HostedOpen);
+  FeDefineNative(context, "hosted-read", HostedRead);
+  FeDefineNative(context, "hosted-close", HostedClose);
+  FeDefineNative(context, "raise-host-quit", RaiseHostQuit);
+  hosted_depth = 0;
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "unit.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // The loader itself. Five lines, and the only thing in them that
+  // evaluates is `eval`.
+  CHK("(fset 'hosted-load"
+      "  (fn (label text)"
+      "    (let ((h (hosted-open label text)) (cell nil) (result nil))"
+      "      (unwind-protect"
+      "          (do (setq cell (hosted-read h))"
+      "              (while cell"
+      "                (setq result (eval (car cell)))"
+      "                (setq cell (hosted-read h))))"
+      "        (hosted-close h))"
+      "      result)))"
+      "'ready",
+      "ready");
+
+  // It loads: the value is the last form's, and the forms ran in order.
+  CHK("(hosted-load \"h.el\" \"(setq q 1) (setq q (+ q 10)) q\")", "11");
+  CHK("q", "11");
+
+  // PER-FORM POSITION. The error reports the hosted unit's label and the
+  // line the FAILING FORM starts on -- not the enclosing `unit.fe`, and not
+  // the line of the `hosted-load` call. Form 4 begins on line 6: two blank
+  // lines and a comment line lie between the forms, which is the case a
+  // host counting its own newlines cannot get right without redoing the
+  // reader's whitespace and comment skipping.
+  static const char per_form[] =
+      "(hosted-load \"forms.el\""
+      " \"(setq q 1)\n\n(setq q 2)\n; a comment\n\n(car 6)\n\")";
+  CHECK(ExpectEvaluationError(context, &state, "unit.fe", per_form,
+                              sizeof(per_form) - 1,
+                              "forms.el:6: expected pair, got integer"));
+  // A form spanning several lines reports the line it STARTS on, which is
+  // what `EvaluateInput` latches too -- and this is the case that
+  // discriminates: without the latch the position is wherever the reader
+  // stopped, so this one answers line 4 while the single-line cases above
+  // still answer correctly by coincidence.
+  static const char spanning[] =
+      "(hosted-load \"span.el\" \"(setq q\n      1)\n(car\n  6)\n\")";
+  CHECK(ExpectEvaluationError(context, &state, "unit.fe", spanning,
+                              sizeof(spanning) - 1,
+                              "span.el:3: expected pair, got integer"));
+  // A reader error inside the unit reports the unit too.
+  static const char unread[] = "(hosted-load \"bad.el\" \"(setq q 1)\n(a b\")";
+  CHECK(ExpectEvaluationError(context, &state, "unit.fe", unread,
+                              sizeof(unread) - 1, "bad.el:2: unclosed list"));
+
+  // NO NEW RUN -- the whole point. A condition, a throw and a quit raised
+  // by a hosted form all reach handlers and catches established OUTSIDE the
+  // loop, in the same run. `FeEvaluateString*` cannot do this (a nested run
+  // per form) and `FeTryEvaluateString*` deliberately walls the throw off.
+  CHK("(condition-case e (hosted-load \"h.el\" \"(car 6)\")"
+      "  (error (list 'caught (car e))))",
+      "(caught wrong-type-argument)");
+  CHK("(catch 'tag (hosted-load \"h.el\" \"(throw 'tag 42)\"))", "42");
+  CHK("(condition-case e (hosted-load \"h.el\" \"(raise-host-quit)\")"
+      "  (quit (list 'caught e)))",
+      "(caught (quit))");
+  // And a handler INSIDE the loaded text still wins, as it would in a file.
+  CHK("(hosted-load \"h.el\" \"(condition-case e (car 6) (error 'inner))\")",
+      "inner");
+
+  // INPUT-UNIT SCOPING engages exactly as it does for `EvaluateInput`. A
+  // one-argument `defvar` mark made in a hosted unit binds dynamically
+  // inside that unit...
+  CHK("(fset 'hv-read (fn () (if (boundp 'hv) hv 'unbound))) 'ready", "ready");
+  // ...and not in a second hosted unit, and not in the ENCLOSING unit
+  // either. All three probes sit inside ONE `FeEvaluateString`, so the
+  // enclosing unit's own scope number is the same for all three and the
+  // only thing that differs is which hosted unit each `let` runs in --
+  // which is what makes this discriminating: with the label published but
+  // no fresh scope number taken, it answers `(from-u1 from-u2 from-outer)`.
+  CHK("(list (hosted-load \"u1.el\""
+      "        \"(internal--mark-special 'hv nil)"
+      "         (let ((hv 'from-u1)) (hv-read))\")"
+      "      (hosted-load \"u2.el\" \"(let ((hv 'from-u2)) (hv-read))\")"
+      "      (let ((hv 'from-outer)) (hv-read)))",
+      "(from-u1 unbound unbound)");
+  CHK("(special-variable-p 'hv)", "nil");
+
+  // NESTED hosted units follow the same equality rule the nested
+  // `EvaluateInput` units do: an outer unit's mark does not reach the unit
+  // it loads, and the outer unit still has its own mark afterwards.
+  CHK("(fset 'nv-read (fn () (if (boundp 'nv) nv 'unbound))) 'ready", "ready");
+  CHK("(setq inner-text \"(let ((nv 'inner)) (nv-read))\") 'ready", "ready");
+  CHK("(hosted-load \"outer.el\""
+      "  \"(internal--mark-special 'nv nil)"
+      "   (list (let ((nv 'outer)) (nv-read))"
+      "         (hosted-load \\\"inner.el\\\" inner-text)"
+      "         (let ((nv 'after)) (nv-read)))\")",
+      "(outer unbound after)");
+
+  // A hosted unit nested inside an `EvaluateInput` one does not see ITS
+  // mark either, and the enclosing unit keeps its own across the load.
+  CHK("(internal--mark-special 'ov nil)"
+      "(fset 'ov-read (fn () (if (boundp 'ov) ov 'unbound)))"
+      "(list (let ((ov 'outer)) (ov-read))"
+      "      (hosted-load \"in.el\" \"(let ((ov 'inner)) (ov-read))\")"
+      "      (let ((ov 'after)) (ov-read)))",
+      "(outer unbound after)");
+
+  // ABNORMAL EXIT THROUGH THE LOOP leaves the scope and the label restored,
+  // for each of the three kinds. The `condition-case` above already showed
+  // the handled case reaches; this shows what the enclosing unit sees
+  // afterwards -- line 2 of `unit.fe`, its own label and its own line, and
+  // the enclosing unit's mark still dynamic.
+  static const char after_caught[] =
+      "(condition-case e (hosted-load \"h.el\" \"(car 6)\") (error 'caught))\n"
+      "(car 7)\n";
+  CHECK(ExpectEvaluationError(context, &state, "unit.fe", after_caught,
+                              sizeof(after_caught) - 1,
+                              "unit.fe:2: expected pair, got integer"));
+  CHECK(context->input_scope == 0);
+  CHECK(hosted_depth == 0);
+
+  // Uncontained, all three kinds: the unit is left for the host context by
+  // `RaiseCompletionCore`, and the cleanup that would have left it ran
+  // first, during the drain.
+  static const char loop_error[] = "(hosted-load \"h.el\" \"(car 6)\")";
+  CHECK(ExpectEvaluationError(context, &state, "unit.fe", loop_error,
+                              sizeof(loop_error) - 1,
+                              "h.el:1: expected pair, got integer"));
+  CHECK(context->input_scope == 0 && hosted_depth == 0);
+
+  static const char loop_quit[] =
+      "(hosted-load \"h.el\" \"(raise-host-quit)\")";
+  CHECK(ExpectCompletionKind(context, &state, "unit.fe", loop_quit,
+                             sizeof(loop_quit) - 1, nullptr,
+                             "h.el:1: host quit", FeCompletionQuit));
+  CHECK(context->input_scope == 0 && hosted_depth == 0);
+
+  static const char loop_budget[] = "(hosted-load \"h.el\" \"(while t 1)\")";
+  const FeEvalOptions tiny_budget = {.step_limit = 256};
+  CHECK(ExpectCompletionKind(context, &state, "unit.fe", loop_budget,
+                             sizeof(loop_budget) - 1, &tiny_budget,
+                             "h.el:1: evaluation step limit exceeded",
+                             FeCompletionBudget));
+  CHECK(context->input_scope == 0 && hosted_depth == 0);
+
+  // The enclosing unit is intact after all of that: a mark it made before
+  // the failures still binds dynamically in it.
+  CHK("(internal--mark-special 'pv nil)"
+      "(fset 'pv-read (fn () (if (boundp 'pv) pv 'unbound)))"
+      "(let ((pv 'still)) (pv-read))",
+      "still");
+
+  // The reader entry's own argument checks, which a host gets wrong before
+  // it gets anything else right.
+  {
+    FeInputUnit enclosing;
+    FeEnterInputUnit(context, "direct.fe", &enclosing);
+    static const char two[] = "1\n(car 6)";
+    size_t offset = 0;
+    size_t line = 1;
+    CHECK(IsRendered(
+        context, FeReadInputForm(context, two, sizeof(two) - 1, &offset, &line),
+        "1"));
+    CHECK(IsRendered(
+        context, FeReadInputForm(context, two, sizeof(two) - 1, &offset, &line),
+        "(car 6)"));
+    // Past the end is nil, and the cursor does not move again.
+    const size_t settled = offset;
+    CHECK(FeReadInputForm(context, two, sizeof(two) - 1, &offset, &line) ==
+          nullptr);
+    CHECK(offset == settled && line == 2);
+    // An empty source is end-of-input immediately, and a null source is
+    // legal at length zero.
+    offset = 0;
+    CHECK(FeReadInputForm(context, nullptr, 0, &offset, &line) == nullptr);
+    FeLeaveInputUnit(context, &enclosing);
+    CHECK(context->input_scope == 0);
+  }
+
+  static const char past_end[] = "(hosted-open \"x\" \"1\")";
+  CHECK(FeEvaluateString(context, "unit.fe", past_end, sizeof(past_end) - 1) !=
+        nullptr);
+  {
+    size_t offset = 9;
+    size_t line = 1;
+    static const char one[] = "1";
+    state.called = false;
+    state.expected_message = "offset exceeds source length";
+    if (setjmp(state.jump) == 0) {
+      (void)FeReadInputForm(context, one, sizeof(one) - 1, &offset, &line);
+      CHECK(false);
+    }
+    CHECK(state.called);
+    FeLeaveInputUnit(context, &hosted_units[0].enclosing);
+    hosted_depth = 0;
+  }
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestDynamicBinding(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -8700,7 +8995,7 @@ int main(void) {
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion() &&
                  TestDynamicBinding() && TestOneArgDefvarScope() &&
-                 TestProtectedEvaluateString()
+                 TestHostedInputUnit() && TestProtectedEvaluateString()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

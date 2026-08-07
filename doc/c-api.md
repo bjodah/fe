@@ -14,12 +14,16 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 7 adds the
+types, and callback signatures declared in `fe.h`; API version 8 adds the
+input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
+API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-language version 10 is the cleanup-handler and `eval` contract (a handler
+language version 10 is the cleanup-handler, `eval` and input-unit contract
+(a handler
 established inside an `unwind-protect` cleanup is honored by that cleanup's
-own raise, and `eval` evaluates its form in the caller's run);
+own raise, `eval` evaluates its form in the caller's run, and a
+one-argument-`defvar` mark is scoped to the input unit that made it);
 language version 9 is the special-variable contract (`internal--mark-special`,
 `special-variable-p`, and shallow dynamic binding at `let`'s two binding
 paths); language version 8 is the reflective-expansion contract
@@ -37,12 +41,14 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 7);
+static_assert(FE_API_VERSION == 8);
 static_assert(FE_LANGUAGE_VERSION == 10);
 ```
 
-Fe 11.0 moves `FE_LANGUAGE_VERSION` 9 -> 10 and leaves `FE_API_VERSION` at 7;
-the reasoning is below, under the version history.
+Fe 11.0 moves `FE_LANGUAGE_VERSION` 9 -> 10 and, in Phase 12's fe fix cycle,
+`FE_API_VERSION` 7 -> 8; the reasoning for both is below, under the version
+history. The release string does not move again for the fix cycle: the cycle
+is the same phase, reopened, and 11.0 covers what the phase shipped.
 
 Fe 10.0 moved `FE_LANGUAGE_VERSION` 8 -> 9 and `FE_API_VERSION` 6 -> 7;
 the reasoning is below, under the version history.
@@ -110,9 +116,11 @@ self-evaluating keywords. Assigning `t`, `nil`, or a keyword now signals
 `setting-constant`, and a keyword such as `:foo` no longer needs quoting.
 
 `FE_LANGUAGE_VERSION` moved 9 -> 10 in sub-plan 12B, with `FeVersion` "10.0"
--> "11.0" and `FE_API_VERSION` deliberately left at 7 -- no declaration in
-`fe.h` changed. Two language changes land under it, and both change what an
-existing program answers.
+-> "11.0" and `FE_API_VERSION` left at 7 in that commit -- no declaration in
+`fe.h` changed there, though Phase 12's fix cycle moves it to 8 for the
+input-unit trio, and the two land under one `FeVersion` "11.0". THREE
+language changes land under language version 10, and all three change what
+an existing program answers.
 
 The first is a fix. A `condition-case` written inside an `unwind-protect`
 *cleanup* now handles what that cleanup raises. Before, it handled nothing at
@@ -123,7 +131,8 @@ ever searched for a handler, so `(unwind-protect 'body (condition-case nil
 the remaining case: a cleanup raise that *nothing in the cleanup* can handle
 still replaces the completion being unwound and is still catchable by an
 enclosing `condition-case`. A host's `FeProtectWithCleanup` cleanup
-establishes no handlers, so the native side of this is bit-identical.
+establishes no handlers of its own, so nothing changes for a native cleanup
+that runs no Lisp.
 
 The second is an addition: `eval`, Emacs' `(eval FORM &optional LEXICAL)`.
 FORM is an evaluated operand and its value is evaluated in the *caller's own
@@ -135,6 +144,30 @@ budget. LEXICAL must be nil or absent; a non-nil value is rejected by name
 `macroexpand`'s ENVIRONMENT uses. The environment is the global one, which is
 what Emacs' LEXICAL=nil means: the caller's lexical bindings are not visible
 to the evaluated form, while dynamically bound names are.
+
+The third is sub-plan 12C Part 2's input-unit scoping, and it changes what an
+existing *embedder* answers, not only what a program does. A one-argument
+`internal--mark-special` mark -- Emacs' one-argument `(defvar v)`, which
+makes `let` over the name dynamic while `special-variable-p` still answers
+nil -- now belongs to the input unit that made it. Every
+`FeEvaluateString()`/`FeEvaluateFile()` call is one such unit, and they
+nest, so two calls on one context no longer share those marks: a host that
+made the mark in one call and relied on it in the next now gets the lexical
+answer there, which is what Emacs gives for two separate files. Full marks
+(the two-argument form, and `defconst`) are global and unaffected, and so is
+`special-variable-p`. Outside any input unit -- a `FeCall()` straight from C,
+a host-driven `let` -- every mark is visible, because there is no unit there
+for one to be foreign to. See `doc/language.md` for the model and its two
+recorded residuals.
+
+`FE_API_VERSION` moved 7 -> 8 in Phase 12's fe fix cycle, for the input-unit
+trio: `FeEnterInputUnit`, `FeReadInputForm` and `FeLeaveInputUnit`, with the
+`FeInputUnit` token they pass between them. Nothing was removed and nothing
+changed meaning. It exists because no composition of the surface before it
+let a host run its own read-eval loop inside ONE input unit in the *current*
+run -- see "Driving An Input Unit Yourself" below for what that means and why
+a `load` written in Lisp needs it. `FeVersion` stays "11.0": the fix cycle is
+the same phase, and the release string covers what the phase shipped.
 
 `FE_API_VERSION` moved 6 -> 7 in sub-plan 11C, for one added declaration:
 `FeTryEvaluateStringWithOptions`. Nothing was removed and nothing changed
@@ -460,14 +493,113 @@ which is replaced by the next call to either helper. The result therefore
 survives allocations without growing the GC stack until another string or file
 evaluation begins, or until the context is closed.
 
-During either evaluation helper, reader errors are reported as
-`<label>:<offset>: <message>` and evaluator errors as
-`<label>: <message>`. File offsets start at zero at the stream position passed
-to `FeEvaluateFile()`. Passing `nullptr` as the label disables the label prefix.
-Fe borrows the label only for the duration of the call and does not retain its
-pointer. Before invoking the error callback, Fe copies the composed diagnostic
-into its temporary error-message buffer; as with other error messages, that
-borrowed message is valid only during the callback.
+During either evaluation helper, both reader and evaluator errors are
+reported as `<label>:<line>: <message>`, with one-based lines counted from
+the start of the input; an evaluator error names the line the failing
+top-level form *starts* on, which is what the reader latches after each
+form. Outside an input unit, where there is no label, a reader diagnostic
+falls back to `byte <offset>: <message>`. File offsets start at zero at the
+stream position passed to `FeEvaluateFile()`. Passing `nullptr` as the label
+disables the label prefix. Fe borrows the label only for the duration of the
+call and does not retain its pointer -- unlike `FeEnterInputUnit()`, which
+borrows it for the unit's whole lifetime. Before invoking the error callback,
+Fe copies the composed diagnostic into its temporary error-message buffer; as
+with other error messages, that borrowed message is valid only during the
+callback.
+
+### Input units, and what they scope
+
+Each `FeEvaluateString()`/`FeEvaluateFile()` call is an INPUT UNIT: a source
+label its diagnostics carry, a position within that source, and -- since
+`FE_LANGUAGE_VERSION` 10 -- the scope a one-argument `internal--mark-special`
+mark made inside it belongs to. Units nest, so a load reached from inside a
+load gets a unit of its own and the outer one comes back when it returns.
+
+The consequence a host has to know about is the scoping one. Two
+`FeEvaluateString()` calls on one context are two units, so a
+let-dynamic-only mark made in the first does not make `let` dynamic in the
+second; it is a *unit*-scoped mark, not a context-scoped one. Full marks are
+global and unaffected. Outside any unit -- `FeCall()` into a callable, a
+host-driven `let`, `SymbolIsLetDynamic` asked from C -- every mark is
+visible, so a host's own hooks and callbacks see the names a loaded file
+declared.
+
+The unit is entered and left as a whole, and it is put back on every exit:
+
+* a NORMAL return restores the enclosing unit;
+* a CONTAINED abnormal exit -- `FeTryCallWithOptions()`,
+  `FeTryEvaluateStringWithOptions()` -- restores the enclosing unit at the
+  barrier, which is how an outer load keeps its own marks and its own file
+  name after an inner one raised;
+* an UNCONTAINED abnormal exit, one that reaches the host `error_fn`, leaves
+  for the HOST CONTEXT rather than restoring anything: no unit, no label.
+  Every unit between the raise and the host is being abandoned at once, so
+  there is nothing to go back to. Cleanups registered inside the abandoned
+  units run first, during the drain, so a host that keeps bookkeeping of its
+  own still gets to unwind it.
+
+### Driving An Input Unit Yourself
+
+`FeEnterInputUnit()`, `FeReadInputForm()` and `FeLeaveInputUnit()`
+(`FE_API_VERSION` 8) hand the unit to a host that wants to run the read-eval
+loop itself. The shape they exist for is a `load` written in Lisp:
+
+```lisp
+(defun load (path)
+  (let ((h (host-open path)))          ; FeEnterInputUnit
+    (unwind-protect
+        (let ((cell (host-read h)))    ; FeReadInputForm
+          (while cell
+            (eval (car cell))          ; the CURRENT run, not a nested one
+            (setq cell (host-read h))))
+      (host-close h))))                ; FeLeaveInputUnit
+```
+
+`FeEnterInputUnit()` takes the next scope number, publishes `label`, and sets
+the position to line 1. It starts no run and drives no reader: it is a state
+change on the context and nothing else, which is exactly what lets the forms
+be evaluated by `eval` -- in the run the loop is already inside. So a
+`condition-case` or a `catch` established *outside* the loop receives a
+condition, a `throw` or a quit raised by a loaded form, which is the property
+no earlier composition could give. `FeEvaluateString()` starts a nested run
+per form, so a raise from a loaded form transfers to the outermost barrier,
+past every handler between the load and the raise;
+`FeTryEvaluateStringWithOptions()` contains that raise but is deliberately a
+throw wall. Measured, with the same loop driven both ways:
+
+| the loop evaluates with | `(condition-case e (load ...) (error ...))` | `(catch 'tag (load ...))` |
+| --- | --- | --- |
+| `eval` (this API) | receives | receives |
+| a per-form nested run | escapes to the host | `no-catch tag` to the host |
+
+`label` is borrowed for the unit's whole lifetime, so it must outlive the
+matching `FeLeaveInputUnit()`; storage the host owns per nesting level is the
+natural place for it. `FeInputUnit` is the enclosing unit, written into
+caller-owned storage by the enter and handed back to the leave; its fields
+are declared only so a caller can allocate one, and nothing outside Fe should
+read or write them. Nesting works because the host keeps one token per level.
+
+`FeReadInputForm()` reads one form and publishes the line that form *starts*
+on as the position an error raised while evaluating it will report.
+`FeReadString()` cannot be used for this: it saves and restores the label and
+position around itself, so a host looping over it publishes neither, and its
+line counter restarts at 1 on every call. `offset` and `line` are the
+caller's cursor over one source -- both in/out, both required -- initialised
+to 0 and 1 and handed back unchanged for each successive form; `offset` ends
+at the first byte not belonging to the returned form. It returns `nullptr`
+when no form remains. `source` may be `nullptr` only when `length` is zero,
+Fe never reads at or beyond `length`, and an embedded NUL inside that length
+is an error rather than end-of-input, exactly as for `FeReadString()`. The
+returned form has no root of its own, as `FeRead()`'s and
+`FeReadString()`'s do not: push it before allocating anything else.
+
+`FeLeaveInputUnit()` restores the enclosing unit from the token. The unwind
+guarantee above applies unchanged, which is why the sketch leaves from an
+`unwind-protect` cleanup: a cleanup runs during the drain, before either the
+containment barrier's restore or the host exit, so the host's own per-level
+bookkeeping unwinds with it. A host that skips the leave on an abnormal path
+is not left with a stale unit -- fe puts the unit back or drops it either way
+-- but it is left with its own state to reconcile.
 
 The lower-level `FeRead()` and `FeReadFile()` APIs remain available for
 streaming embedders and fuzzing. To evaluate such a stream manually, read and
