@@ -381,7 +381,39 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # gate fire: at 807 `make complexity-check` reports "FAIL: total complexity
 # 808 exceeds limit 807" and exits 2, and at 808 it passes; at 510 it
 # reports "FAIL: 1 file(s) exceed per-file limit 510" and exits 2.
-SCC_COMPLEXITY_MAX ?= 808
+#
+# Raised 808 -> 835 by Phase 12's fe FIX CYCLE (2026-08-07), which reopens
+# the workstream an acceptance review rejected and so forces the phase's
+# second pin move. The ceiling is not a new number: it is the 835 12A
+# Decision 7 already funded this phase, restored for the remainder of the
+# work it was funding. What the cycle has to pay for is one blocker fix
+# (`input_scope` was never restored when an input unit exited abnormally
+# through an unprotected entry point, so one failed `M-:` inverted
+# one-argument-`defvar` visibility for the rest of a kg session), the
+# loader entry trio the kg review's negative result sized
+# (`FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, which let a host
+# drive its own read-eval loop inside one input unit in the CURRENT run),
+# and three review majors that are documentation and test evidence rather
+# than code. Priced against the real tree at +0..2 for the blocker (the fix
+# is a store at the host exit plus a save/restore struct; scc counts
+# keywords and it introduces none) and +6..12 for the trio, so 27 points is
+# again well above the top of the range -- deliberately, because this is the
+# same funded ceiling and re-pricing it downward mid-phase would only mean
+# a third raise. The cycle re-sets this to its measured actual in its own
+# last commit, pre-pin, exactly as 12C's close did.
+#
+# `SCC_FILE_COMPLEXITY_MAX` again does NOT move. The blocker fix and the
+# entry trio both land in `fe.c` (152 of 520), for the reason the warning
+# above gives: `fe_eval.c` is at 511 with 9 points left, and the
+# Makefile-named second seam split remains the funded answer there.
+#
+# Proved live at this head, before the raise, the way this repository's
+# convention requires -- by temporarily lowering each cap and watching the
+# gate fire. At 807 `make complexity-check` reports "FAIL: total complexity
+# 808 exceeds limit 807" and exits 2; at 808, and at the 835 below, it
+# passes. At 510 it reports "FAIL: 1 file(s) exceed per-file limit 510" and
+# exits 2.
+SCC_COMPLEXITY_MAX ?= 835
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -625,7 +657,32 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # exceeds funded budget 1132 (+1)" and exits 2, and at 1133 it passes; at
 # `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1 function(s)
 # exceed complexity limit 14" and exits 2.
-PMCCABE_TOTAL_MAX ?= 1133
+#
+# Raised 1133 -> 1155 by Phase 12's fe FIX CYCLE (2026-08-07), the sibling
+# of the scc raise above and for the same reason: this is the 1155 12A
+# Decision 7 already funded for Phase 12, restored for the remainder of the
+# work it was funding after an acceptance review reopened the workstream.
+# This is the authoritative core measure, so it is the one that will say
+# what the fix cycle cost. Priced against the real tree: +4 for the blocker
+# fix (`SaveInputUnit`, `RestoreInputUnit`, `EnterHostInputContext` and
+# `EnterInputUnit`, four straight-line functions at 1 each -- the fix adds
+# no branch anywhere, it moves five scattered save/restore pairs behind one
+# named value and adds a store at the host exit) and +6..14 for the loader
+# entry trio, whose only branching member is `FeReadInputForm`'s argument
+# validation and reader-pushback bookkeeping. 22 points is above the top of
+# that range, deliberately: it is the same funded ceiling, and re-pricing it
+# downward mid-phase would only mean a third raise.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and `PMCCABE_NEW_FUNCTION_MAX`
+# at 15 -- every function the cycle adds must arrive at or under 15, which
+# the per-symbol ratchet checks independently of this total.
+# Proved live at this head, before the raise, by temporarily lowering each
+# gate and watching it fire: at 1132 `make pmccabe-check` reports "FAIL:
+# total complexity 1133 exceeds funded budget 1132 (+1)" and exits 2, and at
+# 1133 -- and at the 1155 below -- it passes; at
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1 function(s)
+# exceed complexity limit 14" and exits 2, the one function being
+# `RunEvaluationLoop` at 15.
+PMCCABE_TOTAL_MAX ?= 1155
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
