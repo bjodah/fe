@@ -320,6 +320,18 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # The next slice to touch that file should expect to price a second split
 # (the completion/cleanup machinery, lines 230-700, is the coherent seam)
 # rather than assume the room is there.
+# Re-measured and left at 806 by the Phase 11 fe fix cycle (2026-08-07),
+# pre-pin: the cycle fixed two blockers and a major and cost this unit
+# nothing at all. The checked binding-list advance is a `CheckType` call
+# rather than an `if`, the `for` it replaced and the `while` it uses count
+# the same, and the completion-in-flight fix and the result-rooting fix add
+# no branch anywhere. Per-file after the cycle: fe_eval.c 509, fe.c 152,
+# main.c 37, fex_io.c 28, fe_run.c 25 -- fe_eval.c unmoved, so the warning
+# above still stands exactly as written. Proved live at this head by
+# temporarily lowering each cap by one and watching the gate fire: at 805
+# `make complexity-check` reports "FAIL: total complexity 806 exceeds limit
+# 805" and at 806 it passes; at 508 it reports "FAIL: 1 file(s) exceed
+# per-file limit 508".
 SCC_COMPLEXITY_MAX ?= 806
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
@@ -507,6 +519,20 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # with it: the accessor's type check is a `CheckType` call rather than an
 # `if`, so scc's keyword count is unchanged at 806 and the fix pays for
 # itself in the branch it removes from the two walks.
+# Re-measured at the fix cycle's close (2026-08-07), pre-pin, and left at
+# 1121: that IS the measured actual, 1121 across 359 symbols, and the one
+# point above 11C's 1120 is the `NextLetBinding` raise above and nothing
+# else. Nothing was spent on the other two fixes -- the completion-in-flight
+# fix adds locals and stores to `RaiseCompletionCore`, whose per-symbol
+# complexity is 5 before and after, and the result-rooting fix deletes two
+# lines from `FeTryEvaluateStringWithOptions`, whose 2 is unchanged. No
+# per-symbol entry in `.ci/pmccabe-baseline.json` moved; the only diff to
+# that file in the whole cycle is the one added key. Proved live at this
+# head the same way: at 1120 `make pmccabe-check` reports "FAIL: total
+# complexity 1121 exceeds funded budget 1120 (+1)" and at 1121 it passes;
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 with the worst function in
+# the tree still `RunEvaluationLoop` at 15, and at 14 the gate reports
+# "FAIL: 1 function(s) exceed complexity limit 14".
 PMCCABE_TOTAL_MAX ?= 1121
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
