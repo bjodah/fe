@@ -21,8 +21,12 @@ Fe is a small, embeddable Lisp-like language implemented in C23. Read
 - `scripts/*.fe`: executable examples and regression-test inputs.
 - `tests/*.out` and `tests/*.err`: exact golden output for the scripts.
 - `doc/`: language, implementation, C API and fuzzing documentation, plus
-  `unwind-design.md`, which is a design for cleanup/unwinding that is
-  deliberately not implemented yet.
+  `unwind-design.md`, which is the ORIGINAL design for cleanup/unwinding.
+  It has been implemented since 06D; its status header records what
+  shipped, what later slices narrowed, and where the shipped behaviour
+  diverges from the design, while the body below that header stays as
+  written. `doc/implementation.md` is the description of what the code
+  actually does.
 - `.ci/`: the numbered CI stages and their shared environment.
 - `utils/`: complexity-budget checks used by CI.
 - `fuzz/`: raw-reader and grammar-steered evaluator fuzz harnesses.

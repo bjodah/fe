@@ -27,6 +27,19 @@ below for `MakeFile()`-shaped problems remains design work.
 (Decision 4, and Emacs' measured behaviour), and is replayed in the
 enclosing context so an enclosing `condition-case` or `catch` can take it.
 Nothing is printed to `stderr` behind the program's back any more.
+
+Two later qualifications, neither of which the body below reflects.
+Sub-plan 12B Part 1 narrowed the rule's scope: a raise a handler
+established *inside the running cleanup* takes is handled there, replaces
+nothing, and reaches no enclosing handler, so Decision 4 now governs only
+the case where nothing in the cleanup can handle it. And Phase 12's fix
+cycle recorded two measured divergences in where the replacement is
+delivered when it does happen -- a handler in the abandoned body, or a
+`catch` the in-flight completion had already exited, can take it where
+Emacs uses the enclosing handler or answers `no-catch`. Both are in
+`doc/language.md` and in the manifest as
+`unwind-protect-cleanup-raise-residuals`.
+
 Line-number references in the rest of this document have been replaced by
 function names: they were stale within one slice of being written, and the
 function names are what a reader can actually find. The rest of this
@@ -325,10 +338,16 @@ point is that handlers can rely on Emacs semantics and the divergence is
 observable from Lisp (`condition-case` around a failing cleanup); 06D
 implements it.
 
-**Shipped in 06D:** a cleanup failure restores the outer evaluator state and
-raises its new structured condition. It replaces the prior completion, runs
-the remaining cleanup entries, and is visible to an enclosing `condition-case`
-or `error_fn`; it is never printed as an auxiliary stderr diagnostic.
+**Shipped in 06D, and narrowed twice since:** a cleanup failure restores the
+outer evaluator state and raises its new structured condition. It replaces
+the prior completion, runs the remaining cleanup entries, and is visible to
+an enclosing `condition-case` or `error_fn`; it is never printed as an
+auxiliary stderr diagnostic. Since 12B Part 1 that is the rule only when
+nothing the cleanup itself established handles the raise: a `condition-case`
+written inside the cleanup takes it, and then nothing is replaced and no
+enclosing handler sees anything. And the delivery of a replacement that does
+happen diverges from Emacs in two shapes -- see the status header at the top
+of this file.
 
 ## Order of work
 

@@ -742,7 +742,7 @@ rejection.
 
 #### `(eval form &optional lexical)`
 
-Evaluates `form` and returns the result — Emacs' `eval`, with Emacs' arity.
+Evaluates `form` and returns the result -- Emacs' `eval`, with Emacs' arity.
 `form` is an ordinary evaluated argument, which is why the examples quote it,
 so `eval` evaluates twice: once to obtain the form, once to run it.
 
@@ -785,8 +785,8 @@ fe > (let ((v 'bound)) (eval 'v))
 bound
 ```
 
-`lexical` is accepted and must be `nil`. Emacs also accepts `t` — lexical
-binding with an empty environment — and an alist of `(NAME . VALUE)` lexical
+`lexical` is accepted and must be `nil`. Emacs also accepts `t` -- lexical
+binding with an empty environment -- and an alist of `(NAME . VALUE)` lexical
 bindings, neither of which Fe has an environment model for. A non-nil value
 raises `unsupported feature: eval lexical argument`, an ordinary catchable
 condition, rather than being silently ignored: the same convention
@@ -798,7 +798,7 @@ budget, reached the same way an equally deep ordinary recursion reaches it.
 
 #### `(and ...)`
 
-Evaluates each argument until one results in `nil` — the last argument’s value
+Evaluates each argument until one results in `nil` -- the last argument's value
 is returned if all the arguments are true. `(and)` with no arguments at all is
 `t`, Emacs' identity element for the operator, not `nil`.
 
@@ -811,7 +811,7 @@ nil
 
 #### `(or ...)`
 
-Evaluates each argument until one results in true, in which case that argument’s
+Evaluates each argument until one results in true, in which case that argument's
 value is returned. Returns `nil` if no arguments are true.
 
 ```clojure
@@ -1042,12 +1042,15 @@ between the runs are live and cannot be abandoned.
 
 ### Special Variables And Dynamic Binding
 
-This section is what `FE_LANGUAGE_VERSION` 9 means. There is no version table
-in this document: every version's rationale, language and API alike, lives in
-one place, the version history in
-[`doc/c-api.md`](c-api.md#api-compatibility) — including why 8 -> 9
+This section is what `FE_LANGUAGE_VERSION` **10** means for binding. Version
+9 was the special-variable cut itself -- marking, dynamic `let`, the restore
+on every completion kind -- and version 10 added the input-unit scope rule
+below, so the section as it now stands describes both. There is no version
+table in this document: every version's rationale, language and API alike,
+lives in one place, the version history in
+[`doc/c-api.md`](c-api.md#api-compatibility) -- including why 8 -> 9
 is the first bump in the series that changes what an *existing* program
-answers rather than only adding names.
+answers rather than only adding names, and what else version 10 covers.
 
 Fe's variables are lexical by default and stay that way. A symbol can be
 *marked*, and a marked symbol binds dynamically -- which is Emacs' model
@@ -1071,19 +1074,19 @@ call this primitive.
 
 The two flags differ in *scope* as well as in strength. A full mark is
 global and permanent. A let-dynamic-only mark belongs to the **input unit**
-that made it — one `FeEvaluateString()` or `FeEvaluateFile()` call, which
-for an embedder is one loaded file — and a `let` in a later unit over the
+that made it -- one `FeEvaluateString()` or `FeEvaluateFile()` call, which
+for an embedder is one loaded file -- and a `let` in a later unit over the
 same name is lexical again. Units nest: a unit loaded from inside another
 gets a scope of its own, does not see the enclosing unit's let-dynamic
 marks, does not leak its own back out when it returns, and leaves the
-enclosing unit's intact — including when it exits by raising, provided the
+enclosing unit's intact -- including when it exits by raising, provided the
 embedder contained the failure with `FeTryEvaluateStringWithOptions()`.
 That is Emacs' rule for the one-argument `defvar`, measured on 31.0.90 in
 all four directions.
 
-Two things it is not. Outside any input unit — a `FeCall()` into a
+Two things it is not. Outside any input unit -- a `FeCall()` into a
 callable, a host-driven `let`, the standalone interpreter, which reads and
-evaluates form by form and enters no unit at all — every mark is visible;
+evaluates form by form and enters no unit at all -- every mark is visible;
 there is no unit there for one to be foreign to. And the marking is
 consulted where the `let` *runs*, not where it was *written*: in Emacs the
 one-argument `defvar` is an entry in the lexical environment, so a function
@@ -1277,13 +1280,13 @@ Returns true if the values `a` and `b` are equal in value. Numbers compare
 by mathematical value across the two numeric types, so `(is 3 3.0)` is `t`:
 integers compare exactly, float-vs-float pairs keep Fe's historical epsilon
 tolerance (`IsNearlyEqual`), and a mixed pair converts the integer to double
-and then takes **the same epsilon tolerance** — a mixed pair is never
+and then takes **the same epsilon tolerance** -- a mixed pair is never
 stricter than the same two values both spelled as floats, so
 `(is 3 (cube-root 27))` and `(is 3.0 (cube-root 27))` are both `t` even
 though `(cube-root 27)` is `3.0000000000000004`. Strings are equal if
 equivalent, and all other values are equal only if they are the same
-underlying object. `is` is Fe's own broad comparator — recorded as such by
-05A's Decision 2, whose contract is the tolerant one — not an Emacs Lisp
+underlying object. `is` is Fe's own broad comparator -- recorded as such by
+05A's Decision 2, whose contract is the tolerant one -- not an Emacs Lisp
 form; `eq` and `eql` below are the exact comparisons, and they are Emacs
 semantics.
 
@@ -1291,7 +1294,7 @@ semantics.
 
 Emacs Lisp's identity operator (05A Decision 2, rows E1-E3, landed 05D):
 `t` if `a` and `b` are the same object, or if both are integers with the same
-value — the fixnum rule Emacs' `(eq 3 3)` depends on. Everything else is
+value -- the fixnum rule Emacs' `(eq 3 3)` depends on. Everything else is
 identity: two separately-read `3.0` floats are two boxed objects, so
 `(eq 3.0 3.0)` is `nil`, and `(eq "a" "a")` is `nil` for the same reason.
 
@@ -1306,7 +1309,7 @@ nil
 
 #### `(eql a b)`
 
-`eq`, or two same-type numbers equal by value — integers by value, floats by
+`eq`, or two same-type numbers equal by value -- integers by value, floats by
 their exact bits. `(eql 3 3.0)` is `nil` because the types differ, and
 `(eql 0.0 -0.0)` is `nil` because the sign bit differs; `(eql 1.5 1.5)` is
 `t` (rows E4-E5).
@@ -1353,12 +1356,12 @@ condition name.
 
 Numeric equality, matching Emacs Lisp: `(= a b c ...)` is true only if every
 argument is numerically equal to every other, by *mathematical value across
-types* — `(= 3 3.0)` is `t`. Until sub-plan 02C of the Emacs-subset hard cut,
+types* -- `(= 3 3.0)` is `t`. Until sub-plan 02C of the Emacs-subset hard cut,
 `=` was instead Fe's historical, non-Emacs assignment primitive -- see
 `(setq symbol value ...)` above for its replacement.
 
 At least one argument is required: `(=)` is `wrong-number-of-arguments`.
-One argument is `t` without comparing *or type-checking* anything — a chain
+One argument is `t` without comparing *or type-checking* anything -- a chain
 of one has no pair to run, so `(= "a")` and `(= t)` are `t`, matching Emacs.
 Two or more are compared as one chain, left to right.
 
@@ -1490,14 +1493,20 @@ because every condition Fe registers reaches `error` through its chain of
 parents. Almost all of them name it directly. The one exception is
 `file-missing`, whose parent is `file-error`, which is Emacs' own chain --
 `(get 'file-missing 'error-conditions)` is `(file-missing file-error error)`
-there — so a `file-missing` is caught by a handler naming `file-missing`,
+there -- so a `file-missing` is caught by a handler naming `file-missing`,
 `file-error` or `error`, and, the chain running one way only, a plain
 `file-error` is not caught by a `file-missing` handler. Nothing in Fe
 *raises* either: they exist for a host that does file operations, which Fe's
 core does not. Emacs' other deeper chains (`overflow-error` is a
-`range-error` is an `arith-error`) and its third file class
-`permission-denied` are deliberately out of scope until a producer needs
-them. `quit` is separate and requires a `quit` or
+`range-error` is an `arith-error`) and its two remaining file classes --
+`permission-denied` and `file-already-exists`, both
+`(CLASS file-error error)` there -- are deliberately out of scope until a
+producer needs them. Being absent from the table, both are refused by
+`signal` as well as unraisable: measured, `(signal 'file-already-exists
+'("a"))` is `(file-already-exists "a")` in Emacs 31.0.90 and
+`(error "Invalid error symbol" file-already-exists)` here.
+
+`quit` is separate and requires a `quit` or
 `t` handler -- and that is true of a real host interrupt (a C-g) as well as
 of `(signal 'quit nil)`; both carry the condition object `(quit)`. Fe's own
 resource ceilings -- the evaluation step budget, the frame wall and the
@@ -1572,8 +1581,8 @@ first, then round: `(ceiling -7 2)` is `-3`); a result outside int64's range
 is `arith-error`. `expt` returns an integer for two integer arguments with a
 non-negative exponent (`(expt 2 8)` is `256`), and promotes to float for a
 negative exponent or any float argument (`(expt 2 -1)` is `0.5`,
-`(expt 2.0 8)` is `256.0`). The transcendentals — `sqrt`, `sin`, `cos`,
-`tan`, `asin`, `acos`, `atan`, `exp`, `log` — return floats always
+`(expt 2.0 8)` is `256.0`). The transcendentals -- `sqrt`, `sin`, `cos`,
+`tan`, `asin`, `acos`, `atan`, `exp`, `log` -- return floats always
 (`(sqrt 16)` is the float `4.0`).
 
 In the standalone `fe` binary the Fex extensions shadow `floor`, `ceiling`,

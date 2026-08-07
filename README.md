@@ -17,7 +17,10 @@ The language offers the following features:
 * Lexically scoped variables by default; a symbol marked with
   `internal--mark-special` binds dynamically instead — shallow binding, with
   the value restored on every completion kind (`special-variable-p` answers
-  whether a symbol is marked)
+  whether a symbol is marked). A mark made with a nil FULL-P — Emacs' one-
+  argument `(defvar v)` — is scoped to the *input unit* that made it, so one
+  `FeEvaluateString()`/`FeEvaluateFile()` call's mark does not make `let`
+  dynamic in the next one; a full mark is global
 * Closures
 * Variadic functions
 * Lisp-2 namespaces — each symbol has a value cell and a function cell, call
@@ -30,7 +33,9 @@ The language offers the following features:
 * Structured conditions: `signal`, `error`, and `condition-case`, with a
   static error hierarchy and cleanup-safe unwinding — a handler established
   inside an `unwind-protect` cleanup handles that cleanup's own raise, and
-  one it cannot handle replaces the completion being unwound
+  one it cannot handle replaces the completion being unwound (where that
+  replacement is *delivered* diverges from Emacs in two recorded shapes; see
+  `doc/language.md`)
 * `eval`, evaluating its form in the caller's own run, so conditions, throws
   and quits out of it reach enclosing handlers and catches
 * Unconditional strict arity for functions, macros, and core primitives

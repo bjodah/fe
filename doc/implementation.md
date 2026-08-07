@@ -747,9 +747,13 @@ nested `Evaluate()` call per form -- fewer nested barriers for a
 multi-form cleanup, same `let`-threads-through-forms semantics. It is a
 nested run on the unused suffix of the *same* frame stack, above a saved
 barrier, per 03C's decision: not a second stack, and not a second
-evaluator. A cleanup's own error still bypasses this nested barrier
-entirely, via `cleanup_catch`'s direct `longjmp`, exactly as it bypassed the
-old recursive `DoList`'s implicit one; `RunOneCleanupEntry`'s own restores
+evaluator. A cleanup's own error bypasses this nested barrier via
+`cleanup_catch`'s direct `longjmp`, exactly as it bypassed the old recursive
+`DoList`'s implicit one -- but only when nothing the cleanup itself
+established can handle it, which is sub-plan 12B Part 1's qualification and
+is stated in full further down, at `cleanup_frame_floor`. A handler the
+cleanup's own forms established is found first and takes the raise, and no
+`longjmp` past this barrier happens at all; `RunOneCleanupEntry`'s own restores
 (frame index, `evaluator_catch`, `native_reentry_depth`, `call_list`) are
 what put the context back together afterward, unchanged by this slice.
 
