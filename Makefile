@@ -396,7 +396,22 @@ fuzz-eval: $(FUZZ_EVAL_BIN)
 
 fuzz-write: $(FUZZ_WRITE_BIN)
 
-fuzz-smoke: fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
+fuzz-smoke: fuzz-eval-seed-verify fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
+
+# A tracked seed under fuzz/seeds/ steers the grammar by its bytes, so any
+# change to the grammar re-steers every one of them at once and nothing says
+# so. Phase 9 proved that: MaxDepth 4 -> 6 plus two new BuildExpression arms
+# left six of the fourteen eval seeds reaching none of the constructs they
+# exist to force, silently, for a whole phase. This replays each one with
+# FE_FUZZ_DUMP=1 and checks the forms it actually builds against
+# fuzz/seeds/reachability.json. Runs before the smoke targets, since a seed
+# that no longer steers anywhere is not something more fuzzing will reveal.
+fuzz-eval-seed-verify: $(FUZZ_EVAL_BIN)
+	python3 utils/verify_fuzz_seeds.py \
+		--fuzzer ./$(FUZZ_EVAL_BIN) \
+		--manifest $(FUZZ_DIR)/seeds/reachability.json \
+		--seed-dir $(FUZZ_DIR)/seeds/eval \
+		--target eval
 
 fuzz-reader-smoke: $(FUZZ_READER_BIN)
 	mkdir -p $(FUZZ_CORPUS_DIR)/reader $(FUZZ_ARTIFACT_DIR)/reader
@@ -583,5 +598,6 @@ iwyu:
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
 .PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
-	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke complexity complexity-check pmccabe \
+	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
+	complexity complexity-check pmccabe \
 	pmccabe-check pmccabe-baseline coverage coverage-clean compat compat-oracle format format-check compile-db iwyu

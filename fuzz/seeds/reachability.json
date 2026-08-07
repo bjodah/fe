@@ -1,0 +1,72 @@
+{
+  "schema": "fe-fuzz-seed-reachability/1",
+  "targets": {
+    "eval": {
+      "catch-throw-cleanup-gap": {
+        "requires": ["(throw ", "(unwind-protect "],
+        "why": "06C's mid-stack unwind with something between the throw and its catch."
+      },
+      "condition-case-handlers": {
+        "requires": ["(condition-case ", "(signal "],
+        "why": "06B's handler matcher: a signalled condition met by a real clause list."
+      },
+      "cons-second-operand-gc": {
+        "requires": [],
+        "why": "A crash reproduction, not a reachability seed: its property is when the 64 KiB arena collects relative to PCons's FeCons, which no dumped form can show. Listed so the manifest stays a census of the directory."
+      },
+      "cyclic-collection": {
+        "requires": ["(setcdr d d)", "(setq d (cons d nil))"],
+        "why": "09C: a car chain closed into a cycle, collected through while live."
+      },
+      "deep-car-collection": {
+        "requires": ["(setq d (cons d nil))"],
+        "why": "09C: a deep car spine, collected through while live."
+      },
+      "error-format-directives": {
+        "requires": ["(error \""],
+        "why": "06B's format-string parser and its fixed message buffer."
+      },
+      "exhaustion-under-condition-case": {
+        "requires": [
+          "(while t (setq l (cons 1 l)))",
+          "(arena-exhaustion ",
+          "(arith-error "
+        ],
+        "why": "09B: an arena exhaustion caught by its own name, and one deliberately not matched so the escape path runs."
+      },
+      "funcall-apply-redispatch": {
+        "requires": [
+          "(funcall (fn ",
+          "(funcall cons ",
+          "(apply (fn ",
+          "(apply cons "
+        ],
+        "why": "04C's four evaluate-then-redispatch shapes: funcall and apply, each with a direct closure and with a symbol designator resolved through the function cell."
+      },
+      "strict-arity-malformed": {
+        "requires": ["(&rest y x)"],
+        "why": "07B: the malformed proper parameter list, which raises invalid-function when the callable is invoked."
+      },
+      "strict-arity-native": {
+        "requires": ["(native-arity nil nil nil)"],
+        "why": "07B: FeRequireNoArguments' \"too many arguments\" raise in a host native."
+      },
+      "strict-arity-native-too-few": {
+        "requires": ["(native-arity)"],
+        "why": "07B: FeGetNextArgument's \"too few arguments\" raise in a host native."
+      },
+      "strict-arity-optional": {
+        "requires": ["(x &optional y)"],
+        "why": "07B: an &optional parameter list."
+      },
+      "strict-arity-primitive": {
+        "requires": ["(car)", "(not t)"],
+        "why": "07B: core primitives called at the wrong arity, under and over."
+      },
+      "strict-arity-rest": {
+        "requires": ["(x &rest y)"],
+        "why": "07B: a &rest parameter list."
+      }
+    }
+  }
+}

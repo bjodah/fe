@@ -145,10 +145,23 @@ rather than relying on incidental symbol generation.
 
 `fuzz/seeds/eval` carries one hand-built seed per group
 (`error-format-directives`, `condition-case-handlers`,
-`catch-throw-cleanup-gap`, `strict-arity`,
-`exhaustion-under-condition-case`, `deep-car-collection`,
-`cyclic-collection`); `FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints the forms
-each one builds.
+`catch-throw-cleanup-gap`, the six `strict-arity-*` shapes,
+`funcall-apply-redispatch`, `exhaustion-under-condition-case`,
+`deep-car-collection`, `cyclic-collection`);
+`FE_FUZZ_DUMP=1 ./fuzz/fuzz_eval SEED` prints the forms each one builds.
+
+**A grammar change invalidates seeds.** A seed is opaque bytes that steer this
+grammar, so a new `switch` arm, a wider modulus or a different `MaxDepth`
+re-steers all of them at once -- and nothing about that is visible in a diff.
+Phase 9 did exactly this: `MaxDepth` 4 -> 6 plus the two arms that took
+`BuildExpression`'s modulus from 34 to 36 left six of the fourteen tracked
+eval seeds reaching none of the constructs they exist to force, for a whole
+phase, while `fuzz/seeds/README.md` went on recording the old counts.
+`fuzz/seeds/reachability.json` now states what each seed must reach and
+`make fuzz-eval-seed-verify` -- which `make fuzz-smoke`, and so
+`.ci/ci-06-fuzz-smoke.sh`, runs first -- replays each seed with
+`FE_FUZZ_DUMP=1` and checks. Touching the grammar means running that target
+and re-deriving whatever it reports, in the same commit.
 
 The evaluator grammar's lambda builder covers zero, one, and two required
 parameters, `&optional`, `&rest`, malformed declarations, and deliberate
