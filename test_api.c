@@ -7186,35 +7186,51 @@ enum {
   _exit(MarkRaiseNoCollection);
 }
 
-// Runs one child with its stderr on a pipe, so the diagnostic is evidence
-// rather than noise in the suite's own output.
-static bool CheckMarkRaiseAborts(int mode, const char* expected_detail) {
+// Forks one child with its stderr on a pipe and collects what it said and how
+// it died. No `CHECK` between the pipe opening and both ends closing: a
+// `CHECK` returns, and `-fanalyzer` is right that a return with a descriptor
+// still open is a leak.
+static bool RunMarkRaiseCapture(int mode,
+                                char* captured,
+                                size_t captured_size,
+                                int* status) {
   int pipe_fds[2] = {-1, -1};
   CHECK(pipe(pipe_fds) == 0);
   fflush(stdout);
   fflush(stderr);
   const pid_t child = fork();
-  CHECK(child >= 0);
   if (child == 0) {
     (void)close(pipe_fds[0]);
     (void)dup2(pipe_fds[1], STDERR_FILENO);
     (void)close(pipe_fds[1]);
     RunMarkRaiseChild(mode);
   }
-  CHECK(close(pipe_fds[1]) == 0);
-  char captured[512] = {0};
-  size_t used = 0;
-  while (used + 1 < sizeof(captured)) {
-    const ssize_t got =
-        read(pipe_fds[0], captured + used, sizeof(captured) - 1 - used);
-    if (got <= 0) {
-      break;
+  (void)close(pipe_fds[1]);
+  captured[0] = '\0';
+  if (child > 0) {
+    size_t used = 0;
+    while (used + 1 < captured_size) {
+      const ssize_t got =
+          read(pipe_fds[0], captured + used, captured_size - 1 - used);
+      if (got <= 0) {
+        break;
+      }
+      used += (size_t)got;
     }
-    used += (size_t)got;
+    captured[used] = '\0';
   }
-  CHECK(close(pipe_fds[0]) == 0);
+  (void)close(pipe_fds[0]);
+  CHECK(child > 0);
+  CHECK(waitpid(child, status, 0) == child);
+  return true;
+}
+
+// Runs one child and asserts how it died, so the diagnostic is evidence
+// rather than noise in the suite's own output.
+static bool CheckMarkRaiseAborts(int mode, const char* expected_detail) {
+  char captured[512];
   int status = 0;
-  CHECK(waitpid(child, &status, 0) == child);
+  CHECK(RunMarkRaiseCapture(mode, captured, sizeof(captured), &status));
   printf("mark raise (mode %d): signalled=%d signal=%d exit=%d\n", mode,
          WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : -1,
          WIFEXITED(status) ? WEXITSTATUS(status) : -1);
