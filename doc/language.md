@@ -712,7 +712,9 @@ Not implemented, and says so: this raises
 program needs a code walker that knows the shape of each special form, which
 Fe does not have. It exists as a name so that calling it reports the missing
 feature instead of `void-function`, which is byte-identical to what a typo
-produces.
+produces. It is still an ordinary function-shaped name: its operands evaluate
+first, and direct, `funcall`, and `apply` calls all reach the same named
+rejection.
 
 #### `(and ...)`
 

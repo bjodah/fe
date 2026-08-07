@@ -2,5 +2,5 @@
 	"id": "cond-h1",
 	"setup": [],
 	"expr": "(get 'arith-error 'error-conditions)",
-	"note": "H1: the hierarchy rows, as Emacs' error-conditions property spells them -- (arith-error error). Reference pin for Decision 1's static table: fe keeps the hierarchy as static C data, so `get`/`error-conditions` stay out of scope and this row stays planned (the fe comparison remains void-function get). Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D (static hierarchy)."
+	"note": "H1: the hierarchy rows, as Emacs' error-conditions property spells them -- (arith-error error). Phase 6 Decision 1 deliberately keeps Fe's hierarchy as static C data, so `get`/`error-conditions` stay unsupported rather than planned; the actual Fe call is plain `void-function get`, indistinguishable from a typo (10A Decision 5). The row preserves the Emacs 31.0.90 oracle the static table was built against; cond-cc5, cond-cc8 and cond-ct6 exercise the hierarchy Fe does expose."
 }

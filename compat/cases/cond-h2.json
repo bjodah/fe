@@ -2,5 +2,5 @@
 	"id": "cond-h2",
 	"setup": [],
 	"expr": "(error-message-string '(wrong-type-argument listp 5))",
-	"note": "H2: the rendered message for a condition object -- \"Wrong type argument: listp, 5\". fe pins ASCII rendering (Emacs uses a right single quote in some texts, e.g. void-function/-variable); this row is the rendering reference for the condition-to-message formatter 06D keeps byte-identical at every existing site. Target of Phase 6 (structured errors and non-local exits); pins the completion/condition semantics before the implementing slice lands. Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle; fe reports its current known gap until the slice flips this feature's status to supported. Slice 06D."
+	"note": "H2: the rendered message for a condition object -- \"Wrong type argument: listp, 5\". Fe pins ASCII rendering (Emacs uses a right single quote in some texts, e.g. void-function/-variable), and this remains the oracle reference for messages formatted at Fe's raise sites. `error-message-string` itself is deliberately unsupported rather than planned; the actual Fe call is plain `void-function error-message-string`, indistinguishable from a typo (10A Decision 5). Recorded 2026-08-05 against the pinned Emacs 31.0.90 oracle."
 }

@@ -1960,20 +1960,17 @@ static bool DispatchPrimitive(FeContext* ctx,
     // happens in `ResumeEvalList`'s arm below, once both operands are known.
     case PMacroexpand1:
     case PMacroexpand:
+    // `macroexpand-all` is a rejected ordinary function, not a special form:
+    // evaluate its operands before the named rejection below.  This also
+    // keeps it reachable through `funcall`/`apply`, whose redispatch refuses
+    // raw-form callables.
+    case PMacroexpandAll:
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
       frame->accumulator = &nil;
       frame->callee = &unbound;
       return false;
-    // `macroexpand-all` (10A Decision 2): expanding every sub-form needs a
-    // code walker that knows each special form's shape, which fe does not
-    // have. It exists as a primitive purely so that calling it says *which*
-    // feature is missing, by name, instead of answering `void-function` --
-    // byte-identical to a typo. Its operands are never evaluated: there is
-    // no answer they could contribute to.
-    case PMacroexpandAll:
-      FeHandleError(ctx, "unsupported feature: macroexpand-all");
     case PAssert:
     case PBoundp:
     case PMakeUnbound:
@@ -3005,10 +3002,11 @@ static const bool primitive_is_function[PSentinel] = {
     [PThrow] = true,
     // Sub-plan 10B: the reflective expanders are ordinary functions in Emacs
     // (`(funcall 'macroexpand-1 '(when t 1))` works there), and their arms
-    // below evaluate every operand. `macroexpand-all` is deliberately absent
-    // -- it evaluates nothing, because it always rejects.
+    // below evaluate every operand. `macroexpand-all` is function-shaped too:
+    // after evaluating its operands it raises the named unsupported error.
     [PMacroexpand1] = true,
     [PMacroexpand] = true,
+    [PMacroexpandAll] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`,
     // `catch`.
@@ -3513,6 +3511,14 @@ static bool ResumeEvalList(FeContext* ctx,
     case PMacroexpand1:
     case PMacroexpand:
       return DispatchMacroexpand(ctx, frame, list, result);
+    // `macroexpand-all` (10A Decision 2): expanding every sub-form needs a
+    // code walker that knows each special form's shape, which fe does not
+    // have.  The operands have still been evaluated, as an ordinary
+    // function's are, and the name is callable through `funcall`/`apply`;
+    // every route now says which feature is missing instead of reporting
+    // `invalid-function` or `void-function` like a typo.
+    case PMacroexpandAll:
+      FeHandleError(ctx, "unsupported feature: macroexpand-all");
     // `(throw TAG VALUE)` (sub-plan 06C): the two operands are the tag and
     // the value; the unwind discards this frame and every frame above the
     // catch it delivers into, so it returns `PerformThrow`'s "continue"

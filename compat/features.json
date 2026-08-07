@@ -51,7 +51,7 @@
     "unsupported-hash-table-p"
    ],
    "kg_test": null,
-   "rationale": "Fe has no hash-table type, no reader syntax for one, and no primitives that construct or query one. Not on this program's roadmap; the compat runner short-circuits cases naming this feature instead of running them and pattern-matching an unbound-symbol error that would look identical to a real gap.",
+   "rationale": "Fe has no hash-table type, no reader syntax for one, and no primitives that construct or query one. Not on this program's roadmap; the compat runner short-circuits cases naming this feature instead of running them. On Fe's actual function channel `(hash-table-p ...)` is plain `void-function`, byte-identical to a typo: there is no curated known-missing-function channel (10A Decision 5).",
    "source_name": null
   },
   {
@@ -1651,7 +1651,7 @@
     "cond-h1"
    ],
    "kg_test": null,
-   "rationale": "Phase 6, 06A Decision 1: the hierarchy is static C data, not symbol properties, so Fe has no `get` and no `error-conditions` and cond-h1's expression is void-function in Fe by design. The row is kept as the recorded oracle the static table was built against -- Emacs spells arith-error's chain as (arith-error error) -- and is `unsupported` rather than `planned` because nothing is planned: symbol properties are a later phase's question if any init-file corpus ever needs them. The hierarchy Fe does implement is exercised by cond-cc5, cond-cc8 and cond-ct6, which match a subtype through an `error` handler. Every chain Fe registers is one level deep; Emacs' deeper chains (overflow-error -> range-error -> arith-error) are excluded by the same Decision and have no producer in Fe.",
+   "rationale": "Phase 6, 06A Decision 1: the hierarchy is static C data, not symbol properties, so Fe has no `get` and no `error-conditions`. On Fe's actual function channel cond-h1 is plain `void-function get`, byte-identical to a typo; there is no curated known-missing-function channel (10A Decision 5). The row is kept as the recorded oracle the static table was built against -- Emacs spells arith-error's chain as (arith-error error) -- and is `unsupported` rather than `planned` because nothing is planned: symbol properties are a later phase's question if any init-file corpus ever needs them. The hierarchy Fe does implement is exercised by cond-cc5, cond-cc8 and cond-ct6, which match a subtype through an `error` handler. Every chain Fe registers is one level deep; Emacs' deeper chains (overflow-error -> range-error -> arith-error) are excluded by the same Decision and have no producer in Fe.",
    "source_name": null
   },
   {
@@ -1664,7 +1664,7 @@
     "cond-h2"
    ],
    "kg_test": null,
-   "rationale": "Phase 6, 06A: Fe has no `error-message-string` and none is planned -- a condition reaches a Fe host as a completion with a message already formatted by the raise site, not as an object a Lisp program renders afterwards. The row is kept as the recorded oracle for the rendering (`Wrong type argument: listp, 5`), and to record that Emacs uses a right single quote in some texts (void-function/void-variable) where Fe pins ASCII. `unsupported` rather than `planned` because the exclusion is the decision, not a pending slice.",
+   "rationale": "Phase 6, 06A: Fe has no `error-message-string` and none is planned -- a condition reaches a Fe host as a completion with a message already formatted by the raise site, not as an object a Lisp program renders afterwards. On Fe's actual function channel the call is plain `void-function error-message-string`, byte-identical to a typo; there is no curated known-missing-function channel (10A Decision 5). The row is kept as the recorded oracle for the rendering (`Wrong type argument: listp, 5`), and to record that Emacs uses a right single quote in some texts (void-function/void-variable) where Fe pins ASCII. `unsupported` rather than `planned` because the exclusion is the decision, not a pending slice.",
    "source_name": null
   },
   {
@@ -2195,7 +2195,7 @@
     "macroexpand-alias-fixpoint"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 10B: Emacs' fixpoint rule -- keep taking single steps while the result is still a macro call. Bounded by the host's evaluation-step budget like all evaluation, so a self-expanding macro and a `defalias` cycle both end at `evaluation step limit exceeded`; that half has no oracle case because Emacs hangs on it, and is pinned in test_api.c:TestMacroexpandBudget.",
+   "rationale": "Sub-plan 10B: Emacs' fixpoint rule -- keep taking single steps while the result is still a macro call. Bounded by the host's evaluation-step budget like all evaluation, so a self-expanding macro ends at `evaluation step limit exceeded`; that half has no oracle case because Emacs hangs on it and is pinned in test_api.c:TestMacroexpandBudget. A `defalias` ring is different: Fe detects it during function-cell resolution and raises `cyclic-function-indirection` immediately (Emacs refuses to create the ring, so this is Fe policy rather than an oracle result).",
    "source_name": "macroexpand"
   },
   {

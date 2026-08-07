@@ -103,6 +103,12 @@
 (assert-not-nil
   (condition-case e (macroexpand-all '(my-when t 1)) (void-function nil)
     (error t)))
+(assert-not-nil
+  (condition-case e (funcall 'macroexpand-all 'x) (invalid-function nil)
+    (error t)))
+(assert-not-nil
+  (condition-case e (apply 'macroexpand-all (list 'x)) (invalid-function nil)
+    (error t)))
 (assert-not-nil (fboundp 'macroexpand-all))
 
 (print "macroexpand ok")

@@ -3510,11 +3510,32 @@ static bool TestMacroexpandPrimitives(void) {
       context, &state, "all.fe", "(macroexpand-all '(my-when t 1))",
       strlen("(macroexpand-all '(my-when t 1))"),
       "all.fe:1: unsupported feature: macroexpand-all"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "all.fe", "(funcall 'macroexpand-all 'x)",
+      strlen("(funcall 'macroexpand-all 'x)"),
+      "all.fe:1: unsupported feature: macroexpand-all"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "all.fe", "(apply 'macroexpand-all (list 'x))",
+      strlen("(apply 'macroexpand-all (list 'x))"),
+      "all.fe:1: unsupported feature: macroexpand-all"));
   EXPANDS_AS("(fboundp 'macroexpand-all)", "t");
   EXPANDS_AS(
       "(condition-case e (macroexpand-all 'x) (void-function 'wrong)"
       " (error 'named))",
       "named");
+  // Although the function is a reject-by-name stub, it remains an ordinary
+  // function: operands evaluate before it reports that the implementation is
+  // missing, including through funcall/apply's evaluate-then-redispatch path.
+  EXPANDS_AS(
+      "(setq all-args nil)"
+      "(condition-case e (macroexpand-all (setq all-args (cons 'direct "
+      "all-args))) (error nil))"
+      "(condition-case e (funcall 'macroexpand-all (setq all-args (cons "
+      "'funcall all-args))) (error nil))"
+      "(condition-case e (apply 'macroexpand-all (list (setq all-args (cons "
+      "'apply all-args)))) (error nil))"
+      "all-args",
+      "(apply funcall direct)");
 
 #undef EXPANDS_AS
 
@@ -3524,10 +3545,10 @@ static bool TestMacroexpandPrimitives(void) {
 
 // A macro whose expansion is another call to itself has no fixpoint, so
 // `macroexpand` must be bounded by the same step budget every other
-// evaluation is -- not hang, and not run out of frames either. Both routes
-// to a nonterminating expansion are pinned: a self-expanding transformer,
-// and a `defalias` cycle, whose substitution steps evaluate nothing at all
-// and would otherwise spin inside the fixpoint loop forever.
+// evaluation is -- not hang, and not run out of frames either.  The other
+// apparent cycle, a `defalias` ring, never enters the fixpoint: resolving
+// whether its target is a macro raises `cyclic-function-indirection` first.
+// Both termination policies are pinned below.
 static bool TestMacroexpandBudget(void) {
   static TestArena arena;
   const size_t size = FeMinimumArenaSize() + 16384;
