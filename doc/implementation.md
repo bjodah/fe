@@ -470,6 +470,24 @@ tail call that holds the logical depth across the expansion. That makes the
 physical frame wall, not C recursion, what stops a macro whose expansion is
 another macro call, and it keeps the expansion off the call site and out of
 the macro's own backtrace frame, exactly as the recursive arm did.
+
+`macroexpand-1` and `macroexpand` reuse exactly that machinery rather than
+a second transformer-application path: `EnterMacroBody` is the only place a
+transformer is ever applied, and it takes the macro call form and the
+identity a `wrong-number-of-arguments` should name as parameters, so an
+ordinary call passes `frame->expr` and a reflective expansion passes its
+evaluated FORM operand. The one field that differs is `frame->fn`, which an
+ordinary macro call fills with the caller environment (the environment the
+expansion is evaluated in) and a reflective expansion fills with the
+resolved `macroexpand-1`/`macroexpand` primitive. `ResumeMacroBody` reads
+its type: a primitive there means "the expansion is this frame's value,
+never evaluate it", and the `macroexpand` tag additionally means "and take
+another step if it is still a macro call". A `defalias` link is a step of
+its own -- Emacs stops at each indirection -- taken in a loop rather than
+through the frame stack, since substituting a head symbol evaluates
+nothing; it charges an evaluation step so a cyclic alias hits the budget.
+The fixpoint reuses the one frame, so its cost in frames is constant no
+matter how many expansions it takes, and the step budget is what bounds it.
 A native call is the one remaining ordinary callable that is not a Lisp
 special form or primitive: once the argument frame has reordered the
 evaluated argument list, the frame switches to `FeFrameNative` and the run

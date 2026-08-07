@@ -1433,6 +1433,48 @@ static void PreflightPrimitive(FeContext* ctx,
                                FeObject* arguments);
 static size_t CountRawArguments(FeContext* ctx, FeObject* arguments);
 
+// Binds a macro call's raw, unevaluated arguments into the transformer's
+// closure environment and switches `frame` to the body-evaluating
+// `FeFrameMacro` kind. This is the *only* place a macro transformer is
+// applied: `DispatchResolvedCall` reaches it for a macro call in evaluated
+// position, and `MacroexpandStep` (sub-plan 10B) reaches it for a reflective
+// `macroexpand-1`/`macroexpand`, so strict arity, environment capture and
+// step charging cannot drift between the two.
+//
+// `call` is the macro call form -- `frame->expr` for an ordinary call, the
+// evaluated FORM operand for a reflective expansion, which is why it is a
+// parameter rather than read off the frame. `identity` is what a
+// `wrong-number-of-arguments` from `ArgsToEnv` names. `caller_env` is what
+// `frame->fn` holds for the rest of the frame's life: the environment the
+// expansion is evaluated in for an ordinary call, or -- for a reflective
+// expansion, which never evaluates the expansion at all -- the resolved
+// `macroexpand-1`/`macroexpand` primitive object, which `ResumeMacroBody`
+// tells apart by type. Both are collector roots, so both are safe there.
+static void EnterMacroBody(FeContext* ctx,
+                           FeEvalFrame* frame,
+                           FeObject* fn,
+                           FeObject* call,
+                           FeObject* identity,
+                           FeObject* caller_env) {
+  frame->kind = FeFrameMacro;
+  // Root the callable while `ArgsToEnv` below allocates (a collection may
+  // run inside it): `frame->fn` is a collector root. It is then overwritten
+  // with `caller_env` -- the body otherwise replaces `frame->env` with the
+  // argument bindings over the macro's closure environment.
+  frame->fn = fn;
+  frame->accumulator = &nil;
+  frame->callee = &unbound;
+  FeObject* va = CDR(fn);  // (env params ...)
+  FeObject* vb = CDR(va);  // (params ...)
+  // The raw, unevaluated arguments are bound by the same allocating,
+  // never-evaluating helper, charging one step per parameter walk exactly
+  // as the recursive arm did.
+  const size_t argc = CountRawArguments(ctx, CDR(call));
+  frame->env = ArgsToEnv(ctx, CAR(vb), CDR(call), CAR(va), identity, argc);
+  frame->rest = CDR(vb);
+  frame->fn = caller_env;
+}
+
 // Dispatches a call whose head has already resolved to `fn`. `quote`
 // short-circuits on its first raw argument. An ordinary callable (native
 // function or lambda) switches the frame to `FeFrameCallArguments` -- the
@@ -1474,27 +1516,8 @@ static bool DispatchResolvedCall(FeContext* ctx,
     return false;
   }
   if (FeGetType(fn) == FeTMacro) {
-    frame->kind = FeFrameMacro;
-    // Root the callable while `ArgsToEnv` below allocates (a collection may
-    // run inside it): `frame->fn` is a collector root. It is then
-    // overwritten with the caller environment, which the expansion must be
-    // evaluated in -- the body otherwise replaces `frame->env` with the
-    // argument bindings over the macro's closure environment.
-    frame->fn = fn;
-    frame->accumulator = &nil;
-    frame->callee = &unbound;
-    FeObject* va = CDR(fn);  // (env params ...)
-    FeObject* vb = CDR(va);  // (params ...)
-    // The raw, unevaluated arguments are bound by the same allocating,
-    // never-evaluating helper, charging one step per parameter walk exactly
-    // as the recursive arm did.
-    FeObject* const caller_env = frame->env;
-    FeObject* const identity = CallIdentity(frame->expr, fn);
-    const size_t argc = CountRawArguments(ctx, CDR(frame->expr));
-    frame->env =
-        ArgsToEnv(ctx, CAR(vb), CDR(frame->expr), CAR(va), identity, argc);
-    frame->rest = CDR(vb);
-    frame->fn = caller_env;
+    EnterMacroBody(ctx, frame, fn, frame->expr, CallIdentity(frame->expr, fn),
+                   frame->env);
     return false;
   }
   // `(void)frame_bind` -- not used here: a raw pair-form head that resolves
@@ -1688,6 +1711,15 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PConditionCase] = {2, SIZE_MAX},
     [PSignal] = {1, 2},
     [PError] = {1, SIZE_MAX},
+    // `macroexpand-1`/`macroexpand` are `(FORM &optional ENVIRONMENT)`,
+    // measured on the pinned Emacs: `(macroexpand-1)` and
+    // `(macroexpand-1 '(a) nil 'extra)` are both
+    // `wrong-number-of-arguments`. `macroexpand-all` carries the same row
+    // so that a well-formed call reaches its own by-name rejection rather
+    // than an arity error about a function nobody can use anyway.
+    [PMacroexpand1] = {1, 2},
+    [PMacroexpand] = {1, 2},
+    [PMacroexpandAll] = {1, 2},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -1922,12 +1954,26 @@ static bool DispatchPrimitive(FeContext* ctx,
     // evaluates -- the arity table's `{1, SIZE_MAX}` row.
     case PFuncall:
     case PApply:
+    // `macroexpand-1`/`macroexpand` (sub-plan 10B) are ordinary functions in
+    // Emacs and here: FORM is an evaluated operand, which is why
+    // `(macroexpand '(when t 1))` needs the quote. The expansion itself
+    // happens in `ResumeEvalList`'s arm below, once both operands are known.
+    case PMacroexpand1:
+    case PMacroexpand:
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
       frame->accumulator = &nil;
       frame->callee = &unbound;
       return false;
+    // `macroexpand-all` (10A Decision 2): expanding every sub-form needs a
+    // code walker that knows each special form's shape, which fe does not
+    // have. It exists as a primitive purely so that calling it says *which*
+    // feature is missing, by name, instead of answering `void-function` --
+    // byte-identical to a typo. Its operands are never evaluated: there is
+    // no answer they could contribute to.
+    case PMacroexpandAll:
+      FeHandleError(ctx, "unsupported feature: macroexpand-all");
     case PAssert:
     case PBoundp:
     case PMakeUnbound:
@@ -2090,6 +2136,91 @@ static bool ResumeBody(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   return true;
 }
 
+// What one `macroexpand-1` step did to a form (sub-plan 10B).
+typedef enum MacroexpandOutcome {
+  // The form is not a macro call at all, and is therefore its own expansion.
+  MacroexpandNone,
+  // The head symbol's function cell held another symbol -- a `defalias`
+  // indirection -- and substituting it *is* the step. `*form` is the new
+  // form; nothing was evaluated.
+  MacroexpandSubstituted,
+  // The head named a macro, and the frame is now evaluating its transformer
+  // body. The expansion arrives at `ResumeMacroBody`'s reflective tail.
+  MacroexpandBody,
+} MacroexpandOutcome;
+
+// One `macroexpand-1` step over `*form`, following Emacs 31.0.90's rule as
+// measured on the pinned oracle:
+//
+//   (macroexpand-1 '(+ 1 2))  => (+ 1 2)     not a macro call
+//   (macroexpand-1 42)        => 42          not a cons
+//   (macroexpand-1 '(ali 7))  => (one-arg 7) one alias indirection is a step
+//   (macroexpand-1 '(one-arg 7)) => '7       the transformer's own answer
+//
+// The alias arm is the reason this does not simply call
+// `ResolveFunctionCallable`: the evaluator resolves a whole `defalias` chain
+// before it calls anything, but Emacs' expander stops at each link and hands
+// the rewritten form back, so `macroexpand-1` through a two-link chain
+// answers the middle link and only `macroexpand`'s fixpoint reaches the
+// transformer. Each substitution charges an evaluation step, so a cyclic
+// alias ends at the step budget instead of spinning.
+//
+// `*form` must be rooted by the caller (a GC-stack slot or a frame field)
+// across the call: both arms allocate.
+static MacroexpandOutcome MacroexpandStep(FeContext* ctx,
+                                          FeEvalFrame* frame,
+                                          FeObject** form,
+                                          FeObject* mode) {
+  if (FeGetType(*form) != FeTPair) {
+    return MacroexpandNone;
+  }
+  FeObject* const head = CAR(*form);
+  if (FeGetType(head) != FeTSymbol) {
+    return MacroexpandNone;
+  }
+  FeObject* const cell = SymbolFunction(head);
+  if (FeGetType(cell) == FeTSymbol) {
+    EvaluationStep(ctx);
+    *form = FeCons(ctx, cell, CDR(*form));
+    return MacroexpandSubstituted;
+  }
+  if (FeGetType(cell) != FeTMacro) {
+    return MacroexpandNone;
+  }
+  EnterMacroBody(ctx, frame, cell, *form, head, mode);
+  return MacroexpandBody;
+}
+
+// `macroexpand`'s fixpoint: keep taking single steps while the form is still
+// a macro call, which is Emacs' own rule. A substitution is taken here, in a
+// loop, because it produces a new form without evaluating anything; a
+// transformer body is not, because running it is the frame machine's job and
+// its result re-enters this function from `ResumeMacroBody`'s reflective
+// tail. Returns true when the frame is now evaluating a transformer body,
+// false when the fixpoint is reached and `*result` holds it.
+//
+// The GC stack cost is one slot no matter how many steps the fixpoint takes:
+// each pass restores the frame's own checkpoint and re-pushes the current
+// form, the same idiom `SpreadApplyArgs` uses.
+static bool MacroexpandToFixpoint(FeContext* ctx,
+                                  FeEvalFrame* frame,
+                                  FeObject* form,
+                                  FeObject* mode,
+                                  FeObject** result) {
+  for (;;) {
+    const MacroexpandOutcome outcome = MacroexpandStep(ctx, frame, &form, mode);
+    if (outcome == MacroexpandBody) {
+      return true;
+    }
+    if (outcome == MacroexpandNone) {
+      *result = form;
+      return false;
+    }
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    FePushGC(ctx, form);
+  }
+}
+
 // One macro-body step: append `callee` -- the just-delivered body form's
 // value, unless it is still the `&unbound` sentinel that marks a freshly set
 // up frame -- and then either start the next form (charging one step, taking
@@ -2106,9 +2237,20 @@ static bool ResumeBody(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // pushed, still raw, as a sub-expression frame in the caller environment
 // (`fn`) with a NULL `bind`, exactly as the recursive arm's
 // `Evaluate(ctx, vb, env, NULL)` did, and this frame switches to
-// `FeFrameMacroExpansion`. Every step pushes a frame, so this never
-// completes the macro frame itself.
-static void ResumeMacroBody(FeContext* ctx, FeEvalFrame* frame) {
+// `FeFrameMacroExpansion`.
+//
+// A *reflective* expansion (sub-plan 10B) is the one exit that completes
+// this frame instead of pushing another: `fn` holds the resolved
+// `macroexpand-1`/`macroexpand` primitive rather than a caller environment,
+// the expansion is the frame's value, and it is never evaluated.
+// `macroexpand` re-enters `MacroexpandStep` on the expansion first, so a
+// macro that expands to another macro call keeps expanding -- Emacs' rule,
+// measured -- and each pass charges at least the body's own evaluation
+// steps, which is what stops a self-expanding macro at the step budget
+// instead of hanging.
+static bool ResumeMacroBody(FeContext* ctx,
+                            FeEvalFrame* frame,
+                            FeObject** result) {
   if (frame->callee != &unbound) {
     frame->accumulator = frame->callee;
     frame->callee = &unbound;
@@ -2118,15 +2260,23 @@ static void ResumeMacroBody(FeContext* ctx, FeEvalFrame* frame) {
     FeRestoreGC(ctx, frame->gc_checkpoint);
     PushEvaluationFrame(ctx, FeGetNextArgument(ctx, &frame->rest), frame->env,
                         &frame->env);
-    return;
+    return false;
   }
   FeObject* const expansion = frame->accumulator;
   RunCleanupsDownTo(ctx, frame->cleanup_checkpoint);
   FeRestoreGC(ctx, frame->gc_checkpoint);
   FePushGC(ctx, expansion);  // Nothing else refers to the expansion now.
+  if (FeGetType(frame->fn) == FeTPrimitive) {
+    if (PRIM(frame->fn) == PMacroexpand) {
+      return !MacroexpandToFixpoint(ctx, frame, expansion, frame->fn, result);
+    }
+    *result = expansion;
+    return true;
+  }
   ctx->call_list = CDR(&frame->trace_cell);
   frame->kind = FeFrameMacroExpansion;
   PushEvaluationFrame(ctx, expansion, frame->fn, NULL);
+  return false;
 }
 
 // The expansion sub-expression above this frame completed and delivered its
@@ -2837,6 +2987,12 @@ static const bool primitive_is_function[PSentinel] = {
     // normally, exactly as Emacs' `(special-form-p 'throw)` is nil -- while
     // `catch` is a special form and stays out of this table.
     [PThrow] = true,
+    // Sub-plan 10B: the reflective expanders are ordinary functions in Emacs
+    // (`(funcall 'macroexpand-1 '(when t 1))` works there), and their arms
+    // below evaluate every operand. `macroexpand-all` is deliberately absent
+    // -- it evaluates nothing, because it always rejects.
+    [PMacroexpand1] = true,
+    [PMacroexpand] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`,
     // `catch`.
@@ -3038,6 +3194,44 @@ static bool DispatchFuncallApply(FeContext* ctx,
   PushEvaluationFrame(ctx, MakeCallForm(ctx, callable, args), frame->env, NULL);
   FeRestoreGC(ctx, gc);
   return false;
+}
+
+// `macroexpand-1`/`macroexpand`'s tail, once FORM and the optional
+// ENVIRONMENT have been evaluated into `list` (sub-plan 10B).
+//
+// ENVIRONMENT is accepted and must be nil. Emacs' environments are an
+// internal alist of `(NAME . DEFINITION)` entries that shadow the function
+// cell -- measured: `(macroexpand-1 '(foo) '((foo lambda (&rest _) 99)))` is
+// 99 on the pinned oracle -- and implementing that alist is a second name
+// resolution path nothing in this program uses. A non-nil value is rejected
+// by name rather than silently ignored, the reader's own convention: a
+// caller who passes one gets told the feature is missing instead of getting
+// an answer computed as if the argument were not there.
+//
+// The form is pushed onto the GC stack because `EnterMacroBody` clears
+// `accumulator` -- which is the operand list's only root -- before
+// `ArgsToEnv` allocates over it. The slot is released by the frame's own
+// `gc_checkpoint` restore, on every route out of here.
+static bool DispatchMacroexpand(FeContext* ctx,
+                                FeEvalFrame* frame,
+                                FeObject* list,
+                                FeObject** result) {
+  FeObject* rest = list;
+  FeObject* const form = FeGetNextArgument(ctx, &rest);
+  if (!FeIsNil(rest) && !FeIsNil(CAR(rest))) {
+    FeHandleError(ctx, "unsupported feature: macroexpand environment");
+  }
+  FeObject* const mode = frame->fn;
+  FePushGC(ctx, form);
+  if (PRIM(mode) == PMacroexpand) {
+    return !MacroexpandToFixpoint(ctx, frame, form, mode, result);
+  }
+  FeObject* stepped = form;
+  if (MacroexpandStep(ctx, frame, &stepped, mode) == MacroexpandBody) {
+    return false;
+  }
+  *result = stepped;
+  return true;
 }
 
 // `(catch TAG BODY...)` (sub-plan 06C): the frame's `accumulator` holds the
@@ -3308,6 +3502,9 @@ static bool ResumeEvalList(FeContext* ctx,
     case PFuncall:
     case PApply:
       return DispatchFuncallApply(ctx, frame, list);
+    case PMacroexpand1:
+    case PMacroexpand:
+      return DispatchMacroexpand(ctx, frame, list, result);
     // `(throw TAG VALUE)` (sub-plan 06C): the two operands are the tag and
     // the value; the unwind discards this frame and every frame above the
     // catch it delivers into, so it returns `PerformThrow`'s "continue"
@@ -3706,10 +3903,14 @@ static FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         // A body-form sub-expression above this frame completed and
         // delivered its value into `callee` (or the frame was just set up
         // and `callee` is still the `&unbound` sentinel); the resume case
-        // either starts the next form or produces the expansion and pushes
-        // it, always pushing a frame.
-        ResumeMacroBody(ctx, frame);
-        continue;
+        // either starts the next form or produces the expansion. An
+        // ordinary macro call then pushes the expansion (another frame); a
+        // reflective `macroexpand-1`/`macroexpand` completes with it.
+        if (!ResumeMacroBody(ctx, frame, &result)) {
+          continue;
+        }
+        CompletePairFrame(ctx, frame);
+        break;
 
       case FeFrameMacroExpansion:
         // The expansion above this frame completed and delivered the macro

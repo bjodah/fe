@@ -337,7 +337,11 @@ that name. Expanding each time costs one expansion per call -- charged against
 the host's evaluation-step budget -- and buys back a macro that means what it
 says.
 
-For more examples, see [macros.fe](../scripts/macros.fe).
+What a macro call expands to can be asked for without evaluating it:
+see `macroexpand-1` and `macroexpand` under Functions below.
+
+For more examples, see [macros.fe](../scripts/macros.fe) and
+[macroexpand.fe](../scripts/macroexpand.fe).
 
 #### `(while condition ...)`
 
@@ -626,6 +630,72 @@ Empties `symbol`'s function cell and returns the symbol. The value cell is
 untouched, so the pair with `makunbound` keeps the two namespaces disjoint:
 `makunbound` empties only the value cell (leaving the function callable), and
 `fmakunbound` empties only the function cell (leaving the variable readable).
+
+#### `(macroexpand-1 form &optional environment)`
+
+Performs one macro-expansion step on `form` and returns the result, without
+evaluating it. Anything that is not a macro call is its own expansion, so
+`(macroexpand-1 42)` is `42` and `(macroexpand-1 '(+ 1 2))` is `(+ 1 2)`.
+
+```clojure
+fe > (fset 'my-when (macro (c b) (list 'if c (list 'do b))))
+fe > (macroexpand-1 '(my-when t 1))
+(if t (do 1))
+```
+
+`form` is an ordinary evaluated argument, which is why the examples quote it.
+
+A step follows the head symbol's function cell one link at a time, matching
+Emacs. When the cell holds another symbol -- a `defalias` indirection -- the
+step is the substitution itself, not the target's expansion:
+
+```clojure
+fe > (defalias 'w 'my-when)
+w
+fe > (macroexpand-1 '(w t 1))
+(my-when t 1)
+```
+
+The transformer is applied with the same strict arity as a direct call, so a
+macro call with the wrong number of arguments raises
+`wrong-number-of-arguments` here too, naming the macro.
+
+`environment` is accepted and must be `nil`. Emacs' macro environments are an
+alist that shadows the function cell; Fe does not implement it and says so --
+a non-nil value raises `unsupported feature: macroexpand environment` rather
+than being ignored.
+
+#### `(macroexpand form &optional environment)`
+
+Repeats `macroexpand-1` until the form stops being a macro call, which is
+Emacs' rule, and returns the result. A macro that expands to another macro
+call is therefore expanded all the way:
+
+```clojure
+fe > (fset 'inner (macro (x) (list '+ x 1)))
+fe > (fset 'outer (macro (x) (list 'inner x)))
+fe > (macroexpand-1 '(outer 2))
+(inner 2)
+fe > (macroexpand '(outer 2))
+(+ 2 1)
+```
+
+Expansion is *not* recursive into sub-forms: only the form's own head is
+expanded, exactly as in Emacs.
+
+Every step charges against the host's evaluation-step budget, so a macro whose
+expansion is another call to itself, or a cycle of `defalias` indirections,
+ends with `evaluation step limit exceeded` rather than hanging. The fixpoint
+reuses a single evaluator frame however many steps it takes.
+
+#### `(macroexpand-all form &optional environment)`
+
+Not implemented, and says so: this raises
+`unsupported feature: macroexpand-all`. Expanding every sub-form of a
+program needs a code walker that knows the shape of each special form, which
+Fe does not have. It exists as a name so that calling it reports the missing
+feature instead of `void-function`, which is byte-identical to what a typo
+produces.
 
 #### `(and ...)`
 

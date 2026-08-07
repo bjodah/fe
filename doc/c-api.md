@@ -13,6 +13,8 @@ break; a host should assert both.
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
 types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+version 8 is the reflective-expansion contract (`macroexpand-1`,
+`macroexpand`, and `macroexpand-all` naming itself as unimplemented);
 version 7 is the protected-constants and self-evaluating-keywords contract;
 version 6 is the strict-arity contract described below; version 4 was the
 numeric contract of the Emacs-subset cut: the reader
@@ -26,10 +28,13 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 6);
-static_assert(FE_LANGUAGE_VERSION == 7);
+static_assert(FE_LANGUAGE_VERSION == 8);
 ```
 
-Fe 8.0 keeps both compatibility macros unchanged, and that is a deliberate
+Fe 9.0 moves `FE_LANGUAGE_VERSION` 7 -> 8 and leaves `FE_API_VERSION` at 6;
+the reasoning is below, under the version history.
+
+Fe 8.0 kept `FE_API_VERSION` unchanged, and that was a deliberate
 choice rather than a claim that nothing moved. `FE_LANGUAGE_VERSION` went 6 ->
 7 for Phase 8, and 7 covers the whole phase: the protected constants and
 self-evaluating keywords *and* the strict reader, which is one bump for one
@@ -87,6 +92,27 @@ dotted-tail and bare-symbol rest spellings are unaffected.
 `FE_LANGUAGE_VERSION` moved 6 -> 7 for protected constants and
 self-evaluating keywords. Assigning `t`, `nil`, or a keyword now signals
 `setting-constant`, and a keyword such as `:foo` no longer needs quoting.
+
+`FE_LANGUAGE_VERSION` moved 7 -> 8 in sub-plan 10B, with `FeVersion` "8.0" ->
+"9.0" and `FE_API_VERSION` deliberately left at 6 -- no declaration in `fe.h`
+changed. The language gains `macroexpand-1` and `macroexpand`, which apply a
+macro's transformer without evaluating what it produces (one step, and Emacs'
+fixpoint), and `macroexpand-all`, which exists only to reject itself by name.
+This is the one bump in the series that is *not* a break: no program that ran
+under version 7 answers differently under 8. It moves anyway, and the reason
+is recorded rather than assumed. The rule two paragraphs below -- compatible
+additions do not require a bump -- is written for downstream embedders who
+pin a commit; this fork has none (the parent program's §0.4), and its single
+consumer is kg's compile-time `static_assert`. A macro that does not move
+cannot tell kg whether the fe it links against has these names, and the
+alternative -- discovering it at run time as `void-function` -- is exactly the
+failure the two-macro scheme exists to prevent. The counter-argument is real
+and is recorded here beside the decision: sub-plan 04C added seven primitives
+(`funcall`, `apply`, `fboundp`, `symbol-function`, `fset`, `fmakunbound`,
+`defalias`) under the additive rule without a bump, and Phase 9 made
+exhaustion catchable -- a genuine change to an existing program's answer --
+without one either. Read together, the precedent says a bump is optional
+here; the two-repository contract says it is useful. It moves.
 
 `FE_API_VERSION` moved 1 -> 2 (`FeVersion` "2.0" -> "3.0") in sub-plan 03F of
 kg's Emacs-subset program: the frame machine's Lisp-nesting and native

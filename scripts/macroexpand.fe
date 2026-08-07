@@ -1,0 +1,87 @@
+;; `macroexpand-1` and `macroexpand` (sub-plan 10B). Every expectation here
+;; was measured on the pinned Emacs 31.0.90 oracle first; compat/ pins the
+;; same answers mechanically against checked-in snapshots.
+
+;; A user macro, written the way Emacs writes `when`.
+(fset 'my-when (macro (c b) (list 'if c (list 'do b))))
+(assert-equals '(if t (do 1)) (macroexpand-1 '(my-when t 1)))
+(assert-equals '(if t (do 1)) (macroexpand '(my-when t 1)))
+
+;; The expansion is returned, not evaluated: nothing here runs `if`.
+(setq ran nil)
+(fset 'shout (macro () '(setq ran t)))
+(assert-equals '(setq ran t) (macroexpand-1 '(shout)))
+(assert-nil ran)
+
+;; A macro that expands to another macro call is where the two differ.
+(fset 'inner (macro (x) (list '+ x 1)))
+(fset 'outer (macro (x) (list 'inner x)))
+(assert-equals '(inner 2) (macroexpand-1 '(outer 2)))
+(assert-equals '(+ 2 1) (macroexpand '(outer 2)))
+
+;; Anything that is not a macro call is its own expansion: an ordinary call,
+;; a call to a plain function, a call to a name nobody defined, a form whose
+;; head is not a symbol at all, and every atom.
+(fset 'plain (fn (x) x))
+(assert-equals '(+ 1 2) (macroexpand-1 '(+ 1 2)))
+(assert-equals '(+ 1 2) (macroexpand '(+ 1 2)))
+(assert-equals '(plain 3) (macroexpand-1 '(plain 3)))
+(assert-equals '(no-such-name 1) (macroexpand-1 '(no-such-name 1)))
+(assert-equals '((lambda (x) x) 1) (macroexpand-1 '((lambda (x) x) 1)))
+(assert-is 'foo (macroexpand-1 'foo))
+(assert-is 42 (macroexpand-1 42))
+(assert-nil (macroexpand-1 nil))
+(assert-is 42 (macroexpand 42))
+
+;; A `defalias` link is one step, not a detour: `macroexpand-1` answers the
+;; link it followed and only the fixpoint reaches the transformer.
+(defalias 'ali 'my-when)
+(defalias 'ali2 'ali)
+(assert-equals '(my-when t 1) (macroexpand-1 '(ali t 1)))
+(assert-equals '(ali t 1) (macroexpand-1 '(ali2 t 1)))
+(assert-equals '(if t (do 1)) (macroexpand '(ali t 1)))
+(assert-equals '(if t (do 1)) (macroexpand '(ali2 t 1)))
+
+;; ENVIRONMENT defaults to nil and may be passed as nil.
+(assert-equals '(if t (do 1)) (macroexpand-1 '(my-when t 1) nil))
+(assert-equals '(if t (do 1)) (macroexpand '(my-when t 1) nil))
+
+;; Both are ordinary functions, reachable through the function namespace.
+(assert-equals '(inner 2) (funcall 'macroexpand-1 '(outer 2)))
+(assert-equals '(+ 2 1) (apply 'macroexpand (list '(outer 2))))
+
+;; The transformer is applied with the evaluator's own strict arity, and the
+;; condition names the macro rather than `macroexpand-1`.
+(fset 'one-arg (macro (a) (list 'not a)))
+(assert-is 'wrong-number-of-arguments
+  (condition-case e (macroexpand-1 '(one-arg 1 2)) (error (car e))))
+(assert-is 2
+  (condition-case e (macroexpand-1 '(one-arg 1 2))
+    (wrong-number-of-arguments (car (cdr (cdr e))))))
+(assert-is 0
+  (condition-case e (macroexpand '(one-arg))
+    (wrong-number-of-arguments (car (cdr (cdr e))))))
+;; An improper argument tail has no count at all, so it is a type error.
+(assert-is 'wrong-type-argument
+  (condition-case e (macroexpand-1 '(one-arg . 3)) (error (car e))))
+
+;; A macro that expands into itself has no fixpoint. `macroexpand-1` still
+;; terminates -- one step is one step.
+(fset 'selfy (macro args (list 'selfy)))
+(assert-equals '(selfy) (macroexpand-1 '(selfy)))
+;; `macroexpand` on it runs until the host's evaluation-step budget stops it;
+;; this script has no budget configured, so it is not called here. `test_api.c`
+;; owns that case (TestMacroexpandBudget), which is the only place a step
+;; limit can be set.
+
+;; A non-nil ENVIRONMENT and `macroexpand-all` are both rejected by name --
+;; not `void-function`, which is what a typo produces.
+(assert-not-nil
+  (condition-case e (macroexpand-1 'x '((a . 1))) (void-function nil)
+    (error t)))
+(assert-not-nil
+  (condition-case e (macroexpand-all '(my-when t 1)) (void-function nil)
+    (error t)))
+(assert-not-nil (fboundp 'macroexpand-all))
+
+(print "macroexpand ok")

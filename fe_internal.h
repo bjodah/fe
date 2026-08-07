@@ -101,6 +101,18 @@ typedef enum Primitive {
   PConditionCase,
   PSignal,
   PError,
+  // Sub-plan 10B of kg's Emacs-subset program (compatibility proofs): the
+  // reflective half of the macro surface. `macroexpand-1` performs one
+  // expansion step and `macroexpand` repeats it to a fixpoint, both
+  // function-shaped (their FORM operand is evaluated like any argument) and
+  // both reusing the evaluator's own `FeFrameMacro` body machinery rather
+  // than a second transformer-application path -- see `EnterMacroBody` and
+  // `MacroexpandStep` in fe_eval.c. `macroexpand-all` needs a code walker
+  // and does not exist; it is a primitive only so that calling it says so by
+  // name instead of answering `void-function` like a typo (10A Decision 2).
+  PMacroexpand1,
+  PMacroexpand,
+  PMacroexpandAll,
   PSentinel
 } Primitive;
 

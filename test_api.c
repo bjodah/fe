@@ -124,8 +124,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 6);
-  static_assert(FE_LANGUAGE_VERSION == 7);
-  CHECK(strcmp(FeVersion, "8.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 8);
+  CHECK(strcmp(FeVersion, "9.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -3343,6 +3343,308 @@ static bool TestMacroExpansion(void) {
                             "expander.fe:1: expected pair, got integer"));
   CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
                    "3"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 10B: `macroexpand-1` and `macroexpand`. Every expectation below
+// was measured on the pinned oracle first
+// (/opt-3/emacs-31-lucid/bin/emacs, GNU Emacs 31.0.90, build 2026-07-09,
+// TERM=xterm-256color) and the measured answer is quoted beside it; the
+// `comparison: emacs` cases in compat/ pin the same answers mechanically.
+// Fe renders `(quote x)` where Emacs prints `'x` -- a recorded printer
+// divergence, not a disagreement about the expansion -- so the transformers
+// here deliberately expand to forms with no `quote` in them.
+static bool TestMacroexpandPrimitives(void) {
+  static TestArena arena;
+  const size_t size = FeMinimumArenaSize() + 16384;
+  CHECK(size <= sizeof(arena.bytes));
+  FeContext* context = FeOpenContext(arena.bytes, size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define EXPANDS_AS(source, expected)                                        \
+  CHECK(IsRendered(                                                         \
+      context,                                                              \
+      FeEvaluateString(context, "expand.fe", (source), sizeof(source) - 1), \
+      (expected)))
+
+  static const char setup[] =
+      // `(my-when COND BODY)` is Emacs' `when` written in fe's own macro
+      // spelling, so the two dialects can be compared on the same shape.
+      "(fset 'my-when (macro (c b) (list 'if c (list 'do b))))"
+      // `outer` expands to a call to `inner`, which expands again: the
+      // nested case that tells `macroexpand-1` and `macroexpand` apart.
+      "(fset 'inner (macro (x) (list '+ x 1)))"
+      "(fset 'outer (macro (x) (list 'inner x)))"
+      // A one-parameter transformer, for the strict-arity assertions.
+      "(fset 'one-arg (macro (a) (list 'not a)))"
+      // Two links of `defalias` indirection over that transformer.
+      "(defalias 'ali 'one-arg)"
+      "(defalias 'ali2 'ali)"
+      // A plain function, not a macro: a call to it is its own expansion.
+      "(fset 'plain (fn (x) x))";
+  CHECK(FeEvaluateString(context, "setup.fe", setup, sizeof(setup) - 1) !=
+        nullptr);
+
+  // A user macro. Emacs: (macroexpand-1 '(when t 1)) => (if t (progn 1)).
+  EXPANDS_AS("(macroexpand-1 '(my-when t 1))", "(if t (do 1))");
+  EXPANDS_AS("(macroexpand '(my-when t 1))", "(if t (do 1))");
+
+  // A macro that expands to another macro call: one step versus the
+  // fixpoint. Emacs: (macroexpand-1 '(outer 2)) => (inner 2), and
+  // (macroexpand '(outer 2)) => (+ 2 1).
+  EXPANDS_AS("(macroexpand-1 '(outer 2))", "(inner 2)");
+  EXPANDS_AS("(macroexpand '(outer 2))", "(+ 2 1)");
+
+  // A non-macro form and an atom are their own expansions, and so is a call
+  // to an unbound name or to a plain function. Emacs answers each of these
+  // unchanged, including the improper-looking `(1 2)` whose head is not a
+  // symbol at all.
+  EXPANDS_AS("(macroexpand-1 '(+ 1 2))", "(+ 1 2)");
+  EXPANDS_AS("(macroexpand '(+ 1 2))", "(+ 1 2)");
+  EXPANDS_AS("(macroexpand-1 '(plain 3))", "(plain 3)");
+  EXPANDS_AS("(macroexpand-1 '(no-such-name 1))", "(no-such-name 1)");
+  EXPANDS_AS("(macroexpand-1 '((lambda (x) x) 1))", "((lambda (x) x) 1)");
+  EXPANDS_AS("(macroexpand-1 '(1 2))", "(1 2)");
+  EXPANDS_AS("(macroexpand-1 'foo)", "foo");
+  EXPANDS_AS("(macroexpand-1 42)", "42");
+  EXPANDS_AS("(macroexpand-1 nil)", "nil");
+  EXPANDS_AS("(macroexpand 'foo)", "foo");
+
+  // Alias-following. Measured, and *not* what "resolve the chain and apply"
+  // would give: Emacs stops at each `defalias` link, so one step through a
+  // two-link chain answers the middle link -- (macroexpand-1 '(ali2 7)) is
+  // (ali 7) -- and only the fixpoint reaches the transformer's own answer.
+  EXPANDS_AS("(macroexpand-1 '(ali 7))", "(one-arg 7)");
+  EXPANDS_AS("(macroexpand-1 '(ali2 7))", "(ali 7)");
+  EXPANDS_AS("(macroexpand '(ali 7))", "(not 7)");
+  EXPANDS_AS("(macroexpand '(ali2 7))", "(not 7)");
+
+  // ENVIRONMENT is accepted and must be nil; the nil-default path is the
+  // one Emacs was measured on -- (macroexpand-1 '(when t 1) nil) is the
+  // same (if t (progn 1)).
+  EXPANDS_AS("(macroexpand-1 '(my-when t 1) nil)", "(if t (do 1))");
+  EXPANDS_AS("(macroexpand '(my-when t 1) nil)", "(if t (do 1))");
+
+  // An expansion is reachable through the function namespace like any other
+  // function: Emacs' `(functionp 'macroexpand-1)` is t.
+  EXPANDS_AS("(funcall 'macroexpand-1 '(outer 2))", "(inner 2)");
+  EXPANDS_AS("(apply 'macroexpand (list '(outer 2)))", "(+ 2 1)");
+
+  // Strict arity of the transformer *under expansion*: the same
+  // `wrong-number-of-arguments` the evaluator raises for the direct call,
+  // naming the macro rather than `macroexpand-1`. Emacs agrees on the
+  // condition and the count; its FUNCTION element is the transformer object
+  // (`#[(a) ((not a)) nil]`) where fe names the symbol, which is the
+  // recorded phase7-arity-condition-rendering divergence.
+  CHECK(ExpectEvaluationError(context, &state, "arity.fe",
+                              "(macroexpand-1 '(one-arg 1 2))",
+                              strlen("(macroexpand-1 '(one-arg 1 2))"),
+                              "arity.fe:1: wrong-number-of-arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "arity.fe",
+                              "(macroexpand '(one-arg))",
+                              strlen("(macroexpand '(one-arg))"),
+                              "arity.fe:1: wrong-number-of-arguments"));
+  EXPANDS_AS(
+      "(condition-case e (macroexpand-1 '(one-arg 1 2))"
+      " (wrong-number-of-arguments (car (cdr (cdr e)))))",
+      "2");
+  // Through an alias, the fixpoint reaches the same check.
+  EXPANDS_AS(
+      "(condition-case e (macroexpand '(ali 1 2))"
+      " (wrong-number-of-arguments (car (cdr (cdr e)))))",
+      "2");
+  // An improper argument tail has no count, so it is a type error about the
+  // tail -- Emacs: (macroexpand-1 '(one-arg . 3)) is
+  // (wrong-type-argument listp 3).
+  EXPANDS_AS(
+      "(condition-case e (macroexpand-1 '(one-arg . 3)) (error (car e)))",
+      "wrong-type-argument");
+
+  // Arity of the expanders themselves: `(FORM &optional ENVIRONMENT)`,
+  // measured -- Emacs answers wrong-number-of-arguments for both.
+  CHECK(ExpectEvaluationError(context, &state, "self.fe", "(macroexpand-1)",
+                              strlen("(macroexpand-1)"),
+                              "self.fe:1: wrong-number-of-arguments"));
+  CHECK(ExpectEvaluationError(context, &state, "self.fe",
+                              "(macroexpand '(a) nil 'extra)",
+                              strlen("(macroexpand '(a) nil 'extra)"),
+                              "self.fe:1: wrong-number-of-arguments"));
+
+  // A non-nil ENVIRONMENT is rejected by name rather than ignored. Emacs
+  // implements the alist (`(macroexpand-1 '(foo) '((foo lambda (&rest _)
+  // 99)))` is 99 there); fe says which feature that is instead of answering
+  // as if the argument had not been passed.
+  CHECK(ExpectEvaluationError(
+      context, &state, "env.fe", "(macroexpand-1 '(my-when t 1) '((x . 1)))",
+      strlen("(macroexpand-1 '(my-when t 1) '((x . 1)))"),
+      "env.fe:1: unsupported feature: macroexpand environment"));
+  CHECK(ExpectEvaluationError(
+      context, &state, "env.fe", "(macroexpand '(my-when t 1) 'anything)",
+      strlen("(macroexpand '(my-when t 1) 'anything)"),
+      "env.fe:1: unsupported feature: macroexpand environment"));
+  // The rejection is a catchable condition, not a hard exit.
+  EXPANDS_AS("(condition-case e (macroexpand-1 'x 'env) (error 'rejected))",
+             "rejected");
+
+  // `macroexpand-all` names itself. It is emphatically NOT `void-function`,
+  // which is byte-identical to what a typo produces (10A Decision 2 and
+  // Decision 5).
+  CHECK(ExpectEvaluationError(
+      context, &state, "all.fe", "(macroexpand-all '(my-when t 1))",
+      strlen("(macroexpand-all '(my-when t 1))"),
+      "all.fe:1: unsupported feature: macroexpand-all"));
+  EXPANDS_AS("(fboundp 'macroexpand-all)", "t");
+  EXPANDS_AS(
+      "(condition-case e (macroexpand-all 'x) (void-function 'wrong)"
+      " (error 'named))",
+      "named");
+
+#undef EXPANDS_AS
+
+  FeCloseContext(context);
+  return true;
+}
+
+// A macro whose expansion is another call to itself has no fixpoint, so
+// `macroexpand` must be bounded by the same step budget every other
+// evaluation is -- not hang, and not run out of frames either. Both routes
+// to a nonterminating expansion are pinned: a self-expanding transformer,
+// and a `defalias` cycle, whose substitution steps evaluate nothing at all
+// and would otherwise spin inside the fixpoint loop forever.
+static bool TestMacroexpandBudget(void) {
+  static TestArena arena;
+  const size_t size = FeMinimumArenaSize() + 16384;
+  CHECK(size <= sizeof(arena.bytes));
+  FeContext* context = FeOpenContext(arena.bytes, size);
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char setup[] =
+      "(fset 'selfy (macro args (list 'selfy)))"
+      "(defalias 'ring-a 'ring-b)"
+      "(defalias 'ring-b 'ring-a)";
+  CHECK(FeEvaluateString(context, "setup.fe", setup, sizeof(setup) - 1) !=
+        nullptr);
+
+  const FeEvalOptions budget = {.step_limit = 256};
+  CHECK(ExpectCompletionKind(
+      context, &state, "selfy.fe", "(macroexpand '(selfy))",
+      strlen("(macroexpand '(selfy))"), &budget,
+      "selfy.fe:1: evaluation step limit exceeded", FeCompletionBudget));
+  CHECK(ExpectCompletionKind(
+      context, &state, "ring.fe", "(macroexpand '(ring-a 1))",
+      strlen("(macroexpand '(ring-a 1))"), &budget,
+      "ring.fe:1: evaluation step limit exceeded", FeCompletionBudget));
+
+  // It is the *step* budget that stops them, not the frame wall: the
+  // fixpoint reuses one frame per pass, so the frame stack stays shallow
+  // however many expansions it takes. The peak below is the whole session's
+  // high-water mark, including the setup forms.
+  const FeArenaStats stats = FeGetArenaStats(context);
+  CHECK(stats.peak_frame_depth < 16);
+
+  // `macroexpand-1` takes exactly one step and terminates on both, with a
+  // budget far smaller than the one the fixpoint exhausted.
+  const FeEvalOptions one_step = {.step_limit = 64};
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(
+                       context, "one.fe", "(macroexpand-1 '(selfy))",
+                       strlen("(macroexpand-1 '(selfy))"), &one_step),
+                   "(selfy)"));
+  CHECK(IsRendered(context,
+                   FeEvaluateStringWithOptions(
+                       context, "one.fe", "(macroexpand-1 '(ring-a 1))",
+                       strlen("(macroexpand-1 '(ring-a 1))"), &one_step),
+                   "(ring-b 1)"));
+
+  // The context is still usable after both budget exhaustions.
+  CHECK(IsRendered(context, FeEvaluateString(context, "after.fe", "(+ 1 2)", 7),
+                   "3"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Sub-plan 10B's rooting, proved rather than reasoned about. Every arm of an
+// expansion allocates -- `ArgsToEnv` builds the callee environment, an alias
+// step conses a new head onto the old tail, the fixpoint re-pushes the form
+// on the GC stack each pass -- and the values it is allocating over live in
+// exactly one place (a frame field, or the one GC-stack slot the fixpoint
+// keeps). `TestArityDataUnderCollection`'s squeeze is reused here: the arena
+// is filled to a fixed headroom before each run, so a collection lands
+// *inside* the expansion rather than before it, at 32 different points.
+//
+// This is deliberately a deterministic test and not a fuzz-grammar arm. The
+// steered evaluator grammar builds its heads from fixed name lists and cannot
+// emit `macroexpand` at all -- measured, 0 of 6639 dumped forms -- and adding
+// an arm would re-map every tracked seed's byte stream, which is the failure
+// mode `fuzz/seeds/reachability.json` exists to catch. See doc/FUZZING.md.
+static bool TestMacroexpandUnderCollection(void) {
+  static const char* const forms[] = {
+      // A transformer body, whose environment `ArgsToEnv` allocates.
+      "'(macroexpand-1 '(outer 2))",
+      // A fixpoint: a body, then another body, on one frame.
+      "'(macroexpand '(outer 2))",
+      // A single alias substitution: the one arm that conses a new form.
+      "'(macroexpand-1 '(ali2 7))",
+      // Two substitutions and then a transformer, all on one frame.
+      "'(macroexpand '(ali2 7))",
+  };
+  static const char* const expected[] = {
+      "(inner 2)",
+      "(+ 2 1)",
+      "(ali 7)",
+      "(not 7)",
+  };
+
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  static const char setup[] =
+      "(fset 'inner (macro (x) (list '+ x 1)))"
+      "(fset 'outer (macro (x) (list 'inner x)))"
+      "(fset 'one-arg (macro (a) (list 'not a)))"
+      "(defalias 'ali 'one-arg)"
+      "(defalias 'ali2 'ali)";
+  CHECK(FeEvaluateString(context, "setup.fe", setup, sizeof(setup) - 1) !=
+        nullptr);
+
+  for (size_t which = 0; which < sizeof(forms) / sizeof(forms[0]); which++) {
+    FeRoot* const form =
+        FeCreateRoot(context, FeEvaluateString(context, "form.fe", forms[which],
+                                               strlen(forms[which])));
+    CHECK(form != nullptr);
+    size_t collected = 0;
+    for (size_t headroom = 1; headroom <= 32; headroom++) {
+      const size_t gc = FeSaveGC(context);
+      while (FeGetArenaStats(context).free_slots > headroom) {
+        (void)FeCons(context, FeNil(context), FeNil(context));
+        FeRestoreGC(context, gc);
+      }
+      const size_t collections = FeGetArenaStats(context).collection_count;
+      CHECK(IsRendered(context, FeEvaluate(context, FeGetRoot(form)),
+                       expected[which]));
+      if (FeGetArenaStats(context).collection_count > collections) {
+        collected++;
+      }
+      FeRestoreGC(context, gc);
+    }
+    printf("macroexpand under collection: form %zu collected in %zu of 32\n",
+           which, collected);
+    CHECK(collected >= 4);
+    FeReleaseRoot(context, form);
+  }
 
   FeCloseContext(context);
   return true;
@@ -6915,11 +7217,21 @@ static bool TestCaughtExhaustionSession(void) {
 // Measured on the *recursive* mark phase, immediately before 09C replaced it,
 // with `TestCollectionStatsPinned`'s own fixed corpus and fixed arena. The
 // rewrite is invisible to every one of them.
+//
+// Re-measured at sub-plan 10B, which is the one thing that legitimately
+// moves two of these four: the arena here is `FeMinimumArenaSize() + 256K`,
+// and three new primitives (`macroexpand-1`, `macroexpand`,
+// `macroexpand-all`) grow the *minimum* by 352 bytes -- their symbols,
+// names, cells and primitive objects -- so the arena grows with it and
+// holds 22 more slots (15210 -> 15232), of which exactly the same 22 are
+// live after a collection (1027 -> 1049). The two figures the walk itself
+// decides -- how many times it collected, and that its peak is the whole
+// arena -- are unchanged, which is the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 15210,
+  PinnedTotalSlots = 15232,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15210,
-  PinnedLiveAfterCollection = 1027,
+  PinnedPeakLive = 15232,
+  PinnedLiveAfterCollection = 1049,
 };
 
 // ---------------------------------------------------------------------------
@@ -7494,11 +7806,13 @@ int main(void) {
                  TestExtensionAPI() && TestRootsAndCalls() &&
                  TestCallWithOptions() && TestMathNatives() &&
                  TestSerialization() && TestDottedLists() &&
-                 TestMacroExpansion() && TestWriter() && TestParameterLists() &&
-                 TestBinding() && TestSymbolCells() && TestInteger() &&
-                 TestFunctionCells() && TestNamespaceCut() &&
-                 TestSetqAndSet() && TestConstantsAndKeywords() &&
-                 TestNumericEqual() && TestNumericTower() && TestNumericCut() &&
+                 TestMacroExpansion() && TestMacroexpandPrimitives() &&
+                 TestMacroexpandBudget() && TestMacroexpandUnderCollection() &&
+                 TestWriter() && TestParameterLists() && TestBinding() &&
+                 TestSymbolCells() && TestInteger() && TestFunctionCells() &&
+                 TestNamespaceCut() && TestSetqAndSet() &&
+                 TestConstantsAndKeywords() && TestNumericEqual() &&
+                 TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestUnwindLisp() &&
                  TestUnwindCleanupBudget() && TestFrameLimits() &&
                  TestFrameSubstrate() && TestArenaStats() &&

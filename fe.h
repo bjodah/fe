@@ -104,7 +104,22 @@
 // evaluated-file and evaluated-string diagnostics. One language bump for the
 // phase, covering the reader break as well as the constants: 8.0's release
 // version moves, both compatibility macros stay where 08B put them.
-#define FE_LANGUAGE_VERSION 7
+//
+// Version 8 (sub-plan 10B) is the reflective-expansion cut: `macroexpand-1`,
+// `macroexpand` and `macroexpand-all` are names the language answers.  The
+// first two expand a macro call without evaluating it -- one step, and
+// Emacs' fixpoint -- and the third names itself as unimplemented instead of
+// answering `void-function`.  Nothing an existing program could write breaks;
+// what moves is what those three names *answer*, which used to be
+// `void-function` for all of them, and `(fboundp 'macroexpand)`, which was
+// nil.  The bump is deliberate under this file's own "compatible additions do
+// not require a bump" rule, and the reasoning is recorded with the commit:
+// under the program's §0.4 (no external constituency) the only consumer of
+// this macro is kg's `static_assert`, and a version that does not move is a
+// version that cannot tell kg whether the fe it is linking against has these
+// names.  `FE_API_VERSION` does not move: no declaration in this header
+// changed.
+#define FE_LANGUAGE_VERSION 8
 
 extern const char* FeVersion;
 
