@@ -123,7 +123,7 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 6);
+  static_assert(FE_API_VERSION == 7);
   static_assert(FE_LANGUAGE_VERSION == 9);
   CHECK(strcmp(FeVersion, "10.0") == 0);
 
@@ -347,6 +347,78 @@ static FeObject* ContainCall(FeContext* context, FeObject* arguments) {
   FeObject* items[] = {FeMakeSymbol(context, "contained"),
                        FeGetCondition(context)};
   return FeMakeList(context, items, 2);
+}
+
+// The protected *string* evaluation's helpers (sub-plan 11C). `ContainString`
+// is the plain host shape -- run text, keep whatever comes back -- and the
+// two natives are its Lisp-visible counterparts: `load-string` contains and
+// swallows (kg's loader, when it decides to report and continue) and
+// `load-string-resignal` contains, does its own unwinding, and puts the
+// completion back in flight (kg's loader, when it wants an enclosing
+// `condition-case` to see it).
+static FeObject* contained_string_result;
+static bool wrap_string_cleanup_ran;
+
+static bool ContainStringWithOptions(FeContext* context,
+                                     const char* label,
+                                     const char* source,
+                                     const FeEvalOptions* options,
+                                     bool expected) {
+  FeObject* value = FeNil(context);
+  const bool completed = FeTryEvaluateStringWithOptions(
+      context, label, source, strlen(source), options, &value);
+  contained_string_result = completed ? value : nullptr;
+  return completed == expected;
+}
+
+static bool ContainString(FeContext* context,
+                          const char* label,
+                          const char* source,
+                          bool expected) {
+  return ContainStringWithOptions(context, label, source, nullptr, expected);
+}
+
+// The text a `load-string` native was handed, copied out of the Fe string so
+// the protected evaluation can read it from C storage.
+static size_t CopyLoadText(FeContext* context,
+                           FeObject* text,
+                           char* buffer,
+                           size_t size) {
+  const size_t length = FeStringByteLength(context, text);
+  if (length >= size) {
+    FeHandleError(context, "load-string: text too long");
+  }
+  (void)FeCopyStringBytes(context, text, buffer, length);
+  buffer[length] = '\0';
+  return length;
+}
+
+static FeObject* ContainEvaluateString(FeContext* context,
+                                       FeObject* arguments) {
+  FeObject* text = FeGetNextArgument(context, &arguments);
+  char source[256];
+  const size_t length = CopyLoadText(context, text, source, sizeof(source));
+  FeObject* value = FeNil(context);
+  if (FeTryEvaluateStringWithOptions(context, "load.fe", source, length,
+                                     nullptr, &value)) {
+    return value;
+  }
+  FeObject* items[] = {FeMakeSymbol(context, "contained"),
+                       FeGetCondition(context)};
+  return FeMakeList(context, items, 2);
+}
+
+static FeObject* WrapEvaluateString(FeContext* context, FeObject* arguments) {
+  FeObject* text = FeGetNextArgument(context, &arguments);
+  char source[256];
+  const size_t length = CopyLoadText(context, text, source, sizeof(source));
+  FeObject* value = FeNil(context);
+  if (FeTryEvaluateStringWithOptions(context, "load.fe", source, length,
+                                     nullptr, &value)) {
+    return value;
+  }
+  wrap_string_cleanup_ran = true;
+  FeResignal(context);
 }
 
 static FeObject* WrapCall(FeContext* context, FeObject* arguments) {
@@ -8030,6 +8102,130 @@ static bool TestDynamicBinding(void) {
   return true;
 }
 
+// Sub-plan 11C Part 2: `FeTryEvaluateStringWithOptions`, the protected
+// *string* evaluation. Everything `TestProtectedCall` asserts about the
+// protected call is asserted here about the protected evaluation, because the
+// promise is the same one; what is new is the loader seam kg will use --
+// contain, unwind, `FeResignal` into a handler established *outside* the
+// protected evaluation -- and the side-effect ordering a multi-form string
+// has and a single call does not.
+static bool TestProtectedEvaluateString(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "load-string", ContainEvaluateString);
+  FeDefineNative(context, "load-string-resignal", WrapEvaluateString);
+  FeDefineNative(context, "raise-host-quit", RaiseHostQuit);
+  FeDefineNative(context, "raise-host-budget", RaiseHostBudget);
+
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "protect.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  const size_t gc = FeSaveGC(context);
+
+  // A normal completion returns the value of the *last* form.
+  contained_string_result = nullptr;
+  CHECK(ContainString(context, "load.fe", "(+ 1 2) (+ 40 2)", true));
+  CHECK(IsRendered(context, contained_string_result, "42"));
+  CHECK(FeGetCompletion(context) == FeCompletionNormal);
+
+  // An error inside the evaluated text is *returned*, not thrown past this
+  // frame: the C frame below is still live, the kind, condition object and
+  // message are all readable from it, and the GC stack is back where it
+  // started.
+  CHECK(ContainString(context, "load.fe", "(car 5)", false));
+  CHECK(FeGetCompletion(context) == FeCompletionError);
+  CHECK(IsRendered(context, FeGetCondition(context),
+                   "(wrong-type-argument listp 5)"));
+  CHECK(strcmp(FeGetCompletionMessage(context),
+               "load.fe:1: expected pair, got integer") == 0);
+  CHECK(FeSaveGC(context) == gc);
+
+  // Side-effect order: the forms before the raising one have run, and the
+  // ones after it have not. A string is not a call, and this is the
+  // difference.
+  CHK("(setq trace nil)", "nil");
+  CHECK(ContainString(context, "load.fe",
+                      "(setq trace (cons 'a trace)) (car 5) "
+                      "(setq trace (cons 'b trace))",
+                      false));
+  CHK("trace", "(a)");
+
+  // A quit and a budget are contained with their kinds intact, and Budget --
+  // the kind `condition-case` deliberately cannot catch -- is contained all
+  // the same, because containment is not catching.
+  CHECK(ContainString(context, "load.fe", "(raise-host-quit)", false));
+  CHECK(FeGetCompletion(context) == FeCompletionQuit);
+  CHECK(IsRendered(context, FeGetCondition(context), "(quit)"));
+  CHECK(ContainString(context, "load.fe", "(raise-host-budget)", false));
+  CHECK(FeGetCompletion(context) == FeCompletionBudget);
+  CHECK(FeIsNil(FeGetCondition(context)));
+
+  // A budget the *options* set, spent inside the evaluated text, is
+  // contained too -- and `options` bounds this evaluation only: the caller's
+  // ambient record is back afterwards, which the unbounded evaluation below
+  // it proves by not tripping.
+  const FeEvalOptions budget = {.step_limit = 50};
+  CHECK(ContainStringWithOptions(context, "load.fe",
+                                 "(setq i 0) (while t (setq i (+ i 1)))",
+                                 &budget, false));
+  CHECK(FeGetCompletion(context) == FeCompletionBudget);
+  CHK("(+ 1 1)", "2");
+
+  // A throw is contained as the wall error it is: the containment barrier is
+  // a throw wall, exactly as the protected call's is, so a `catch` outside
+  // the protected evaluation is not reached and the throw becomes
+  // `no-catch`. This is the recorded divergence, pinned rather than fixed
+  // (11A Decision 5 rejects Shape B by scope).
+  CHECK(ContainString(context, "load.fe", "(throw 'nowhere 1)", false));
+  CHECK(FeGetCompletion(context) == FeCompletionError);
+  CHECK(IsRendered(context, FeGetCondition(context), "(no-catch nowhere 1)"));
+  CHK("(catch 'tg (load-string \"(throw 'tg 1)\") 'intact)", "intact");
+
+  // The GC stack is balanced across every containment above.
+  CHECK(FeSaveGC(context) == gc);
+
+  // The seam kg's loader will use: contain, do the host's own unwinding
+  // while the frame is still live, then `FeResignal` -- and a
+  // `condition-case` established *outside* the protected evaluation matches
+  // on the original condition symbol. Without the containment this
+  // completion transfers to the outermost barrier and that handler never
+  // runs, which is the whole divergence this entry point closes.
+  wrap_string_cleanup_ran = false;
+  CHK("(condition-case e (load-string-resignal \"(car 5)\") "
+      "  (wrong-type-argument (list 'caught e)))",
+      "(caught (wrong-type-argument listp 5))");
+  CHECK(wrap_string_cleanup_ran);
+
+  // And the contained-and-swallowed shape, which must leave the enclosing
+  // evaluation running.
+  CHK("(list (load-string \"(car 5)\") 'still-running)",
+      "((contained (wrong-type-argument listp 5)) still-running)");
+
+  // The enclosing run's result is the caller's, not the loaded text's. This
+  // holds with or without the protected entry's `evaluation_result`
+  // save/restore -- `EvaluateInput` re-assigns that field after every form,
+  // so it cannot be caught by a test; see the comment on
+  // `FeTryEvaluateStringWithOptions` for why the restore is there anyway.
+  // What this case does pin is the observable part: a nested evaluation does
+  // not become the enclosing one's value.
+  CHK("(do (load-string \"'from-the-load\") 'from-the-caller)",
+      "from-the-caller");
+
+  CHECK(FeSaveGC(context) == gc);
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -8064,7 +8260,7 @@ int main(void) {
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion() &&
-                 TestDynamicBinding()
+                 TestDynamicBinding() && TestProtectedEvaluateString()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

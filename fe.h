@@ -51,7 +51,17 @@
 // arity is now unconditional. A host that called either gets a compile
 // error, which is the whole notification: there is no runtime answer that
 // would still be true.
-#define FE_API_VERSION 6
+//
+// Version 7 (sub-plan 11C) adds one entry point,
+// `FeTryEvaluateStringWithOptions`: the protected *string* evaluation, the
+// sibling `FeTryCallWithOptions` (version 5) has needed since a host that
+// loads a file from inside an evaluation turned out to have the same problem
+// a host that calls a callback has. Nothing is removed and nothing changes
+// meaning, so every existing call keeps compiling; the bump exists because a
+// version that does not move cannot tell kg whether the fe it is linking
+// against has the entry point at all -- the same reasoning version 3's
+// language bump used, and the same `static_assert` tripwire.
+#define FE_API_VERSION 7
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -578,6 +588,27 @@ void FeReleaseRoot(FeContext* ctx, FeRoot* root);
     const char* source,
     size_t length,
     const FeEvalOptions* options);
+// The protected string evaluation: `FeEvaluateStringWithOptions` under
+// exactly the containment `FeTryCallWithOptions` gives a call. On true,
+// `*result` holds the value of the last form evaluated. On false, nothing
+// was written to `*result`, `error_fn` was not called, the host's own frame
+// was not unwound, and `FeGetCompletion`/`FeGetCondition`/
+// `FeGetCompletionMessage` describe what happened; the host either swallows
+// it or `FeResignal`s it into the enclosing run. Forms before the raising
+// one have already run and their side effects stand.
+//
+// This is the entry point a host that *loads* Lisp from inside an evaluation
+// should use. `FeEvaluateString` is a nested run dressed as a top-level
+// call, so a completion raised by the loaded text transfers to the outermost
+// barrier -- past every `condition-case` between the load and the raise.
+// A `throw` out of the loaded text is contained as the barrier-wall error it
+// is; the containment barrier is a throw wall, as the protected call's is.
+[[nodiscard]] bool FeTryEvaluateStringWithOptions(FeContext* ctx,
+                                                  const char* label,
+                                                  const char* source,
+                                                  size_t length,
+                                                  const FeEvalOptions* options,
+                                                  FeObject** result);
 [[nodiscard]] FeObject* FeEvaluateFile(FeContext* ctx,
                                        const char* label,
                                        FILE* file);

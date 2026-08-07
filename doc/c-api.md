@@ -11,7 +11,8 @@ contract and a change to the Lisp language it evaluates are different kinds of
 break; a host should assert both.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
+types, and callback signatures declared in `fe.h`; version 7 adds the
+protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
 version 9 is the special-variable contract (`internal--mark-special`,
 `special-variable-p`, and shallow dynamic binding at `let`'s two binding
@@ -29,11 +30,11 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 6);
+static_assert(FE_API_VERSION == 7);
 static_assert(FE_LANGUAGE_VERSION == 9);
 ```
 
-Fe 10.0 moves `FE_LANGUAGE_VERSION` 8 -> 9 and leaves `FE_API_VERSION` at 6;
+Fe 10.0 moves `FE_LANGUAGE_VERSION` 8 -> 9 and `FE_API_VERSION` 6 -> 7;
 the reasoning is below, under the version history.
 
 Fe 9.0 moved `FE_LANGUAGE_VERSION` 7 -> 8 and left `FE_API_VERSION` at 6;
@@ -97,6 +98,12 @@ dotted-tail and bare-symbol rest spellings are unaffected.
 `FE_LANGUAGE_VERSION` moved 6 -> 7 for protected constants and
 self-evaluating keywords. Assigning `t`, `nil`, or a keyword now signals
 `setting-constant`, and a keyword such as `:foo` no longer needs quoting.
+
+`FE_API_VERSION` moved 6 -> 7 in sub-plan 11C, for one added declaration:
+`FeTryEvaluateStringWithOptions`. Nothing was removed and nothing changed
+meaning, so every existing call keeps compiling; the bump exists because a
+version that does not move cannot tell a host whether the fe it is linking
+against has the entry point at all.
 
 `FE_LANGUAGE_VERSION` moved 8 -> 9 in sub-plan 11B, with `FeVersion` "9.0" ->
 "10.0" and `FE_API_VERSION` left at 6 in that commit -- no declaration in
@@ -837,6 +844,10 @@ way to return and report a bad argument.
 bool FeTryCallWithOptions(FeContext* ctx, FeObject* callable,
                           FeObject* const* arguments, size_t count,
                           const FeEvalOptions* options, FeObject** result);
+bool FeTryEvaluateStringWithOptions(FeContext* ctx, const char* label,
+                                    const char* source, size_t length,
+                                    const FeEvalOptions* options,
+                                    FeObject** result);
 [[noreturn]] void FeResignal(FeContext* ctx);
 ```
 
@@ -889,6 +900,36 @@ static FeObject* CallHook(FeContext* ctx, FeObject* arguments) {
   return FeNil(ctx);  // or FeResignal(ctx) to re-raise it
 }
 ```
+
+`FeTryEvaluateStringWithOptions()` (`FE_API_VERSION` 7, sub-plan 11C) is the
+same contract over *text* instead of a callable: every bullet above applies
+to it word for word, with `*result` holding the value of the last form on the
+`true` path. It exists because a host that **loads** Lisp from inside an
+evaluation has the problem the paragraph above describes, and could not fix
+it the same way: `FeEvaluateString()` is a nested run dressed as a top-level
+call, so a completion raised by the loaded text transfers to the outermost
+barrier -- past every `condition-case` between the load and the raise.
+
+```c
+static FeObject* Load(FeContext* ctx, const char* path,
+                      const char* text, size_t length) {
+  FeObject* value = FeNil(ctx);
+  if (FeTryEvaluateStringWithOptions(ctx, path, text, length,
+                                     nullptr, &value)) {
+    return value;
+  }
+  UnwindLoaderBookkeeping(ctx);  // while this frame is still live
+  FeResignal(ctx);               // now an enclosing condition-case sees it
+}
+```
+
+Two things the string variant does not change. Forms *before* the raising one
+have already run and their side effects stand -- containment is not a
+transaction. And a `throw` out of the loaded text is contained as the
+barrier-wall `no-catch` error it already is, so a `catch` established outside
+the loaded text is still not reached; that is a recorded divergence from
+Emacs rather than a property of this entry point, and closing it would need
+`load` to be an fe primitive with a frame kind of its own.
 
 `example_host.c` exercises both the accessors and the protected call.
 

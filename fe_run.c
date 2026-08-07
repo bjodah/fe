@@ -318,6 +318,105 @@ bool FeTryCallWithOptions(FeContext* ctx,
   return completed;
 }
 
+// The protected *string* evaluation (11A Decision 5's Shape A), the exact
+// sibling of `FeTryCallWithOptions` above with `FeEvaluateStringWithOptions`
+// in place of the call. Everything in that function's comment applies here
+// unchanged: a non-normal completion is returned rather than thrown past
+// this frame, `error_fn` is not called, the kind, condition object and
+// message are readable through `FeGetCompletion`/`FeGetCondition`/
+// `FeGetCompletionMessage`, and the host then chooses between swallowing it
+// and `FeResignal`-ing it into the enclosing run.
+//
+// This exists because a host that *loads a file* from inside an evaluation
+// has the same problem a host that calls a callback has, and could not solve
+// it the same way: kg's `lisp_eval_file()` re-enters through
+// `FeEvaluateString`, which is a nested run dressed as a top-level call, so
+// a completion raised by the loaded text transferred straight to the
+// outermost barrier -- past every `condition-case` between the `load` and
+// the raise. With this, kg contains the completion, unwinds its own loader
+// bookkeeping while the frame is still live, and re-raises with `FeResignal`
+// once the enclosing run's floor is back, which is what makes an enclosing
+// `condition-case` find it.
+//
+// A `throw` out of the evaluated text is contained as the barrier-wall error
+// it already is: the containment barrier is a throw wall exactly as the
+// protected call's is, so a `catch` outside it is not honoured and the throw
+// becomes `no-catch`. Making that reach an enclosing `catch` needs `load` to
+// be a primitive with a frame kind of its own and is deliberately out of
+// scope (11A Decision 5).
+//
+// One thing this does that the protected call does not need to: it saves and
+// restores `ctx->evaluation_result`. `EvaluateInput` (fe.c) assigns that
+// field on entry and after every form it evaluates, and it is both the value
+// `FeEvaluateString` returns and a collector root, so a nested protected
+// evaluation leaves the enclosing one's field holding a value from the text
+// *this* call read. That is defensive rather than observable today, and it
+// is worth saying which: an enclosing `EvaluateInput` re-assigns the field
+// immediately after every `FeEvaluate` it makes, so its own return value is
+// unaffected however deeply this is nested inside one, and no test in
+// `test_api.c` distinguishes the two versions. What the restore buys is that
+// the invariant "this field holds the enclosing run's own last value" does
+// not depend on that argument -- and the field is a GC root, so a version of
+// `EvaluateInput` that stopped re-assigning it would lose an object here
+// rather than fail visibly.
+bool FeTryEvaluateStringWithOptions(FeContext* ctx,
+                                    const char* label,
+                                    const char* source,
+                                    size_t length,
+                                    const FeEvalOptions* options,
+                                    FeObject** result) {
+  FeContext* const volatile ctx_v = ctx;
+  FeObject** const volatile result_v = result;
+  const char* const volatile label_v = label;
+  const char* const volatile source_v = source;
+  const size_t volatile length_v = length;
+  const FeEvalOptions* const volatile options_v = options;
+  const size_t volatile gc = FeSaveGC(ctx);
+  const size_t volatile frame_base = ctx->frame_stack_index;
+  const size_t volatile saved_run_base = ctx->run_base;
+  const size_t volatile saved_reentry = ctx->native_reentry_depth;
+  const size_t volatile saved_cleanup_floor = ctx->cleanup_floor;
+  FeObject* const volatile saved_call_list = ctx->call_list;
+  FeObject* const volatile saved_evaluation_result = ctx->evaluation_result;
+  jmp_buf* const volatile saved_evaluator_catch = ctx->evaluator_catch;
+  jmp_buf* const volatile saved_condition_catch = ctx->condition_catch;
+  jmp_buf* const volatile saved_cleanup_catch = ctx->cleanup_catch;
+  const FeEvaluationControl saved_control = SaveEvaluationControl(ctx);
+  jmp_buf jump;
+
+  // cppcheck-suppress autoVariables
+  ctx_v->evaluator_catch = &jump;
+  ctx_v->cleanup_catch = nullptr;
+  ctx_v->cleanup_floor = ctx_v->cleanup_stack_index;
+  ctx_v->completion = FeCompletionNormal;
+  ctx_v->condition = &nil;
+  ctx_v->evaluation_active = false;
+
+  const bool completed = setjmp(jump) == 0;
+  if (completed) {
+    FeObject* const value = FeEvaluateStringWithOptions(
+        ctx_v, label_v, source_v, length_v, options_v);
+    ctx_v->condition = &nil;
+    ctx_v->completion = FeCompletionNormal;
+    *result_v = value;
+  }
+  ctx_v->frame_stack_index = frame_base;
+  ctx_v->run_base = saved_run_base;
+  ctx_v->native_reentry_depth = saved_reentry;
+  ctx_v->cleanup_floor = saved_cleanup_floor;
+  ctx_v->call_list = saved_call_list;
+  ctx_v->evaluation_result = saved_evaluation_result;
+  ctx_v->evaluator_catch = saved_evaluator_catch;
+  ctx_v->condition_catch = saved_condition_catch;
+  ctx_v->cleanup_catch = saved_cleanup_catch;
+  ctx_v->pending_throw = false;
+  ctx_v->pending_throw_tag = FeNil(ctx_v);
+  ctx_v->pending_throw_value = FeNil(ctx_v);
+  RestoreEvaluationControl(ctx_v, &saved_control);
+  FeRestoreGC(ctx_v, gc);
+  return completed;
+}
+
 // The text of the last completion that reached a barrier or the host, fully
 // formatted -- source label and all -- exactly as `FeErrorFn` would have been
 // given it. Valid until the next completion in this context.

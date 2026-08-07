@@ -294,6 +294,7 @@
   "fe_run.c:FeIsFunction": 4,
   "fe_run.c:FeResignal": 2,
   "fe_run.c:FeTryCallWithOptions": 2,
+  "fe_run.c:FeTryEvaluateStringWithOptions": 2,
   "fe_run.c:RunEvaluation": 4,
   "fe_run.c:RunEvaluationBody": 2,
   "fex.c:BuildErrnoError": 1,
