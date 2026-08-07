@@ -359,7 +359,29 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # 806 exceeds limit 805" and exits 2; at 806, and at the 835 below, it
 # passes. At 508 it reports "FAIL: 1 file(s) exceed per-file limit 508" and
 # exits 2.
-SCC_COMPLEXITY_MAX ?= 835
+#
+# Set 835 -> 808 at the sub-plan 12C close (2026-08-07), pre-pin: that IS
+# the measured actual after Phase 12's whole fe workstream -- the
+# cleanup-handler ordering fix, the `eval` primitive, the `file-missing`
+# hierarchy line and the one-argument-`defvar` scope carrier. The phase spent
+# 2 of the 29 points the raise funded (806 -> 808), so the 27 unspent ones go
+# back rather than sitting as unearned headroom, exactly as 11C handed 29
+# back. Two points is the whole of it because scc counts keywords: the
+# ordering fix's `&&` and the scope carrier's comparisons are not keywords,
+# and the hierarchy line is data. The +2 is `DispatchEval`'s arm.
+# `SCC_FILE_COMPLEXITY_MAX` is again deliberately NOT re-set to its actual
+# and stays at 520. Per-file at the close: fe_eval.c 511, fe.c 152, main.c
+# 37, fex_io.c 28, fe_run.c 25. fe_eval.c moved 509 -> 511 and has 9 points
+# left, which is less comfortable than the 11 the last phase warned about --
+# so the warning above stands with more force, not less, and the
+# Makefile-named second seam split (the completion/cleanup machinery, lines
+# 230-700) remains the funded answer for the next slice that needs room
+# there. 12C's own work deliberately landed in fe.c for that reason.
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire: at 807 `make complexity-check` reports "FAIL: total complexity
+# 808 exceeds limit 807" and exits 2, and at 808 it passes; at 510 it
+# reports "FAIL: 1 file(s) exceed per-file limit 510" and exits 2.
+SCC_COMPLEXITY_MAX ?= 808
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -583,7 +605,27 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1 function(s)
 # exceed complexity limit 14" and exits 2, the one function being
 # `RunEvaluationLoop` at 15.
-PMCCABE_TOTAL_MAX ?= 1155
+#
+# Set 1155 -> 1133 at the sub-plan 12C close (2026-08-07), pre-pin: that IS
+# the measured actual, 1133 across 361 symbols, and this is the
+# authoritative core measure, so it is the one that says what Phase 12's fe
+# workstream cost. It spent 12 of the funded 34 (1121 -> 1133): +1 for the
+# cleanup ordering fix's frame-floor test in `RaiseCompletionCore`, +3 for
+# `eval`'s new `DispatchEval` arm, 0 for the `file-missing` hierarchy line,
+# which is pure data, and +8 for the scope carrier (`SymbolIsLetDynamic`
+# 1 -> 5, `MarkSpecialSymbol` 4 -> 5, and a new `CurrentMarkScope` at 3).
+# The 22 unspent points go back. Two symbols were added over the phase
+# (359 -> 361) and three per-symbol entries rose, each banked in the commit
+# that caused it with the reason in its body.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 with the worst function in
+# the tree still `RunEvaluationLoop` at 15, and `PMCCABE_NEW_FUNCTION_MAX`
+# stays at 15 -- both functions the phase added arrived at 3.
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire: at 1132 `make pmccabe-check` reports "FAIL: total complexity 1133
+# exceeds funded budget 1132 (+1)" and exits 2, and at 1133 it passes; at
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1 function(s)
+# exceed complexity limit 14" and exits 2.
+PMCCABE_TOTAL_MAX ?= 1133
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
