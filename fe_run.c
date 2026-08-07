@@ -23,7 +23,6 @@
 // `RunEvaluationBody` live here and are called from there.
 
 #include <setjmp.h>
-#include <stddef.h>
 #include <string.h>
 #include "fe.h"
 #include "fe_internal.h"

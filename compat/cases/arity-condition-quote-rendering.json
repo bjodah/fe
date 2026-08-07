@@ -2,5 +2,5 @@
  "id": "arity-condition-quote-rendering",
  "setup": [],
  "expr": "(condition-case e (quote 1 2) (wrong-number-of-arguments (cdr e)))",
- "note": "The whole data list of `(quote 1 2)`'s arity condition, printed. Both sides hold `(quote 2)`; Emacs' printer abbreviates it to `'2` and Fe's writes it out. A writer divergence, not an arity one."
+ "note": "The whole data list of `(quote 1 2)`'s arity condition, printed. Both sides hold `(quote 2)` and, since sub-plan 11C taught fe's writer Emacs' `'X` abbreviation, both print it as `'2`. This case was recorded under phase7-arity-condition-rendering as a writer divergence; it moved to writer-quote-forms when the divergence closed."
 }

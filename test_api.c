@@ -381,7 +381,7 @@ static bool ContainString(FeContext* context,
 // The text a `load-string` native was handed, copied out of the Fe string so
 // the protected evaluation can read it from C storage.
 static size_t CopyLoadText(FeContext* context,
-                           FeObject* text,
+                           const FeObject* text,
                            char* buffer,
                            size_t size) {
   const size_t length = FeStringByteLength(context, text);
@@ -395,7 +395,7 @@ static size_t CopyLoadText(FeContext* context,
 
 static FeObject* ContainEvaluateString(FeContext* context,
                                        FeObject* arguments) {
-  FeObject* text = FeGetNextArgument(context, &arguments);
+  const FeObject* text = FeGetNextArgument(context, &arguments);
   char source[256];
   const size_t length = CopyLoadText(context, text, source, sizeof(source));
   FeObject* value = FeNil(context);
@@ -409,7 +409,7 @@ static FeObject* ContainEvaluateString(FeContext* context,
 }
 
 static FeObject* WrapEvaluateString(FeContext* context, FeObject* arguments) {
-  FeObject* text = FeGetNextArgument(context, &arguments);
+  const FeObject* text = FeGetNextArgument(context, &arguments);
   char source[256];
   const size_t length = CopyLoadText(context, text, source, sizeof(source));
   FeObject* value = FeNil(context);
@@ -7986,8 +7986,8 @@ static bool TestDynamicBinding(void) {
   // Nothing is marked until `internal--mark-special` says so, and the two
   // flags are separate: a let-dynamic-only mark (Emacs' one-arg `defvar`)
   // binds dynamically while `special-variable-p` still answers nil.
-  FeObject* const full = FeMakeSymbol(context, "kv");
-  FeObject* const half = FeMakeSymbol(context, "hv");
+  const FeObject* const full = FeMakeSymbol(context, "kv");
+  const FeObject* const half = FeMakeSymbol(context, "hv");
   CHECK(!SymbolIsSpecial(context, full) && !SymbolIsLetDynamic(context, full));
   CHK("(internal--mark-special 'kv t)", "kv");
   CHK("(internal--mark-special 'hv nil)", "hv");
