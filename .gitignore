@@ -1,5 +1,6 @@
 fe
 example_host
+test_api
 *.o
 *.dSYM
 .vscode
