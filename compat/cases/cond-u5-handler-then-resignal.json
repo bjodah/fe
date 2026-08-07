@@ -1,0 +1,6 @@
+{
+ "id": "cond-u5-handler-then-resignal",
+ "setup": [],
+ "expr": "(condition-case e (unwind-protect (/ 1 0) (condition-case c (car 6) (error (signal 'args-out-of-range (list 'from-cleanup))))) (error e))",
+ "note": "U5: handled inside the cleanup, then re-signalled from that handler. The re-raise is a fresh condition and replaces the one being unwound, exactly as an unhandled cleanup error does (06A Decision 4)."
+}

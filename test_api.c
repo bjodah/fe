@@ -4105,6 +4105,101 @@ static bool TestUnwindHostAPI(void) {
   return true;
 }
 
+// A `FeCleanupFn` that raises. Used to pin the one hazard sub-plan 12B Part
+// 1's ordering fix had to design around: a *native* cleanup's forms do not
+// run through `RunEvaluationBody`, so nothing republishes `ctx->run_base`
+// and `FindConditionHandler`'s scan would otherwise reach handlers OUTSIDE
+// the `unwind-protect` -- and transfer to one with the frame stack and the
+// remaining drain in the wrong state. `cleanup_frame_floor` is what stops
+// that: for a native cleanup it equals the current frame index, nothing is
+// above it, no handler is ever accepted, and the raise takes the same
+// `cleanup_catch` bounce it always took.
+[[noreturn]] static void RaisingNativeCleanup(
+    // cppcheck-suppress constParameterCallback
+    FeContext* context,
+    void* data) {
+  ResourceState* state = data;
+  state->close_result = fclose(state->file);
+  state->open = false;
+  state->close_count++;
+  FeHandleError(context, "native cleanup failed");
+}
+
+// `(with-raising-cleanup THUNK)`: `with-resource`, but the registered
+// cleanup raises after releasing the resource.
+static FeObject* WithRaisingCleanup(FeContext* context, FeObject* args) {
+  FeObject* thunk = FeGetNextArgument(context, &args);
+  FeRequireNoArguments(context, args);
+  resource_state.file = tmpfile();
+  if (resource_state.file == nullptr) {
+    FeHandleError(context, "tmpfile failed");
+  }
+  resource_state.open = true;
+  FeProtectWithCleanup(context, RaisingNativeCleanup, &resource_state);
+  return FeCall(context, thunk, nullptr, 0);
+}
+
+// The native half of 12B Part 1: honoring handlers established inside a
+// running cleanup must leave the native arm bit-identical, because a native
+// cleanup establishes none. Every expectation here was measured on the
+// commit *before* the ordering fix and is unchanged by it.
+static bool TestNativeCleanupHandlerFloor(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "with-raising-cleanup", WithRaisingCleanup);
+
+#define CHK(expr, expected)                                                    \
+  CHECK(IsRendered(                                                            \
+      context, FeEvaluateString(context, "native.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // Body returns normally; the native cleanup raises. The only handler in
+  // sight is OUTSIDE the protected call, i.e. below the cleanup's frame
+  // floor, so it is reached the long way -- the bounce, then the replay in
+  // the enclosing context -- and not by a direct transfer from inside the
+  // cleanup. The resource is still released exactly once.
+  ResetResourceState();
+  CHK("(condition-case e (with-raising-cleanup (fn () 'body)) (error e))",
+      "(error \"native cleanup failed\")");
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+
+  // With no handler at all it reaches the host, carrying the cleanup's own
+  // message.
+  ResetResourceState();
+  static const char unhandled[] = "(with-raising-cleanup (fn () 'body))";
+  CHECK(ExpectEvaluationError(context, &state, "native.fe", unhandled,
+                              sizeof(unhandled) - 1,
+                              "native.fe:1: native cleanup failed"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+
+  // Body raises too: 06A Decision 4 unchanged for the native arm -- the
+  // cleanup's own completion replaces the one already unwinding, so the
+  // host sees the cleanup's message and not `expected pair, got integer`.
+  // (The enclosing `condition-case` is deliberately absent: the body raises
+  // inside the nested run `FeCall` started, so the drain happens with that
+  // run's floor published and an outer handler is behind the native-reentry
+  // wall. That is pre-existing and unrelated -- measured identical on the
+  // commit before this one.)
+  ResetResourceState();
+  static const char both[] = "(with-raising-cleanup (fn () (car 1)))";
+  CHECK(ExpectEvaluationError(context, &state, "native.fe", both,
+                              sizeof(both) - 1,
+                              "native.fe:1: native cleanup failed"));
+  CHECK(!resource_state.open);
+  CHECK(resource_state.close_count == 1);
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestUnwindLisp(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -8317,19 +8412,19 @@ int main(void) {
                  TestNamespaceCut() && TestSetqAndSet() &&
                  TestConstantsAndKeywords() && TestNumericEqual() &&
                  TestNumericTower() && TestNumericCut() &&
-                 TestUnwindHostAPI() && TestUnwindLisp() &&
-                 TestUnwindCleanupBudget() && TestFrameLimits() &&
-                 TestFrameSubstrate() && TestArenaStats() &&
-                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
-                 TestArgumentFrame() && TestArgumentProbe() &&
-                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
-                 TestMacroFrame() && TestNativeReentry() &&
-                 TestNativeOwningReentry() && TestResumableFrameGC() &&
-                 TestCleanupRunGC() && TestPrimitiveOrder() &&
-                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
-                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestLongArgumentLists() && TestNativeArityRecord() &&
-                 TestExhaustionCatchability() &&
+                 TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestFrameLimits() && TestFrameSubstrate() &&
+                 TestArenaStats() && TestEvaluationStackProbe() &&
+                 TestCallHeadProbe() && TestArgumentFrame() &&
+                 TestArgumentProbe() && TestLambdaBodyFrame() &&
+                 TestLambdaBodyChain() && TestMacroFrame() &&
+                 TestNativeReentry() && TestNativeOwningReentry() &&
+                 TestResumableFrameGC() && TestCleanupRunGC() &&
+                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
+                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
+                 TestGcStackConstantInNesting() && TestLongArgumentLists() &&
+                 TestNativeArityRecord() && TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
                  TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&

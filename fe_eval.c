@@ -349,6 +349,14 @@ static void RunOneCleanupEntry(FeContext* ctx,
   const size_t volatile saved_run_base = ctx_v->run_base;
   FeObject* const volatile saved_call_list = ctx_v->call_list;
   jmp_buf* const volatile saved_condition_catch = ctx_v->condition_catch;
+  const size_t volatile saved_cleanup_frame_floor = ctx_v->cleanup_frame_floor;
+  // Saved and put back like every other ambient field: an entry that
+  // *handles* its own raise leaves the completion Normal (the handler
+  // transfer does), and the drain this entry belongs to still needs its own
+  // kind afterwards -- `AllocateFrame`'s `CleanupFrameReserve` gate and
+  // `FePushGC`'s reserve both read it as "a completion is in flight", and
+  // the entries after this one must not lose that.
+  const FeCompletion volatile saved_completion = ctx_v->completion;
   const FeEvaluationControl saved_control = SaveEvaluationControl(ctx_v);
   if (budget != nullptr) {
     ctx_v->evaluation_interrupt = budget->interrupt;
@@ -361,6 +369,7 @@ static void RunOneCleanupEntry(FeContext* ctx,
     ctx_v->evaluation_active = true;
   }
   ctx_v->cleanup_catch = &local_jump;
+  ctx_v->cleanup_frame_floor = ctx_v->frame_stack_index;
   if (setjmp(local_jump) == 0) {
     if (entry_v->kind == FeCleanupNative) {
       entry_v->as.native.fn(ctx_v, entry_v->as.native.data);
@@ -369,6 +378,8 @@ static void RunOneCleanupEntry(FeContext* ctx,
     }
   } else {
     ctx_v->cleanup_catch = saved_catch;
+    ctx_v->cleanup_frame_floor = saved_cleanup_frame_floor;
+    ctx_v->completion = saved_completion;
     ctx_v->evaluator_catch = saved_evaluator_catch;
     ctx_v->native_reentry_depth = saved_native_reentry_depth;
     ctx_v->run_base = saved_run_base;
@@ -403,6 +414,8 @@ static void RunOneCleanupEntry(FeContext* ctx,
                         ctx_v->cleanup_error_message);
   }
   ctx_v->cleanup_catch = saved_catch;
+  ctx_v->cleanup_frame_floor = saved_cleanup_frame_floor;
+  ctx_v->completion = saved_completion;
   // A cleanup error longjmps directly here, bypassing the nested
   // RunEvaluation() that installed its own barrier. Do not leave that
   // automatic jmp_buf, its frames, or its trace link live in the context.
@@ -589,22 +602,24 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
   ctx->call_list = &nil;
   ctx->nextchr = '\0';
 
-  if (ctx->cleanup_catch != nullptr) {
-    // A cleanup entry's own `fn` or unwind-forms raised. Resume at
-    // `RunOneCleanupEntry`'s `setjmp` instead of reaching the host: that
-    // keeps unwinding the cleanup stack instead of abandoning it, and lets
-    // the replay happen in the enclosing context, where an enclosing
-    // `condition-case` can see it (06A Decision 4: the cleanup's completion
-    // replaces the one already in flight). Kind and text travel together.
-    SaveCleanupCompletion(ctx, kind, msg);
-    longjmp(*ctx->cleanup_catch, 1);
-  }
-
   ctx->completion = kind;
 
+  // The handler search runs *before* the `cleanup_catch` bounce below, and
+  // `cleanup_frame_floor` is what makes that safe (sub-plan 12B Part 1,
+  // 12A Decision 2). The two were the other way round, so while any cleanup
+  // entry ran, every raise took the bounce unconditionally and the cleanup's
+  // own handler frames were never examined: `(unwind-protect 'body
+  // (condition-case c (car 6) (error 'handled)))` is `body` in Emacs 31.0.90
+  // and escaped to the host here, drain or no drain. What changes is handler
+  // *visibility inside a cleanup*, and nothing else -- a handler below the
+  // floor still loses to the bounce, so an unhandled cleanup raise still
+  // replaces the completion being unwound and is still caught by an
+  // *enclosing* `condition-case` (06A Decision 4), which is measured
+  // byte-identical to Emacs for the error, quit and throw unwinds alike.
   size_t handler_index;
   FeObject* handler;
-  if (FindConditionHandler(ctx, kind, &handler_index, &handler)) {
+  if (FindConditionHandler(ctx, kind, &handler_index, &handler) &&
+      handler_index >= ctx->cleanup_frame_floor) {
     FeEvalFrame* const frame = &ctx->frame_stack[handler_index];
     // The condition that is unwinding is held in a local, not re-read from
     // `ctx->condition`, across the drain below: a cleanup entry can run
@@ -631,6 +646,18 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data) {
     // minus the steps the body spent: the handler and everything after it
     // continue inside the same budget, wall and interrupt.
     longjmp(*ctx->condition_catch, 1);
+  }
+
+  if (ctx->cleanup_catch != nullptr) {
+    // A cleanup entry's own `fn` or unwind-forms raised, and nothing the
+    // entry itself established can handle it. Resume at
+    // `RunOneCleanupEntry`'s `setjmp` instead of reaching the host: that
+    // keeps unwinding the cleanup stack instead of abandoning it, and lets
+    // the replay happen in the enclosing context, where an enclosing
+    // `condition-case` can see it (06A Decision 4: the cleanup's completion
+    // replaces the one already in flight). Kind and text travel together.
+    SaveCleanupCompletion(ctx, kind, msg);
+    longjmp(*ctx->cleanup_catch, 1);
   }
 
   // Nothing here can catch it, so the whole registry drains (down to

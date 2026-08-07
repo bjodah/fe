@@ -1,0 +1,6 @@
+{
+ "id": "cond-u6-cleanup-throw-during-error",
+ "setup": [],
+ "expr": "(catch 'tg (condition-case e (unwind-protect (/ 1 0) (throw 'tg 'from-cleanup)) (error (list 'E e))))",
+ "note": "U6 (audit probe A16), a permanent guard on 06A Decision 4: a cleanup that THROWS during an error unwind wins over the error, and the value reaches the catch rather than the condition-case."
+}

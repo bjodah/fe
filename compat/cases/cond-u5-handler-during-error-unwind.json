@@ -1,0 +1,6 @@
+{
+ "id": "cond-u5-handler-during-error-unwind",
+ "setup": [],
+ "expr": "(condition-case e (unwind-protect (/ 1 0) (condition-case nil (car 6) (error nil))) (error e))",
+ "note": "U5: a cleanup error HANDLED inside the cleanup, while an error is unwinding. The in-flight condition survives -- the outer handler still binds (arith-error). This is the Phase 11 carried-forward reproduction, spelled without `ignore-errors` (which Fe does not have)."
+}

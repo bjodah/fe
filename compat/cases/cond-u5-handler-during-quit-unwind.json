@@ -1,0 +1,6 @@
+{
+ "id": "cond-u5-handler-during-quit-unwind",
+ "setup": [],
+ "expr": "(condition-case e (unwind-protect (signal 'quit nil) (condition-case nil (car 6) (error nil))) (quit (list 'quit-caught e)) (error (list 'err e)))",
+ "note": "U5: a cleanup error handled inside the cleanup, while a quit is unwinding. Quit is still quit -- the `quit` handler takes it and the `error` one does not."
+}

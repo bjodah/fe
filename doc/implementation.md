@@ -930,14 +930,47 @@ below).
 A cleanup that itself raises is the one case the raise path treats
 differently: `cleanup_catch`, a `jmp_buf*` naming the local `setjmp()` a
 helper (`RunOneCleanupEntry()`) installed around that one entry's execution,
-is non-null exactly while that entry is running. `RaiseCompletionCore()`
-checks it first, before anything else, and when it is set, resumes there
-directly instead of reaching `error_fn` -- reaching a callback contracted to
-never return would abandon every cleanup entry still below this one. The
-message is copied into context-owned storage first, since the frame that
-formatted it is what is about to be unwound past, and the *kind* is copied
-with it, so a cleanup that runs out of its own bounded budget or answers a
-second host interrupt does not arrive relabelled as an ordinary error.
+is non-null exactly while that entry is running. When it is set and nothing
+the entry itself established can handle the raise, `RaiseCompletionCore()`
+resumes there directly instead of reaching `error_fn` -- reaching a callback
+contracted to never return would abandon every cleanup entry still below
+this one. The message is copied into context-owned storage first, since the
+frame that formatted it is what is about to be unwound past, and the *kind*
+is copied with it, so a cleanup that runs out of its own bounded budget or
+answers a second host interrupt does not arrive relabelled as an ordinary
+error.
+
+"Nothing the entry itself established" is the qualification sub-plan 12B
+Part 1 added, and it is decided by a second field, `cleanup_frame_floor`:
+the frame-stack index the running entry started at, zero when no entry is
+running. The handler search runs *before* the `cleanup_catch` bounce and a
+handler is accepted only at or above that floor. Below it are the frames of
+the computation the drain is abandoning, and taking one of those directly
+would skip the rest of the registry.
+
+The two used to be the other way round -- `cleanup_catch` first,
+unconditionally -- so while any cleanup entry ran, *every* raise bounced and
+the cleanup's own handler frames were never examined. The visible effect was
+not limited to a drain: `(unwind-protect 'body (condition-case nil (car 6)
+(error nil)))` escaped to the host, where Emacs 31.0.90 answers `body`.
+
+`run_base` cannot serve as that floor even though it looks like it should.
+A *Lisp* cleanup's forms run through `RunEvaluationBody()`, whose loop
+republishes `run_base` to the cleanup's own base, so for those the search is
+already confined and the floor is redundant. A *native* cleanup runs its
+`FeCleanupFn` directly and republishes nothing, and neither does the window
+inside `RunEvaluationBody()` before its loop starts, where a frame-limit
+raise lands. In both of those `run_base` is still the enclosing run's. For a
+native cleanup the floor equals the current frame index, nothing is above
+it, no handler is ever accepted, and the arm is bit-identical to what it was
+before the fix.
+
+`RunOneCleanupEntry()` saves and restores `ctx->completion` with the rest of
+the ambient state for the same reason. An entry whose own handler catches
+its raise leaves the completion `Normal` -- the handler transfer sets it --
+and the drain that entry belongs to still needs its own kind afterwards,
+because `AllocateFrame()`'s `CleanupFrameReserve` gate and `FePushGC()`'s
+reserve both read that field as "a completion is in flight".
 
 Once control resumes at that `setjmp()`, `RunOneCleanupEntry()` restores
 the enclosing run's frame stack, floor, barriers and evaluation-control

@@ -1,0 +1,6 @@
+{
+ "id": "cond-u5-handler-nested-both-depths",
+ "setup": [],
+ "expr": "(condition-case e (unwind-protect (unwind-protect (/ 1 0) (condition-case nil (car 7) (error nil))) (condition-case nil (car 6) (error nil))) (error e))",
+ "note": "U5: nested unwind-protects with an error handled at BOTH cleanup depths; the original condition still reaches the outer handler."
+}

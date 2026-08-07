@@ -1,0 +1,6 @@
+{
+ "id": "cond-u6-unhandled-during-quit",
+ "setup": [],
+ "expr": "(condition-case e (unwind-protect (signal 'quit nil) (car 6)) (quit (list 'q e)) (error (list 'e e)))",
+ "note": "U6 (audit probe A15), a permanent guard on 06A Decision 4: an unhandled cleanup error during a QUIT unwind replaces the quit, so it arrives as an error and the `error` handler takes it."
+}

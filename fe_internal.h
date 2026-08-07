@@ -736,6 +736,26 @@ struct FeContext {
   // there instead of reaching the host and abandoning the rest of the
   // cleanup stack.
   jmp_buf* cleanup_catch;
+  // The frame-stack index the currently running cleanup entry started at,
+  // and zero when no entry is running. It is the floor that decides which
+  // condition handlers a raise inside a cleanup may see: a handler at or
+  // above it was established by this cleanup entry itself and is honored;
+  // one below it belongs to the computation the drain is abandoning, and
+  // the raise takes `cleanup_catch` instead so the rest of the registry
+  // still unwinds (06A Decision 4).
+  //
+  // `run_base` cannot serve as that floor. A *Lisp* cleanup's forms run
+  // through `RunEvaluationBody`, whose loop republishes `run_base` to the
+  // cleanup's own base, so the handler search is already confined; a
+  // *native* cleanup does not, and neither does the window inside
+  // `RunEvaluationBody` before the loop starts (where a frame-limit raise
+  // lands). In both of those `run_base` is still the enclosing run's, and
+  // without this floor the search would reach outside the `unwind-protect`
+  // and transfer to a handler with the frame stack and the remaining drain
+  // in the wrong state. For a native cleanup the floor equals the current
+  // index, nothing is above it, and no handler is ever accepted -- which is
+  // exactly the pre-existing behaviour.
+  size_t cleanup_frame_floor;
   char cleanup_error_message[256];
   // The kind that goes with `cleanup_error_message`. A cleanup that runs out
   // of its own bounded budget, or that answers a second host interrupt, must

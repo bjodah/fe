@@ -809,12 +809,31 @@ outer
 1
 ```
 
-If a cleanup form itself raises, its completion **replaces** whatever was
-already unwinding -- Emacs' policy, and 06A Decision 4's. The replacement is
-an ordinary condition: an enclosing `condition-case` can catch it, and the
-error the cleanup interrupted is gone. Nothing is printed behind the
-program's back, and the remaining cleanups still run, on the replacing
-completion's own path.
+A cleanup form may establish condition handlers of its own, and they are
+honored: a `condition-case` written inside a cleanup catches what the
+cleanup raises, whether or not a completion is being unwound, and the
+`unwind-protect` still answers with the body's value.
+
+```clojure
+fe > (unwind-protect 'body (condition-case nil (car 6) (error nil)))
+body
+fe > (condition-case e
+       (unwind-protect (/ 1 0) (condition-case nil (car 6) (error nil)))
+       (error e))
+(arith-error)
+```
+
+A handler *outside* the `unwind-protect` is not a candidate from inside the
+cleanup, because it belongs to the computation the drain is abandoning: the
+raise leaves the cleanup first, so the rest of the cleanup registry still
+unwinds, and only then is that handler reached.
+
+If a cleanup form raises and nothing the cleanup itself established handles
+it, its completion **replaces** whatever was already unwinding -- Emacs'
+policy, and 06A Decision 4's. The replacement is an ordinary condition: an
+enclosing `condition-case` can catch it, and the error the cleanup
+interrupted is gone. Nothing is printed behind the program's back, and the
+remaining cleanups still run, on the replacing completion's own path.
 
 ```clojure
 fe > (condition-case e (unwind-protect (error "orig") (error "cleanup"))

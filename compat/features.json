@@ -1665,10 +1665,32 @@
     "cond-u4-cleanup-throw-over-error",
     "cond-u4-cleanup-throw-outer",
     "cond-u4-cleanup-throw-inner-live",
-    "cond-u4-cleanup-throw-no-catch"
+    "cond-u4-cleanup-throw-no-catch",
+    "cond-u6-unhandled-during-error",
+    "cond-u6-unhandled-during-quit",
+    "cond-u6-cleanup-throw-during-error"
    ],
    "kg_test": null,
-   "rationale": "Phase 6, 06A Decision 4, complete: a cleanup runs on the error, throw and quit paths alike (cond-u1-*), nested cleanups run innermost-first (cond-u3-order), and a cleanup that raises replaces the completion already unwinding -- an error (cond-u2) or a throw (cond-u4-*), including a throw whose catch lies below the cleanup's own nested run, which is re-issued in the enclosing context rather than answered as no-catch. The five original rows were written in Emacs' progn/push and died on void-function before testing anything; their replacements are in the dialect intersection and carry fresh snapshots of their own.",
+   "rationale": "Phase 6, 06A Decision 4, complete: a cleanup runs on the error, throw and quit paths alike (cond-u1-*), nested cleanups run innermost-first (cond-u3-order), and a cleanup that raises replaces the completion already unwinding -- an error (cond-u2) or a throw (cond-u4-*), including a throw whose catch lies below the cleanup's own nested run, which is re-issued in the enclosing context rather than answered as no-catch. The five original rows were written in Emacs' progn/push and died on void-function before testing anything; their replacements are in the dialect intersection and carry fresh snapshots of their own. Re-measured against Emacs 31.0.90 by sub-plan 12B Part 1 and pinned as permanent guards, because the handler-visibility fix in that slice had to leave this policy untouched and now has three cases saying so: cond-u6-unhandled-during-error, cond-u6-unhandled-during-quit and cond-u6-cleanup-throw-during-error are the audit's probes A10, A15 and A16, and their answers are byte-identical before and after the fix. The line the fix draws is `unhandled`: a raise a cleanup's OWN handler catches never leaves the cleanup and so replaces nothing (unwind-protect-cleanup-handlers), while a raise no handler at or above the cleanup's frame floor can take still replaces the completion being unwound, exactly as this row has always said.",
+   "source_name": null
+  },
+  {
+   "id": "unwind-protect-cleanup-handlers",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-u5-handler-in-cleanup",
+    "cond-u5-handler-binds-own-condition",
+    "cond-u5-handler-during-error-unwind",
+    "cond-u5-handler-during-throw-unwind",
+    "cond-u5-handler-during-quit-unwind",
+    "cond-u5-handler-nested-both-depths",
+    "cond-u5-handler-then-resignal"
+   ],
+   "kg_test": "fe/test_api.c:TestNativeCleanupHandlerFloor",
+   "rationale": "Sub-plan 12B Part 1, closing the gap Phase 11 carried forward -- and which the Phase 12 audit measured to be broader than Phase 11 recorded. The symptom was `a cleanup that handles its own error clobbers the in-flight condition'; the defect was that a `condition-case' established inside an `unwind-protect' CLEANUP handled nothing at all, drain or no drain, so every error in a cleanup body behaved as if unhandled. `(unwind-protect 'body (condition-case nil (car 6) (error nil)))' is `body' in Emacs 31.0.90 and escaped to the host here. One ordering caused it: `RaiseCompletionCore' tested `cleanup_catch' and bounced to `RunOneCleanupEntry' before it ever called `FindConditionHandler'. The fix runs the search first and accepts a handler only at or above `cleanup_frame_floor', the frame index the running cleanup entry started at. `run_base' could not serve as that floor: a Lisp cleanup's forms republish it, a NATIVE cleanup's do not, and neither does the window before `RunEvaluationBody''s loop starts, so without the floor a native cleanup's raise could transfer to a handler outside the `unwind-protect' with the drain in the wrong state. For a native cleanup the floor equals the current index, no handler is ever accepted, and the arm is bit-identical -- `TestNativeCleanupHandlerFloor' is that assertion and passes unchanged on the commit before the fix. `catch'/`throw' inside a cleanup already worked and is unaffected.",
    "source_name": null
   },
   {

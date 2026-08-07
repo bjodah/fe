@@ -1,0 +1,6 @@
+{
+ "id": "cond-u5-handler-in-cleanup",
+ "setup": [],
+ "expr": "(unwind-protect 'body (condition-case nil (car 6) (error nil)))",
+ "note": "U5: a condition handler established INSIDE an unwind-protect cleanup handles the cleanup's own error. Before sub-plan 12B Part 1 this escaped to the host in Fe -- `RaiseCompletionCore` tested `cleanup_catch` before it ever called `FindConditionHandler`, so while any cleanup entry ran the cleanup's own handler frames were unreachable. The unwind-protect's value is still the body's; the cleanup's is discarded."
+}

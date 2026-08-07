@@ -1,0 +1,6 @@
+{
+ "id": "cond-u5-handler-during-throw-unwind",
+ "setup": [],
+ "expr": "(catch 'tg (unwind-protect (throw 'tg 99) (condition-case nil (car 6) (error nil))))",
+ "note": "U5: a cleanup error handled inside the cleanup, while a throw is unwinding. The throw still reaches its catch, with its value."
+}

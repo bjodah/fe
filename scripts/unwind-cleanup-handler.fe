@@ -1,0 +1,162 @@
+;; A condition handler established *inside* an `unwind-protect` cleanup is
+;; honored by a raise from that cleanup (sub-plan 12B Part 1). Before the
+;; ordering fix in `RaiseCompletionCore`, every raise inside a running
+;; cleanup entry took the `cleanup_catch` bounce before the handler search
+;; ran, so the cleanup's own handler frames were never examined and even
+;; `(unwind-protect 'body (condition-case nil (car 6) (error nil)))` escaped
+;; to the host.
+;;
+;; Every expectation below is the answer measured from Emacs 31.0.90 under
+;; `lexical-binding: t`, top-level forms, on 2026-08-07. Fe has no
+;; `ignore-errors` and no `progn`, so the Emacs probe's `(ignore-errors X)`
+;; is spelled `(condition-case nil X (error nil))` and its `progn` is `do`;
+;; nothing else differs.
+
+;; T1: the handler catches, and the cleanup's value is discarded -- the
+;; `unwind-protect`'s value is still the body's.
+(assert-equals 'body
+  (unwind-protect 'body (condition-case nil (car 6) (error nil))))
+
+;; T2: the handler binds the cleanup's OWN condition object.
+(assert-equals 'body
+  (unwind-protect 'body (condition-case c (car 6) (error c))))
+(setq t2-seen 'unset)
+(unwind-protect 'body (condition-case c (car 6) (error (setq t2-seen c))))
+(assert-equals '(wrong-type-argument listp 6) t2-seen)
+
+;; T3: two separately handled errors in one cleanup; the second handler is
+;; reached, which the single-shot bounce could never do.
+(setq t3-log nil)
+(assert-equals 'body
+  (unwind-protect 'body
+    (do (setq t3-log (cons (condition-case c (car 6) (error (car c))) t3-log))
+        (setq t3-log (cons (condition-case c (car 7) (error (car c))) t3-log)))))
+(assert-equals '(wrong-type-argument wrong-type-argument) t3-log)
+
+;; T4: a handled cleanup error during an ERROR unwind. The outer condition
+;; survives -- this is the Phase 11 carried-forward reproduction, where the
+;; cleanup's contained error used to reach the outer handler as if it had
+;; replaced `(arith-error)`.
+(assert-equals '(arith-error)
+  (condition-case e
+    (unwind-protect (/ 1 0) (condition-case nil (car 6) (error nil)))
+    (error e)))
+
+;; T5: a handled cleanup error during a THROW unwind. The throw still
+;; reaches its catch, with its value.
+(assert-equals 99
+  (catch 'tg
+    (unwind-protect (throw 'tg 99) (condition-case nil (car 6) (error nil)))))
+(setq t5-seen 'unset)
+(assert-equals '(99 wrong-type-argument)
+  (list (catch 'tg
+          (unwind-protect (throw 'tg 99)
+            (setq t5-seen (condition-case c (car 6) (error (car c))))))
+        t5-seen))
+
+;; T6: a handled cleanup error during a QUIT unwind. Quit is still quit --
+;; delivered to the `quit` handler and not to the `error` one.
+(assert-equals '(quit-caught (quit))
+  (condition-case e
+    (unwind-protect (signal 'quit nil)
+      (condition-case nil (car 6) (error nil)))
+    (quit (list 'quit-caught e))
+    (error (list 'err e))))
+
+;; T7: nested unwind-protects, an error handled at BOTH cleanup depths. The
+;; original condition still reaches the outer handler.
+(assert-equals '(arith-error)
+  (condition-case e
+    (unwind-protect
+      (unwind-protect (/ 1 0) (condition-case nil (car 7) (error nil)))
+      (condition-case nil (car 6) (error nil)))
+    (error e)))
+
+;; T8: handled, then re-`signal`ed from inside the cleanup's handler. The
+;; re-raise is a fresh condition and it replaces the one being unwound,
+;; exactly as an unhandled cleanup error does.
+(assert-equals '(args-out-of-range from-cleanup)
+  (condition-case e
+    (unwind-protect (/ 1 0)
+      (condition-case c (car 6)
+        (error (signal 'args-out-of-range (list 'from-cleanup)))))
+    (error e)))
+
+;; T9: a `catch`/`throw` established inside a cleanup already worked before
+;; the fix and still does -- the defect was specific to condition handlers.
+(assert-equals 'body
+  (unwind-protect 'body (catch 'x (throw 'x 1))))
+
+;; --- 06A Decision 4's guards. An UNHANDLED cleanup raise still replaces
+;; --- the completion being unwound. These three are measured byte-identical
+;; --- to Emacs 31.0.90 both before and after the fix, and are pinned here so
+;; --- a later change to the cleanup path cannot quietly move them.
+
+;; A10: unhandled cleanup error during an error unwind.
+(assert-equals '(wrong-type-argument listp 6)
+  (condition-case e (unwind-protect (/ 1 0) (car 6)) (error e)))
+
+;; A15: unhandled cleanup error during a quit unwind -- it arrives as an
+;; ERROR, so the `error` handler takes it and the `quit` one does not.
+(assert-equals '(e (wrong-type-argument listp 6))
+  (condition-case e
+    (unwind-protect (signal 'quit nil) (car 6))
+    (quit (list 'q e))
+    (error (list 'e e))))
+
+;; A16: a cleanup that THROWS during an error unwind wins over the error.
+(assert-equals 'from-cleanup
+  (catch 'tg
+    (condition-case e
+      (unwind-protect (/ 1 0) (throw 'tg 'from-cleanup))
+      (error (list 'E e)))))
+
+;; And the two the corpus already pinned, restated here beside their new
+;; neighbours: a raising cleanup replaces an in-flight error, and a
+;; throwing one replaces it too.
+(assert-equals '(error "cleanup")
+  (condition-case e (unwind-protect (error "orig") (error "cleanup")) (error e)))
+(assert-equals 'b
+  (catch 'tg (unwind-protect (error "orig") (throw 'tg 'b))))
+
+;; A handler OUTSIDE the unwind-protect is below the cleanup's frame floor,
+;; so it is never taken directly from inside the cleanup: the raise still
+;; goes out through the bounce, which is what keeps the rest of the cleanup
+;; registry unwinding. Observable through the outer cleanup, which must
+;; still run.
+(setq outer-ran nil)
+(assert-equals '(wrong-type-argument listp 6)
+  (condition-case e
+    (unwind-protect
+      (unwind-protect 'body (car 6))
+      (setq outer-ran t))
+    (error e)))
+(assert-equals t outer-ran)
+
+;; A cleanup whose handler runs must not disarm the drain that follows it:
+;; the outer cleanup still runs, and the completion still arrives.
+(setq drain-log nil)
+(assert-equals '(arith-error)
+  (condition-case e
+    (unwind-protect
+      (unwind-protect (/ 1 0)
+        (do (condition-case nil (car 6) (error nil))
+            (setq drain-log (cons 'inner drain-log))))
+      (setq drain-log (cons 'outer drain-log)))
+    (error e)))
+(assert-equals '(outer inner) drain-log)
+
+;; Rooting: the condition object a cleanup's handler binds must survive
+;; collections the cleanup itself provokes.
+(setq gc-seen 'unset)
+(assert-equals 'body
+  (unwind-protect 'body
+    (condition-case c (car 6)
+      (error (do (setq gc-i 0)
+                 (while (< gc-i 4000)
+                   (cons gc-i gc-i)
+                   (setq gc-i (+ gc-i 1)))
+                 (setq gc-seen c))))))
+(assert-equals '(wrong-type-argument listp 6) gc-seen)
+
+(print "unwind-cleanup-handler: all cases passed")

@@ -1,0 +1,9 @@
+{
+ "id": "cond-u5-handler-binds-own-condition",
+ "setup": [
+  "(setq cond-u5b-seen 'unset)",
+  "(unwind-protect 'body (condition-case c (car 6) (error (setq cond-u5b-seen c))))"
+ ],
+ "expr": "cond-u5b-seen",
+ "note": "U5: the handler inside the cleanup binds the cleanup's OWN condition object, not the one being unwound. Written in the Fe/Emacs dialect intersection -- a setup form sets a flag, the expression reads it."
+}

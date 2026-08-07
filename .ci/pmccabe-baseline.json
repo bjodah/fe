@@ -231,7 +231,7 @@
   "fe_eval.c:PushEvaluationFrame": 1,
   "fe_eval.c:RaiseBudget": 1,
   "fe_eval.c:RaiseCompletion": 2,
-  "fe_eval.c:RaiseCompletionCore": 4,
+  "fe_eval.c:RaiseCompletionCore": 5,
   "fe_eval.c:RaiseCondition": 3,
   "fe_eval.c:RaiseGcStackOverflow": 3,
   "fe_eval.c:RaiseNamedError": 1,
