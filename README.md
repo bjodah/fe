@@ -14,13 +14,19 @@ The language offers the following features:
 * Emacs-style numeric literals: `42` is an integer, `42.0`, `.5` and `1e3`
   are floats, and floats print shortest-round-trip, always carrying a `.` or
   an exponent so they never read back as integers (`42.0`, `0.1`, `1e+20`)
-* Lexically scoped variables
+* Lexically scoped variables by default; a symbol marked with
+  `internal--mark-special` binds dynamically instead — shallow binding, with
+  the value restored on every completion kind (`special-variable-p` answers
+  whether a symbol is marked)
 * Closures
 * Variadic functions
 * Lisp-2 namespaces — each symbol has a value cell and a function cell, call
   position resolves the function cell, and `#'x` reads as `(function x)`
 * Non-local exits: `catch` and `throw`, unwinding to the innermost matching
-  tag and running the `unwind-protect` cleanups in between
+  tag and running the `unwind-protect` cleanups in between — the search stops
+  at a host native's evaluator boundary, so a throw from inside a nested run
+  raises `no-catch` there rather than reaching a `catch` outside it (a
+  recorded divergence from Emacs; see `doc/language.md`)
 * Structured conditions: `signal`, `error`, and `condition-case`, with a
   static error hierarchy and cleanup-safe unwinding
 * Unconditional strict arity for functions, macros, and core primitives

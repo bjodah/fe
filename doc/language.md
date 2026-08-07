@@ -922,6 +922,13 @@ between the runs are live and cannot be abandoned.
 
 ### Special Variables And Dynamic Binding
 
+This section is what `FE_LANGUAGE_VERSION` 9 means. There is no version table
+in this document: every version's rationale, language and API alike, lives in
+one place, the version history in
+[`doc/c-api.md`](c-api.md#api-compatibility) — including why 8 -> 9
+is the first bump in the series that changes what an *existing* program
+answers rather than only adding names.
+
 Fe's variables are lexical by default and stay that way. A symbol can be
 *marked*, and a marked symbol binds dynamically -- which is Emacs' model
 under `lexical-binding: t`, and the reason a library there can write

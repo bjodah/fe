@@ -10,17 +10,21 @@ Fe has two independent version numbers, because a change to the C embedding
 contract and a change to the Lisp language it evaluates are different kinds of
 break; a host should assert both.
 
+The two numbers are counted separately and are currently close enough to be
+confused for each other, so every mention below names its unit.
+
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; version 7 adds the
+types, and callback signatures declared in `fe.h`; API version 7 adds the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-version 9 is the special-variable contract (`internal--mark-special`,
+language version 9 is the special-variable contract (`internal--mark-special`,
 `special-variable-p`, and shallow dynamic binding at `let`'s two binding
-paths); version 8 is the reflective-expansion contract (`macroexpand-1`,
-`macroexpand`, and `macroexpand-all` naming itself as unimplemented);
-version 7 is the protected-constants and self-evaluating-keywords contract;
-version 6 is the strict-arity contract described below; version 4 was the
-numeric contract of the Emacs-subset cut: the reader
+paths); language version 8 is the reflective-expansion contract
+(`macroexpand-1`, `macroexpand`, and `macroexpand-all` naming itself as
+unimplemented); language version 7 -- a different 7 from the API version
+above -- is the protected-constants and self-evaluating-keywords contract;
+language version 6 is the strict-arity contract described below; language
+version 4 was the numeric contract of the Emacs-subset cut: the reader
 classifies `42` as an integer and `42.0` as a float (05A Decision 3), floats
 print shortest-round-trip with a `.` or an exponent always present (`42.0`,
 `1e+20` -- an appended `.0` only when neither is there already), integer

@@ -63,7 +63,7 @@
      "(apply (fn ",
      "(apply cons "
     ],
-    "why": "04C's four evaluate-then-redispatch shapes: funcall and apply, each with a direct closure and with a symbol designator resolved through the function cell."
+    "why": "04C's four evaluate-then-redispatch shapes: funcall and apply, each with a direct closure and with a symbol designator resolved through the function cell. All four are BUILT, and the two closure shapes RUN: the grammar emits the designator shapes as the bare symbol `cons`, whose value cell is empty since the 04D cut, so `(funcall cons ...)` raises `void-variable` -- and a raise ends the whole input at the harness's `setjmp`. The closure shapes are therefore placed first, and the designator shapes are reachability for the *construction* path only. Moving them somewhere they also execute needs a grammar change, which is out of scope here; the seed is unchanged."
    },
    "strict-arity-malformed": {
     "requires": [
