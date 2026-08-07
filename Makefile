@@ -299,7 +299,28 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # no total. The per-file cap goes on binding at full strength; proved live
 # the same way, by setting `SCC_FILE_COMPLEXITY_MAX=493` and watching
 # "FAIL: 1 file(s) exceed per-file limit 493".
-SCC_COMPLEXITY_MAX ?= 835
+# Set 835 -> 806 at the sub-plan 11C close (2026-08-07), pre-pin: the
+# measured actual after the translation-unit split, dynamic binding, the two
+# new primitives, the `(quote X)` -> `'X` writer abbreviation and
+# `FeTryEvaluateStringWithOptions`. Proved the way this repository's
+# convention requires, by temporarily lowering the cap by one and watching
+# the gate fire: at 805 `make complexity-check` reports "FAIL: total
+# complexity 806 exceeds limit 805"; at 806 it passes. Phase 11 spent 19 of
+# the 48 points the raise funded (787 -> 806, against a +25..49 price across
+# 11B and 11C), so the 29 unspent ones go back rather than sitting as
+# unearned headroom. The split is why the number is that low: 11B's own
+# opening commit moved 23 points of fe_eval.c into fe_run.c at zero net
+# cost, and everything after it was priced against a file that had room.
+# `SCC_FILE_COMPLEXITY_MAX` is deliberately *not* re-set to its actual and
+# stays at 520, as it has since 08: the per-file numbers are fe_eval.c 509,
+# fe.c 152, fe_run.c 25, main.c 37. 10B's warning -- that fe_eval.c at 517
+# of 520 left the next change of any size to price a raise or a split -- was
+# answered by the split rather than by a raise, and fe_eval.c came out of
+# this phase at 509 with 11 points of headroom, which is *not* comfortable.
+# The next slice to touch that file should expect to price a second split
+# (the completion/cleanup machinery, lines 230-700, is the coherent seam)
+# rather than assume the room is there.
+SCC_COMPLEXITY_MAX ?= 806
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -457,7 +478,23 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # only, every value unchanged -- and every later per-symbol increase is
 # banked explicitly, with its reason, in the commit that causes it. The last
 # commit of sub-plan 11C re-sets this number to the measured actual, pre-pin.
-PMCCABE_TOTAL_MAX ?= 1140
+# Set 1140 -> 1120 at the sub-plan 11C close (2026-08-07), the measured
+# actual across 358 symbols (347 before; eleven new, none above 5:
+# `FindSpecialEntry` 3, `MarkSpecialSymbol` 4, `SymbolIsSpecial` 2,
+# `SymbolIsLetDynamic` 1, `PushDynamicBinding` 1, `RestoreDynamicBinding` 1,
+# `BindingsHaveDynamic` 3, `InstallLetBindings` 3, `ResumeDynamicLet` 3,
+# `EmitAbbreviation` 5, `FeTryEvaluateStringWithOptions` 2 -- all inside
+# PMCCABE_NEW_FUNCTION_MAX). Proved the same way: at 1119 `make
+# pmccabe-check` reports "FAIL: total complexity 1120 exceeds funded budget
+# 1119 (+1)"; at 1120 it passes. The phase spent 32 of the 52 funded points;
+# the other 20 go back. Five per-symbol increases were banked in the commit
+# that caused them, with reasons, each one an arm added to an existing
+# switch or `if`: `ResumeUnary` 6 -> 8, `MarkCleanupRoots` 3 -> 4,
+# `RunCleanups` 2 -> 3, `StartBindingLet` 2 -> 3, `ResumeLet` 2 -> 3; one
+# decrease was banked as an improvement, `WriteObject` 10 -> 8, when the two
+# writer abbreviations were folded into one helper. The worst function in
+# the tree is still `RunEvaluationLoop` at 15 of the 22 per-function cap.
+PMCCABE_TOTAL_MAX ?= 1120
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
