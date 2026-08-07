@@ -124,8 +124,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 6);
-  static_assert(FE_LANGUAGE_VERSION == 8);
-  CHECK(strcmp(FeVersion, "9.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 9);
+  CHECK(strcmp(FeVersion, "10.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -7267,11 +7267,20 @@ static bool TestCaughtExhaustionSession(void) {
 // live after a collection (1027 -> 1049). The two figures the walk itself
 // decides -- how many times it collected, and that its peak is the whole
 // arena -- are unchanged, which is the invariance 09C pinned.
+//
+// Re-measured again at sub-plan 11B for exactly the same reason: two more
+// primitives (`internal--mark-special`, `special-variable-p`) grow
+// `FeMinimumArenaSize()`, so the arena grows with it and holds 17 more slots
+// (15232 -> 15249), of which the same 17 are live after a collection
+// (1049 -> 1066). The collection count and the peak are again unchanged.
+// Nothing in the corpus marks a symbol special, so `special_list` is empty
+// here and the registry costs nothing: these two numbers move because the
+// *primitive table* grew, not because dynamic binding did anything.
 enum {
-  PinnedTotalSlots = 15232,
+  PinnedTotalSlots = 15249,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15232,
-  PinnedLiveAfterCollection = 1049,
+  PinnedPeakLive = 15249,
+  PinnedLiveAfterCollection = 1066,
 };
 
 // ---------------------------------------------------------------------------
@@ -7839,6 +7848,158 @@ static bool TestCollectionStatsPinned(void) {
   return true;
 }
 
+// Sub-plan 11B of kg's Emacs-subset program: special variables and shallow
+// dynamic binding. The semantics grid itself -- the twelve rows sub-plan 11A
+// measured on Emacs 31.0.90, and the A2b/A4/A13 guards -- is
+// `scripts/special-variables.fe`, which can spell all of it in Lisp. What is
+// here is everything that cannot be: the five completion kinds a binding must
+// survive (two of which, Quit and Budget, have no Lisp spelling at all), a
+// collection running while bindings are live, and the registry's own C-level
+// state.
+static FeObject* CollectNow(FeContext* context,
+                            // cppcheck-suppress constParameterCallback
+                            FeObject* arguments) {
+  (void)arguments;
+  return FeMakeBool(context, ForceCollection(context));
+}
+
+static bool TestDynamicBinding(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "contain-call", ContainCall);
+  FeDefineNative(context, "raise-host-quit", RaiseHostQuit);
+  FeDefineNative(context, "raise-host-budget", RaiseHostBudget);
+  FeDefineNative(context, "collect-now", CollectNow);
+
+#define CHK(expr, expected)                                                 \
+  CHECK(IsRendered(                                                         \
+      context, FeEvaluateString(context, "dyn.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // The registry, read through the same predicates the binding paths use.
+  // Nothing is marked until `internal--mark-special` says so, and the two
+  // flags are separate: a let-dynamic-only mark (Emacs' one-arg `defvar`)
+  // binds dynamically while `special-variable-p` still answers nil.
+  FeObject* const full = FeMakeSymbol(context, "kv");
+  FeObject* const half = FeMakeSymbol(context, "hv");
+  CHECK(!SymbolIsSpecial(context, full) && !SymbolIsLetDynamic(context, full));
+  CHK("(internal--mark-special 'kv t)", "kv");
+  CHK("(internal--mark-special 'hv nil)", "hv");
+  CHECK(SymbolIsSpecial(context, full) && SymbolIsLetDynamic(context, full));
+  CHECK(!SymbolIsSpecial(context, half) && SymbolIsLetDynamic(context, half));
+  // Marking is idempotent and one-way, so a second full mark neither adds a
+  // registry entry nor a demotion path exists to undo one.
+  CHK("(internal--mark-special 'kv t)", "kv");
+  CHK("(internal--mark-special 'kv nil)", "kv");
+  CHECK(SymbolIsSpecial(context, full));
+
+  CHK("(setq kv 'global)", "global");
+  const size_t cleanups = context->cleanup_stack_index;
+
+  // 1/5 normal. The binding is in force for the body and gone on return --
+  // stated here as the control the other four are measured against.
+  CHK("(contain-call (lambda () (let ((kv 'inner)) (symbol-value 'kv))))",
+      "(ok inner)");
+  CHK("(symbol-value 'kv)", "global");
+
+  // 2/5 error, 3/5 throw, 4/5 quit, 5/5 budget. Each is raised from inside a
+  // live binding and contained by `FeTryCallWithOptions`, so the global value
+  // is asserted after the completion has already been swallowed -- the exact
+  // shape kg's hook dispatch and process callbacks have.
+  CHK("(contain-call (lambda () (let ((kv 'inner)) (car 5))))",
+      "(contained (wrong-type-argument listp 5))");
+  CHECK(contained_kind == FeCompletionError);
+  CHK("(symbol-value 'kv)", "global");
+
+  CHK("(contain-call (lambda () (let ((kv 'inner)) (throw 'nowhere 1))))",
+      "(contained (no-catch nowhere 1))");
+  CHECK(contained_kind == FeCompletionError);
+  CHK("(symbol-value 'kv)", "global");
+
+  CHK("(contain-call (lambda () (let ((kv 'inner)) (raise-host-quit))))",
+      "(contained (quit))");
+  CHECK(contained_kind == FeCompletionQuit);
+  CHK("(symbol-value 'kv)", "global");
+
+  CHK("(contain-call (lambda () (let ((kv 'inner)) (raise-host-budget))))",
+      "(contained nil)");
+  CHECK(contained_kind == FeCompletionBudget);
+  CHK("(symbol-value 'kv)", "global");
+
+  // Every one of the five left the cleanup registry exactly as it found it:
+  // an entry that was pushed and never drained would show up here as a leak
+  // and, later, as a restore performed at the wrong depth.
+  CHECK(context->cleanup_stack_index == cleanups);
+
+  // The same for the sequential two-argument `let` (kg's `internal--let`),
+  // whose binding belongs to the enclosing body rather than to its own form.
+  CHK("(contain-call (lambda () (do (let kv 'inner) (car 5))))",
+      "(contained (wrong-type-argument listp 5))");
+  CHK("(symbol-value 'kv)", "global");
+  CHECK(context->cleanup_stack_index == cleanups);
+
+  // A budget that expires on its own, rather than a host raising one: the
+  // binding is live when the last step is spent, and the value cell is back
+  // by the time the host's recovery `longjmp` has landed.
+  static const char runaway[] = "(let ((kv 'inner)) (while t (setq kv 'spun)))";
+  const FeEvalOptions budget = {.step_limit = 200};
+  CHECK(ExpectCompletionKind(
+      context, &state, "dyn.fe", runaway, sizeof(runaway) - 1, &budget,
+      "dyn.fe:1: evaluation step limit exceeded", FeCompletionBudget));
+  CHK("(symbol-value 'kv)", "global");
+  CHECK(context->cleanup_stack_index == cleanups);
+
+  // Unboundness is a value like any other here (row A10a): a `let` over an
+  // unbound special leaves it unbound again, on the abnormal path too.
+  CHK("(internal--mark-special 'uv nil)", "uv");
+  CHK("(boundp 'uv)", "nil");
+  CHK("(contain-call (lambda () (let ((uv 1)) (list (boundp 'uv) (car 5)))))",
+      "(contained (wrong-type-argument listp 5))");
+  CHK("(boundp 'uv)", "nil");
+
+  // A collection while two dynamic bindings are live. The shadowed globals
+  // are reachable from nowhere but the cleanup entries holding them -- that
+  // is what shallow binding means -- so a mark phase that did not walk those
+  // entries would sweep them, and the restore below would write a swept
+  // object back into a value cell. The strings are long enough to span
+  // several cells, so a partial sweep shows up as a wrong answer rather than
+  // as a coincidence.
+  static const char setup[] =
+      "(do (internal--mark-special 'g1 t) (internal--mark-special 'g2 t)"
+      "    (setq g1 (list 'one \"a string long enough to span several cells\"))"
+      "    (setq g2 (list 'two \"another string that also spans cells\"))"
+      "    'ready)";
+  CHECK(IsRendered(
+      context, FeEvaluateString(context, "dyn.fe", setup, sizeof(setup) - 1),
+      "ready"));
+  static const char under_gc[] =
+      "(let ((g1 'shadow-one) (g2 'shadow-two))"
+      "  (list (collect-now) g1 g2))";
+  CHECK(IsRendered(
+      context,
+      FeEvaluateString(context, "dyn.fe", under_gc, sizeof(under_gc) - 1),
+      "(t shadow-one shadow-two)"));
+  CHK("g1", "(one \"a string long enough to span several cells\")");
+  CHK("g2", "(two \"another string that also spans cells\")");
+
+  // And the same with the collection happening on the *abnormal* path, after
+  // the bindings are in force and before the drain that restores them.
+  CHK("(contain-call (lambda () (let ((g1 'x) (g2 'y)) (collect-now)"
+      "                            (car 5))))",
+      "(contained (wrong-type-argument listp 5))");
+  CHK("g1", "(one \"a string long enough to span several cells\")");
+  CHK("g2", "(two \"another string that also spans cells\")");
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -7872,7 +8033,8 @@ int main(void) {
                  TestMarkGraphShapes() && TestCollectionStatsPinned() &&
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
-                 TestProtectedCall() && TestHostRaiseCompletion()
+                 TestProtectedCall() && TestHostRaiseCompletion() &&
+                 TestDynamicBinding()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

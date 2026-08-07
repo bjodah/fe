@@ -1,0 +1,6 @@
+{
+ "id": "special-variable-p-keyword",
+ "setup": [],
+ "expr": "(special-variable-p :kw)",
+ "note": "11B: the keyword half of the constants answer above."
+}

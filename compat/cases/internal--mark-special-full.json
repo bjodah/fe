@@ -1,0 +1,6 @@
+{
+ "id": "internal--mark-special-full",
+ "setup": [],
+ "expr": "(do (internal--mark-special 'mark-full-p t) (special-variable-p 'mark-full-p))",
+ "note": "11B: fe's own marking primitive, which Emacs does not have -- there, `(defvar v 1)` is what sets the flag, and `defvar` is a special form fe deliberately does not gain (11A Decision 2: kg's prelude macros call this instead). A non-nil FULL-P sets both the special flag and the let-dynamic flag, so `special-variable-p` answers t."
+}

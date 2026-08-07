@@ -1,0 +1,6 @@
+{
+ "id": "special-variable-p-unmarked",
+ "setup": [],
+ "expr": "(special-variable-p 'never-marked-at-all)",
+ "note": "11B: the default answer for every symbol nobody has marked. Fe's flag is set only by `internal--mark-special`; Emacs' by `defvar`/`defconst`. Both sides answer nil for a name neither has seen."
+}

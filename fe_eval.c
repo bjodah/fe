@@ -260,6 +260,34 @@ static void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
   }
 }
 
+// One shallow dynamic binding (sub-plan 11B, 11A Decision 2): save the
+// symbol's current global value -- or its unboundness, which is the same
+// `&unbound` object the cell already holds -- as a cleanup entry owing a
+// restore, then write the new value into the global cell. Nothing else
+// changes: `setq`, `set` and `symbol-value` keep reading and writing that one
+// cell, which is why shallow binding makes `(let ((sv 2)) (setq sv 3) (svf))`
+// answer 3 (A2a) and a closure read the value in force at *call* time (A5)
+// with no further machinery.
+//
+// The registration comes first so a `cleanup stack overflow` raise leaves the
+// cell untouched rather than shadowed with no way back.
+static void PushDynamicBinding(FeContext* ctx,
+                               FeObject* symbol,
+                               FeObject* value) {
+  FeObject* const cell = SymbolBindingCell(symbol);
+  PushCleanup(ctx, (FeCleanupEntry){
+                       .kind = FeCleanupBinding,
+                       .as.binding = {.symbol = symbol, .value = CDR(cell)}});
+  CDR(cell) = value;
+}
+
+// The other half, run by `RunCleanups` on every completion kind. Two stores,
+// no allocation and nothing that can raise, which is what lets the drain do
+// it inline instead of through `RunOneCleanupEntry`'s barrier.
+static void RestoreDynamicBinding(const FeCleanupEntry* entry) {
+  CDR(SymbolBindingCell(entry->as.binding.symbol)) = entry->as.binding.value;
+}
+
 // Copies the completion raised while a cleanup entry was itself running
 // into context-owned storage, since the formatted message `RaiseCompletion`
 // is about to `longjmp` away from lives on that frame's stack and would
@@ -414,6 +442,15 @@ static void RunCleanups(FeContext* ctx,
                         const FeCleanupBudget* budget) {
   while (ctx->cleanup_stack_index > target) {
     const FeCleanupEntry entry = ctx->cleanup_stack[--ctx->cleanup_stack_index];
+    if (entry.kind == FeCleanupBinding) {
+      // A dynamic binding's restore (11B): two stores that cannot raise and
+      // evaluate nothing, so they do not need -- and must not pay for -- a
+      // barrier, a fresh control record or a budget of their own. This is
+      // the single point at which "restored on all five completion kinds"
+      // holds: every drain in the evaluator goes through here.
+      RestoreDynamicBinding(&entry);
+      continue;
+    }
     RunOneCleanupEntry(ctx, &entry, budget);
   }
 }
@@ -1064,6 +1101,86 @@ static void ValidateLetBindings(FeContext* ctx, FeObject* bindings) {
   }
 }
 
+// True when at least one of this binding list's targets is marked
+// let-dynamic (sub-plan 11B). The answer decides which of two shapes the
+// `let` takes, and it is asked here -- once, of a *binding list* -- rather
+// than at each parameter binding, which is what keeps the A4 guard
+// structural: `ArgsToEnv` never consults the flag, so a defun or lambda
+// parameter named after a special is still bound lexically, as measured on
+// Emacs 31.0.90 under `lexical-binding: t`.
+static bool BindingsHaveDynamic(FeContext* ctx, FeObject* bindings) {
+  for (FeObject* rest = bindings; !FeIsNil(rest); rest = CDR(rest)) {
+    if (SymbolIsLetDynamic(ctx, LetBindingTarget(ctx, CAR(rest)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The frame's collected values, in binding order, become its bindings
+// (sub-plan 11B): a let-dynamic target swaps the global value cell and
+// pushes the restore obligation, any other target extends the environment
+// the body will see. Every value form has already been evaluated, in the
+// frame's entry environment, so this is `let` and not `let*`, and a target
+// appearing twice binds twice -- the restores are LIFO, so the outer one
+// wins on the way out, as in Emacs.
+//
+// Rooting: `frame->accumulator` holds the head of the reordered value list
+// for the whole walk, so the values survive `BindValue`'s allocations, and
+// each environment cell `Bind` makes is on the GC stack until the frame's
+// own checkpoint is restored. The cleanup entries hold the shadowed globals
+// and `MarkCleanupRoots` marks them.
+static void InstallLetBindings(FeContext* ctx, FeEvalFrame* frame) {
+  frame->accumulator = ReverseList(frame->accumulator);
+  FeObject* values = frame->accumulator;
+  FeObject* env = frame->env;
+  for (FeObject* rest = CAR(frame->fn); !FeIsNil(rest); rest = CDR(rest)) {
+    FeObject* const target = LetBindingTarget(ctx, CAR(rest));
+    FeObject* const value = CAR(values);
+    values = CDR(values);
+    if (SymbolIsLetDynamic(ctx, target)) {
+      PushDynamicBinding(ctx, target, value);
+    } else {
+      env = BindValue(ctx, env, target, value);
+    }
+  }
+  // The frame becomes an ordinary sequential body: `env` is what the body
+  // forms see, `rest` the raw forms, and `accumulator` the "last completed
+  // value" a body with no forms at all completes with (nil, matching
+  // `(let ((a 1)))`). Its completion runs `CompletePairFrame`, whose
+  // `RunCleanupsDownTo(frame->cleanup_checkpoint)` -- the checkpoint this
+  // frame took while it was still `FeFrameExpression`, below every entry
+  // pushed above -- is what undoes the dynamic bindings on a normal return.
+  frame->kind = FeFrameBody;
+  frame->env = env;
+  frame->rest = CDR(frame->fn);
+  frame->accumulator = &nil;
+  frame->callee = &unbound;
+}
+
+// One `FeFrameDynamicLet` step: collect the delivered value, start the next
+// binding's value form, or -- once every one is in -- install the bindings.
+// Deliberately the same shape as `ResumeArguments`, including the GC-stack
+// restore per operand: the accumulator is a frame field and therefore a
+// mark-phase root already, so a long binding list costs arena, not root
+// slots.
+static bool ResumeDynamicLet(FeContext* ctx, FeEvalFrame* frame) {
+  if (frame->callee != &unbound) {
+    frame->accumulator = FeCons(ctx, frame->callee, frame->accumulator);
+    frame->callee = &unbound;
+    frame->rest = CDR(frame->rest);
+  }
+  if (!FeIsNil(frame->rest)) {
+    EvaluationStep(ctx);
+    FeRestoreGC(ctx, frame->gc_checkpoint);
+    PushEvaluationFrame(ctx, LetBindingValue(ctx, CAR(frame->rest)), frame->env,
+                        NULL);
+    return false;
+  }
+  InstallLetBindings(ctx, frame);
+  return false;
+}
+
 static void StartBindingLet(FeContext* ctx,
                             FeEvalFrame* frame,
                             FeObject* bindings,
@@ -1071,6 +1188,19 @@ static void StartBindingLet(FeContext* ctx,
   FeObject* parameters = &nil;
   FeObject* values = &nil;
   ValidateLetBindings(ctx, bindings);
+  if (BindingsHaveDynamic(ctx, bindings)) {
+    // At least one target binds dynamically, so the lambda-application
+    // desugaring below cannot be used for this form: a lambda parameter is
+    // a lexical environment entry, and a lexical entry for a special name
+    // would shadow the global cell that `setq` and every free reference
+    // read (A2a). `fn` carries `(BINDINGS . BODY)`, both fixed.
+    frame->kind = FeFrameDynamicLet;
+    frame->fn = FeCons(ctx, bindings, body);
+    frame->rest = bindings;
+    frame->accumulator = &nil;
+    frame->callee = &unbound;
+    return;
+  }
   for (FeObject* rest = bindings; !FeIsNil(rest); rest = CDR(rest)) {
     FeObject* binding = CAR(rest);
     parameters = FeCons(ctx, LetBindingTarget(ctx, binding), parameters);
@@ -1691,6 +1821,12 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PMacroexpand1] = {1, 2},
     [PMacroexpand] = {1, 2},
     [PMacroexpandAll] = {1, 2},
+    // Sub-plan 11B: `internal--mark-special` is SYMBOL plus a FULL-P flag,
+    // exactly two, because a one-argument spelling would have to guess which
+    // of the two `defvar` arities called it. `special-variable-p` is Emacs'
+    // own arity, exactly one.
+    [PMarkSpecial] = {2, 2},
+    [PSpecialVariableP] = {1, 1},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -1956,6 +2092,11 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PIntegerp:
     case PFloatp:
     case PKeywordp:
+    // `special-variable-p` (11B): arity-exact like `boundp` above, and it
+    // answers the *special* flag alone, so a symbol marked by a one-arg
+    // `defvar` answers nil while still binding dynamically -- the measured
+    // A7a/A7b pair.
+    case PSpecialVariableP:
       frame->kind = FeFrameUnary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -1974,6 +2115,10 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PIs:
     case PFset:
     case PDefalias:
+    // `internal--mark-special` (11B): SYMBOL then FULL-P, the target
+    // validated on delivery before the flag form is evaluated, which is the
+    // validate-first ordering the rest of this family already has.
+    case PMarkSpecial:
       frame->kind = FeFrameBinary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -2417,10 +2562,25 @@ static bool ResumeAndOr(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
 // synchronously without ever creating this frame kind), `accumulator` the
 // already-checked raw target symbol. The delivered value form's value
 // extends `*bind`, and the result is always nil.
+//
+// A let-dynamic target (sub-plan 11B) binds shallowly instead: the global
+// cell is swapped and the restore obligation pushed, and `*bind` is left
+// alone, since a lexical entry for the name would shadow exactly the cell
+// the binding just wrote. The scope is the same either way -- the rest of
+// the enclosing sequence -- so the restore must *not* run when this little
+// form completes, which is what raising this frame's own
+// `cleanup_checkpoint` past the new entry says. The entry is then drained by
+// whichever frame owns the enclosing body, on every completion kind, exactly
+// as the binding-list form's is.
 static bool ResumeLet(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
   if (frame->callee != &unbound) {
-    *frame->bind =
-        BindValue(ctx, frame->env, frame->accumulator, frame->callee);
+    if (SymbolIsLetDynamic(ctx, frame->accumulator)) {
+      PushDynamicBinding(ctx, frame->accumulator, frame->callee);
+      frame->cleanup_checkpoint = ctx->cleanup_stack_index;
+    } else {
+      *frame->bind =
+          BindValue(ctx, frame->env, frame->accumulator, frame->callee);
+    }
     frame->callee = &unbound;
     *result = &nil;
     return true;
@@ -2568,6 +2728,24 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       FeRequireNoArguments(ctx, frame->rest);
       *result = FeMakeBool(ctx, IsKeywordSymbol(value));
       break;
+    // `special-variable-p` (11B) reads the *special* flag and nothing else,
+    // so a symbol marked by a one-arg `defvar` answers nil here while still
+    // binding dynamically -- the measured A7a/A7b pair. The constants are
+    // the one answer that is not the flag: `(special-variable-p nil)`,
+    // `t` and any keyword are all `t` on Emacs 31.0.90, measured, even
+    // though nothing can ever bind one. They are tested before the type
+    // check because fe's nil is not a symbol object at all. A non-symbol is
+    // `(wrong-type-argument symbolp X)`, which is Emacs' answer too.
+    case PSpecialVariableP: {
+      FeRequireNoArguments(ctx, frame->rest);
+      if (FeIsNil(value) || IsConstantSymbol(value)) {
+        *result = FeMakeBool(ctx, true);
+        break;
+      }
+      *result = FeMakeBool(
+          ctx, SymbolIsSpecial(ctx, CheckType(ctx, value, FeTSymbol)));
+      break;
+    }
     // One constancy check, before the type check: `CheckType` returns its
     // argument unchanged, so the second `RejectConstantTarget(ctx, sym)` each
     // arm used to make could never fail where the first had not.
@@ -2620,6 +2798,10 @@ static bool ResumeBinary(FeContext* ctx,
       // validate-first ordering.
       case PFset:
       case PDefalias:
+      // `internal--mark-special` (11B): nil, `t` and keywords are constants
+      // and cannot be `let`-bound at all, so marking one is refused here
+      // rather than discovered at the binding site.
+      case PMarkSpecial:
         ValidateValueTarget(ctx, first);
         break;
       default:
@@ -2677,6 +2859,14 @@ static bool ResumeBinary(FeContext* ctx,
       break;
     case PDefalias:
       SetSymbolFunction(first, second);
+      *result = first;
+      break;
+    // `internal--mark-special` (11B). A non-nil FULL-P sets both flags (the
+    // two-arg `defvar` and `defconst` case), nil sets the let-dynamic flag
+    // alone (the one-arg `defvar` case). Returns the symbol, as `defvar`
+    // does in Emacs.
+    case PMarkSpecial:
+      MarkSpecialSymbol(ctx, first, !FeIsNil(second));
       *result = first;
       break;
     default:
@@ -2978,6 +3168,11 @@ static const bool primitive_is_function[PSentinel] = {
     [PMacroexpand1] = true,
     [PMacroexpand] = true,
     [PMacroexpandAll] = true,
+    // Sub-plan 11B: both are ordinary functions -- their operands evaluate,
+    // and Emacs' `special-variable-p` is a function too (`(funcall
+    // 'special-variable-p 'x)` works there).
+    [PMarkSpecial] = true,
+    [PSpecialVariableP] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`,
     // `catch`.
@@ -3597,6 +3792,8 @@ static bool ResumeContinuation(FeContext* ctx,
       return ResumeAndOr(ctx, frame, result);
     case FeFrameLet:
       return ResumeLet(ctx, frame, result);
+    case FeFrameDynamicLet:
+      return ResumeDynamicLet(ctx, frame);
     case FeFrameSetq:
       return ResumeSetq(ctx, frame, result);
     case FeFrameUnary:
@@ -3649,6 +3846,7 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
       case FeFrameWhile:
       case FeFrameAndOr:
       case FeFrameLet:
+      case FeFrameDynamicLet:
       case FeFrameSetq:
       case FeFrameRelay:
       case FeFrameUnary:
@@ -3687,6 +3885,7 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
     case FeFrameWhile:
     case FeFrameAndOr:
     case FeFrameLet:
+    case FeFrameDynamicLet:
     case FeFrameSetq:
     case FeFrameRelay:
     case FeFrameUnary:
@@ -3933,6 +4132,7 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
       case FeFrameWhile:
       case FeFrameAndOr:
       case FeFrameLet:
+      case FeFrameDynamicLet:
       case FeFrameSetq:
       case FeFrameRelay:
       case FeFrameUnary:

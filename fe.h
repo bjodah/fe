@@ -119,7 +119,22 @@
 // version that cannot tell kg whether the fe it is linking against has these
 // names.  `FE_API_VERSION` does not move: no declaration in this header
 // changed.
-#define FE_LANGUAGE_VERSION 8
+//
+// Version 9 (sub-plan 11B) is the special-variable cut, and it is the first
+// language bump in this series that changes what an *existing* program
+// answers rather than only adding names.  A symbol marked by
+// `internal--mark-special` binds dynamically: `let` and `let*` over it swap
+// the global value cell instead of extending the lexical environment, a
+// function that reads the name free sees the bound value, `setq` inside the
+// binding writes the binding, and the previous value -- or the symbol's
+// unboundness -- is restored on every completion kind.  Nothing that never
+// calls `internal--mark-special` can tell the difference, and closure and
+// defun *parameters* stay lexical unconditionally, which is Emacs' own
+// answer under `lexical-binding: t`.  `special-variable-p` is the reader for
+// the flag.  `FE_API_VERSION` does not move here either -- no declaration in
+// this header changed -- though sub-plan 11C moves it for the protected
+// string entry, and the two land under one `FeVersion` "10.0".
+#define FE_LANGUAGE_VERSION 9
 
 extern const char* FeVersion;
 

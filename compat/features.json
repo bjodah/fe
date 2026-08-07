@@ -103,8 +103,38 @@
     "primitive-let"
    ],
    "kg_test": null,
-   "rationale": "Same name, incompatible shape: Emacs's `let` takes a bindings list as its first argument and signals wrong-type-argument when given a bare symbol; Fe's `let` takes a bare symbol directly and has no separate body argument at all. kg's prelude `let` macro (tracked in kg's own manifest, owner kg, comparison emacs) is the Emacs-shaped construct; this entry is Fe's distinct low-level primitive.",
+   "rationale": "Same name, incompatible shape at the arity this case pins: Emacs's `let` takes a bindings list and a body, and signals wrong-type-argument when given a bare symbol, which is what `(let x 5)` measures. Fe's `let` accepts *both* -- a bindings list plus body, Emacs-shaped, which is the arm `StartBindingLet` drives and the one kg's prelude uses under the alias `internal--let`'s sibling; and the historical two-argument `(let SYM VALUE)` form, a sequential local declaration scoped to the rest of the enclosing body with no body argument of its own, which kg's prelude calls `internal--let`. This row is the second of those, and it stays divergent because Emacs has no such form. (The rationale here used to say fe's `let` had no bindings-list arm at all; that has not been true since the frame evaluator landed, and sub-plan 11B -- which taught both arms dynamic binding -- is where it was corrected.)",
    "source_name": "let"
+  },
+  {
+   "id": "special-variable-p",
+   "category": "bindings",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "special-variable-p-unmarked",
+    "special-variable-p-constant",
+    "special-variable-p-keyword",
+    "special-variable-p-non-symbol"
+   ],
+   "kg_test": "fe/scripts/special-variables.fe",
+   "rationale": null,
+   "source_name": "special-variable-p"
+  },
+  {
+   "id": "internal--mark-special",
+   "category": "bindings",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "kg-policy",
+   "cases": [
+    "internal--mark-special-full",
+    "internal--mark-special-let-dynamic"
+   ],
+   "kg_test": "fe/test_api.c:TestDynamicBinding",
+   "rationale": "Sub-plan 11B (11A Decision 2): the primitive that gives a symbol its special and let-dynamic flags. Emacs has no function of this name -- there the flags are set by `defvar`/`defconst`, which fe deliberately does not gain, so kg's prelude macros call this instead. kg-policy, therefore, not emacs: what is Emacs-comparable is the *behaviour* the flags produce, and the Emacs-comparison cases for that are kg's (sub-plan 11D), written against `defvar` and the same 21-probe grid.",
+   "source_name": "internal--mark-special"
   },
   {
    "id": "primitive-if",
@@ -646,7 +676,7 @@
     "primitive-setq-value-error"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 02B lands `setq` as a core special form (fe.c's EvaluateSetq, reached from EvaluatePrimitive's PSetq arm): pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. Sub-plan 02C then deleted the historical assignment `=` it landed beside, so `setq` is Fe's only assignment special form and `=` is numeric equality (primitive-numeric-eq).",
+   "rationale": "Sub-plan 02B lands `setq` as a core special form (fe.c's EvaluateSetq, reached from EvaluatePrimitive's PSetq arm): pair iteration over the existing assignment path, updating the innermost lexical binding when one exists and the global value cell otherwise. Sub-plan 02C then deleted the historical assignment `=` it landed beside, so `setq` is Fe's only assignment special form and `=` is numeric equality (primitive-numeric-eq). Sub-plan 11B adds the one qualification this rationale needs: `setq` still updates the innermost lexical binding when one exists and the global value cell otherwise, and *that is unchanged* for a special variable -- a dynamically bound symbol has no lexical entry, so `setq` writes the global cell, which shallow binding has already pointed at the innermost binding. That is what makes `(let ((sv 2)) (setq sv 3) (svf))` answer 3 (11A row A2a) with no change to this path at all.",
    "source_name": "setq"
   },
   {
@@ -663,7 +693,7 @@
     "primitive-set-arity-too-many"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 02B lands `set` (fe.c's EvaluateSet, reached from EvaluatePrimitive's PSet arm) as an ordinary, exact-arity function using the existing global setter FeSet() -- it always writes the symbol's global value cell and never reads or changes a lexical binding of the same spelling, unlike `setq`.",
+   "rationale": "Sub-plan 02B lands `set` (fe.c's EvaluateSet, reached from EvaluatePrimitive's PSet arm) as an ordinary, exact-arity function using the existing global setter FeSet() -- it always writes the symbol's global value cell and never reads or changes a lexical binding of the same spelling, unlike `setq`. Sub-plan 11B leaves this exactly as it is, with one thing now worth saying out loud: `set` writes the global value cell, and under shallow dynamic binding that cell *is* the innermost binding of a special variable while a `let` over it is in force. So `set` on a bound special assigns the binding, not the value the binding is hiding -- which is Emacs' behaviour too -- and the restore on the way out still puts back the value from before the binding, not the one `set` wrote.",
    "source_name": "set"
   },
   {

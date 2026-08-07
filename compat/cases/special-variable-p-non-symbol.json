@@ -1,0 +1,6 @@
+{
+ "id": "special-variable-p-non-symbol",
+ "setup": [],
+ "expr": "(special-variable-p 5)",
+ "note": "11B: `(wrong-type-argument symbolp 5)` on both sides. Fe reaches it through the same `CheckType` every symbol-taking unary primitive uses."
+}

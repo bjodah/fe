@@ -171,6 +171,58 @@ fallback, so the value cell has exactly one reader. It is
 tagged `FeTFree` so that an escape aborts in
 the writer rather than impersonating a value.
 
+### Special variables and shallow dynamic binding
+
+A symbol's *metadata* -- as opposed to its name, function cell and value
+cell, all of which live in the symbol object above -- is one registry on the
+context: `ctx->special_list`, a list of `(SYMBOL . FULL-P)` pairs with one
+entry per marked symbol, marked by `CollectGarbage` as a root in its own
+right. `MarkSpecialSymbol`, `SymbolIsSpecial` and `SymbolIsLetDynamic` (fe.c,
+beside the symbol accessors) are its whole interface.
+
+It is a list, and not a bit in the symbol object, for two reasons. A
+symbol's `car` word is a tag whose spare bits the collector's pointer
+reversal already owns (see `GcMarkCdrBit`), so there is no free bit to take;
+and a list costs two cells per *marked symbol* rather than anything at all
+per binding, which is the cost that would be on the hot path. Membership is
+one linear scan, the same shape `FeMakeSymbol`'s interning and `GetBound`'s
+environment walk already are.
+
+Binding a marked symbol is *shallow*: `PushDynamicBinding` (fe_eval.c) saves
+the global value cell's current contents -- which may be the `unbound`
+object itself, the whole of row A10a -- as an `FeCleanupBinding` entry on the
+cleanup registry, then writes the new value into that same cell. The restore
+is `RestoreDynamicBinding`, two stores that cannot raise and evaluate
+nothing, which is why `RunCleanups` performs it inline rather than through
+`RunOneCleanupEntry`'s barrier and control-record save/restore.
+
+Putting the obligation on the cleanup registry rather than in a registry of
+its own is the design decision worth stating: the property a dynamic binding
+needs is exactly the one every cleanup entry already has -- it must be
+honoured on all five completion kinds -- and the drains that do that
+(`CompletePairFrame`, `CompleteImplicitBodyFrame`, `RaiseCompletionCore`'s
+handler and host drains, `PerformThrow`'s unwind) are already written
+against this stack and this stack only. `MarkCleanupRoots` marks the saved
+value, which while the binding is in force is reachable from nowhere else.
+
+Two frame kinds consult the flag and nothing else does. `StartBindingLet`
+asks `BindingsHaveDynamic` once, of a whole binding list: with no marked
+target the list compiles into the lambda application it always did, and with
+one the frame becomes `FeFrameDynamicLet`, which evaluates every value form
+in the entry environment and then binds each target by its own kind
+(`InstallLetBindings`) before becoming an ordinary body frame. `ResumeLet`,
+the two-argument `(let SYM VALUE)` path, binds shallowly for a marked target
+and raises its own frame's `cleanup_checkpoint` past the new entry, because
+that binding's scope is the enclosing body rather than its own little form.
+
+`ArgsToEnv` -- every closure, `fn` and macro parameter binding -- never asks.
+That is not an oversight but the guard: a defun parameter named after a
+special variable is bound *lexically* in Emacs 31.0.90 under
+`lexical-binding: t` (measured interpreted, byte-compiled, with a user
+`defvar` and with a core variable), and an implementation that bound
+specials dynamically at every parameter-binding site would close one
+divergence and open another.
+
 ## Sub-plan 04C: the function namespace
 
 The namespace split reached its final form with sub-plan 04D's cut. The

@@ -1,0 +1,6 @@
+{
+ "id": "internal--mark-special-let-dynamic",
+ "setup": [],
+ "expr": "(do (internal--mark-special 'mark-half-p nil) (setq mark-half-p 'global) (fset 'mark-half-read (fn () mark-half-p)) (list (special-variable-p 'mark-half-p)       (let ((mark-half-p 'bound)) (mark-half-read))       (mark-half-read)))",
+ "note": "11B: the let-dynamic-only mark, the flag Emacs' *one-argument* `(defvar v)` sets -- measured there as `special-variable-p` nil with a `let` that is nonetheless dynamic (11A rows A7a/A7b). This is the pair that makes two flags necessary rather than one. Emacs cannot be asked this question in the same words, because the marking primitive is fe's; the Emacs-comparison form of the same behaviour is kg's, against `defvar` (sub-plan 11D)."
+}

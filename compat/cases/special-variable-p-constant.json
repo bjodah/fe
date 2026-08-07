@@ -1,0 +1,6 @@
+{
+ "id": "special-variable-p-constant",
+ "setup": [],
+ "expr": "(special-variable-p nil)",
+ "note": "11B, measured on Emacs 31.0.90: a constant IS a special variable there -- nil, t and every keyword answer t -- even though nothing can ever bind one. Fe answers the same, from a constancy test placed before the type check, because fe's nil is not a symbol object at all."
+}

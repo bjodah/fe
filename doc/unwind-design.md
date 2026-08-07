@@ -189,6 +189,24 @@ this section built out. `FeCleanupFn`'s second parameter is named `data`, not
 than `FeInterruptFn`'s -- there was no strong reason to prefer one existing
 name over the other, so this just picked one.
 
+**A third entry kind, since sub-plan 11B:** `FeCleanupBinding`, one shallow
+dynamic binding owing a restore of a symbol's global value cell. It is the
+argument of this whole section made a third time -- the property a dynamic
+binding needs is exactly the one the two kinds above already have, that it
+must be honoured on the way out *whichever way that is*, and every drain in
+the evaluator is already written against this one stack. A second registry
+would have needed its own copy of each of those drains, and a fourth
+checkpoint on every frame to drain it to.
+
+Unlike the other two kinds it evaluates nothing, allocates nothing and
+cannot fail: `RunCleanups` performs it inline (`RestoreDynamicBinding`, two
+stores) rather than through `RunOneCleanupEntry`'s barrier, fresh control
+record and per-entry budget, none of which a pointer write needs. That is
+also what makes the restore safe on the one path where nothing else is --
+after arena exhaustion, where allocating even the condition object is
+already impossible. `MarkCleanupRoots` marks the saved value, which for as
+long as the binding is in force is reachable from nowhere else.
+
 ## Interaction with the GC stack
 
 The GC stack and the cleanup stack are separate and must stay separate: the GC

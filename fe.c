@@ -22,68 +22,71 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "9.0";
+const char* FeVersion = "10.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
-static const char* primitive_names[] = {[PAssert] = "assert",
-                                        [PEnv] = "env",
-                                        [PLet] = "let",
-                                        [PNumericEqual] = "=",
-                                        [PSetq] = "setq",
-                                        [PSet] = "set",
-                                        [PIf] = "if",
-                                        [PFn] = "lambda",
-                                        [PMacro] = "macro",
-                                        [PWhile] = "while",
-                                        [PQuote] = "quote",
-                                        [PBoundp] = "boundp",
-                                        [PMakeUnbound] = "makunbound",
-                                        [PAnd] = "and",
-                                        [POr] = "or",
-                                        [PDo] = "do",
-                                        [PUnwindProtect] = "unwind-protect",
-                                        [PCons] = "cons",
-                                        [PCar] = "car",
-                                        [PCdr] = "cdr",
-                                        [PSetCar] = "setcar",
-                                        [PSetCdr] = "setcdr",
-                                        [PList] = "list",
-                                        [PNot] = "not",
-                                        [PIs] = "is",
-                                        [PEq] = "eq",
-                                        [PEql] = "eql",
-                                        [PAtom] = "atom",
-                                        [PPrint] = "print",
-                                        [PLess] = "<",
-                                        [PLessEqual] = "<=",
-                                        [PGreater] = ">",
-                                        [PGreaterEqual] = ">=",
-                                        [PNotEqual] = "/=",
-                                        [PIntegerp] = "integerp",
-                                        [PFloatp] = "floatp",
-                                        [PKeywordp] = "keywordp",
-                                        [PAdd] = "+",
-                                        [PSub] = "-",
-                                        [PMul] = "*",
-                                        [PDiv] = "/",
-                                        [PFunction] = "function",
-                                        [PFset] = "fset",
-                                        [PDefalias] = "defalias",
-                                        [PSymbolFunction] = "symbol-function",
-                                        [PSymbolValue] = "symbol-value",
-                                        [PFboundp] = "fboundp",
-                                        [PFmakunbound] = "fmakunbound",
-                                        [PFuncall] = "funcall",
-                                        [PApply] = "apply",
-                                        [PCatch] = "catch",
-                                        [PThrow] = "throw",
-                                        [PConditionCase] = "condition-case",
-                                        [PSignal] = "signal",
-                                        [PError] = "error",
-                                        [PMacroexpand1] = "macroexpand-1",
-                                        [PMacroexpand] = "macroexpand",
-                                        [PMacroexpandAll] = "macroexpand-all"};
+static const char* primitive_names[] = {
+    [PAssert] = "assert",
+    [PEnv] = "env",
+    [PLet] = "let",
+    [PNumericEqual] = "=",
+    [PSetq] = "setq",
+    [PSet] = "set",
+    [PIf] = "if",
+    [PFn] = "lambda",
+    [PMacro] = "macro",
+    [PWhile] = "while",
+    [PQuote] = "quote",
+    [PBoundp] = "boundp",
+    [PMakeUnbound] = "makunbound",
+    [PAnd] = "and",
+    [POr] = "or",
+    [PDo] = "do",
+    [PUnwindProtect] = "unwind-protect",
+    [PCons] = "cons",
+    [PCar] = "car",
+    [PCdr] = "cdr",
+    [PSetCar] = "setcar",
+    [PSetCdr] = "setcdr",
+    [PList] = "list",
+    [PNot] = "not",
+    [PIs] = "is",
+    [PEq] = "eq",
+    [PEql] = "eql",
+    [PAtom] = "atom",
+    [PPrint] = "print",
+    [PLess] = "<",
+    [PLessEqual] = "<=",
+    [PGreater] = ">",
+    [PGreaterEqual] = ">=",
+    [PNotEqual] = "/=",
+    [PIntegerp] = "integerp",
+    [PFloatp] = "floatp",
+    [PKeywordp] = "keywordp",
+    [PAdd] = "+",
+    [PSub] = "-",
+    [PMul] = "*",
+    [PDiv] = "/",
+    [PFunction] = "function",
+    [PFset] = "fset",
+    [PDefalias] = "defalias",
+    [PSymbolFunction] = "symbol-function",
+    [PSymbolValue] = "symbol-value",
+    [PFboundp] = "fboundp",
+    [PFmakunbound] = "fmakunbound",
+    [PFuncall] = "funcall",
+    [PApply] = "apply",
+    [PCatch] = "catch",
+    [PThrow] = "throw",
+    [PConditionCase] = "condition-case",
+    [PSignal] = "signal",
+    [PError] = "error",
+    [PMacroexpand1] = "macroexpand-1",
+    [PMacroexpand] = "macroexpand",
+    [PMacroexpandAll] = "macroexpand-all",
+    [PMarkSpecial] = "internal--mark-special",
+    [PSpecialVariableP] = "special-variable-p"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -480,6 +483,17 @@ static void MarkCleanupRoots(FeContext* ctx) {
       FeMark(ctx, entry->as.lisp.forms);
       FeMark(ctx, entry->as.lisp.env);
     }
+    // A shadowed global value (sub-plan 11B) is reachable from nowhere else
+    // for as long as the binding is in force -- that is what shallow binding
+    // means -- so the entry holding it is its only root. The symbol itself
+    // is on `symbol_list` and would survive anyway; marking it here keeps
+    // the entry's rooting one statement rather than an argument about
+    // another structure's lifetime, exactly as `native_identity` is marked
+    // in `CollectGarbage` for the same reason.
+    if (entry->kind == FeCleanupBinding) {
+      FeMark(ctx, entry->as.binding.symbol);
+      FeMark(ctx, entry->as.binding.value);
+    }
   }
 }
 
@@ -505,6 +519,7 @@ static void CollectGarbage(FeContext* ctx) {
     FeMark(ctx, ctx->gc_stack[i]);
   }
   FeMark(ctx, ctx->symbol_list);
+  FeMark(ctx, ctx->special_list);
   FeMark(ctx, ctx->evaluation_result);
   FeMark(ctx, ctx->call_result);
   FeMark(ctx, ctx->root_list);
@@ -1358,6 +1373,45 @@ FeObject* SymbolFunction(FeObject* sym) {
 
 void SetSymbolFunction(FeObject* sym, FeObject* fn) {
   CDR(CAR(SymbolBindingCell(sym))) = fn;
+}
+
+// The special-variable registry (sub-plan 11B of kg's Emacs-subset program).
+// `ctx->special_list` is a list of `(SYMBOL . FULL-P)` pairs; see its comment
+// on `struct FeContext` for why it is a list and not a bit in the symbol.
+static FeObject* FindSpecialEntry(FeContext* ctx, const FeObject* sym) {
+  for (FeObject* rest = ctx->special_list; !FeIsNil(rest); rest = CDR(rest)) {
+    if (CAR(CAR(rest)) == sym) {
+      return CAR(rest);
+    }
+  }
+  return nullptr;
+}
+
+void MarkSpecialSymbol(FeContext* ctx, FeObject* sym, bool full) {
+  FeObject* entry = FindSpecialEntry(ctx, sym);
+  if (entry != nullptr) {
+    // Idempotent, and one-way in both directions it can go: marking full
+    // over let-dynamic-only upgrades (a one-arg `defvar` followed by a
+    // two-arg one), and marking let-dynamic-only over full does nothing.
+    // Emacs has no unmarking, so neither does this.
+    if (full) {
+      CDR(entry) = ctx->t;
+    }
+    return;
+  }
+  const size_t gc = FeSaveGC(ctx);
+  entry = FeCons(ctx, sym, full ? ctx->t : &nil);
+  ctx->special_list = FeCons(ctx, entry, ctx->special_list);
+  FeRestoreGC(ctx, gc);
+}
+
+bool SymbolIsSpecial(FeContext* ctx, const FeObject* sym) {
+  const FeObject* const entry = FindSpecialEntry(ctx, sym);
+  return entry != nullptr && !FeIsNil(CDR(entry));
+}
+
+bool SymbolIsLetDynamic(FeContext* ctx, const FeObject* sym) {
+  return FindSpecialEntry(ctx, sym) != nullptr;
 }
 
 static FeObject rparen;
@@ -2567,6 +2621,7 @@ static FeContext* OpenContext(void* arena, size_t size) {
   ctx->pending_throw_value = &nil;
   ctx->free_list = &nil;
   ctx->symbol_list = &nil;
+  ctx->special_list = &nil;
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;
   ctx->root_list = &nil;
@@ -2653,6 +2708,7 @@ void FeCloseContext(FeContext* ctx) {
   // Clear the GC stack and symbol list: this makes all objects unreachable:
   ctx->gc_stack_index = 0;
   ctx->symbol_list = &nil;
+  ctx->special_list = &nil;
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;
   ctx->root_list = &nil;

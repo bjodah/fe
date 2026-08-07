@@ -113,6 +113,17 @@ typedef enum Primitive {
   PMacroexpand1,
   PMacroexpand,
   PMacroexpandAll,
+  // Sub-plan 11B of kg's Emacs-subset program (special variables and shallow
+  // dynamic binding). `internal--mark-special` is arity 2 -- SYMBOL and a
+  // FULL-P flag -- and is the only way a symbol acquires either flag: FULL-P
+  // non-nil sets both (Emacs' two-arg `defvar` and `defconst`), nil sets the
+  // let-dynamic flag alone (Emacs' one-arg `defvar`, whose symbol binds
+  // dynamically while `special-variable-p` still answers nil -- measured on
+  // 31.0.90). Marking is idempotent and one-way; Emacs has no unmarking
+  // either. `special-variable-p` answers the *special* flag only. Fe has no
+  // `defvar` of its own: kg's prelude macros call these two.
+  PMarkSpecial,
+  PSpecialVariableP,
   PSentinel
 } Primitive;
 
@@ -243,6 +254,21 @@ static_assert(alignof(FeObject) > GcMarkCdrBit);
 typedef enum FeCleanupKind {
   FeCleanupNative,
   FeCleanupLisp,
+  // One shallow dynamic binding owing a restore (sub-plan 11B). It is an
+  // entry in this registry rather than a registry of its own because the
+  // restore obligation is exactly the one property every cleanup entry
+  // already has: it must be honoured on all five completion kinds -- normal,
+  // error, throw, quit, budget -- and the drains that do that
+  // (`CompletePairFrame`, `CompleteImplicitBodyFrame`,
+  // `RaiseCompletionCore`'s handler and host drains, `PerformThrow`'s
+  // unwind) are already written against this stack and this stack only. See
+  // doc/unwind-design.md's "Two cleanup registries" section.
+  //
+  // Unlike the other two kinds this one cannot raise and evaluates no Lisp,
+  // so `RunCleanups` performs it inline instead of paying
+  // `RunOneCleanupEntry`'s barrier and control-record save/restore per
+  // binding.
+  FeCleanupBinding,
 } FeCleanupKind;
 
 typedef struct FeCleanupEntry {
@@ -256,6 +282,15 @@ typedef struct FeCleanupEntry {
       FeObject* forms;  // The unwind forms, evaluated as an implicit `do`.
       FeObject* env;    // The environment `unwind-protect` was entered with.
     } lisp;
+    struct {
+      FeObject* symbol;
+      // The global value cell's contents from before the binding, which is
+      // `&unbound` when the symbol had none -- the measured A10a answer, a
+      // `let` over an unbound special leaves it unbound again afterwards.
+      // `MarkCleanupRoots` marks it: nothing else refers to a shadowed value
+      // while the binding is in force.
+      FeObject* value;
+    } binding;
   } as;
 } FeCleanupEntry;
 
@@ -363,6 +398,26 @@ typedef enum FeFrameKind {
   // already-checked target symbol; the delivered value form's value extends
   // `*bind`.
   FeFrameLet,
+  // A `let` with an Emacs-shaped binding list at least one of whose targets
+  // is marked let-dynamic (sub-plan 11B). A binding list with no such target
+  // never becomes this kind: it keeps compiling into the lambda application
+  // `StartBindingLet` has always built, so nothing about ordinary lexical
+  // `let` changes and closure parameter binding never consults the flag --
+  // the measured A4 guard, that a defun parameter named after a special is
+  // still bound lexically under `lexical-binding: t`.
+  //
+  // `fn` holds `(BINDINGS . BODY)`, both fixed for the frame's life; `rest`
+  // is the remaining raw bindings, `accumulator` the delivered values
+  // (reversed while collecting, reordered once), and `callee` the
+  // just-delivered value (`&unbound` between deliveries). Every value form
+  // is evaluated in the frame's *entry* environment, so this is `let` and
+  // not `let*`. When `rest` is empty `InstallLetBindings` binds each target
+  // -- dynamic ones by swapping the global cell and pushing an
+  // `FeCleanupBinding` entry, lexical ones by extending the environment --
+  // and switches the frame to `FeFrameBody`, whose completion through
+  // `CompletePairFrame` drains those entries back down to this frame's own
+  // `cleanup_checkpoint`.
+  FeFrameDynamicLet,
   // `setq`: `rest` holds the remaining raw SYMBOL VALUE pairs, evaluated and
   // assigned left to right; `accumulator` holds the pending pair's raw target
   // symbol between validating it and the value form's delivery. Each
@@ -530,6 +585,14 @@ FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns
 FeObject* SymbolFunction(FeObject* sym);  // &unbound when no function binding
 void SetSymbolFunction(FeObject* sym, FeObject* fn);
+// The special-variable registry (sub-plan 11B), defined in fe.c beside the
+// symbol accessors because it is symbol metadata; the evaluator's binding
+// paths and the two primitives that expose it are in fe_eval.c.
+// `MarkSpecialSymbol` is idempotent and one-way: marking full over
+// let-dynamic-only upgrades, and nothing ever clears either flag.
+void MarkSpecialSymbol(FeContext* ctx, FeObject* sym, bool full);
+bool SymbolIsSpecial(FeContext* ctx, const FeObject* sym);
+bool SymbolIsLetDynamic(FeContext* ctx, const FeObject* sym);
 FeObject* MakeObject(FeContext* ctx);
 bool Equal(FeObject* a, FeObject* b);
 // `eq`/`eql`'s shared answer (05D): pointer identity, both-integers-equal, or
@@ -582,6 +645,17 @@ struct FeContext {
   FeObject* call_result;
   FeObject* root_list;
   FeObject* t;
+  // The special-variable registry (sub-plan 11B): a list of `(SYMBOL .
+  // FULL-P)` pairs, one per marked symbol, `FULL-P` being `t` for a full
+  // special and nil for let-dynamic-only. A list rather than a bit in the
+  // symbol object because a symbol's `car` word is a tag whose spare bits
+  // the collector's pointer reversal already owns (see `GcMarkCdrBit`), and
+  // a list costs two cells per *marked symbol* rather than anything at all
+  // per binding -- which is the cost that would be on the hot path. Marked
+  // by `CollectGarbage` as a root in its own right; membership is one linear
+  // scan, the same shape `FeMakeSymbol`'s interning and `GetBound`'s
+  // environment walk already are.
+  FeObject* special_list;
   FeEvalFrame* frame_stack;
   size_t frame_stack_capacity;
   size_t frame_stack_index;

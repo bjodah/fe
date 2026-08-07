@@ -1,0 +1,223 @@
+;; Special variables and shallow dynamic binding (sub-plan 11B of kg's
+;; Emacs-subset program).  Every assertion below is one row of the 21-probe
+;; semantics grid sub-plan 11A measured on Emacs 31.0.90 under
+;; `lexical-binding: t`, with top-level forms -- the row's Emacs answer is
+;; the expectation, and the row label is in the comment.  Fe has no `defvar`:
+;; `internal--mark-special` is the primitive kg's prelude `defvar`/`defconst`
+;; macros call, arity 2, the second argument being "full special" (both
+;; flags) rather than "let-dynamic only" (the one-arg `defvar` quirk).
+
+;; A9a-shape: the two primitives exist and are ordinary functions.
+(assert-not-nil (fboundp 'internal--mark-special))
+(assert-not-nil (fboundp 'special-variable-p))
+(assert-nil (special-variable-p 'never-marked))
+
+;; A7d/A8a: a full mark answers `special-variable-p`.  A1: a `let` over it is
+;; dynamic -- a function that reads the name free sees the bound value.
+(internal--mark-special 'dvs t)
+(assert-not-nil (special-variable-p 'dvs))
+(setq dvs 1)
+(fset 'dvsf (fn () dvs))
+(assert-equals 2 (let ((dvs 2)) (dvsf)))
+(assert-equals 1 (dvsf))
+
+;; A7a/A7b: a let-dynamic-only mark binds dynamically while
+;; `special-variable-p` still answers nil.  This pair is the whole reason
+;; there are two flags and not one.
+(internal--mark-special 'onearg nil)
+(assert-nil (special-variable-p 'onearg))
+(setq onearg 0)
+(fset 'oneargf (fn () onearg))
+(assert-equals 5 (let ((onearg 5)) (oneargf)))
+(assert-equals 0 (oneargf))
+
+;; The mark is idempotent and one-way: let-dynamic-only over full does not
+;; demote, full over let-dynamic-only upgrades.  Emacs has no unmarking.
+(internal--mark-special 'dvs nil)
+(assert-not-nil (special-variable-p 'dvs))
+(internal--mark-special 'onearg t)
+(assert-not-nil (special-variable-p 'onearg))
+
+;; A2a: shallow binding means `setq` inside the binding writes the binding,
+;; and the global value is back afterwards.
+(internal--mark-special 'sv t)
+(setq sv 1)
+(fset 'svf (fn () sv))
+(assert-equals '(3 1) (list (let ((sv 2)) (setq sv 3) (svf)) sv))
+
+;; A3a: nested bindings of the same name, innermost visible, each restored.
+(internal--mark-special 'n3 t)
+(setq n3 0)
+(fset 'n3f (fn () n3))
+(assert-equals '(1 2 1) (let ((n3 1)) (list (n3f) (let ((n3 2)) (n3f)) (n3f))))
+(assert-equals 0 (n3f))
+
+;; A3b: sequential visibility.  Fe spells `let*` as a body of two-argument
+;; `let` forms (kg's prelude calls that one `internal--let`), and a dynamic
+;; target there binds for the rest of the enclosing body, restored when the
+;; body's own form completes.
+(internal--mark-special 'sq t)
+(setq sq 0)
+(fset 'sqf (fn () sq))
+(fset 'sequential (fn () (do (let a 2) (let sq a) (list a (sqf)))))
+(assert-equals '(2 2) (sequential))
+(assert-equals 0 (sqf))
+
+;; A5: a closure reads the value in force when it is *called*, not when it
+;; was made -- which shallow binding gives for free.
+(internal--mark-special 'clv t)
+(setq clv 1)
+(setq clf (fn () clv))
+(assert-equals 2 (let ((clv 2)) (funcall clf)))
+(assert-equals 1 (funcall clf))
+
+;; A10a: a `let` over an *unbound* special binds it, and its unboundness --
+;; not nil -- is what comes back.
+(internal--mark-special 'unb nil)
+(assert-nil (boundp 'unb))
+(fset 'unbf (fn () (if (boundp 'unb) (list 'bound unb) 'unbound)))
+(assert-equals '((bound 3) unbound) (list (let ((unb 3)) (unbf)) (unbf)))
+(assert-nil (boundp 'unb))
+
+;; A11: the temporary-setting idiom, the headline divergence this closes.
+(internal--mark-special 'hkv t)
+(setq hkv nil)
+(fset 'callee (fn () hkv))
+(fset 'caller (fn () (let ((hkv t)) (callee))))
+(assert-not-nil (caller))
+(assert-nil hkv)
+
+;; ---------------------------------------------------------------------
+;; The guards: what must *not* change.
+
+;; A4: a lambda parameter named after a special binds LEXICALLY, measured on
+;; Emacs 31.0.90 interpreted, byte-compiled, and with a core variable.  An
+;; implementation that bound specials dynamically at every parameter-binding
+;; site would close A1 and open this one.
+(internal--mark-special 'pv t)
+(setq pv 1)
+(fset 'taker (fn (pv) (list pv (let ((q 1)) q))))
+(assert-equals '(9 1) (taker 9))
+(assert-equals 1 pv)
+
+;; A13: a plain, never-marked name stays lexical -- the `let` is invisible to
+;; a function that reads the global.
+(setq plain 1)
+(fset 'plainf (fn () plain))
+(assert-equals 1 (let ((plain 2)) (plainf)))
+
+;; A2b: `setq` outside any `let` still writes the global cell.
+(setq plainv 10)
+(assert-equals '(10 11) (list plainv (do (setq plainv 11) plainv)))
+
+;; A mixed binding list binds each target by its own kind, and the value
+;; forms are all evaluated in the *entry* environment (`let`, not `let*`).
+(internal--mark-special 'mixd t)
+(setq mixd 'global)
+(fset 'mixdf (fn () mixd))
+(assert-equals '(1 dyn global)
+  (let ((lexi 1) (mixd 'dyn)) (list lexi (mixdf) 'global)))
+(assert-equals 'global (mixdf))
+
+;; A binding list with no dynamic target at all is untouched by any of this:
+;; it still compiles into the lambda application it always did, so an empty
+;; body is nil and shadowing works as before.
+(assert-nil (let ((a 1))))
+(assert-equals 3 (let ((a 1) (b 2)) (+ a b)))
+
+;; ---------------------------------------------------------------------
+;; Restore on abnormal completions (the C tests in test_api.c cover quit and
+;; budget, which have no Lisp spelling).
+
+;; A6a: the binding is visible until a `throw` unwinds past it, and gone
+;; after.
+(internal--mark-special 'thv t)
+(setq thv 1)
+(fset 'thvf (fn () thv))
+(assert-equals '(2 1)
+  (list (catch 'tag (let ((thv 2)) (throw 'tag (thvf)))) (thvf)))
+
+;; A6b: an error unwinds it too, so the handler sees the global value.
+(internal--mark-special 'erv t)
+(setq erv 1)
+(fset 'ervf (fn () erv))
+(assert-equals '(1 1)
+  (list (condition-case nil (let ((erv 2)) (error "x")) (error (ervf)))
+        (ervf)))
+
+;; The restore rides the same cleanup registry `unwind-protect` does, so the
+;; two interleave in one order: the cleanup runs while the binding it was
+;; registered under is still in force, and the binding is gone once the form
+;; that made it has completed.
+(internal--mark-special 'uwv t)
+(setq uwv 'outer)
+(fset 'uwvf (fn () uwv))
+(setq seen nil)
+(assert-equals 'inner
+  (let ((uwv 'inner)) (unwind-protect (uwvf) (setq seen (uwvf)))))
+(assert-equals 'inner seen)
+(assert-equals 'outer (uwvf))
+
+;; Deep nesting with interleaved lexical bindings of other names: every level
+;; restores, in order, and the lexical names never reach the global cell.
+(internal--mark-special 'deepv t)
+(setq deepv 0)
+(fset 'deepf (fn () deepv))
+(assert-equals '(1 (2 3 2) 1)
+  (let ((lex1 'a) (deepv 1))
+    (list (deepf)
+          (let ((lex2 'b) (deepv 2))
+            (list (deepf)
+                  (let ((deepv 3)) (deepf))
+                  (deepf)))
+          (deepf))))
+(assert-equals 0 (deepf))
+(assert-nil (boundp 'lex1))
+(assert-nil (boundp 'lex2))
+
+;; A constant cannot be marked, so it can never be dynamically bound either.
+(assert-equals 'setting-constant
+  (condition-case e (internal--mark-special nil t) (error (car e))))
+(assert-equals 'setting-constant
+  (condition-case e (internal--mark-special :kw t) (error (car e))))
+
+;; Measured on Emacs 31.0.90: a constant IS a special variable there -- nil,
+;; t and every keyword answer t -- even though nothing can ever bind one.
+(assert-not-nil (special-variable-p nil))
+(assert-not-nil (special-variable-p t))
+(assert-not-nil (special-variable-p :kw))
+
+;; Arity and type are the ordinary ones for this family.
+(assert-equals 'wrong-number-of-arguments
+  (condition-case e (internal--mark-special 'x) (error (car e))))
+(assert-equals 'wrong-number-of-arguments
+  (condition-case e (special-variable-p 'x 'y) (error (car e))))
+(assert-equals 'wrong-type-argument
+  (condition-case e (special-variable-p 5) (error (car e))))
+
+;; Arena exhaustion composes with the binding restore (sub-plan 09B's
+;; conditions plus 11B's bindings): a dynamic binding in force when the arena
+;; runs out is undone by the same drain that carries the condition to its
+;; handler, and the undo allocates nothing at all -- two stores -- which is
+;; what makes it safe on the one path where allocation has already failed.
+(internal--mark-special 'exv t)
+(setq exv 'before)
+(fset 'exvf (fn () exv))
+(assert-equals 'caught
+  (condition-case nil
+    (let ((exv 'during)) (let ((l nil)) (while t (setq l (cons 1 l)))))
+    (arena-exhaustion 'caught)))
+(assert-equals 'before (exvf))
+
+;; The same, one level down: the binding is made by the sequential
+;; two-argument `let` and the exhaustion happens in a later body form.
+(internal--mark-special 'exq t)
+(setq exq 'before)
+(fset 'exqf (fn () exq))
+(assert-equals 'caught
+  (condition-case nil
+    (do (let exq 'during) (let ((l nil)) (while t (setq l (cons 1 l)))))
+    (arena-exhaustion 'caught)))
+(assert-equals 'before (exqf))
+
+(print 'special-variables-ok)

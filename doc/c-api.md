@@ -13,7 +13,9 @@ break; a host should assert both.
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
 types, and callback signatures declared in `fe.h`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-version 8 is the reflective-expansion contract (`macroexpand-1`,
+version 9 is the special-variable contract (`internal--mark-special`,
+`special-variable-p`, and shallow dynamic binding at `let`'s two binding
+paths); version 8 is the reflective-expansion contract (`macroexpand-1`,
 `macroexpand`, and `macroexpand-all` naming itself as unimplemented);
 version 7 is the protected-constants and self-evaluating-keywords contract;
 version 6 is the strict-arity contract described below; version 4 was the
@@ -28,10 +30,13 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 6);
-static_assert(FE_LANGUAGE_VERSION == 8);
+static_assert(FE_LANGUAGE_VERSION == 9);
 ```
 
-Fe 9.0 moves `FE_LANGUAGE_VERSION` 7 -> 8 and leaves `FE_API_VERSION` at 6;
+Fe 10.0 moves `FE_LANGUAGE_VERSION` 8 -> 9 and leaves `FE_API_VERSION` at 6;
+the reasoning is below, under the version history.
+
+Fe 9.0 moved `FE_LANGUAGE_VERSION` 7 -> 8 and left `FE_API_VERSION` at 6;
 the reasoning is below, under the version history.
 
 Fe 8.0 kept `FE_API_VERSION` unchanged, and that was a deliberate
@@ -92,6 +97,18 @@ dotted-tail and bare-symbol rest spellings are unaffected.
 `FE_LANGUAGE_VERSION` moved 6 -> 7 for protected constants and
 self-evaluating keywords. Assigning `t`, `nil`, or a keyword now signals
 `setting-constant`, and a keyword such as `:foo` no longer needs quoting.
+
+`FE_LANGUAGE_VERSION` moved 8 -> 9 in sub-plan 11B, with `FeVersion` "9.0" ->
+"10.0" and `FE_API_VERSION` left at 6 in that commit -- no declaration in
+`fe.h` changed there. This is the first bump in the series that changes what
+an *existing* program answers rather than only adding names: a symbol marked
+by `internal--mark-special` binds dynamically, so `let` and `let*` over it
+swap the global value cell instead of extending the lexical environment, a
+function that reads the name free sees the bound value, and the previous
+value -- or the symbol's unboundness -- comes back on every completion kind.
+A program that never marks anything cannot tell the difference, and closure
+and defun *parameters* stay lexical unconditionally, which is Emacs' own
+answer under `lexical-binding: t`. See `doc/language.md` for the model.
 
 `FE_LANGUAGE_VERSION` moved 7 -> 8 in sub-plan 10B, with `FeVersion` "8.0" ->
 "9.0" and `FE_API_VERSION` deliberately left at 6 -- no declaration in `fe.h`

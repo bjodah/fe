@@ -144,8 +144,11 @@ fe > ((lambda (t) (setq t 2)) 1)
 
 #### `(let ((symbol value) ...) body...)`
 
-Creates simultaneous lexical bindings, evaluating every initializer in the
+Creates simultaneous bindings, evaluating every initializer in the
 surrounding environment, then evaluates the body and returns its last value.
+A binding is lexical unless the target has been marked *let-dynamic* by
+`internal--mark-special`, in which case it is dynamic: see "Special variables
+and dynamic binding" below.
 A bare symbol binding, such as `(let (flag) flag)`, binds `nil`. `t`, `nil`,
 and keywords are rejected as binding targets with `setting-constant` before
 any initializer runs. The binding list is compiled into a lambda
@@ -155,7 +158,15 @@ Emacs binds a variable of that literal name, which Fe cannot do here, and
 binding one value to a rest parameter instead would be a silent
 misinterpretation. Any other `&`-prefixed name binds normally, as it does in
 Emacs. Fe also retains the historical `(let symbol value)`
-two-argument form, which creates a binding and returns `nil`.
+two-argument form, which creates a binding scoped to the rest of the
+enclosing body and returns `nil`; a marked target binds dynamically there
+too, for the same scope.
+
+The lambda-application compilation is used only when *no* target in the
+binding list is marked let-dynamic. A binding list with at least one marked
+target is bound by the evaluator directly instead, because a lambda
+parameter is a lexical environment entry and a lexical entry for a special
+name would shadow the very cell the dynamic binding wrote.
 
 #### `(setq symbol value ...)`
 
@@ -164,7 +175,10 @@ has. Takes any number of `symbol value` pairs and processes them left to
 right: each `value` form is evaluated -- already seeing every earlier pair's
 new value, since they run in order -- and then bound to the innermost
 lexical binding of `symbol` if one exists in the current environment, else
-to the global value cell. Assignment is the only thing that creates a global
+to the global value cell. This rule is unchanged for a special variable:
+a dynamically bound symbol has no lexical entry, so `setq` writes the global
+cell -- which, under shallow binding, *is* the innermost binding while a
+`let` over it is in force. Assignment is the only thing that creates a global
 binding: naming a symbol that has never been assigned is `void-variable`,
 not `nil` (`nil` is a value like any other, so a variable assigned `nil` is
 bound). `(setq)`, with no pairs, is `nil`; otherwise `setq` returns the
@@ -896,6 +910,78 @@ raises `no-catch` inside it. This is a recorded divergence from Emacs,
 which unwinds C frames of its own in the same situation; fe's C activations
 between the runs are live and cannot be abandoned.
 
+### Special Variables And Dynamic Binding
+
+Fe's variables are lexical by default and stay that way. A symbol can be
+*marked*, and a marked symbol binds dynamically -- which is Emacs' model
+under `lexical-binding: t`, and the reason a library there can write
+`(let ((case-fold-search t)) ...)` and have a function it calls see the
+change. Two flags carry it:
+
+* **special**, which is what `special-variable-p` answers, and
+* **let-dynamic**, which is what `let` and the two-argument `let` consult.
+
+`(internal--mark-special SYMBOL FULL-P)` is the only way to set either. A
+non-nil `FULL-P` sets both (Emacs' two-argument `defvar` and its `defconst`);
+nil sets let-dynamic alone, which reproduces Emacs' one-argument `(defvar v)`
+exactly: the symbol binds dynamically while `special-variable-p` still
+answers nil. Marking is idempotent and one-way -- a full mark over a
+let-dynamic-only one upgrades, and nothing unmarks, because Emacs has no
+unmarking either. `t`, `nil` and keywords are constants and cannot be
+marked at all (`setting-constant`). Fe has no `defvar` of its own: the
+Emacs-shaped `defvar`/`defconst` macros are kg's, in its prelude, and they
+call this primitive.
+
+Binding is *shallow*. Binding a marked symbol saves the current contents of
+its global value cell -- or the fact that it had none -- writes the new
+value into that same cell, and records the obligation to put the old one
+back. The obligation is honoured when the form that made the binding
+completes, on every completion kind there is: a normal return, an error, a
+`throw` unwinding past it, a quit, and an exhausted step budget. Three
+consequences follow with no further machinery, and all three are Emacs'
+measured answers:
+
+* a function that reads the name free sees the bound value, wherever it was
+  defined;
+* `setq` inside the binding writes the binding, not the value it hides,
+  because the cell it writes is the binding; and
+* a closure reads the value in force when it is *called*, not when it was
+  made.
+
+What does **not** change is as much of the design as what does. Closure and
+`fn`/`lambda` **parameters** bind lexically unconditionally, even when the
+parameter is named after a marked symbol -- measured on Emacs 31.0.90, which
+does the same under `lexical-binding: t` -- so the flag is consulted at
+`let`'s binding paths and nowhere else. A `let` over an unmarked name is
+lexical exactly as before. `set` and `symbol-value` read and write the
+global cell as they always have.
+
+```clojure
+fe > (internal--mark-special 'hkv t)
+hkv
+fe > (setq hkv nil)
+nil
+fe > (fset 'callee (fn () hkv))
+#'callee
+fe > (let ((hkv t)) (callee))
+t
+fe > hkv
+nil
+```
+
+#### `(internal--mark-special symbol full-p)`
+
+Marks `symbol` as described above and returns it. Exactly two arguments.
+`symbol` must be a symbol and must not be a constant.
+
+#### `(special-variable-p symbol)`
+
+Answers the *special* flag: `t` for a symbol marked with a non-nil `FULL-P`,
+nil for one marked let-dynamic-only or not marked at all. `nil`, `t` and
+keywords answer `t`, which is Emacs' answer for a constant even though
+nothing can ever bind one. A non-symbol is `(wrong-type-argument symbolp X)`.
+Exactly one argument.
+
 ### Functions
 
 #### `(cons car cdr)`
@@ -943,7 +1029,11 @@ An ordinary function, unlike `setq` above: both `symbol` and `value` are
 evaluated, so the target is usually quoted. `set` always writes `symbol`'s
 *global* value cell, even when a lexical binding of the same name is in
 scope in the calling environment -- that lexical binding is neither read
-nor written. Returns `value`.
+nor written. Under shallow dynamic binding that global cell is the innermost
+binding of a special variable while a `let` over it is in force, so `set`
+assigns the binding rather than the value the binding is hiding, and the
+restore on the way out still puts back the value from before the binding.
+Returns `value`.
 
 Requires exactly two arguments; a wrong argument count is
 `wrong-number-of-arguments`, checked before either argument form is
