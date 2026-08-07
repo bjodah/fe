@@ -1417,10 +1417,18 @@ handler. A handler receives the condition object, a cons whose car is the
 condition symbol and whose cdr is its data, bound to `variable` (or no binding
 for `nil`), and its forms are an implicit `do`. `error` catches ordinary
 conditions including `wrong-type-argument`, `arith-error` and `no-catch`,
-because every condition Fe registers names `error` as its parent: the
-hierarchy is one level deep, and Emacs' deeper chains (`overflow-error` is
-a `range-error` is an `arith-error`) are deliberately out of scope until a
-producer needs them. `quit` is separate and requires a `quit` or
+because every condition Fe registers reaches `error` through its chain of
+parents. Almost all of them name it directly. The one exception is
+`file-missing`, whose parent is `file-error`, which is Emacs' own chain --
+`(get 'file-missing 'error-conditions)` is `(file-missing file-error error)`
+there — so a `file-missing` is caught by a handler naming `file-missing`,
+`file-error` or `error`, and, the chain running one way only, a plain
+`file-error` is not caught by a `file-missing` handler. Nothing in Fe
+*raises* either: they exist for a host that does file operations, which Fe's
+core does not. Emacs' other deeper chains (`overflow-error` is a
+`range-error` is an `arith-error`) and its third file class
+`permission-denied` are deliberately out of scope until a producer needs
+them. `quit` is separate and requires a `quit` or
 `t` handler -- and that is true of a real host interrupt (a C-g) as well as
 of `(signal 'quit nil)`; both carry the condition object `(quit)`. Fe's own
 resource ceilings -- the evaluation step budget, the frame wall and the

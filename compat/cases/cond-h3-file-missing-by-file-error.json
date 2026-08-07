@@ -1,0 +1,6 @@
+{
+ "id": "cond-h3-file-missing-by-file-error",
+ "setup": [],
+ "expr": "(condition-case e (signal 'file-missing '(\"a\" \"b\" \"/x\")) (file-error (list 'FE e)))",
+ "note": "12C Part 1: caught through its parent. This is the first two-deep chain in the table -- `(get 'file-missing 'error-conditions)' is (file-missing file-error error) on Emacs 31.0.90 -- and it needed no new code, only the data line: FindConditionParentByName already walks the chain."
+}

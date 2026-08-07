@@ -44,6 +44,41 @@
 (assert-equals 'format-error
   (condition-case nil (error "%x" 1) (error 'format-error)))
 
+;; `file-missing` under `file-error` under `error` (sub-plan 12C Part 1) --
+;; the first two-deep chain in the hierarchy, and the one Emacs uses for a
+;; file that is not there. Every expectation is the answer measured from
+;; Emacs 31.0.90 on 2026-08-07; there `(get 'file-missing 'error-conditions)`
+;; is `(file-missing file-error error)`.
+(assert-equals '(file-missing "Cannot open load file" "No such file or directory" "/x.el")
+  (condition-case e
+    (signal 'file-missing
+      '("Cannot open load file" "No such file or directory" "/x.el"))
+    (file-missing e)))
+;; Caught through each level of the chain, with the condition object intact.
+(assert-equals '(FE (file-missing "a" "b" "/x"))
+  (condition-case e (signal 'file-missing '("a" "b" "/x")) (file-error (list 'FE e))))
+(assert-equals '(E (file-missing "a" "b" "/x"))
+  (condition-case e (signal 'file-missing '("a" "b" "/x")) (error (list 'E e))))
+;; And not by an unrelated class.
+(assert-equals '(E file-missing)
+  (condition-case e (signal 'file-missing '("a"))
+    (arith-error 'A)
+    (error (list 'E (car e)))))
+;; Handler order decides between two matching clauses, both ways round.
+(assert-equals 'MISSING
+  (condition-case nil (signal 'file-missing '("a")) (file-missing 'MISSING) (file-error 'FE)))
+(assert-equals 'FE
+  (condition-case nil (signal 'file-missing '("a")) (file-error 'FE) (file-missing 'MISSING)))
+;; The chain runs one way only: a `file-error` is not a `file-missing`.
+(assert-equals '(E file-error)
+  (condition-case e (signal 'file-error '("x")) (file-missing 'M) (error (list 'E (car e)))))
+;; Data is optional, as it is for every other class.
+(assert-equals '(file-missing)
+  (condition-case e (signal 'file-missing nil) (file-error e)))
+;; `file-error` itself is unmoved by the addition.
+(assert-equals '(file-error "x")
+  (condition-case e (signal 'file-error '("x")) (file-error e)))
+
 ;; The uncaught tail: everything above is caught, so nothing above this line
 ;; reaches the host. This one does, and the golden `tests/conditions.fe.err`
 ;; is what an uncaught condition looks like on its way out of the standalone

@@ -1,0 +1,6 @@
+{
+ "id": "cond-h3-file-missing-handler-order",
+ "setup": [],
+ "expr": "(condition-case nil (signal 'file-missing '(\"a\")) (file-error 'FE) (file-missing 'MISSING))",
+ "note": "12C Part 1: when two clauses both match, the first written wins -- so a `file-error' clause ahead of a `file-missing' one takes a file-missing. The reverse order answers MISSING; both were measured."
+}

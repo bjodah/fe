@@ -1740,7 +1740,24 @@
     "cond-h1"
    ],
    "kg_test": null,
-   "rationale": "Phase 6, 06A Decision 1: the hierarchy is static C data, not symbol properties, so Fe has no `get` and no `error-conditions`. On Fe's actual function channel cond-h1 is plain `void-function get`, byte-identical to a typo; there is no curated known-missing-function channel (10A Decision 5). The row is kept as the recorded oracle the static table was built against -- Emacs spells arith-error's chain as (arith-error error) -- and is `unsupported` rather than `planned` because nothing is planned: symbol properties are a later phase's question if any init-file corpus ever needs them. The hierarchy Fe does implement is exercised by cond-cc5, cond-cc8 and cond-ct6, which match a subtype through an `error` handler. Every chain Fe registers is one level deep; Emacs' deeper chains (overflow-error -> range-error -> arith-error) are excluded by the same Decision and have no producer in Fe.",
+   "rationale": "Phase 6, 06A Decision 1: the hierarchy is static C data, not symbol properties, so Fe has no `get` and no `error-conditions`. On Fe's actual function channel cond-h1 is plain `void-function get`, byte-identical to a typo; there is no curated known-missing-function channel (10A Decision 5). The row is kept as the recorded oracle the static table was built against -- Emacs spells arith-error's chain as (arith-error error) -- and is `unsupported` rather than `planned` because nothing is planned: symbol properties are a later phase's question if any init-file corpus ever needs them. The hierarchy Fe does implement is exercised by cond-cc5, cond-cc8 and cond-ct6, which match a subtype through an `error` handler. Every chain Fe registered was one level deep until sub-plan 12C added `file-missing' < `file-error' < `error' (the condition-hierarchy-file-classes row below), which is the first two-deep one and the first to exercise `FindConditionParentByName''s walk past a single link; Emacs' other deeper chains (overflow-error -> range-error -> arith-error) are still excluded by the same Decision and still have no producer in Fe.",
+   "source_name": null
+  },
+  {
+   "id": "condition-hierarchy-file-classes",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-h3-file-missing-signal",
+    "cond-h3-file-missing-by-file-error",
+    "cond-h3-file-missing-by-error",
+    "cond-h3-file-missing-handler-order",
+    "cond-h3-file-error-is-not-file-missing"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 12C Part 1: `file-missing' < `file-error' < `error', Emacs' own chain -- measured on 31.0.90, `(get 'file-missing 'error-conditions)' is (file-missing file-error error). `file-error' was already in the table and already worked; this adds one data line and no code, because all three consumers of `condition_parents' are sizeof-driven loops and `FindConditionParentByName' already walks the chain. It is nevertheless the FIRST two-deep entry, so it is also the first case that exercises that walk past one link -- which is why 06A Decision 1's note that `every chain Fe registers is one level deep' (the condition-hierarchy row above) no longer holds. Two things follow from the line and are pinned here: `(signal 'file-missing ...)' becomes legal, since `IsConditionSymbol' gates `signal' on this table and used to answer `(error \"Invalid error symbol\" file-missing)'; and a `file-missing' is caught by a `file-error' or an `error' handler while a `file-error' is NOT caught by a `file-missing' one. kg's loader and `require' raise it at their two measured sites in sub-plan 12D; nothing in fe raises it, which is deliberate -- fe's core has no file operations. `permission-denied', Emacs' third file class, is NOT implemented: it is measurable only unprivileged (this box runs the suite as root, where `chmod 000' is defeated and `(file-readable-p ...)' is t), and 12A Decision 1 records it rather than asserting it.",
    "source_name": null
   },
   {

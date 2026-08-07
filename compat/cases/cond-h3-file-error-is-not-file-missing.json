@@ -1,0 +1,6 @@
+{
+ "id": "cond-h3-file-error-is-not-file-missing",
+ "setup": [],
+ "expr": "(condition-case e (signal 'file-error '(\"x\")) (file-missing 'M) (error (list 'E (car e))))",
+ "note": "12C Part 1: the chain runs one way only. A `file-error' is not caught by a `file-missing' handler."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "cond-h3-file-missing-signal",
+ "setup": [],
+ "expr": "(condition-case e (signal 'file-missing '(\"Cannot open load file\" \"No such file or directory\" \"/x.el\")) (file-missing e))",
+ "note": "12C Part 1: `file-missing' is a condition symbol `signal' accepts, and its data is Emacs' (OPERATION STRERROR PATH) shape. Before this it was `(error \"Invalid error symbol\" file-missing)' here, because `IsConditionSymbol' gates `signal' on the hierarchy table."
+}

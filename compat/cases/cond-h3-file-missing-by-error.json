@@ -1,0 +1,6 @@
+{
+ "id": "cond-h3-file-missing-by-error",
+ "setup": [],
+ "expr": "(condition-case e (signal 'file-missing '(\"a\" \"b\" \"/x\")) (error (list 'E e)))",
+ "note": "12C Part 1: caught through the root, two links up, with the condition object intact."
+}

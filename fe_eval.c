@@ -121,6 +121,17 @@ static const ConditionParent condition_parents[] = {
     {"args-out-of-range", "error"},
     {"arith-error", "error"},
     {"file-error", "error"},
+    // Sub-plan 12C Part 1. Emacs' own chain, measured on 31.0.90: `(get
+    // 'file-missing 'error-conditions)` is `(file-missing file-error error)`
+    // and `(get 'file-error 'error-conditions)` is `(file-error error)`. It
+    // is the first two-deep entry in this table, and it needs no code: the
+    // three consumers are `sizeof`-driven loops and
+    // `FindConditionParentByName` already walks the chain, so `error`
+    // catches it through `file-error`. kg's loader and `require` raise it
+    // for a missing file (sub-plan 12D); here it earns its place by making
+    // `(signal 'file-missing ...)` legal at all, since `IsConditionSymbol`
+    // gates `signal` on this table.
+    {"file-missing", "file-error"},
     {"cyclic-function-indirection", "error"},
     {"invalid-function", "error"},
     {"setting-constant", "error"},
