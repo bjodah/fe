@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "10.0";
+const char* FeVersion = "11.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
@@ -86,7 +86,8 @@ static const char* primitive_names[] = {
     [PMacroexpand] = "macroexpand",
     [PMacroexpandAll] = "macroexpand-all",
     [PMarkSpecial] = "internal--mark-special",
-    [PSpecialVariableP] = "special-variable-p"};
+    [PSpecialVariableP] = "special-variable-p",
+    [PEval] = "eval"};
 
 typedef struct PrimitiveAlias {
   const char* name;

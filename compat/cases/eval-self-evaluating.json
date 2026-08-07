@@ -1,0 +1,6 @@
+{
+ "id": "eval-self-evaluating",
+ "setup": [],
+ "expr": "(eval 42)",
+ "note": "12B: a self-evaluating object is its own value under `eval`."
+}

@@ -144,7 +144,18 @@
 // the flag.  `FE_API_VERSION` does not move here either -- no declaration in
 // this header changed -- though sub-plan 11C moves it for the protected
 // string entry, and the two land under one `FeVersion` "10.0".
-#define FE_LANGUAGE_VERSION 9
+//
+// Language version 10 (sub-plan 12B) is two changes to control flow, both of
+// which change what an existing program answers.  A condition handler
+// established *inside* an `unwind-protect` cleanup is now honored by a raise
+// from that cleanup, where before every raise inside a running cleanup
+// behaved as unhandled -- 06A Decision 4's replace-the-completion rule is
+// unchanged and now applies only where nothing in the cleanup can handle it.
+// And `eval` exists: Emacs' `(eval FORM &optional LEXICAL)`, evaluating FORM
+// in the caller's own run so conditions, throws and quits out of it reach
+// enclosing handlers and catches, with a non-nil LEXICAL rejected by name.
+// `FE_API_VERSION` stays at 7 -- no declaration in this header changed.
+#define FE_LANGUAGE_VERSION 10
 
 extern const char* FeVersion;
 

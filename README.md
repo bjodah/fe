@@ -28,7 +28,11 @@ The language offers the following features:
   raises `no-catch` there rather than reaching a `catch` outside it (a
   recorded divergence from Emacs; see `doc/language.md`)
 * Structured conditions: `signal`, `error`, and `condition-case`, with a
-  static error hierarchy and cleanup-safe unwinding
+  static error hierarchy and cleanup-safe unwinding — a handler established
+  inside an `unwind-protect` cleanup handles that cleanup's own raise, and
+  one it cannot handle replaces the completion being unwound
+* `eval`, evaluating its form in the caller's own run, so conditions, throws
+  and quits out of it reach enclosing handlers and catches
 * Unconditional strict arity for functions, macros, and core primitives
 * Mark-and-sweep garbage collector
 * Stack traceback on error

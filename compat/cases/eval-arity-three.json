@@ -1,0 +1,6 @@
+{
+ "id": "eval-arity-three",
+ "setup": [],
+ "expr": "(condition-case e (eval '(+ 1 2) nil 'extra) (error e))",
+ "note": "12B: a third argument is wrong-number-of-arguments, naming eval and 3."
+}

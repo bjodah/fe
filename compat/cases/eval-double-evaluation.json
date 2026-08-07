@@ -1,0 +1,6 @@
+{
+ "id": "eval-double-evaluation",
+ "setup": [],
+ "expr": "(eval ''x)",
+ "note": "12B: `eval` evaluates twice -- once to obtain the form (consuming the outer quote), once to run it. `(eval ''x)` is the symbol x."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "eval-throw-reaches-enclosing-catch",
+ "setup": [],
+ "expr": "(catch 'tg (eval '(throw 'tg 7)))",
+ "note": "12B: a `throw' out of an eval'd form reaches a `catch' established outside the eval call. This is the property kg's loader needs: nothing is interposed between the evaluated form and the surrounding control flow."
+}

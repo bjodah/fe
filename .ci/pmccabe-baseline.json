@@ -183,6 +183,7 @@
   "fe_eval.c:CompletePairFrame": 1,
   "fe_eval.c:ConditionMatches": 7,
   "fe_eval.c:CountRawArguments": 3,
+  "fe_eval.c:DispatchEval": 3,
   "fe_eval.c:DispatchFuncallApply": 6,
   "fe_eval.c:DispatchLet": 5,
   "fe_eval.c:DispatchMacroexpand": 3,

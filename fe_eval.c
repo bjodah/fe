@@ -1919,6 +1919,12 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     // own arity, exactly one.
     [PMarkSpecial] = {2, 2},
     [PSpecialVariableP] = {1, 1},
+    // Sub-plan 12B: `(eval FORM &optional LEXICAL)`, Emacs' own arity --
+    // measured on the pinned 31.0.90, `(eval)` is
+    // `(wrong-number-of-arguments eval 0)` and `(eval '(+ 1 2) nil 'extra)`
+    // is `(wrong-number-of-arguments eval 3)`. A non-nil LEXICAL is a
+    // by-name rejection in the arm, not an arity error.
+    [PEval] = {1, 2},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -2164,6 +2170,10 @@ static bool DispatchPrimitive(FeContext* ctx,
     // keeps it reachable through `funcall`/`apply`, whose redispatch refuses
     // raw-form callables.
     case PMacroexpandAll:
+    // `eval` (sub-plan 12B) is function-shaped for the same reason: FORM and
+    // the optional LEXICAL are evaluated operands, and the arm below relays
+    // the resulting form into this same run.
+    case PEval:
       frame->kind = FeFrameEvalList;
       frame->fn = fn;
       frame->rest = arguments;
@@ -3265,6 +3275,10 @@ static const bool primitive_is_function[PSentinel] = {
     // 'special-variable-p 'x)` works there).
     [PMarkSpecial] = true,
     [PSpecialVariableP] = true,
+    // Sub-plan 12B: `eval` is an ordinary function in Emacs --
+    // `(special-form-p 'eval)` is nil and `(funcall 'eval '(+ 1 2))` is 3
+    // there -- and its arm evaluates both operands before relaying.
+    [PEval] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`,
     // `catch`.
@@ -3496,6 +3510,46 @@ static bool DispatchMacroexpand(FeContext* ctx,
   FeObject* const mode = frame->fn;
   FePushGC(ctx, form);
   return !MacroexpandContinue(ctx, frame, form, mode, true, result);
+}
+
+// `eval`'s tail, once FORM and the optional LEXICAL have been evaluated into
+// `list` (sub-plan 12B Part 2).
+//
+// The whole point is where the form runs: this frame becomes a relay for an
+// ordinary expression frame pushed above it, in the SAME run, so nothing
+// stands between the evaluated form and the handlers, catches and cleanups
+// established around the `eval` call. A condition propagates to an enclosing
+// `condition-case`, a `throw` reaches an enclosing `catch`, a quit stays a
+// quit, and the steps the form spends come out of the caller's budget. That
+// is the `funcall`/`apply` redispatch shape (`DispatchFuncallApply` above)
+// minus the call-form construction, and like it, it adds no frame kind.
+//
+// The environment is the global one, not `frame->env`. Emacs' LEXICAL
+// argument selects the environment and never inherits the caller's:
+// measured on 31.0.90 under `lexical-binding: t`, `(let ((qq 1)) (eval 'qq))`
+// is `(void-variable qq)`, while a `let` over a name `defvar` made dynamic
+// is visible to the evaluated form. Fe reproduces both with `&nil` here,
+// because a dynamically bound name is read through its global cell.
+//
+// LEXICAL must be nil. Emacs accepts `t` (lexical binding with an empty
+// environment) and an alist, neither of which fe has an environment model
+// for; a non-nil value is rejected by name rather than silently ignored --
+// `DispatchMacroexpand`'s ENVIRONMENT convention, and the reader's.
+//
+// `list` is re-rooted in `accumulator` before anything else: `ResumeEvalList`
+// empties that field while reversing the operand list, so on entry `list` is
+// live only in this C local, and `AllocateFrame` inside
+// `PushEvaluationFrame` can raise.
+static bool DispatchEval(FeContext* ctx, FeEvalFrame* frame, FeObject* list) {
+  frame->accumulator = list;
+  FeObject* rest = list;
+  FeObject* const form = FeGetNextArgument(ctx, &rest);
+  if (!FeIsNil(rest) && !FeIsNil(CAR(rest))) {
+    FeHandleError(ctx, "unsupported feature: eval lexical argument");
+  }
+  frame->kind = FeFrameRelay;
+  PushEvaluationFrame(ctx, form, &nil, NULL);
+  return false;
 }
 
 // `(catch TAG BODY...)` (sub-plan 06C): the frame's `accumulator` holds the
@@ -3769,6 +3823,8 @@ static bool ResumeEvalList(FeContext* ctx,
     case PMacroexpand1:
     case PMacroexpand:
       return DispatchMacroexpand(ctx, frame, list, result);
+    case PEval:
+      return DispatchEval(ctx, frame, list);
     // `macroexpand-all` (10A Decision 2): expanding every sub-form needs a
     // code walker that knows each special form's shape, which fe does not
     // have.  The operands have still been evaluated, as an ordinary

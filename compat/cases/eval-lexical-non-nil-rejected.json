@@ -1,0 +1,6 @@
+{
+ "id": "eval-lexical-non-nil-rejected",
+ "setup": [],
+ "expr": "(condition-case e (eval '(+ 1 2) t) (error e))",
+ "note": "12B, the one deliberate divergence: Emacs accepts LEXICAL t (lexical binding with an empty environment) and answers 3. Fe has no environment model for it and rejects it BY NAME -- the `macroexpand' ENVIRONMENT convention -- rather than silently ignoring the argument. Recorded as divergent, not fixed."
+}

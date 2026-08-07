@@ -1,0 +1,6 @@
+{
+ "id": "eval-value",
+ "setup": [],
+ "expr": "(eval '(+ 1 2))",
+ "note": "12B: `eval` returns the value of the form. FORM is an evaluated operand, so the quote is Emacs' too."
+}

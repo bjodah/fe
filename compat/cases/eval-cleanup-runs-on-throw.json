@@ -1,0 +1,9 @@
+{
+ "id": "eval-cleanup-runs-on-throw",
+ "setup": [
+  "(setq eval-cleanup-flag nil)",
+  "(catch 'x (unwind-protect (eval '(throw 'x 'from-eval)) (setq eval-cleanup-flag 'ran)))"
+ ],
+ "expr": "eval-cleanup-flag",
+ "note": "12B: a cleanup between the `eval' and the `catch' still runs while the throw passes it. Written in the Fe/Emacs dialect intersection -- a setup form sets a flag, the expression reads it."
+}

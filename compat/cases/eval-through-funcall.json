@@ -1,0 +1,6 @@
+{
+ "id": "eval-through-funcall",
+ "setup": [],
+ "expr": "(funcall 'eval '(+ 1 2))",
+ "note": "12B: `eval` is an ordinary function, not a special form -- Emacs' own `(special-form-p 'eval)` is nil -- so it is reachable through funcall."
+}

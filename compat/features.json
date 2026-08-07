@@ -1694,6 +1694,43 @@
    "source_name": null
   },
   {
+   "id": "primitive-eval",
+   "category": "control-flow",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "eval-value",
+    "eval-double-evaluation",
+    "eval-self-evaluating",
+    "eval-through-funcall",
+    "eval-condition-reaches-enclosing-handler",
+    "eval-throw-reaches-enclosing-catch",
+    "eval-cleanup-runs-on-throw",
+    "eval-lexical-scope-not-inherited",
+    "eval-arity-zero",
+    "eval-arity-three",
+    "eval-explicit-nil-lexical",
+    "eval-nested"
+   ],
+   "kg_test": "fe/test_api.c:TestEvalPrimitive",
+   "rationale": "Sub-plan 12B Part 2. Emacs' `(eval FORM &optional LEXICAL)', added as a core primitive because Fe had no `eval' at all. FORM is an evaluated operand and `eval' is an ordinary function (Emacs' `(special-form-p 'eval)' is nil), so it is reachable through funcall and apply. The property worth the primitive is WHERE the form runs: it is relayed into the CURRENT run through the existing FeFrameRelay redispatch -- the `funcall'/`apply' shape minus the call-form construction, no new frame kind -- so a condition reaches an enclosing `condition-case', a `throw' reaches an enclosing `catch', a quit stays a quit, cleanups in between still run, and the steps the form spends come out of the caller's budget. The environment is the global one, which is what Emacs' LEXICAL=nil means: `(let ((v 1)) (eval 'v))' is (void-variable v) on 31.0.90 under lexical-binding: t, while a dynamically bound name IS visible. The LEXICAL argument itself is the one divergence and has its own row.",
+   "source_name": "eval"
+  },
+  {
+   "id": "eval-lexical-argument",
+   "category": "control-flow",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "eval-lexical-non-nil-rejected"
+   ],
+   "kg_test": null,
+   "rationale": "Sub-plan 12B Part 2's one deliberate divergence in `eval'. Emacs' LEXICAL argument selects an environment: `t' means lexical binding with an empty lexical environment (`(eval '(+ 1 2) t)' is 3 there) and an alist of (NAME . VALUE) pairs supplies one (`(eval 'zz '((zz . 5)))' is 5). Fe has no environment model for either -- its lexical environments are the evaluator's own chain and there is no reader or constructor for one at the Lisp level -- so a non-nil LEXICAL raises `unsupported feature: eval lexical argument' rather than being silently ignored, which is the convention `macroexpand''s ENVIRONMENT argument already set (macroexpand-environment, the sibling row). Nil and absent are the supported spellings and behave exactly as Emacs' do. Closing this means Lisp-level lexical environments, which nothing in either tree needs; it is recorded, not planned.",
+   "source_name": null
+  },
+  {
    "id": "condition-hierarchy",
    "category": "errors-and-non-local-exits",
    "status": "unsupported",

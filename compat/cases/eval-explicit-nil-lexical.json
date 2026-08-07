@@ -1,0 +1,6 @@
+{
+ "id": "eval-explicit-nil-lexical",
+ "setup": [],
+ "expr": "(eval '(+ 1 2) nil)",
+ "note": "12B: an explicit nil LEXICAL means what omitting it means."
+}

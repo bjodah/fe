@@ -124,6 +124,19 @@ typedef enum Primitive {
   // `defvar` of its own: kg's prelude macros call these two.
   PMarkSpecial,
   PSpecialVariableP,
+  // Sub-plan 12B Part 2 of kg's Emacs-subset program: `eval`, Emacs'
+  // `(eval FORM &optional LEXICAL)`. Function-shaped -- FORM is an evaluated
+  // operand, which is why `(eval '(+ 1 2))` needs the quote, and
+  // `(special-form-p 'eval)` is nil on the pinned Emacs too. It evaluates
+  // the resulting form in the CURRENT run, by relaying through
+  // `FeFrameRelay` exactly as `funcall`/`apply` do, so a condition, throw or
+  // quit out of the evaluated form propagates to handlers and catches
+  // established outside the `eval` call. A non-nil LEXICAL is rejected by
+  // name, the `macroexpand` ENVIRONMENT convention; the environment used is
+  // the global one, which is what Emacs' LEXICAL=nil means -- measured:
+  // `(let ((qq 1)) (eval 'qq))` is `(void-variable qq)` on 31.0.90 under
+  // `lexical-binding: t`, while a `let` over a dynamic name IS visible.
+  PEval,
   PSentinel
 } Primitive;
 

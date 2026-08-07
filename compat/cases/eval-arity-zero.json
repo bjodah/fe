@@ -1,0 +1,6 @@
+{
+ "id": "eval-arity-zero",
+ "setup": [],
+ "expr": "(condition-case e (eval) (error e))",
+ "note": "12B: `eval' has Emacs' arity, (FORM &optional LEXICAL); zero arguments names the function and the count."
+}

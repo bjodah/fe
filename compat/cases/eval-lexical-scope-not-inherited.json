@@ -1,0 +1,6 @@
+{
+ "id": "eval-lexical-scope-not-inherited",
+ "setup": [],
+ "expr": "(condition-case e (let ((eval-lex 1)) (eval 'eval-lex)) (error e))",
+ "note": "12B: the caller's LEXICAL bindings are not visible to the evaluated form -- Emacs' answer for a nil LEXICAL argument, measured as (void-variable eval-lex) on 31.0.90 under lexical-binding: t. The dynamic half of the pair cannot be written in the intersection, because Fe's marking primitive is `internal--mark-special' and Emacs' is `defvar'; scripts/eval.fe carries it."
+}

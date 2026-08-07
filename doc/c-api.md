@@ -17,6 +17,9 @@ confused for each other, so every mention below names its unit.
 types, and callback signatures declared in `fe.h`; API version 7 adds the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+language version 10 is the cleanup-handler and `eval` contract (a handler
+established inside an `unwind-protect` cleanup is honored by that cleanup's
+own raise, and `eval` evaluates its form in the caller's run);
 language version 9 is the special-variable contract (`internal--mark-special`,
 `special-variable-p`, and shallow dynamic binding at `let`'s two binding
 paths); language version 8 is the reflective-expansion contract
@@ -35,10 +38,13 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 7);
-static_assert(FE_LANGUAGE_VERSION == 9);
+static_assert(FE_LANGUAGE_VERSION == 10);
 ```
 
-Fe 10.0 moves `FE_LANGUAGE_VERSION` 8 -> 9 and `FE_API_VERSION` 6 -> 7;
+Fe 11.0 moves `FE_LANGUAGE_VERSION` 9 -> 10 and leaves `FE_API_VERSION` at 7;
+the reasoning is below, under the version history.
+
+Fe 10.0 moved `FE_LANGUAGE_VERSION` 8 -> 9 and `FE_API_VERSION` 6 -> 7;
 the reasoning is below, under the version history.
 
 Fe 9.0 moved `FE_LANGUAGE_VERSION` 7 -> 8 and left `FE_API_VERSION` at 6;
@@ -102,6 +108,33 @@ dotted-tail and bare-symbol rest spellings are unaffected.
 `FE_LANGUAGE_VERSION` moved 6 -> 7 for protected constants and
 self-evaluating keywords. Assigning `t`, `nil`, or a keyword now signals
 `setting-constant`, and a keyword such as `:foo` no longer needs quoting.
+
+`FE_LANGUAGE_VERSION` moved 9 -> 10 in sub-plan 12B, with `FeVersion` "10.0"
+-> "11.0" and `FE_API_VERSION` deliberately left at 7 -- no declaration in
+`fe.h` changed. Two language changes land under it, and both change what an
+existing program answers.
+
+The first is a fix. A `condition-case` written inside an `unwind-protect`
+*cleanup* now handles what that cleanup raises. Before, it handled nothing at
+all, drain or no drain: the raise path tested its cleanup bounce before it
+ever searched for a handler, so `(unwind-protect 'body (condition-case nil
+(car 6) (error nil)))` reached the host as an unhandled error where Emacs
+31.0.90 answers `body`. 06A Decision 4 is unchanged and is now the rule for
+the remaining case: a cleanup raise that *nothing in the cleanup* can handle
+still replaces the completion being unwound and is still catchable by an
+enclosing `condition-case`. A host's `FeProtectWithCleanup` cleanup
+establishes no handlers, so the native side of this is bit-identical.
+
+The second is an addition: `eval`, Emacs' `(eval FORM &optional LEXICAL)`.
+FORM is an evaluated operand and its value is evaluated in the *caller's own
+run*, not in a nested one, so a condition, a `throw` or a quit out of the
+evaluated form propagates to handlers, catches and cleanups established
+around the `eval` call, and the steps it spends come out of the caller's
+budget. LEXICAL must be nil or absent; a non-nil value is rejected by name
+(`unsupported feature: eval lexical argument`), the same convention
+`macroexpand`'s ENVIRONMENT uses. The environment is the global one, which is
+what Emacs' LEXICAL=nil means: the caller's lexical bindings are not visible
+to the evaluated form, while dynamically bound names are.
 
 `FE_API_VERSION` moved 6 -> 7 in sub-plan 11C, for one added declaration:
 `FeTryEvaluateStringWithOptions`. Nothing was removed and nothing changed

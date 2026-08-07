@@ -1,0 +1,6 @@
+{
+ "id": "eval-condition-reaches-enclosing-handler",
+ "setup": [],
+ "expr": "(condition-case e (eval '(car 6)) (error e))",
+ "note": "12B: the form is evaluated in the CURRENT run, so a condition raised by it reaches a `condition-case' established outside the eval call, with its own condition object."
+}

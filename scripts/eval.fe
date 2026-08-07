@@ -1,0 +1,110 @@
+;; `eval` (sub-plan 12B Part 2): Emacs' `(eval FORM &optional LEXICAL)`.
+;; Every expectation below is the answer measured from Emacs 31.0.90 under
+;; `lexical-binding: t`, top-level forms, on 2026-08-07 -- except the one
+;; deliberate divergence, the LEXICAL rejection, which is marked where it
+;; appears.
+
+;; The value shape, and the double evaluation `eval` performs: FORM is an
+;; evaluated operand, so its own quote is consumed and what is left is
+;; evaluated again.
+(assert-equals 3 (eval '(+ 1 2)))
+(assert-equals 'x (eval ''x))
+(assert-equals '(a b) (eval '(quote (a b))))
+(assert-equals nil (eval nil))
+(assert-equals 42 (eval 42))
+(assert-equals "s" (eval "s"))
+
+;; `eval` is an ordinary function, not a special form: Emacs' own
+;; `(special-form-p 'eval)` is nil, and it is reachable through `funcall`
+;; and `apply`.
+(assert-equals 3 (funcall 'eval '(+ 1 2)))
+(assert-equals 3 (apply 'eval '((+ 1 2))))
+
+;; The environment is the global one, which is what Emacs' LEXICAL=nil
+;; means. It does NOT inherit the caller's lexical scope...
+(assert-equals '(void-variable eval-lex)
+  (condition-case e (let ((eval-lex 1)) (eval 'eval-lex)) (error e)))
+;; ...but a dynamically bound name is visible, because it is read through
+;; its global cell -- the same pair Emacs answers.
+(internal--mark-special 'eval-dyn nil)
+(setq eval-dyn 'global)
+(assert-equals 'global (eval 'eval-dyn))
+(assert-equals 'bound (let ((eval-dyn 'bound)) (eval 'eval-dyn)))
+(assert-equals 'global (eval 'eval-dyn))
+
+;; The whole point: the form is evaluated in the CURRENT run, so a
+;; condition, a throw and a quit out of it all reach handlers established
+;; OUTSIDE the `eval` call.
+(assert-equals '(wrong-type-argument listp 6)
+  (condition-case e (eval '(car 6)) (error e)))
+(assert-equals 'named
+  (condition-case nil (eval '(car 6)) (wrong-type-argument 'named)))
+(assert-equals 7 (catch 'tg (eval '(throw 'tg 7))))
+(assert-equals '(q (quit))
+  (condition-case e (eval '(signal 'quit nil))
+    (quit (list 'q e))
+    (error (list 'e e))))
+
+;; A cleanup between the eval and the catch still runs, and the throw still
+;; arrives.
+(setq eval-cleanup nil)
+(assert-equals 'from-eval
+  (catch 'x (unwind-protect (eval '(throw 'x 'from-eval))
+              (setq eval-cleanup 'ran))))
+(assert-equals 'ran eval-cleanup)
+
+;; `eval` inside a cleanup: its raise is the cleanup's raise, and 12B Part
+;; 1's rule applies to it unchanged -- unhandled, it replaces; handled by a
+;; handler inside the same cleanup, it does not.
+(assert-equals '(wrong-type-argument listp 6)
+  (condition-case e (unwind-protect 'body (eval '(car 6))) (error e)))
+(assert-equals 'body
+  (unwind-protect 'body (condition-case nil (eval '(car 6)) (error nil))))
+
+;; `eval` inside a macro expansion.
+(defalias 'eval-macro (macro (form) (list 'eval (list 'quote form))))
+(assert-equals 7 (eval-macro (+ 3 4)))
+(assert-equals '(eval '(+ 3 4)) (macroexpand-1 '(eval-macro (+ 3 4))))
+
+;; Side effects land in the caller's world.
+(setq eval-i 0)
+(eval '(while (< eval-i 5) (setq eval-i (+ eval-i 1))))
+(assert-equals 5 eval-i)
+
+;; Arity is Emacs': `(eval)` and a third argument are both
+;; wrong-number-of-arguments, naming `eval` and the count.
+(assert-equals '(wrong-number-of-arguments eval 0)
+  (condition-case e (eval) (error e)))
+(assert-equals '(wrong-number-of-arguments eval 3)
+  (condition-case e (eval '(+ 1 2) nil 'extra) (error e)))
+
+;; An explicit nil LEXICAL is accepted and means what omitting it means.
+(assert-equals 3 (eval '(+ 1 2) nil))
+
+;; DELIBERATE DIVERGENCE, the `macroexpand` ENVIRONMENT convention: Emacs
+;; accepts LEXICAL `t` (lexical binding with an empty environment) and an
+;; alist, and answers 3 for the first of these. Fe has no environment model
+;; for either, so a non-nil LEXICAL is rejected BY NAME rather than silently
+;; ignored -- and the rejection is an ordinary catchable condition.
+(assert-equals '(error "unsupported feature: eval lexical argument")
+  (condition-case e (eval '(+ 1 2) t) (error e)))
+(assert-equals '(error "unsupported feature: eval lexical argument")
+  (condition-case e (eval 'zz '((zz . 5))) (error e)))
+
+;; Self-referential nesting. `eval` relays into the current run rather than
+;; starting one, so nesting costs frames on the one frame stack and is
+;; bounded by the ordinary frame budget -- measured at this arena: 1092
+;; nested `eval`s answer, 1093 is `evaluation frame limit exceeded`, which
+;; is the same wall, reached the same uncatchable way, as an equally deep
+;; ordinary recursion. 200 is asserted here because the exact number is a
+;; function of the arena size, not of `eval`.
+(assert-equals 3 (eval '(eval '(+ 1 2))))
+(assert-equals 3 (eval '(eval '(eval '(eval '(eval '(+ 1 2)))))))
+(setq eval-nest '(+ 1 2))
+(setq eval-n 0)
+(while (< eval-n 200)
+  (setq eval-nest (list 'eval (list 'quote eval-nest)))
+  (setq eval-n (+ eval-n 1)))
+(assert-equals 3 (eval eval-nest))
+
+(print "eval: all cases passed")

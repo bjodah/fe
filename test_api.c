@@ -124,8 +124,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 7);
-  static_assert(FE_LANGUAGE_VERSION == 9);
-  CHECK(strcmp(FeVersion, "10.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 10);
+  CHECK(strcmp(FeVersion, "11.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -4200,6 +4200,82 @@ static bool TestNativeCleanupHandlerFloor(void) {
   return true;
 }
 
+// `eval` (sub-plan 12B Part 2) from the host's side: the property that makes
+// it worth having is that the evaluated form runs in the CURRENT run, so
+// the host-visible completion kinds, the step budget and the interrupt
+// schedule all pass through it unchanged. The Lisp-visible grid --
+// values, arity, LEXICAL rejection, condition/throw/quit propagation to
+// enclosing handlers, nesting -- is `scripts/eval.fe`.
+static bool TestEvalPrimitive(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "eval.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("(eval '(+ 1 2))", "3");
+
+  // The steps the evaluated form spends come out of the caller's budget, so
+  // a loop reached through `eval` exhausts it exactly as the same loop
+  // written inline does -- and arrives as Budget, not as an ordinary error.
+  static const char budget_loop[] = "(eval '(while t 1))";
+  const FeEvalOptions tiny_budget = {.step_limit = 32};
+  CHECK(ExpectCompletionKind(context, &state, "eval.fe", budget_loop,
+                             sizeof(budget_loop) - 1, &tiny_budget,
+                             "eval.fe:1: evaluation step limit exceeded",
+                             FeCompletionBudget));
+
+  // The interrupt schedule likewise: a host `C-g` inside an eval'd loop is
+  // a Quit completion, with `(quit)` as its condition object.
+  static const char interrupt_loop[] = "(eval '(while t 1))";
+  InterruptState interrupt = {.context = context,
+                              .expected_userdata = &interrupt,
+                              .polls = 0,
+                              .cancel_after = 3};
+  const FeEvalOptions interrupt_options = {
+      .poll_interval = 4, .interrupt = Interrupt, .userdata = &interrupt};
+  CHECK(ExpectCompletionKind(
+      context, &state, "eval.fe", interrupt_loop, sizeof(interrupt_loop) - 1,
+      &interrupt_options, "eval.fe:1: evaluation cancelled", FeCompletionQuit));
+
+  // An unhandled condition from an eval'd form reaches the host as an
+  // ordinary Error, carrying the eval'd form's own message and this run's
+  // source label -- not a wrapper naming `eval`.
+  static const char unhandled[] = "(eval '(car 6))";
+  CHECK(ExpectCompletionKind(
+      context, &state, "eval.fe", unhandled, sizeof(unhandled) - 1, nullptr,
+      "eval.fe:1: expected pair, got integer", FeCompletionError));
+
+  // A cleanup registered before the eval still runs on the way out.
+  CHK("(setq eval-cleanup-ran nil)", "nil");
+  static const char with_cleanup[] =
+      "(unwind-protect (eval '(car 6)) (setq eval-cleanup-ran t))";
+  CHECK(ExpectEvaluationError(context, &state, "eval.fe", with_cleanup,
+                              sizeof(with_cleanup) - 1,
+                              "eval.fe:1: expected pair, got integer"));
+  CHK("eval-cleanup-ran", "t");
+
+  // The LEXICAL rejection is a named, catchable condition rather than a
+  // silently ignored argument.
+  static const char lexical[] = "(eval '(+ 1 2) t)";
+  CHECK(ExpectEvaluationError(context, &state, "eval.fe", lexical,
+                              sizeof(lexical) - 1,
+                              "eval.fe:1: unsupported feature: eval lexical "
+                              "argument"));
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 static bool TestUnwindLisp(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -7498,11 +7574,19 @@ static bool TestCaughtExhaustionSession(void) {
 // Nothing in the corpus marks a symbol special, so `special_list` is empty
 // here and the registry costs nothing: these two numbers move because the
 // *primitive table* grew, not because dynamic binding did anything.
+//
+// Re-measured again at sub-plan 12B for the third time and the same reason:
+// one more primitive (`eval`) grows `FeMinimumArenaSize()`, so the arena
+// grows with it and holds 6 more slots (15249 -> 15255), of which the same 6
+// are live after a collection (1066 -> 1072) -- `eval`'s primitive object,
+// its interned symbol, that symbol's name and cells. The collection count
+// and the peak are unchanged for the third time, which is the invariance 09C
+// pinned. Nothing in the corpus calls `eval`.
 enum {
-  PinnedTotalSlots = 15249,
+  PinnedTotalSlots = 15255,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15249,
-  PinnedLiveAfterCollection = 1066,
+  PinnedPeakLive = 15255,
+  PinnedLiveAfterCollection = 1072,
 };
 
 // ---------------------------------------------------------------------------
@@ -8413,18 +8497,19 @@ int main(void) {
                  TestConstantsAndKeywords() && TestNumericEqual() &&
                  TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
-                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestFrameLimits() && TestFrameSubstrate() &&
-                 TestArenaStats() && TestEvaluationStackProbe() &&
-                 TestCallHeadProbe() && TestArgumentFrame() &&
-                 TestArgumentProbe() && TestLambdaBodyFrame() &&
-                 TestLambdaBodyChain() && TestMacroFrame() &&
-                 TestNativeReentry() && TestNativeOwningReentry() &&
-                 TestResumableFrameGC() && TestCleanupRunGC() &&
-                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
-                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
-                 TestGcStackConstantInNesting() && TestLongArgumentLists() &&
-                 TestNativeArityRecord() && TestExhaustionCatchability() &&
+                 TestEvalPrimitive() && TestUnwindLisp() &&
+                 TestUnwindCleanupBudget() && TestFrameLimits() &&
+                 TestFrameSubstrate() && TestArenaStats() &&
+                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
+                 TestArgumentFrame() && TestArgumentProbe() &&
+                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
+                 TestMacroFrame() && TestNativeReentry() &&
+                 TestNativeOwningReentry() && TestResumableFrameGC() &&
+                 TestCleanupRunGC() && TestPrimitiveOrder() &&
+                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
+                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
+                 TestLongArgumentLists() && TestNativeArityRecord() &&
+                 TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
                  TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&

@@ -740,6 +740,62 @@ produces. It is still an ordinary function-shaped name: its operands evaluate
 first, and direct, `funcall`, and `apply` calls all reach the same named
 rejection.
 
+#### `(eval form &optional lexical)`
+
+Evaluates `form` and returns the result — Emacs' `eval`, with Emacs' arity.
+`form` is an ordinary evaluated argument, which is why the examples quote it,
+so `eval` evaluates twice: once to obtain the form, once to run it.
+
+```clojure
+fe > (eval '(+ 1 2))
+3
+fe > (eval ''x)
+x
+fe > (eval 42)
+42
+```
+
+`eval` is an ordinary function, not a special form, so `(funcall 'eval '(+ 1
+2))` and `(apply 'eval '((+ 1 2)))` both answer `3`, as they do in Emacs.
+
+The form is evaluated **in the current run**, not in a nested one. Nothing is
+interposed between it and the surrounding control flow: a condition reaches
+an enclosing `condition-case`, a `throw` reaches an enclosing `catch`, a quit
+stays a quit, cleanups between the two still run, and the steps the form
+spends come out of the caller's budget.
+
+```clojure
+fe > (condition-case e (eval '(car 6)) (error e))
+(wrong-type-argument listp 6)
+fe > (catch 'tg (eval '(throw 'tg 7)))
+7
+```
+
+The environment is the global one. The caller's *lexical* bindings are not
+visible to the evaluated form, which is Emacs' answer for a nil `lexical`
+argument; a name bound dynamically (see "Special Variables And Dynamic
+Binding" below) is visible, because it is read through its global cell.
+
+```clojure
+fe > (let ((v 1)) (eval 'v))
+error: void-variable v
+fe > (internal--mark-special 'v nil)
+fe > (setq v 'global)
+fe > (let ((v 'bound)) (eval 'v))
+bound
+```
+
+`lexical` is accepted and must be `nil`. Emacs also accepts `t` — lexical
+binding with an empty environment — and an alist of `(NAME . VALUE)` lexical
+bindings, neither of which Fe has an environment model for. A non-nil value
+raises `unsupported feature: eval lexical argument`, an ordinary catchable
+condition, rather than being silently ignored: the same convention
+`macroexpand`'s `environment` argument uses.
+
+Because `eval` relays into the current run rather than starting one, nesting
+it costs frames on the one frame stack and is bounded by the ordinary frame
+budget, reached the same way an equally deep ordinary recursion reaches it.
+
 #### `(and ...)`
 
 Evaluates each argument until one results in `nil` — the last argument’s value

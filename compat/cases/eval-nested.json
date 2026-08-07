@@ -1,0 +1,6 @@
+{
+ "id": "eval-nested",
+ "setup": [],
+ "expr": "(eval '(eval '(+ 1 2)))",
+ "note": "12B: `eval' of an `eval' form. Fe relays into the current run rather than starting one, so nesting costs frames on the one frame stack and is bounded by the ordinary frame budget."
+}
