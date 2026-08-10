@@ -1,0 +1,6 @@
+{
+	"id": "lisp2-apply-error",
+	"setup": [],
+	"expr": "(apply 'error (list \"boom\"))",
+	"note": "Phase 13.1: `error` is an ordinary function in Emacs and its arm here evaluates every operand, but the missing primitive_is_function[] row made `(apply 'error ...)` answer `invalid-function error`. The spread list reaches the format machinery as the message."
+}

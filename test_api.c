@@ -141,8 +141,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 8);
-  static_assert(FE_LANGUAGE_VERSION == 10);
-  CHECK(strcmp(FeVersion, "11.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 11);
+  CHECK(strcmp(FeVersion, "12.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -2243,6 +2243,27 @@ static bool TestFunctionCells(void) {
   CHK("(funcall 'funcall '+ 1 2)", "3");
   CHK("(funcall 'apply '+ 1 '(2))", "3");
 
+  // Phase 13: `signal`, `error` and `keywordp` are ordinary functions in
+  // Emacs and evaluate every operand here, but had no row in
+  // `primitive_is_function[]`, so both entry points rejected them as special
+  // forms -- `(funcall 'signal ...)` was `invalid-function signal`. That made
+  // the one name a handler-writing program needs most unreachable through
+  // `funcall`/`apply`, and through every prelude function built on them.
+  // The raise still carries the condition the program asked for, and is
+  // still catchable at the point of the funcall.
+  LISP2_ERR("(funcall 'signal 'error (list \"x\"))", "lisp2.fe:1: error");
+  LISP2_ERR("(apply 'signal 'error '((\"x\")))", "lisp2.fe:1: error");
+  LISP2_ERR("(apply 'error (list \"boom\"))", "lisp2.fe:1: boom");
+  LISP2_ERR("(funcall 'error \"fmt %d\" 7)", "lisp2.fe:1: fmt 7");
+  CHK("(condition-case e (funcall 'signal 'wrong-type-argument "
+      "(list 'symbolp 1)) (wrong-type-argument (car (cdr e))))",
+      "symbolp");
+  CHK("(condition-case e (apply 'error '(\"boom\")) (error (car (cdr e))))",
+      "boom");
+  CHK("(funcall 'keywordp :a)", "t");
+  CHK("(funcall 'keywordp 'a)", "nil");
+  CHK("(apply 'keywordp '(:a))", "t");
+
   // A dead designator chain is `void-function` at the name the program
   // wrote, not at the last link the resolver reached: Emacs reports
   // `void-function dead-head` for both the call and the funcall.
@@ -2359,6 +2380,13 @@ static bool TestFunctionCells(void) {
   CHECK(FeIsFunction(context, FeMakeSymbol(context, "funcall")));
   CHECK(FeIsFunction(context, FeMakeSymbol(context, "apply")));
   CHECK(FeIsFunction(context, FeMakeSymbol(context, "sqrt")));
+  // Phase 13: the same three rows the funcall block above pins, asked
+  // through the host API -- Emacs' `functionp` is t for all three, and
+  // `FeIsFunction` reads the same table `funcall` routes on, so the host
+  // answer and the Lisp answer cannot drift apart.
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "signal")));
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "error")));
+  CHECK(FeIsFunction(context, FeMakeSymbol(context, "keywordp")));
   CHECK(!FeIsFunction(context, FeMakeSymbol(context, "if")));
   CHECK(!FeIsFunction(context, FeMakeSymbol(context, "quote")));
   CHECK(!FeIsFunction(context, FeMakeSymbol(context, "lambda")));

@@ -1,0 +1,6 @@
+{
+	"id": "lisp2-funcall-signal",
+	"setup": [],
+	"expr": "(funcall 'signal 'error (list \"x\"))",
+	"note": "Phase 13.1: `signal` is an ordinary function in Emacs -- (special-form-p 'signal) is nil there -- and its arm here evaluates every operand, but it had no row in fe_eval.c's primitive_is_function[], so funcall rejected it as a special form with `invalid-function signal`. The raise now reaches the host carrying the condition the program asked for. Measured before the fix: fe answered the invalid-function condition instead."
+}

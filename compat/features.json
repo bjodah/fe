@@ -2389,6 +2389,36 @@
    "kg_test": null,
    "rationale": "Sub-plan 10B / 10A Decision 2, deliberate and recorded in TODO.md: expanding every sub-form needs a code walker that knows the shape of each special form, which fe does not have. The name exists as a primitive purely so that calling it raises `unsupported feature: macroexpand-all` -- naming the missing feature, the reader's own reject-by-name convention -- rather than `void-function`, which is byte-identical to what a typo produces (10A Decision 5). The runner short-circuits this entry and never invokes fe; test_api.c:TestMacroexpandPrimitives and scripts/macroexpand.fe pin the raise itself.",
    "source_name": "macroexpand-all"
+  },
+  {
+   "id": "funcall-function-shaped-raisers",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "lisp2-funcall-signal",
+    "lisp2-funcall-signal-caught",
+    "lisp2-apply-error",
+    "lisp2-apply-error-format"
+   ],
+   "kg_test": "fe/test_api.c:TestFunctionCells",
+   "rationale": "Phase 13.1: `signal` and `error` are ordinary functions in Emacs -- (special-form-p 'signal) is nil there -- and both arms here route to the eval-list frame, which evaluates every operand. Neither had a row in fe_eval.c's primitive_is_function[], so IsRawFormCallable() classified them as special forms and funcall/apply answered `invalid-function`. Measured before the fix, in fe and through kg's kgbatch alike: (funcall 'signal 'error (list \"x\")) => invalid-function signal, (apply 'error (list \"boom\")) => invalid-function error. The raise now carries the condition the program named and is catchable where the funcall stands. FE_LANGUAGE_VERSION 10 -> 11 for it.",
+   "source_name": "signal"
+  },
+  {
+   "id": "funcall-keywordp",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "lisp2-funcall-keywordp",
+    "lisp2-apply-keywordp-negative"
+   ],
+   "kg_test": "fe/test_api.c:TestFunctionCells",
+   "rationale": "Phase 13.1: `keywordp` is an ordinary predicate in Emacs and its arm here is the unary frame, which evaluates its operand, but it too had no primitive_is_function[] row -- so every higher-order use answered `invalid-function keywordp`, including (mapcar 'keywordp '(:a 1)), which kg's prelude mapcar reaches through funcall. Direct calls were never affected, which is why the gap survived a corpus that only ever calls it in call position.",
+   "source_name": "keywordp"
   }
  ]
 }

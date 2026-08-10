@@ -1,0 +1,6 @@
+{
+	"id": "lisp2-apply-error-format",
+	"setup": [],
+	"expr": "(condition-case e (apply 'error (list \"fmt %d\" 7)) (error e))",
+	"note": "Phase 13.1: the applied `error` formats at signal time exactly as the direct call does (cond-data-error-format pins the direct shape with the same expression shape), so a spread argument list is consumed by the directives rather than dropped. The whole condition object is the value rather than the message string alone: fe's `print` writes a top-level string unquoted, which is the recorded reader-string-raw-byte-printing asymmetry and not what this case is about."
+}

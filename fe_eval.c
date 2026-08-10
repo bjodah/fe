@@ -3300,6 +3300,18 @@ static const bool primitive_is_function[PSentinel] = {
     // `(special-form-p 'eval)` is nil and `(funcall 'eval '(+ 1 2))` is 3
     // there -- and its arm evaluates both operands before relaying.
     [PEval] = true,
+    // Phase 13: all three are ordinary functions in Emacs -- `(special-form-p
+    // 'signal)`, `'error` and `'keywordp` are all nil there, and
+    // `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and
+    // `(mapcar 'keywordp '(:a 1))` all work. Their arms here evaluate every
+    // operand too: `signal` and `error` route to the eval-list frame beside
+    // `throw`, `keywordp` to the unary frame beside `integerp`. Missing rows
+    // made `funcall`/`apply` reject them as special forms, so the one name a
+    // handler-writing program needs most -- `signal` -- was unreachable
+    // through the two entry points a prelude `mapcar`/`apply` is built on.
+    [PSignal] = true,
+    [PError] = true,
+    [PKeywordp] = true,
     // False, listed for the record: `let`, `setq`, `if`, `lambda`, `macro`,
     // `while`, `quote`, `and`, `or`, `do`, `unwind-protect`, `function`,
     // `catch`.

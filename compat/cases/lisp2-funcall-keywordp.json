@@ -1,0 +1,6 @@
+{
+	"id": "lisp2-funcall-keywordp",
+	"setup": [],
+	"expr": "(funcall 'keywordp :a)",
+	"note": "Phase 13.1: `keywordp` is an ordinary predicate in Emacs and its arm here is the unary frame, which evaluates its operand -- yet it had no primitive_is_function[] row, so every higher-order use (`(mapcar 'keywordp ...)`, which kg's prelude mapcar funcalls) answered `invalid-function keywordp`."
+}

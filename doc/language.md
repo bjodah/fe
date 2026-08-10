@@ -535,6 +535,16 @@ function-shaped, so `(funcall 'funcall '+ 1 2)` is an ordinary 3. A designator
 chain that dies in an empty function cell is `void-function` at the name the
 program wrote too, not at the last link the chain reached.
 
+Which primitives are function-shaped is read off the evaluator's own routing,
+not maintained as an opinion beside it, and a name that is missing from that
+table is rejected as though it were a special form. Language version 11
+repairs three that were: `signal`, `error` and `keywordp` evaluate every
+operand and are ordinary functions in Emacs, but `(funcall 'signal 'error
+'("x"))`, `(apply 'error '("boom"))` and `(mapcar 'keywordp '(:a 1))`
+answered `invalid-function` until then. Nothing else about them changed --
+the raise `signal` and `error` produce is the same raise, catchable at the
+same place.
+
 ```clojure
 fe > (funcall (lambda (x) (+ x 1)) 2)
 3

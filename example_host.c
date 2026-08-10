@@ -7,7 +7,7 @@
 #include "fe.h"
 
 static_assert(FE_API_VERSION == 8);
-static_assert(FE_LANGUAGE_VERSION == 10);
+static_assert(FE_LANGUAGE_VERSION == 11);
 
 typedef struct HostState {
   jmp_buf error_jump;

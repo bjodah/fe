@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "11.0";
+const char* FeVersion = "12.0";
 
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 

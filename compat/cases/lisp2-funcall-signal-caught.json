@@ -1,0 +1,6 @@
+{
+	"id": "lisp2-funcall-signal-caught",
+	"setup": [],
+	"expr": "(condition-case e (funcall 'signal 'wrong-type-argument (list 'symbolp 1)) (wrong-type-argument (car (cdr e))))",
+	"note": "Phase 13.1: the funcall'd `signal` raises the condition it names, not `invalid-function`, so a lexically enclosing handler for that condition matches. This is the shape a handler-writing init file uses (`(apply 'signal ...)` in a re-raise helper) and the one the missing row made unreachable."
+}

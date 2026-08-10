@@ -1,0 +1,6 @@
+{
+	"id": "lisp2-apply-keywordp-negative",
+	"setup": [],
+	"expr": "(apply 'keywordp '(a))",
+	"note": "Phase 13.1: the negative arm of the same row -- a plain symbol is not a keyword -- reached through `apply` rather than call position, so the predicate is usable as a value on both entry points."
+}

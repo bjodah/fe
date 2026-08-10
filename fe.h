@@ -170,7 +170,25 @@
 // in the caller's own run so conditions, throws and quits out of it reach
 // enclosing handlers and catches, with a non-nil LEXICAL rejected by name.
 // `FE_API_VERSION` stays at 7 -- no declaration in this header changed.
-#define FE_LANGUAGE_VERSION 10
+//
+// Language version 11 (Phase 13.1) is a classification repair: `signal`,
+// `error` and `keywordp` are function-shaped primitives -- their arms
+// evaluate every operand, and `(special-form-p ...)` is nil for all three on
+// Emacs -- but had no row in the evaluator's `primitive_is_function[]`, so
+// `funcall` and `apply` rejected them as special forms.  `(funcall 'signal
+// 'error '("x"))`, `(apply 'error '("boom"))` and `(mapcar 'keywordp '(:a
+// 1))` answered `invalid-function` and now do what Emacs does; `functionp`,
+// and the host's `FeIsFunction` under it, answer t for all three where they
+// answered nil.  It is the same kind of bump as version 8's: no program that
+// ran under 10 answers differently under 11, because every affected program
+// raised.  It is a bump all the same, for version 8's reason -- kg's
+// compile-time `static_assert` is this macro's only consumer, and a macro
+// that does not move cannot tell kg whether the fe it links against can
+// reach `signal` through the two entry points a prelude is built on.
+// `FE_API_VERSION` stays at 8: no declaration in this header changed, and
+// the GC stress knob that lands in the same slice is a build-time
+// `FE_GC_STRESS` inside fe.c, not a C contract.
+#define FE_LANGUAGE_VERSION 11
 
 extern const char* FeVersion;
 

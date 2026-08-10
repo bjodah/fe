@@ -19,6 +19,9 @@ input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
 API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+language version 11 is the funcall-classification repair (`signal`, `error`
+and `keywordp` are reachable through `funcall`/`apply`, and `FeIsFunction`
+answers true for all three);
 language version 10 is the cleanup-handler, `eval` and input-unit contract
 (a handler
 established inside an `unwind-protect` cleanup is honored by that cleanup's
@@ -42,8 +45,11 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 8);
-static_assert(FE_LANGUAGE_VERSION == 10);
+static_assert(FE_LANGUAGE_VERSION == 11);
 ```
+
+Fe 12.0 moves `FE_LANGUAGE_VERSION` 10 -> 11 and leaves `FE_API_VERSION` at
+8; the reasoning is below, under the version history.
 
 Fe 11.0 moves `FE_LANGUAGE_VERSION` 9 -> 10 and, in Phase 12's fe fix cycle,
 `FE_API_VERSION` 7 -> 8; the reasoning for both is below, under the version
@@ -159,6 +165,27 @@ answer there, which is what Emacs gives for two separate files. Full marks
 a host-driven `let` -- every mark is visible, because there is no unit there
 for one to be foreign to. See `doc/language.md` for the model and its two
 recorded residuals.
+
+`FE_LANGUAGE_VERSION` moved 10 -> 11 in Phase 13.1, with `FeVersion` "11.0"
+-> "12.0" and `FE_API_VERSION` left at 8 -- no declaration in `fe.h` changed.
+The language change is one repair: `signal`, `error` and `keywordp` had no
+row in the evaluator's `primitive_is_function[]`, so `funcall` and `apply`
+rejected them as special forms even though every one of their arms evaluates
+its operands and `(special-form-p ...)` is nil for all three on Emacs
+31.0.90. `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and
+`(mapcar 'keywordp '(:a 1))` raised `invalid-function` and now behave as
+Emacs does, and `FeIsFunction` -- `functionp`'s question, which reads the
+same table -- answers true for all three where it answered false.
+
+Like language version 8's, this bump is not a break: no program that ran
+under 10 answers differently under 11, because every affected program raised.
+It is a bump for version 8's stated reason. This macro's only consumer is a
+host's compile-time `static_assert`, and `signal` reachable through
+`funcall`/`apply` is precisely what a prelude's higher-order functions are
+built on, so a macro that did not move could not tell an embedder whether the
+fe it links against has it. The `FE_GC_STRESS` build knob lands in the same
+slice and moves neither macro: it is a compile-time define inside `fe.c` with
+no declaration in `fe.h` and no effect on any program's answer.
 
 `FE_API_VERSION` moved 7 -> 8 in Phase 12's fe fix cycle, for the input-unit
 trio: `FeEnterInputUnit`, `FeReadInputForm` and `FeLeaveInputUnit`, with the
