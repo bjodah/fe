@@ -141,8 +141,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 8);
-  static_assert(FE_LANGUAGE_VERSION == 11);
-  CHECK(strcmp(FeVersion, "12.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 12);
+  CHECK(strcmp(FeVersion, "13.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -1016,11 +1016,10 @@ static bool TestReaderLiterals(void) {
           "unsupported read syntax: character above 255 in string");
   REJECTS("\"\\q\"", "unsupported read syntax: unknown escape");
 
-  // A backslash was rejected only at the start of a token, so `(cdr '(a\ b))`
-  // answered `(b)` -- two symbols -- where Emacs reads the one symbol `a b`
-  // and answers nil.
-  REJECTS("(cdr '(a\\ b))", "unsupported read syntax: symbol escape");
-  REJECTS("\\a", "unsupported read syntax: symbol escape");
+  // Symbol escapes were a named rejection until Phase 14 implemented them
+  // (`TestSymbolPrimitives` below has the positive assertions). What is left
+  // to reject is a backslash with nothing after it.
+  REJECTS("'a\\", "unterminated symbol escape");
 
   // The remaining named reject arms, each asserted to name its syntax.
   REJECTS("#q", "unsupported read syntax: #");
@@ -3874,7 +3873,10 @@ static bool TestDottedLists(void) {
   CHECK(ReadsAs(context, "(a . b ; trailing\n )", "(a . b)"));
 
   // Outside a list, `.` is an ordinary symbol and `.5` is still a number.
-  CHECK(ReadsAs(context, ".", "."));
+  // Since Phase 14 the printer escapes that symbol's leading dot, which is
+  // what makes its rendering read back as itself rather than as the
+  // dotted-pair marker.
+  CHECK(ReadsAs(context, ".", "\\."));
   CHECK(ReadsAs(context, ".5", "0.5"));
   CHECK(ReadsAs(context, "(.5 x)", "(0.5 x)"));
 
@@ -4383,6 +4385,150 @@ static bool TestEvalPrimitive(void) {
                               "argument"));
 
 #undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Phase 14 of kg's Emacs-subset program: the symbol surface, the reader's
+// backslash escapes, and the printer that makes both round-trip. Every
+// expected answer below was measured on GNU Emacs 31.0.90.
+static bool TestSymbolPrimitives(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "symbols.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("(symbol-name 'foo)", "foo");
+  CHK("(symbol-name nil)", "nil");
+  CHK("(eq (intern \"zz1\") (intern \"zz1\"))", "t");
+  CHK("(eq (intern \"nil\") nil)", "t");
+
+  // THE `intern-soft` CONTRACT: nil on a miss, and no interning as a side
+  // effect. The double probe is the assertion -- an implementation that
+  // interns on a miss answers the symbol on the second call, and a program
+  // that loops until `intern-soft` says nil then never terminates.
+  CHK("(intern-soft \"fresh-name\")", "nil");
+  CHK("(intern-soft \"fresh-name\")", "nil");
+  CHK("(do (intern \"fresh-name\") (intern-soft \"fresh-name\"))",
+      "fresh-name");
+  // A name seen only as a STRING must not have become a symbol either --
+  // neither by being read, nor by being bound, nor by being probed.
+  CHK("(intern-soft \"string-only-name\")", "nil");
+  CHK("(let ((s \"string-only-name\")) (intern-soft s))", "nil");
+  CHK("(intern-soft \"string-only-name\")", "nil");
+
+  // `make-symbol` is uninterned: same name, different object, and the
+  // obarray never learns about it.
+  CHK("(eq (make-symbol \"foo\") 'foo)", "nil");
+  CHK("(symbol-name (make-symbol \"foo\"))", "foo");
+  CHK("(intern-soft (make-symbol \"uu9\"))", "nil");
+  CHK("(let ((s (make-symbol \"uu9\"))) (eq s s))", "t");
+  // ... and it prints as its bare name, exactly as Emacs does with
+  // `print-gensym` nil, which is Emacs' default and fe's only mode.
+  CHK("(make-symbol \"foo\")", "foo");
+  // An uninterned symbol named like a keyword is an ordinary unbound symbol.
+  CHK("(keywordp (make-symbol \":a\"))", "nil");
+  CHK("(keywordp :a)", "t");
+
+  // `gensym` hands out uninterned symbols nothing else can name.
+  CHK("(eq (gensym) (gensym))", "nil");
+  CHK("(intern-soft (symbol-name (gensym)))", "nil");
+  CHK("(symbol-name (gensym \"kgtest-\"))", "kgtest-3");
+
+  // Property lists. New properties append at the tail (measured), an
+  // existing one is overwritten in place, and a property compares by `eq`,
+  // so an integer works.
+  CHK("(symbol-plist 'plist-probe)", "nil");
+  CHK("(put 'plist-probe 'a 1)", "1");
+  CHK("(get 'plist-probe 'a)", "1");
+  CHK("(get 'plist-probe 'nope)", "nil");
+  CHK("(do (put 'plist-probe 'b 2) (symbol-plist 'plist-probe))", "(a 1 b 2)");
+  CHK("(do (put 'plist-probe 'a 9) (symbol-plist 'plist-probe))", "(a 9 b 2)");
+  CHK("(do (put 'plist-probe 5 6) (get 'plist-probe 5))", "6");
+  CHK("(get 'never-put-anything 'a)", "nil");
+  CHK("(get nil 'a)", "nil");
+  // An uninterned symbol carries its own properties, which is the whole
+  // reason the plist lives in the object rather than in a registry.
+  CHK("(let ((s (make-symbol \"u\"))) (put s 'k 'v) (get s 'k))", "v");
+
+  // The type errors name Emacs' predicate.
+  CHK("(condition-case e (intern 5) (error e))",
+      "(wrong-type-argument stringp 5)");
+  CHK("(condition-case e (symbol-name 5) (error e))",
+      "(wrong-type-argument symbolp 5)");
+  CHK("(condition-case e (get 5 'a) (error e))",
+      "(wrong-type-argument symbolp 5)");
+  CHK("(condition-case e (put nil 'a 1) (error e))",
+      "(wrong-type-argument symbolp nil)");
+
+  // All eight are ordinary functions, reachable through `funcall`/`apply`.
+  CHK("(funcall 'intern \"zzz9\")", "zzz9");
+  CHK("(apply 'get (list 'plist-probe 'b))", "2");
+
+  // Reader escapes: a backslash takes the next byte literally, suppresses
+  // the number classification for the whole token, and does NOT make the
+  // resulting `.` a dotted-pair marker.
+  CHK("(symbol-name 'a\\ b)", "a b");
+  CHK("(cdr '(a\\ b))", "nil");
+  CHK("(symbol-name '\\1)", "1");
+  CHK("(symbol-name '1\\2)", "12");
+  CHK("(cdr (cdr '(a \\. b)))", "(b)");
+  CHK("(cdr '(a . b))", "b");
+  CHK("(eq '\\1 (intern \"1\"))", "t");
+  CHK("(eq '## (intern \"\"))", "t");
+
+  // The printer escapes what the reader would otherwise take for something
+  // else, byte for byte as Emacs does.
+  CHK("(intern \"a b\")", "a\\ b");
+  CHK("(intern \"1\")", "\\1");
+  CHK("(intern \"1.5\")", "\\1.5");
+  CHK("(intern \"+1\")", "\\+1");
+  CHK("(intern \"1e5\")", "\\1e5");
+  CHK("(intern \"1.0e+INF\")", "\\1.0e+INF");
+  CHK("(intern \"?\")", "\\?");
+  CHK("(intern \"ab?\")", "ab?");
+  CHK("(intern \".\")", "\\.");
+  CHK("(intern \"..\")", "\\..");
+  CHK("(intern \".emacs\")", ".emacs");
+  CHK("(intern \"a(b\")", "a\\(b");
+  CHK("(intern \"a;b\")", "a\\;b");
+  CHK("(intern \"#ab\")", "\\#ab");
+  CHK("(intern \"a[b\")", "a\\[b");
+  CHK("(intern \"1+\")", "1+");
+  CHK("(intern \"-\")", "-");
+  CHK("(intern \"\")", "##");
+
+  // Round trip, the property the escapes exist for: what the printer emits
+  // for a name needing escapes is what the reader turns back into the same
+  // object.
+  CHK("(eq 'a\\ b (intern \"a b\"))", "t");
+  CHK("(eq '\\?  (intern \"?\"))", "t");
+  CHK("(eq '\\.. (intern \"..\"))", "t");
+  CHK("(eq 'a\\(b (intern \"a(b\"))", "t");
+  CHK("(eq '\\#ab (intern \"#ab\"))", "t");
+  CHK("(eq '\\1.5 (intern \"1.5\"))", "t");
+
+#undef CHK
+
+  // A 64-byte name is refused where the reader refuses one, rather than
+  // truncated.
+  static const char too_long[] =
+      "(intern "
+      "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")";
+  CHECK(ExpectEvaluationError(context, &state, "symbols.fe", too_long,
+                              sizeof(too_long) - 1,
+                              "symbols.fe:1: symbol name too long "
+                              "(63-byte limit)"));
 
   FeCloseContext(context);
   return true;
@@ -7694,11 +7840,23 @@ static bool TestCaughtExhaustionSession(void) {
 // its interned symbol, that symbol's name and cells. The collection count
 // and the peak are unchanged for the third time, which is the invariance 09C
 // pinned. Nothing in the corpus calls `eval`.
+// Re-measured at Phase 14 for the fourth time, and this one moves for two
+// reasons rather than one: eight more primitives (`intern`, `intern-soft`,
+// `symbol-name`, `make-symbol`, `gensym`, `put`, `get`, `symbol-plist`), and
+// a symbol object that is one cons bigger -- Phase 14 widened the name slot
+// into `(name . plist)`, so `GetSymbolObjectCount` went from 5 cells to 6 and
+// EVERY core symbol costs one more. The arena grows with
+// `FeMinimumArenaSize()` and holds 141 more slots (15255 -> 15396), of which
+// 153 more are live after a collection (1072 -> 1225): the extra plist cell
+// is charged to every symbol the corpus interns, not only to the core ones
+// the minimum counts, which is why the live figure moves further than the
+// total. The collection count and the peak are unchanged for the fourth
+// time, which is the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 15255,
+  PinnedTotalSlots = 15396,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15255,
-  PinnedLiveAfterCollection = 1072,
+  PinnedPeakLive = 15396,
+  PinnedLiveAfterCollection = 1225,
 };
 
 // ---------------------------------------------------------------------------
@@ -9077,19 +9235,19 @@ int main(void) {
                  TestConstantsAndKeywords() && TestNumericEqual() &&
                  TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
-                 TestEvalPrimitive() && TestUnwindLisp() &&
-                 TestUnwindCleanupBudget() && TestFrameLimits() &&
-                 TestFrameSubstrate() && TestArenaStats() &&
-                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
-                 TestArgumentFrame() && TestArgumentProbe() &&
-                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
-                 TestMacroFrame() && TestNativeReentry() &&
-                 TestNativeOwningReentry() && TestResumableFrameGC() &&
-                 TestCleanupRunGC() && TestPrimitiveOrder() &&
-                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
-                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestLongArgumentLists() && TestNativeArityRecord() &&
-                 TestExhaustionCatchability() &&
+                 TestEvalPrimitive() && TestSymbolPrimitives() &&
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestFrameLimits() && TestFrameSubstrate() &&
+                 TestArenaStats() && TestEvaluationStackProbe() &&
+                 TestCallHeadProbe() && TestArgumentFrame() &&
+                 TestArgumentProbe() && TestLambdaBodyFrame() &&
+                 TestLambdaBodyChain() && TestMacroFrame() &&
+                 TestNativeReentry() && TestNativeOwningReentry() &&
+                 TestResumableFrameGC() && TestCleanupRunGC() &&
+                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
+                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
+                 TestGcStackConstantInNesting() && TestLongArgumentLists() &&
+                 TestNativeArityRecord() && TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
                  TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&

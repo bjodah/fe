@@ -1,0 +1,6 @@
+{
+ "id": "symbol-make-symbol-prints-bare",
+ "setup": [],
+ "expr": "(list (make-symbol \"gg\"))",
+ "note": "Phase 14: how an uninterned symbol PRINTS. Emacs writes its bare name unless `print-gensym` is non-nil, and nil is `print-gensym`'s default; fe has no such variable and no `#:` spelling at all, so bare is its only mode and the two agree here. The consequence both sides accept is that printing is not injective for uninterned symbols."
+}

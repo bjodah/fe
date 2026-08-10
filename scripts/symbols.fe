@@ -1,0 +1,125 @@
+;; The symbol surface and the reader escapes that go with it (Phase 14 of
+;; kg's Emacs-subset program).  Every expectation below was measured on GNU
+;; Emacs 31.0.90; `fe/compat/cases/symbol-*` and `reader-symbol-*` carry the
+;; oracle snapshots, and this script is the executable half.
+
+;; Names and identity.  Interning is by name, so two interns of one name are
+;; one object; `symbol-name` reads it back.  Fe's nil is not a symbol object,
+;; and it answers "nil" here as Emacs' symbol nil does.
+(assert-equals "foo" (symbol-name 'foo))
+(assert-equals "nil" (symbol-name nil))
+(assert-not-nil (eq (intern "zz1") (intern "zz1")))
+(assert-not-nil (eq (intern "nil") nil))
+(assert-not-nil (eq (intern "foo") 'foo))
+
+;; THE `intern-soft` CONTRACT: nil on a miss, and no interning as a side
+;; effect.  Two consecutive probes of a fresh name both answer nil; only an
+;; `intern` puts it in the obarray.  An implementation that interns on a miss
+;; answers the symbol the second time -- and a program written around
+;; `(while (intern-soft ...) ...)` then allocates until the arena is gone.
+(assert-nil (intern-soft "fresh-name"))
+(assert-nil (intern-soft "fresh-name"))
+(intern "fresh-name")
+(assert-not-nil (intern-soft "fresh-name"))
+
+;; A name that has only ever been a string is not a symbol either.
+(assert-nil (intern-soft "string-only-name"))
+(setq the-string "string-only-name")
+(assert-nil (intern-soft the-string))
+(assert-nil (intern-soft "string-only-name"))
+
+;; `make-symbol` is uninterned: the same name, a different object, and the
+;; obarray never learns about it.  `intern-soft` of one is nil even when a
+;; symbol of that name IS interned, because the question is identity.
+(assert-nil (eq (make-symbol "foo") 'foo))
+(assert-equals "foo" (symbol-name (make-symbol "foo")))
+(assert-nil (intern-soft (make-symbol "foo")))
+(setq uninterned (make-symbol "uu9"))
+(assert-not-nil (eq uninterned uninterned))
+(assert-nil (intern-soft uninterned))
+
+;; An uninterned symbol named like a keyword is an ordinary unbound symbol,
+;; which is Emacs' answer too.
+(assert-nil (keywordp (make-symbol ":a")))
+(assert-not-nil (keywordp :a))
+
+;; `gensym` hands out uninterned symbols nothing else can name -- the
+;; mechanism a macro's temporary needs so a user's `defvar` of the same name
+;; cannot capture it.
+(assert-nil (eq (gensym) (gensym)))
+(assert-nil (intern-soft (symbol-name (gensym))))
+
+;; Property lists.  A fresh symbol has none; a new property appends at the
+;; tail; an existing one is overwritten in place; the property compares by
+;; `eq`, so an integer works.  Reading a property nobody set is nil, and so
+;; is reading one off nil.
+(assert-nil (symbol-plist 'plist-probe))
+(assert-equals 1 (put 'plist-probe 'a 1))
+(assert-equals 1 (get 'plist-probe 'a))
+(assert-nil (get 'plist-probe 'nope))
+(put 'plist-probe 'b 2)
+(assert-equals '(a 1 b 2) (symbol-plist 'plist-probe))
+(put 'plist-probe 'a 9)
+(assert-equals '(a 9 b 2) (symbol-plist 'plist-probe))
+(put 'plist-probe 5 6)
+(assert-equals 6 (get 'plist-probe 5))
+(assert-nil (get 'never-put-anything 'a))
+(assert-nil (get nil 'a))
+
+;; An uninterned symbol carries its own properties.  That is the reason the
+;; plist lives in the symbol object and not in a context-side registry: such
+;; a registry would keep every symbol that ever had a property alive, and an
+;; uninterned symbol is the first symbol Fe has that the collector may take.
+(setq carrier (make-symbol "u"))
+(put carrier 'k 'v)
+(assert-equals 'v (get carrier 'k))
+(assert-nil (get (make-symbol "u") 'k))
+
+;; All eight are ordinary functions, so they are reachable through the two
+;; entry points a higher-order program is built on.
+(assert-equals 'zzz9 (funcall 'intern "zzz9"))
+(assert-equals 2 (apply 'get (list 'plist-probe 'b)))
+
+;; Reader escapes.  A backslash takes the next byte into the name literally,
+;; so a delimiter or a digit becomes an ordinary character of the symbol, and
+;; one escape anywhere makes the whole token a symbol rather than a number.
+(assert-equals "a b" (symbol-name 'a\ b))
+(assert-nil (cdr '(a\ b)))
+(assert-equals "1" (symbol-name '\1))
+(assert-equals "12" (symbol-name '1\2))
+(assert-not-nil (eq '\1 (intern "1")))
+
+;; An ESCAPED dot is an ordinary element, not the dotted-tail marker -- the
+;; two read to the same interned symbol, so the reader's own knowledge is
+;; what tells them apart.
+(assert-equals '(a \. b) '(a \. b))
+(assert-equals '(b) (cdr (cdr '(a \. b))))
+(assert-equals 'b (cdr '(a . b)))
+
+;; `##` is the symbol with the empty name, read and printed the way Emacs
+;; does it.
+(assert-not-nil (eq '## (intern "")))
+(assert-equals "" (symbol-name '##))
+
+;; Round trip: a name that needs escapes prints so that reading the output
+;; back gives the same object.  These are the printer's rules stated as the
+;; property they exist for.
+(assert-not-nil (eq 'a\ b (intern "a b")))
+(assert-not-nil (eq '\? (intern "?")))
+(assert-not-nil (eq '\.. (intern "..")))
+(assert-not-nil (eq 'a\(b (intern "a(b")))
+(assert-not-nil (eq '\#ab (intern "#ab")))
+(assert-not-nil (eq '\1.5 (intern "1.5")))
+(assert-not-nil (eq '.emacs (intern ".emacs")))
+
+;; Type errors name the predicate Emacs names.
+(assert-equals '(wrong-type-argument stringp 5)
+               (condition-case e (intern 5) (error e)))
+(assert-equals '(wrong-type-argument symbolp 5)
+               (condition-case e (symbol-name 5) (error e)))
+(assert-equals '(wrong-type-argument symbolp 5)
+               (condition-case e (get 5 'a) (error e)))
+(assert-equals '(wrong-type-argument symbolp nil)
+               (condition-case e (put nil 'a 1) (error e)))
+
+(print "symbols ok")

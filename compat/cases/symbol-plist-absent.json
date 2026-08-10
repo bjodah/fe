@@ -1,0 +1,6 @@
+{
+ "id": "symbol-plist-absent",
+ "setup": [],
+ "expr": "(list (get 'never-put-anything 'a) (get nil 'a))",
+ "note": "Phase 14: reading a property off a symbol that has no plist at all, and off nil, are both nil. The nil half is why `get` does not type-check its first operand against fe's symbol type before answering."
+}

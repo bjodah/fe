@@ -1946,6 +1946,19 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     // is `(wrong-number-of-arguments eval 3)`. A non-nil LEXICAL is a
     // by-name rejection in the arm, not an arity error.
     [PEval] = {1, 2},
+    // Phase 14's symbol family. Emacs' `intern` and `intern-soft` take an
+    // optional OBARRAY; fe has exactly one obarray and no way to name a
+    // second, so a second operand is `wrong-number-of-arguments` here and a
+    // recorded divergence rather than an argument that is accepted and
+    // ignored. `gensym`'s PREFIX is optional, as in Emacs.
+    [PIntern] = {1, 1},
+    [PInternSoft] = {1, 1},
+    [PSymbolName] = {1, 1},
+    [PMakeSymbol] = {1, 1},
+    [PGensym] = {0, 1},
+    [PPut] = {3, 3},
+    [PGet] = {2, 2},
+    [PSymbolPlist] = {1, 1},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -2001,6 +2014,19 @@ static bool DispatchPrimitive(FeContext* ctx,
   // about 4% of `scripts/mandelbrot.fe` -- for an answer that cannot have
   // changed in between.
   FeObject* arguments = CDR(frame->expr);
+  // Phase 14's symbol family, routed as one: eight ordinary functions that
+  // share the whole setup below and finish in fe.c's
+  // `EvaluateSymbolPrimitive`. A range test rather than eight `case` labels
+  // here and eight more in `ResumeEvalList` -- see the `PIntern` block in
+  // fe_internal.h.
+  if (IsSymbolPrimitive((Primitive)PRIM(fn))) {
+    frame->kind = FeFrameEvalList;
+    frame->fn = fn;
+    frame->rest = arguments;
+    frame->accumulator = &nil;
+    frame->callee = &unbound;
+    return false;
+  }
   switch (PRIM(fn)) {
     case PEnv:
       *result = ctx->symbol_list;
@@ -3300,6 +3326,18 @@ static const bool primitive_is_function[PSentinel] = {
     // `(special-form-p 'eval)` is nil and `(funcall 'eval '(+ 1 2))` is 3
     // there -- and its arm evaluates both operands before relaying.
     [PEval] = true,
+    // Phase 14: every one of the symbol family is an ordinary function in
+    // Emacs -- `(special-form-p 'intern)` is nil, `(mapcar 'symbol-name '(a
+    // b))` works -- and every one of them evaluates all of its operands here,
+    // routed as one family into the eval-list frame.
+    [PIntern] = true,
+    [PInternSoft] = true,
+    [PSymbolName] = true,
+    [PMakeSymbol] = true,
+    [PGensym] = true,
+    [PPut] = true,
+    [PGet] = true,
+    [PSymbolPlist] = true,
     // Phase 13: all three are ordinary functions in Emacs -- `(special-form-p
     // 'signal)`, `'error` and `'keywordp` are all nil there, and
     // `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and
@@ -3839,6 +3877,13 @@ static bool ResumeEvalList(FeContext* ctx,
     CDR(frame->accumulator) = list;
     list = frame->accumulator;
     frame->accumulator = next;
+  }
+  // Phase 14's symbol family: the other half of `DispatchPrimitive`'s range
+  // test. Its answer is computed in fe.c, beside the symbol accessors and the
+  // obarray, so the whole family costs this evaluator one decision point.
+  if (IsSymbolPrimitive((Primitive)PRIM(frame->fn))) {
+    *result = EvaluateSymbolPrimitive(ctx, (Primitive)PRIM(frame->fn), list);
+    return true;
   }
   switch (PRIM(frame->fn)) {
     case PList:

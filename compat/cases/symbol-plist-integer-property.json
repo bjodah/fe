@@ -1,0 +1,8 @@
+{
+ "id": "symbol-plist-integer-property",
+ "setup": [
+  "(put 'plist-int 5 6)"
+ ],
+ "expr": "(get 'plist-int 5)",
+ "note": "Phase 14: a property is any object and compares by `eq`, so an integer works -- `eq` being value equality for integers on both sides."
+}

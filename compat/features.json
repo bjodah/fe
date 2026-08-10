@@ -2196,25 +2196,26 @@
    "cases": [
     "reader-uninterned-symbol",
     "reader-vector-literal",
-    "reader-record-literal",
-    "reader-empty-symbol"
+    "reader-record-literal"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Emacs reads `#:sym` as an uninterned symbol, `[1 2 3]` as a vector, `#s(a 1)` as a record, and `##` as the symbol with the empty name. Fe has none of those types and one symbol table, so each is a named read error. Before 08C they were silent misreads: `#:sym` read as the symbol `#:sym`, which is eq to nothing Emacs would produce, and `[1 2 3]` read as bracket-bearing symbols. This is also where the release's one reader break lives: a bare `#` and `#`-initial symbols are no longer readable, which forced Fe's own scripts/concatenate.fe to stop naming a function `#`."
+   "rationale": "Emacs reads `#:sym` as an uninterned symbol, `[1 2 3]` as a vector and `#s(a 1)` as a record. Fe has none of those types, so each is a named read error. Before 08C they were silent misreads: `#:sym` read as the symbol `#:sym`, which is eq to nothing Emacs would produce, and `[1 2 3]` read as bracket-bearing symbols. This is also where the release's one reader break lives: a bare `#` and `#`-initial symbols are no longer readable, which forced Fe's own scripts/concatenate.fe to stop naming a function `#`. `##` left this row at Phase 14, which implements it -- see reader-empty-symbol; it is the one `#` spelling that phase opened, and `#:` is deliberately not among them, fe having no `print-gensym` half to match it with."
   },
   {
    "id": "reader-symbol-escape",
    "category": "reader-and-literals",
-   "status": "divergent",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "reader-symbol-escape"
+    "reader-symbol-escape",
+    "reader-symbol-escape-name",
+    "reader-symbol-escape-forces-symbol"
    ],
-   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
    "source_name": null,
-   "rationale": "Emacs reads `a\\ b` as the single symbol whose name is \"a b\", so `(cdr '(a\\ b))` is nil. Fe has no symbol-escape syntax, which 08C's plan recorded as deliberately out of scope. The reject arm had to be widened to earn that record: a backslash was refused only at a token's first character, so `(a\\ b)` read as the two symbols `a` and `b` and cdr answered `(b)` -- a silent misread of the list's length, not of a symbol name."
+   "rationale": "Phase 14 implements Emacs' symbol escapes, superseding the named rejection this row recorded from 08C to Phase 13. A backslash takes the next byte into the name literally -- `a\\ b` is the one symbol \"a b\" and `\\1` is the symbol \"1\" -- and one escape anywhere in a token suppresses the number classification for the whole token. The rejection it replaces was itself a repair: a backslash was refused only at a token's first character, so `(a\\ b)` read as the two symbols `a` and `b` and cdr answered `(b)`, a silent misread of the list's length. What is still rejected is a backslash with nothing after it -- `unterminated symbol escape` -- and the strict-reader policy for everything Phase 14 did not deliberately open (vectors, `#` syntax other than `##`, unknown string escapes) is unchanged."
   },
   {
    "id": "reader-character-range",
@@ -2451,6 +2452,199 @@
    "kg_test": null,
    "rationale": "Phase 13.4 trap battery: catch tags are compared with `eq` and nothing about the comparison type-checks the operands, so `t` is a legal tag and a throw whose tag matches an outer catch passes through an inner one. `nil` as a tag does NOT match, on Emacs as on fe -- cond-ct4 pins that -- so the two constants are pinned separately rather than assumed symmetric. Pinned, not changed.",
    "source_name": "catch"
+  },
+  {
+   "id": "symbol-name",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-name-basic",
+    "symbol-type-error-symbol-name"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `symbol-name` reads a symbol's name back as a string, and a non-symbol raises `(wrong-type-argument symbolp X)`. fe's nil is its own object type rather than a symbol, so the name \"nil\" is answered for it explicitly; that is what Emacs' symbol nil answers.",
+   "source_name": "symbol-name"
+  },
+  {
+   "id": "symbol-intern",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-intern-identity",
+    "symbol-type-error-intern"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `intern` is the obarray's constructor -- by name, so two interns of one name are one object. `(intern \"nil\")` answers the nil object rather than minting a second thing that prints `nil`, which is the same answer Emacs gives for a different reason (its nil IS a symbol). A name longer than 63 bytes is a named error, the reader's own token bound.",
+   "source_name": "intern"
+  },
+  {
+   "id": "symbol-intern-soft",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-intern-soft-double-probe",
+    "symbol-intern-soft-after-intern",
+    "symbol-intern-soft-string-only"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14, the contract this family is easiest to get wrong on: `intern-soft` answers nil on a miss and interns nothing. The double probe is what pins it -- an implementation that interns on a miss answers the symbol the second time, and the `(while (setq x (intern-soft (format ...))) ...)` idiom then allocates without bound instead of terminating. It takes a symbol as well as a string, and for a symbol the question is identity: an uninterned symbol answers nil even when a symbol of that name is interned.",
+   "source_name": "intern-soft"
+  },
+  {
+   "id": "symbol-make-symbol",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-make-symbol-uninterned",
+    "symbol-make-symbol-prints-bare",
+    "symbol-make-symbol-keyword"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `make-symbol` builds a symbol in no obarray. Two decisions are recorded here because they are policy rather than consequence. PRINTING: an uninterned symbol writes its bare name, which is what Emacs does with `print-gensym` nil, its default; fe has no `print-gensym` and no `#:` spelling at all, so printing is not injective for uninterned symbols on either side and the two agree on the output. COMPARISON: identity only -- `eq` is pointer identity, and fe has no `equal` of its own, kg's prelude `equal` bottoming out in `eq` for atoms, so an uninterned symbol is equal to nothing but itself. An uninterned symbol named like a keyword is an ordinary symbol, which needed `keywordp` to ask whether the interner self-bound the name rather than only whether it starts with a colon.",
+   "source_name": "make-symbol"
+  },
+  {
+   "id": "symbol-gensym",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-gensym-uninterned"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `gensym` is `make-symbol` over a per-context sequence number -- the mechanism a macro's temporary needs so a user's `defvar` of the same name cannot capture it. What is pinned is uniqueness and uninternedness, not the NAME: Emacs' counter is the Lisp variable `gensym-counter` and fe's is a context field with no Lisp spelling, so a case comparing the name would be comparing two unrelated pieces of process state. Two further divergences are recorded rather than pinned, both trivial and both untested for the same reason: fe has no `gensym-counter` to read or set, and fe's PREFIX must be a string where Emacs formats any object (`(gensym 5)` is the symbol `54` there, its answer depending on the counter).",
+   "source_name": "gensym"
+  },
+  {
+   "id": "symbol-put",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-plist-append-order",
+    "symbol-plist-overwrite",
+    "symbol-plist-integer-property"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `put` writes a property on a symbol. Two measured behaviours rather than assumed ones: a new property is appended at the TAIL of the list (the head is the cheaper implementation and gives the other order), and an existing property is overwritten in place rather than shadowed by a second copy. Properties compare by `eq`, so an integer property works.",
+   "source_name": "put"
+  },
+  {
+   "id": "symbol-get",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-plist-get",
+    "symbol-plist-absent"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `get` reads a property back, answering nil for one nobody set and for a symbol with no property list at all. `(get nil 'x)` is nil too, which is why `get` tests for fe's nil before type-checking.",
+   "source_name": "get"
+  },
+  {
+   "id": "symbol-plist",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-plist-uninterned"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `symbol-plist` is the whole list, which is what makes `put`'s order and overwriting observable at all. It also carries this family's storage decision: the property list lives in the SYMBOL OBJECT -- Phase 14 widened a symbol's name slot into `(name . plist)`, costing one cons per symbol -- rather than in a context-side registry in the shape the special-variable list uses. A registry keyed by symbol would keep alive every symbol that ever carried a property, and an uninterned symbol is the first symbol fe has that the collector may reclaim.",
+   "source_name": "symbol-plist"
+  },
+  {
+   "id": "symbol-put-on-nil",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-put-nil"
+   ],
+   "kg_test": null,
+   "rationale": "Emacs' nil is an ordinary symbol and carries a property list like any other, so `(put nil 'a 1)` stores and `(get nil 'a)` reads it back. fe's nil is a distinct object type with no storage of its own, so `put` refuses it by name -- `(wrong-type-argument symbolp nil)` -- rather than accepting the write and dropping it, and `get` keeps answering nil. The reading half therefore agrees with Emacs for every program that did not write; only a program that writes on nil sees the difference, and it sees a diagnostic rather than a value that quietly went missing.",
+   "source_name": null
+  },
+  {
+   "id": "symbol-intern-obarray-argument",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-intern-obarray"
+   ],
+   "kg_test": null,
+   "rationale": "Emacs' `intern` and `intern-soft` take an optional OBARRAY; fe has exactly one obarray and no way to name a second, so a second operand is `wrong-number-of-arguments`. Refusing it is the deliberate half: accepting and ignoring an OBARRAY would make a program that meant a private obarray silently share the global one, which is the class of silent misreading the strict reader exists to avoid. `make-symbol` is what a program that wanted a private name can use instead.",
+   "source_name": null
+  },
+  {
+   "id": "symbol-family-are-functions",
+   "category": "functions-and-macros",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "symbol-family-are-functions"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: all eight names are ordinary functions -- `(special-form-p 'intern)` is nil on Emacs -- and evaluate every operand, so they are reachable through `funcall` and `apply`. Phase 13 had to repair exactly this for `signal`, `error` and `keywordp`, whose missing `primitive_is_function[]` rows made them look like special forms; the family lands with its rows from the start.",
+   "source_name": null
+  },
+  {
+   "id": "reader-symbol-escaped-dot",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-symbol-escaped-dot"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: an escaped dot is an ordinary list element where a bare one is the dotted-tail marker, so `(a \\. b)` is a three-element list and `(a . b)` is a pair. Both spellings read to the same interned symbol, so the object alone cannot tell them apart -- the reader records whether the token it just produced contained an escape, and the dotted-tail test consults that. Without it the escape would have turned a three-element list into a pair, silently.",
+   "source_name": null
+  },
+  {
+   "id": "reader-empty-symbol",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-empty-symbol",
+    "reader-empty-symbol-name"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: `##` is the symbol with the empty name, and fe now reads it as well as prints it -- otherwise the writer would emit a token its own reader refuses, which is the round-trip property the escapes exist for. The `reader-empty-symbol` case moved here from reader-hash-syntax-unsupported, where it was a recorded divergence until this phase: a bare `##` was a read error and now evaluates to `(void-variable ##)`, which is what the oracle answers. It is the one `#` spelling Phase 14 opens; every other one stays the named `unsupported read syntax: #` rejection.",
+   "source_name": null
+  },
+  {
+   "id": "writer-symbol-escapes",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "writer-symbol-escapes",
+    "writer-symbol-roundtrip"
+   ],
+   "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+   "rationale": "Phase 14: a symbol whose name would otherwise read back as something else prints with escapes. The rule was measured byte for byte on the oracle, by printing `(intern (string C ?a ?b))` and `(intern (string ?a C ?b))` for every C from 1 to 127: bytes at or below the space, and `\"#'(),;[]\\` and the backquote, are escaped wherever they occur; the first byte is escaped when the whole name reads as a number, when the name starts with `?`, or when it starts with `.` and the next byte is not an ASCII letter. The last clause is why `.` and `..` are escaped and `.emacs` is not.",
+   "source_name": null
   }
  ]
 }

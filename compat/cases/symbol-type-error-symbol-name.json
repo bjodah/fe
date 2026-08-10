@@ -1,0 +1,6 @@
+{
+ "id": "symbol-type-error-symbol-name",
+ "setup": [],
+ "expr": "(condition-case e (symbol-name 5) (error e))",
+ "note": "Phase 14: a non-symbol names Emacs' own predicate in the condition data."
+}

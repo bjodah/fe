@@ -1,0 +1,6 @@
+{
+ "id": "symbol-type-error-intern",
+ "setup": [],
+ "expr": "(condition-case e (intern 5) (error e))",
+ "note": "Phase 14: `intern` takes a string; anything else is `(wrong-type-argument stringp X)`."
+}

@@ -1,6 +1,6 @@
 {
-	"id": "reader-symbol-escape",
-	"setup": [],
-	"expr": "(cdr '(a\\ b))",
-	"note": "Emacs' symbol-escape syntax inside a token."
+ "id": "reader-symbol-escape",
+ "setup": [],
+ "expr": "(cdr '(a\\ b))",
+ "note": "Emacs' symbol-escape syntax inside a token: `a\\ b` is the single symbol whose name is \"a b\", so the list has one element and its cdr is nil. Phase 14 implements it; the case predates that and was pinned as a divergence until then."
 }

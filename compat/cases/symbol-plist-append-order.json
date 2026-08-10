@@ -1,0 +1,9 @@
+{
+ "id": "symbol-plist-append-order",
+ "setup": [
+  "(put 'plist-probe 'a 1)",
+  "(put 'plist-probe 'b 2)"
+ ],
+ "expr": "(symbol-plist 'plist-probe)",
+ "note": "Phase 14: a new property is appended at the TAIL of the property list, not pushed at its head. Measured, not assumed -- the head is the cheaper implementation and gives `(b 2 a 1)`."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "symbol-name-basic",
+ "setup": [],
+ "expr": "(list (symbol-name 'foo) (symbol-name nil))",
+ "note": "Phase 14: `symbol-name` reads a symbol's name back as a string. fe's nil is not a symbol object at all -- it has its own type -- so the name \"nil\" is spelled out for it here, which is what Emacs answers for its symbol nil."
+}

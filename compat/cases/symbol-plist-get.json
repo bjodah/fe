@@ -1,0 +1,8 @@
+{
+ "id": "symbol-plist-get",
+ "setup": [
+  "(put 'plist-read 'a 1)"
+ ],
+ "expr": "(list (get 'plist-read 'a) (get 'plist-read 'nope))",
+ "note": "Phase 14: `get` reads a property back, and a property nobody set is nil rather than an error."
+}

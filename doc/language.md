@@ -38,13 +38,34 @@ silently truncated the string instead (`(list "\0a" "a\0b")` answered
 `("a" "ab")`). The same escapes in a character literal, which produces an
 integer, agree with Emacs exactly.
 
+Symbol escapes are Emacs': a backslash takes the next byte into the symbol's
+name literally, so `a\ b` is the one symbol whose name is `a b`, `\1` is the
+symbol named `1` rather than the integer, and `\(` is a symbol rather than an
+open parenthesis. One escape anywhere in a token makes the whole token a
+symbol, which is why `1\2` is the symbol `12`. An escaped dot is an ordinary
+list element where a bare one is the dotted-tail marker, so `(a \. b)` is a
+three-element list and `(a . b)` is a pair. A backslash with nothing after it
+is a read error.
+
+`##` is the symbol with the empty name, read and printed the way Emacs does
+it. It is the one `#` dispatch Fe implements.
+
 Signed radix integers use `#x`, `#o`, and `#b`, for hexadecimal, octal, and
 binary respectively. An overflowing integer follows Fe's pre-bignum policy and
 becomes a double. Unsupported reader syntax is rejected rather than becoming a
 symbol: vectors (`[...]`), `#:`, `#s(...)`, a bare `#` and every other `#`
-dispatch, and symbol escapes (`a\ b`) are not part of Fe's subset. The `#`
+dispatch besides `##` are not part of Fe's subset. The `#`
 rejection is a break with earlier Fe: a `#`-initial symbol used to read, and
 Fe's own `scripts/concatenate.fe` named a function `#`.
+
+The writer is the reader's inverse for symbols: a name that would otherwise
+read back as something else prints with escapes. Bytes at or below the space,
+and `"#'(),;[]\` and the backquote, are escaped wherever they occur; the
+first byte is escaped when the whole name reads as a number (`\1`, `\+1`,
+`\1.5`, `\1e5`), when the name starts with `?`, or when it starts with `.`
+and the next byte is not an ASCII letter (`\.` and `\..`, but `.emacs`).
+Everything else prints bare. The rule was measured byte for byte on Emacs
+31.0.90; `compat/cases/writer-symbol-escapes` carries the snapshot.
 
 Every one of these is recorded in `compat/features.json`, with the measured
 Emacs answer checked in beside it under `compat/oracle/`.
@@ -1336,6 +1357,71 @@ a newline. At least one value is required: `(print)` is
 Accepting more than one value is a deliberate Fe divergence -- Emacs' `print`
 takes one object and an optional output stream -- and is recorded as such in
 `compat/features.json` under `phase7-primitive-print-arity`.
+
+### Symbols
+
+A symbol is either **interned** -- registered in Fe's single obarray, so that
+every occurrence of its name is the same object -- or **uninterned**, which is
+a symbol nothing but a reference can reach. The reader interns; `make-symbol`
+and `gensym` do not. An uninterned symbol prints as its bare name, which is
+what Emacs does with `print-gensym` nil, its default; Fe has no `print-gensym`
+and no `#:` spelling, so two symbols of one name print alike and are told
+apart only by `eq`. Every symbol carries a **property list**, nil until a
+`put` writes one, stored in the symbol object itself so that an uninterned
+symbol with properties is still collectable.
+
+Fe has one obarray and no way to name a second, so `intern` and `intern-soft`
+do not take Emacs' optional OBARRAY argument; a second operand is
+`wrong-number-of-arguments` rather than an argument that is accepted and
+ignored. Symbol names are bounded at 63 bytes, the reader's own token bound.
+
+#### `(intern name)`
+
+Returns the interned symbol whose name is the string `name`, creating it if
+no symbol of that name exists. `(intern "nil")` is `nil`. A non-string is
+`(wrong-type-argument stringp X)`.
+
+#### `(intern-soft name-or-symbol)`
+
+Returns the interned symbol named by its argument, or `nil` when there is
+none -- and interns nothing. This is a probe, not a constructor: two
+consecutive `intern-soft` calls on a name nothing has interned both answer
+nil. Given a symbol, the question is identity, so an uninterned symbol
+answers nil even when a symbol of the same name is interned.
+
+#### `(symbol-name symbol)`
+
+Returns the symbol's name as a string. `(symbol-name nil)` is `"nil"`.
+
+#### `(make-symbol name)`
+
+Returns a fresh uninterned symbol named `name`. It is `eq` to nothing but
+itself, and `intern-soft` of it is nil. An uninterned symbol whose name
+starts with a colon is an ordinary symbol, not a keyword.
+
+#### `(gensym &optional prefix)`
+
+Returns a fresh uninterned symbol named `prefix` (default `"g"`) followed by
+a per-context sequence number -- the way a macro gets a temporary a user's
+`defvar` cannot capture. Unlike Emacs, Fe has no `gensym-counter` variable to
+read or set, and `prefix` must be a string.
+
+#### `(put symbol property value)`
+
+Stores `value` as `symbol`'s `property` and returns `value`. A new property
+is appended at the tail of the property list; an existing one is overwritten
+in place. Properties compare by `eq`, so any object works as one. Fe's `nil`
+is not a symbol object and has no storage, so `(put nil ...)` is
+`(wrong-type-argument symbolp nil)` where Emacs stores.
+
+#### `(get symbol property)`
+
+Returns the stored value, or nil when the property was never set. `(get nil
+P)` is nil.
+
+#### `(symbol-plist symbol)`
+
+Returns the whole property list, `(PROPERTY VALUE ...)`.
 
 ### Numbers
 

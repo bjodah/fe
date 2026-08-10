@@ -188,7 +188,23 @@
 // `FE_API_VERSION` stays at 8: no declaration in this header changed, and
 // the GC stress knob that lands in the same slice is a build-time
 // `FE_GC_STRESS` inside fe.c, not a C contract.
-#define FE_LANGUAGE_VERSION 11
+// Version 12 (Phase 14 of kg's Emacs-subset program) is the symbol surface
+// and the reader escapes that go with it, and unlike versions 8 and 11 it IS
+// a break: a program that read before may read differently now, and one that
+// printed before may print differently.  `intern`, `intern-soft`,
+// `symbol-name`, `make-symbol`, `gensym`, `put`, `get` and `symbol-plist`
+// are new names that answered `void-function`.  A backslash in a token was a
+// named read error and is now Emacs' symbol escape, so `(a\ b)` is a
+// one-element list where it used to be a diagnostic and `\1` is the symbol
+// `1` where it used to be one too; `\.` in a list is an ordinary element
+// rather than a dotted-tail marker; `##` reads as the symbol with the empty
+// name.  The printer escapes a symbol name that would otherwise read back as
+// something else, so the symbol `.` now prints `\.` and `(intern "a b")`
+// prints `a\ b`.  And an uninterned symbol named like a keyword is no longer
+// a keyword: `keywordp` now asks whether the interner self-bound it, which
+// is what makes `(keywordp (make-symbol ":a"))` nil as it is on Emacs.
+// `FE_API_VERSION` stays at 8: no declaration in this header changed.
+#define FE_LANGUAGE_VERSION 12
 
 extern const char* FeVersion;
 

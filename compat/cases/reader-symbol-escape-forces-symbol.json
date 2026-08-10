@@ -1,0 +1,6 @@
+{
+ "id": "reader-symbol-escape-forces-symbol",
+ "setup": [],
+ "expr": "(list (eq '\\1 (intern \"1\")) (integerp '\\1))",
+ "note": "Phase 14: `\\1` is the symbol whose name is \"1\", the same object `(intern \"1\")` answers, and it is not an integer -- the escape suppresses the number classification for the token it appears in. `integerp` rather than `symbolp` because `symbolp` is kg's prelude name and this corpus runs against fe alone."
+}

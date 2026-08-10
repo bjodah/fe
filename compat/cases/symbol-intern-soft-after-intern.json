@@ -1,0 +1,10 @@
+{
+ "id": "symbol-intern-soft-after-intern",
+ "setup": [
+  "(intern-soft \"fresh-name-b\")",
+  "(intern-soft \"fresh-name-b\")",
+  "(intern \"fresh-name-b\")"
+ ],
+ "expr": "(intern-soft \"fresh-name-b\")",
+ "note": "Phase 14: the other half of the double probe -- after an explicit `intern` the same name answers the symbol, so the nil above is a miss and not a stub."
+}

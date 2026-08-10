@@ -23,6 +23,12 @@ spellings it must reject rather than misread (`?\s-`, `?\x`, `\400`, `\0`,
 arm which is never reached is not evidence of anything: an unreachable arm and
 a wrong arm look identical in a coverage report of zero.
 
+Two of those eight stopped being rejections at Phase 14, which implements
+them: `a\ b` is the symbol escape and `##` is the empty-name symbol. They
+stay in the dict, now seeding the accepted half; the census below predates
+that phase and still lists `symbol escape` as an arm, which is now spelled
+`unterminated symbol escape` and reached only by a backslash at end of input.
+
 Measured, one 45-second run of `fuzz_reader` on this box with this dict and
 `scripts/` as extra seeds -- 295050 executions, 6414 exec/s, 2694 new units,
 peak RSS 186 MB -- and every corpus file then replayed through `./fe`, counting

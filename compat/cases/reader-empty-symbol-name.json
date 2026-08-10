@@ -1,0 +1,6 @@
+{
+ "id": "reader-empty-symbol-name",
+ "setup": [],
+ "expr": "(list (eq '## (intern \"\")) (symbol-name '##))",
+ "note": "Phase 14: `##` reads as the symbol with the empty name -- the same object `(intern \"\")` answers -- and that name is the empty string. The sibling case `reader-empty-symbol` pins how a bare `##` EVALUATES; this one pins what it read to."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "reader-symbol-escape-name",
+ "setup": [],
+ "expr": "(list (symbol-name 'a\\ b) (symbol-name '\\1) (symbol-name '1\\2))",
+ "note": "Phase 14: a backslash takes the next byte into the symbol's name literally, so a delimiter becomes an ordinary character of the name, and one escape anywhere makes the whole token a symbol rather than a number."
+}

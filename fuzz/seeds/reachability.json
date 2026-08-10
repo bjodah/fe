@@ -69,7 +69,7 @@
     "requires": [
      "(&rest y x)"
     ],
-    "why": "07B: the malformed proper parameter list, which raises invalid-function when the callable is invoked."
+    "why": "07B: the malformed proper parameter list, which raises invalid-function when the callable is invoked. Re-seeded at Phase 14: eight more primitives and one more cons per symbol grew FeMinimumArenaSize by 2264 bytes, which cut the 64 KiB fuzz arena's room for a generated program from about 466 objects to 324 -- the old seed's form no longer fit and built nothing at all. This is exactly what the reachability manifest exists to catch."
    },
    "strict-arity-native": {
     "requires": [

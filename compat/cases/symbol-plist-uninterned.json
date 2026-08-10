@@ -1,0 +1,6 @@
+{
+ "id": "symbol-plist-uninterned",
+ "setup": [],
+ "expr": "(let ((s (make-symbol \"u\"))) (put s 'k 'v) (list (get s 'k) (get (make-symbol \"u\") 'k)))",
+ "note": "Phase 14: an uninterned symbol carries its own properties, and a second uninterned symbol of the same name carries none of them. That is the reason the property list lives in the symbol object rather than in a context-side registry keyed by symbol: such a registry would keep alive every symbol that ever had a property, and an uninterned symbol is the first symbol fe has that the collector may reclaim."
+}

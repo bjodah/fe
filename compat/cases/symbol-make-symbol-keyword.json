@@ -1,0 +1,6 @@
+{
+ "id": "symbol-make-symbol-keyword",
+ "setup": [],
+ "expr": "(list (keywordp (make-symbol \":a\")) (keywordp :a))",
+ "note": "Phase 14: a keyword is an INTERNED symbol whose name starts with a colon. An uninterned one named the same way is an ordinary symbol, so it is neither self-evaluating nor constant."
+}

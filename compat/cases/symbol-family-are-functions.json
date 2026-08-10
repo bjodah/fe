@@ -1,0 +1,6 @@
+{
+ "id": "symbol-family-are-functions",
+ "setup": [],
+ "expr": "(list (funcall 'intern \"zzz9\") (funcall 'symbol-name 'a))",
+ "note": "Phase 14: every name in the family is an ordinary function -- `(special-form-p 'intern)` is nil on Emacs -- so all of them are reachable through `funcall` and `apply`, which is what a prelude's higher-order functions are built on. Phase 13 fixed exactly this for `signal`/`error`/`keywordp`, and these eight carry their rows from the start."
+}

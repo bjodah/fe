@@ -1,0 +1,9 @@
+{
+ "id": "symbol-intern-soft-string-only",
+ "setup": [
+  "(setq the-string \"string-only-name\")",
+  "(intern-soft the-string)"
+ ],
+ "expr": "(intern-soft \"string-only-name\")",
+ "note": "Phase 14: a name that has only ever existed as a string -- read as a literal, bound to a variable, and passed to `intern-soft` -- has still not become a symbol."
+}

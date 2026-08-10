@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "12.0";
+const char* FeVersion = "13.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -107,7 +107,15 @@ static const char* primitive_names[] = {
     [PMacroexpandAll] = "macroexpand-all",
     [PMarkSpecial] = "internal--mark-special",
     [PSpecialVariableP] = "special-variable-p",
-    [PEval] = "eval"};
+    [PEval] = "eval",
+    [PIntern] = "intern",
+    [PInternSoft] = "intern-soft",
+    [PSymbolName] = "symbol-name",
+    [PMakeSymbol] = "make-symbol",
+    [PGensym] = "gensym",
+    [PPut] = "put",
+    [PGet] = "get",
+    [PSymbolPlist] = "symbol-plist"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -732,6 +740,21 @@ static bool IsKeywordName(const char* name) {
 
 static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym);
 
+// The obarray lookup, shared by `FeMakeSymbol` and Phase 14's `intern-soft`.
+// `nullptr` for a miss is what makes `intern-soft` a probe: it is the ONE
+// contract this family has that a plausible implementation gets wrong, and
+// getting it wrong is unbounded allocation rather than a wrong answer --
+// `(while (setq x (intern-soft (format ...))) ...)` is a real idiom, and an
+// intern-on-miss makes it never terminate.
+static FeObject* FindInternedSymbol(FeContext* ctx, const char* name) {
+  for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
+    if (IsStringEqual(SymbolName(CAR(rest)), name)) {
+      return CAR(rest);
+    }
+  }
+  return nullptr;
+}
+
 static void InitializeKeywordValue(FeObject* symbol, const char* name) {
   if (IsKeywordName(name)) {
     CDR(SymbolBindingCell(symbol)) = symbol;
@@ -831,24 +854,40 @@ FeObject* FeMakeString(FeContext* ctx, const char* str) {
   return obj;
 }
 
-FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
-  FeObject* obj;
-  // Try to find in symbol_list:
-  for (obj = ctx->symbol_list; !FeIsNil(obj); obj = CDR(obj)) {
-    if (IsStringEqual(SymbolName(CAR(obj)), name)) {
-      return CAR(obj);
-    }
-  }
-  // Create new object, push to symbol_list and return. A symbol's cdr is one
-  // cons: `((name . function) . value)` (sub-plan 04B). The function cell is
-  // initialized to `&unbound` and written only through
-  // `SetSymbolFunction`; the name moves one pair down so the binding cell --
-  // the cdr of the outer pair -- is unchanged, which is what keeps the whole
-  // value path (`GetBound`, `FeSet`, `FeIsBound`, `ResumeSetq`) untouched.
-  obj = MakeObject(ctx);
+// A symbol object with nothing bound and nothing interned. A symbol's cdr is
+// one cons: `(((name . plist) . function) . value)` (sub-plan 04B, widened by
+// Phase 14). The function cell is initialized to `&unbound` and written only
+// through `SetSymbolFunction`; the name moved one pair down in 04B and a
+// second one in Phase 14, both times so the binding cell -- the cdr of the
+// outer pair -- is unchanged, which is what keeps the whole value path
+// (`GetBound`, `FeSet`, `FeIsBound`, `ResumeSetq`) untouched.
+//
+// Every intermediate here is on the GC stack the moment `MakeObject` returns
+// it, so the four allocations may collect between one another without losing
+// a half-built symbol.
+//
+// This is also Phase 14's `make-symbol`, called directly: a symbol object
+// that is on no list at all. Such a symbol is the first one fe has that the
+// collector may reclaim -- `symbol_list` is a root, so an interned symbol
+// lives as long as its context -- which is why the plist lives in the object
+// and not in a context-side registry. `InitializeKeywordValue` is NOT part of
+// it and is applied by `FeMakeSymbol` alone; see `IsKeywordSymbol`.
+static FeObject* MakeSymbolObject(FeContext* ctx, const char* name) {
+  FeObject* const obj = MakeObject(ctx);
   SetType(obj, FeTSymbol);
-  CDR(obj) =
-      FeCons(ctx, FeCons(ctx, FeMakeString(ctx, name), &unbound), &unbound);
+  CDR(obj) = FeCons(
+      ctx, FeCons(ctx, FeCons(ctx, FeMakeString(ctx, name), &nil), &unbound),
+      &unbound);
+  return obj;
+}
+
+FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
+  FeObject* obj = FindInternedSymbol(ctx, name);
+  if (obj != nullptr) {
+    return obj;
+  }
+  // Create new object, push to symbol_list and return.
+  obj = MakeSymbolObject(ctx, name);
   InitializeKeywordValue(obj, name);
   ctx->symbol_list = FeCons(ctx, obj, ctx->symbol_list);
   return obj;
@@ -925,6 +964,28 @@ enum {
   DefaultWriteMaxDepth = FeWriteDefaultMaxDepth,
 };
 
+// Emacs' number lexer (05A Decision 3, 05D), replacing ReadAtom's bare
+// `strtod`: classify the token first, then convert only the classified text
+// with `strtoll`/`strtod`. Integer = optional sign, digits, optional trailing
+// dot (`1.` is the integer 1, R2). Float = a fraction and/or an exponent
+// (`.5`, `1e3`, `1.e3`, R3/R5). The nonfinite spellings the printer emits --
+// `1.0e+INF`, `-1.0e+INF`, `0.0e+NaN`, `-0.0e+NaN` -- read back as nonfinite
+// floats, keeping read/print round-tripping an invariant. Everything else is
+// a symbol: `0x10`, `inf`, `nan`, `1e`, `1.0e+` are un-numbered (R6-R8).
+// An integer literal that overflows `int64_t` reads as a double (the
+// pre-bignum Emacs behaviour), recorded as a divergence row against modern
+// Emacs' bignums (05A Decision 3).
+// The classification lives above the writer because Phase 14's symbol
+// printer asks the same question of a symbol's name: a name Emacs would
+// read back as a number is printed with its first byte escaped.
+typedef enum NumberKind {
+  NumberSymbol,
+  NumberInteger,
+  NumberFloat,
+  NumberInf,
+  NumberNan,
+} NumberKind;
+
 typedef struct Writer {
   FeContext* ctx;
   FeWriteFn* fn;
@@ -954,6 +1015,75 @@ static void Emit(Writer* w, char chr) {
 static void EmitString(Writer* w, const char* s) {
   while (*s) {
     Emit(w, *s++);
+  }
+}
+
+static size_t CopyStoredStringBytes(const FeObject* string, char* dst);
+static NumberKind ClassifyNumber(const char* buf);
+
+// The bytes Emacs escapes wherever they occur in a symbol name, measured
+// byte for byte on 31.0.90 by printing `(intern (string C ?a ?b))` and
+// `(intern (string ?a C ?b))` for every C from 1 to 127: everything at or
+// below the space, and `"#'(),;[]\` and the backquote. Each one is reader
+// syntax somewhere, in Emacs or here or both.
+static bool IsAlwaysEscapedSymbolByte(char chr) {
+  const unsigned char byte = (unsigned char)chr;
+  return byte <= ' ' || strchr("\"#'(),;[]\\`", byte) != nullptr;
+}
+
+static bool IsAsciiLetter(char chr) {
+  return (chr >= 'a' && chr <= 'z') || (chr >= 'A' && chr <= 'Z');
+}
+
+// Does the FIRST byte need a backslash so the reader does not take the whole
+// name for something else? The same measurement says three things do: a name
+// that reads as a number (`1`, `+1`, `.5`, `1e5`, `1.0e+INF`), a name
+// starting with `?` (a character literal), and a name starting with `.`
+// whose second byte is not an ASCII letter -- `.`, `..` and `.5x` are
+// escaped, `.emacs` and `.x-` are not. Emacs escapes only that first byte,
+// not the rest of the token.
+static bool IsConfusingSymbolName(const char* name) {
+  if (name[0] == '?') {
+    return true;
+  }
+  if (name[0] == '.') {
+    return !IsAsciiLetter(name[1]);
+  }
+  return ClassifyNumber(name) != NumberSymbol;
+}
+
+// A symbol's name, escaped so that reading the output back gives this symbol
+// again (Phase 14). The empty name is `##`, which is how Emacs both writes
+// and reads it. Never recurses: the cells are a cdr chain.
+//
+// The whole-name test needs the name in one buffer, and `SymbolNameLimit` is
+// the longest name fe itself ever builds; a longer one can only come from an
+// embedder's `FeMakeSymbol`, and it gets the per-byte escapes without the
+// number-lookalike test, which no name that long can pass here anyway.
+static void EmitSymbolName(Writer* w, FeObject* name) {
+  const size_t length = CopyStoredStringBytes(name, nullptr);
+  if (length == 0) {
+    EmitString(w, "##");
+    return;
+  }
+  bool escape_first = false;
+  if (length <= SymbolNameLimit) {
+    char buf[SymbolNameLimit + 1];
+    (void)CopyStoredStringBytes(name, buf);
+    buf[length] = '\0';
+    escape_first = IsConfusingSymbolName(buf);
+  }
+  bool first = true;
+  while (!FeIsNil(name)) {
+    for (size_t i = 0; i < StringBufferSize && STRING_BUFFER(name)[i]; i++) {
+      const char chr = STRING_BUFFER(name)[i];
+      if ((first && escape_first) || IsAlwaysEscapedSymbolByte(chr)) {
+        Emit(w, '\\');
+      }
+      Emit(w, chr);
+      first = false;
+    }
+    name = CDR(name);
   }
 }
 
@@ -1173,7 +1303,7 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
       break;
 
     case FeTSymbol:
-      EmitStoredString(w, SymbolName(obj), 0);
+      EmitSymbolName(w, SymbolName(obj));
       break;
 
     case FeTString:
@@ -1407,7 +1537,8 @@ bool FeIsFBound(FeContext* ctx, FeObject* sym) {
 }
 
 // Symbol accessors (sub-plan 04B of kg's Emacs-subset program): a symbol's
-// `cdr` is one cons, `((name . function) . value)`, and every reader of that
+// `cdr` is one cons, `(((name . plist) . function) . value)` since Phase 14
+// widened the name slot into a pair, and every reader of that
 // private layout goes through these. The value path deliberately has no
 // accessor of its own: its unit of currency is the binding cell, and lexical
 // environment entries and the global cell share the `CDR(cell)` read/write
@@ -1417,7 +1548,15 @@ bool FeIsFBound(FeContext* ctx, FeObject* sym) {
 // `SymbolName`/`SymbolBindingCell` read through a `const FeObject*` because
 // `GetStringObject`/`IsNamedSymbol` do.
 FeObject* SymbolName(const FeObject* sym) {
-  return CAR(CAR(CDR(sym)));
+  return CAR(CAR(CAR(CDR(sym))));
+}
+
+FeObject* SymbolPlist(FeObject* sym) {
+  return CDR(CAR(CAR(SymbolBindingCell(sym))));
+}
+
+void SetSymbolPlist(FeObject* sym, FeObject* plist) {
+  CDR(CAR(CAR(SymbolBindingCell(sym)))) = plist;
 }
 
 FeObject* SymbolBindingCell(FeObject* sym) {
@@ -1551,25 +1690,6 @@ static FeObject* ReadWrapped(FeContext* ctx,
   return FeCons(ctx, FeMakeSymbol(ctx, name), FeCons(ctx, v, &nil));
 }
 
-// Emacs' number lexer (05A Decision 3, 05D), replacing ReadAtom's bare
-// `strtod`: classify the token first, then convert only the classified text
-// with `strtoll`/`strtod`. Integer = optional sign, digits, optional trailing
-// dot (`1.` is the integer 1, R2). Float = a fraction and/or an exponent
-// (`.5`, `1e3`, `1.e3`, R3/R5). The nonfinite spellings the printer emits --
-// `1.0e+INF`, `-1.0e+INF`, `0.0e+NaN`, `-0.0e+NaN` -- read back as nonfinite
-// floats, keeping read/print round-tripping an invariant. Everything else is
-// a symbol: `0x10`, `inf`, `nan`, `1e`, `1.0e+` are un-numbered (R6-R8).
-// An integer literal that overflows `int64_t` reads as a double (the
-// pre-bignum Emacs behaviour), recorded as a divergence row against modern
-// Emacs' bignums (05A Decision 3).
-typedef enum NumberKind {
-  NumberSymbol,
-  NumberInteger,
-  NumberFloat,
-  NumberInf,
-  NumberNan,
-} NumberKind;
-
 // `p` points at the `e`/`E` of an exponent; the significand has been
 // consumed. A `+`/`-` sign, digits, or the exact `INF`/`NaN` spellings decide
 // a float from a symbol -- `1e3`, `1e+5`, `1e-7` are floats, `1e`, `1e+`,
@@ -1648,16 +1768,24 @@ static double NanWithSign(bool negative) {
 // A number, `nil`, or a symbol. `chr` is the first character; a character
 // already pushed back into `ctx->nextchr` is consumed before the input.
 static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
-  char buf[64];
+  char buf[SymbolNameLimit + 1];
   char* p = buf;
   const char* delimiter = " \n\t\r();`,";
+  bool escaped = false;
   do {
-    // Emacs reads `a\ b` as the single symbol `a b`; Fe has no symbol-escape
-    // syntax, so the backslash is rejected wherever it appears in a token, not
-    // just at its start. Rejecting only the leading position let `(a\ b)` read
-    // as the two symbols `a` and `b` -- a silent misread of a one-element list.
+    // Emacs' symbol escapes (Phase 14): a backslash takes the next byte into
+    // the name literally, whatever it is -- a delimiter, a digit, another
+    // backslash -- so `a\ b` is the one symbol whose name is "a b", and `\1`
+    // is the symbol named "1" rather than the integer. It also suppresses
+    // the number classification below for the whole token, which is Emacs'
+    // rule: one escape anywhere means the token is a symbol.
     if (chr == '\\') {
-      FeHandleError(ctx, "unsupported read syntax: symbol escape");
+      chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+      ctx->nextchr = '\0';
+      if (chr == '\0') {
+        FeHandleError(ctx, "unterminated symbol escape");
+      }
+      escaped = true;
     }
     if (p == buf + sizeof(buf) - 1) {
       FeHandleError(ctx, "symbol too long (63-byte limit)");
@@ -1668,6 +1796,13 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   } while (chr && !strchr(delimiter, chr));
   *p = '\0';
   ctx->nextchr = chr;
+  ctx->reader_atom_escaped = escaped;
+  if (escaped) {
+    // `\nil` is the symbol `nil`, which in fe is the nil object -- the same
+    // answer `(intern "nil")` gives, and Emacs' too, since its reader is
+    // `intern` of the accumulated name.
+    return strcmp(buf, "nil") == 0 ? &nil : FeMakeSymbol(ctx, buf);
+  }
   switch (ClassifyNumber(buf)) {
     case NumberInteger: {
       errno = 0;
@@ -2013,9 +2148,17 @@ bool IsNamedSymbol(const FeObject* v, const char* name) {
   return FeGetType(v) == FeTSymbol && IsStringEqual(SymbolName(v), name);
 }
 
+// A keyword is an INTERNED symbol whose name starts with a colon (08B). The
+// self-binding `InitializeKeywordValue` gives one at intern time is what says
+// "interned" here: Phase 14's `make-symbol` skips it, so an uninterned symbol
+// named `:a` is an ordinary unbound symbol, which is what the pinned Emacs
+// answers too -- `(keywordp (make-symbol ":a"))` is nil there and
+// `(symbol-value (make-symbol ":a"))` is `(void-variable :a)`. Nothing can
+// clear an interned keyword's self-binding: `setq`, `set`, `makunbound` and
+// `let` all refuse a constant, and a keyword is one.
 bool IsKeywordSymbol(const FeObject* v) {
   return FeGetType(v) == FeTSymbol && SymbolName(v) != NULL &&
-         STRING_BUFFER(SymbolName(v))[0] == ':';
+         STRING_BUFFER(SymbolName(v))[0] == ':' && CDR(CDR(v)) == v;
 }
 
 bool IsConstantSymbol(const FeObject* v) {
@@ -2036,6 +2179,12 @@ static FeObject* ReadHash(FeContext* ctx, FeReadFn fn, void* udata) {
     return ReadRadix(ctx, fn, udata, 8);
   if (next == 'b' || next == 'B')
     return ReadRadix(ctx, fn, udata, 2);
+  // `##` is the symbol with the empty name, which is how Emacs both prints
+  // and reads it. Phase 14 needs the read half so that every symbol the
+  // writer produces reads back: `(intern "")` is a legal symbol and `""` is
+  // not a token any other spelling can carry.
+  if (next == '#')
+    return FeMakeSymbol(ctx, "");
   FeHandleError(ctx, "unsupported read syntax: #");
 }
 
@@ -2109,7 +2258,11 @@ static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
     if (v == NULL) {
       FeHandleError(ctx, "unclosed list");
     }
-    if (IsDot(v)) {
+    // An ESCAPED dot is an ordinary symbol, so `(a \. b)` is a three-element
+    // list where `(a . b)` is a pair (Phase 14). The two read to the same
+    // interned symbol -- `\.` is not a different object -- so the object
+    // alone cannot answer this and the reader's own flag has to.
+    if (IsDot(v) && !ctx->reader_atom_escaped) {
       if (FeIsNil(res)) {
         FeHandleError(ctx, "'.' at start of list");
       }
@@ -2516,14 +2669,211 @@ FeObject* FeEvaluateFileWithOptions(FeContext* ctx,
   return result;
 }
 
+// Phase 14's symbol surface. Eight ordinary functions whose operands the
+// evaluator has already evaluated into `arguments`; the arity table has
+// already refused a wrong count, so every `CAR`/`CDR` below has something to
+// read. See the `PIntern`..`PSymbolPlist` block in fe_internal.h for why the
+// family is contiguous and why the routing is a range test.
+
+bool IsSymbolPrimitive(Primitive primitive) {
+  return primitive >= PIntern && primitive <= PSymbolPlist;
+}
+
+// A name operand as a C string. `SymbolNameLimit` is the reader's own token
+// bound, so a name a program constructs is bounded exactly where a name a
+// program writes is; a longer one is a named error rather than a truncation.
+static void CopyNameArgument(FeContext* ctx, FeObject* obj, char* buf) {
+  const FeObject* const string = CheckType(ctx, obj, FeTString);
+  const size_t length = CopyStoredStringBytes(string, nullptr);
+  if (length > SymbolNameLimit) {
+    FeHandleError(ctx, "symbol name too long (63-byte limit)");
+  }
+  (void)CopyStoredStringBytes(string, buf);
+  buf[length] = '\0';
+}
+
+// `nil` is not a symbol object in fe, so the name "nil" has to answer the nil
+// object -- which is what Emacs answers too, its `nil` being the symbol of
+// that name. Without this, `(intern "nil")` would mint a second thing that
+// prints `nil` and is not it.
+static FeObject* InternName(FeContext* ctx, const char* name) {
+  return strcmp(name, "nil") == 0 ? &nil : FeMakeSymbol(ctx, name);
+}
+
+// `(intern-soft NAME-OR-SYMBOL)`: nil on a miss, and NO interning. Emacs
+// takes a symbol as well as a string, and answers nil for an uninterned one,
+// which is identity and not name equality -- `(intern-soft (make-symbol
+// "x"))` is nil even when `x` is interned.
+static FeObject* InternSoft(FeContext* ctx, FeObject* argument) {
+  char name[SymbolNameLimit + 1];
+  if (FeGetType(argument) == FeTSymbol) {
+    const size_t length = CopyStoredStringBytes(SymbolName(argument), nullptr);
+    if (length > SymbolNameLimit) {
+      return &nil;
+    }
+    (void)CopyStoredStringBytes(SymbolName(argument), name);
+    name[length] = '\0';
+  } else if (FeIsNil(argument)) {
+    return &nil;  // Emacs' `(intern-soft "nil")` is nil either way.
+  } else {
+    CopyNameArgument(ctx, argument, name);
+  }
+  FeObject* const found = FindInternedSymbol(ctx, name);
+  return found == nullptr ||
+                 (FeGetType(argument) == FeTSymbol && found != argument)
+             ? &nil
+             : found;
+}
+
+// `(gensym &optional PREFIX)`: an uninterned symbol named PREFIX followed by
+// a per-context sequence number. Emacs keeps the counter in the Lisp variable
+// `gensym-counter`; fe exposes no way to read or set it, so the only promise
+// is uniqueness within a context, which is all a macro's temporary needs.
+static FeObject* Gensym(FeContext* ctx, FeObject* arguments) {
+  char name[SymbolNameLimit + 1] = "g";
+  if (!FeIsNil(arguments)) {
+    CopyNameArgument(ctx, CAR(arguments), name);
+  }
+  const size_t used = strlen(name);
+  Format(name + used, sizeof(name) - used, "%" PRIu64, ctx->gensym_counter);
+  ctx->gensym_counter++;
+  return MakeSymbolObject(ctx, name);
+}
+
+// A symbol's name as a string, with fe's nil -- which is not a symbol object
+// -- answering "nil" as Emacs' symbol nil does.
+static FeObject* SymbolNameString(FeContext* ctx, FeObject* argument) {
+  if (FeIsNil(argument)) {
+    return FeMakeString(ctx, "nil");
+  }
+  char name[SymbolNameLimit + 1];
+  const FeObject* const stored =
+      SymbolName(CheckType(ctx, argument, FeTSymbol));
+  const size_t length = CopyStoredStringBytes(stored, nullptr);
+  if (length > SymbolNameLimit) {
+    FeHandleError(ctx, "symbol name too long (63-byte limit)");
+  }
+  (void)CopyStoredStringBytes(stored, name);
+  name[length] = '\0';
+  return FeMakeString(ctx, name);
+}
+
+// The property list is `(PROP VALUE PROP VALUE ...)` and properties compare
+// by `eq`, exactly as in Emacs -- so an integer property works, `eq` being
+// value equality for integers here. `put` appends a new property at the tail
+// rather than pushing it at the head, which is measured Emacs behaviour:
+// `(put 'p 'a 1)` then `(put 'p 'b 2)` leaves `(a 1 b 2)`.
+// The pair whose `car` holds PROPERTY's value, or null when the plist does
+// not carry it. A trailing odd element is not a property, which is why the
+// walk also requires a `cdr`.
+static FeObject* FindPlistCell(FeObject* plist, FeObject* property) {
+  while (!FeIsNil(plist) && !FeIsNil(CDR(plist))) {
+    if (IdentityObjects(CAR(plist), property, false)) {
+      return CDR(plist);
+    }
+    plist = CDR(CDR(plist));
+  }
+  return nullptr;
+}
+
+static FeObject* PlistGet(FeObject* plist, FeObject* property) {
+  FeObject* const cell = FindPlistCell(plist, property);
+  return cell == nullptr ? &nil : CAR(cell);
+}
+
+static FeObject* PlistPut(FeContext* ctx, FeObject* arguments) {
+  FeObject* const symbol = CheckType(ctx, CAR(arguments), FeTSymbol);
+  FeObject* const property = CAR(CDR(arguments));
+  FeObject* const value = CAR(CDR(CDR(arguments)));
+  FeObject* const cell = FindPlistCell(SymbolPlist(symbol), property);
+  if (cell != nullptr) {
+    CAR(cell) = value;
+    return value;
+  }
+  // Two fresh pairs appended at the tail. `symbol` and `value` are reachable
+  // from the caller's rooted operand list across both allocations.
+  FeObject* const tail = FeCons(ctx, property, FeCons(ctx, value, &nil));
+  FeObject* plist = SymbolPlist(symbol);
+  if (FeIsNil(plist)) {
+    SetSymbolPlist(symbol, tail);
+    return value;
+  }
+  while (!FeIsNil(CDR(plist))) {
+    plist = CDR(plist);
+  }
+  CDR(plist) = tail;
+  return value;
+}
+
+FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
+                                  Primitive primitive,
+                                  FeObject* arguments) {
+  // `arguments` is a C local in `ResumeEvalList` by the time it gets here --
+  // the accumulator that held it has been emptied by the reversal -- so it is
+  // rooted explicitly across the allocations below. The result is pushed back
+  // after the restore, which is the state every other primitive leaves the GC
+  // stack in: `MakeObject` pushes whatever it hands out.
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, arguments);
+  char name[SymbolNameLimit + 1];
+  FeObject* result = &nil;
+  // On an `int`, not on `Primitive`: `-Wswitch-enum` asks a switch over an
+  // enumeration to name every value, and this one deliberately handles the
+  // eight its caller filtered for. `ResumeEvalList` switches on `PRIM(...)`
+  // for the same reason.
+  switch ((int)primitive) {
+    case PIntern:
+      CopyNameArgument(ctx, CAR(arguments), name);
+      result = InternName(ctx, name);
+      break;
+    case PInternSoft:
+      result = InternSoft(ctx, CAR(arguments));
+      break;
+    case PSymbolName:
+      result = SymbolNameString(ctx, CAR(arguments));
+      break;
+    case PMakeSymbol:
+      CopyNameArgument(ctx, CAR(arguments), name);
+      result = MakeSymbolObject(ctx, name);
+      break;
+    case PGensym:
+      result = Gensym(ctx, arguments);
+      break;
+    case PPut:
+      result = PlistPut(ctx, arguments);
+      break;
+    // fe's nil owns no storage of its own, so a property cannot be stored on
+    // it. Reading answers nil, which is what Emacs answers for a property
+    // nobody set; `put` says so by name -- `(wrong-type-argument symbolp
+    // nil)` -- rather than dropping the value on the floor.
+    case PGet:
+      result =
+          FeIsNil(CAR(arguments))
+              ? &nil
+              : PlistGet(SymbolPlist(CheckType(ctx, CAR(arguments), FeTSymbol)),
+                         CAR(CDR(arguments)));
+      break;
+    case PSymbolPlist:
+      result = FeIsNil(CAR(arguments))
+                   ? &nil
+                   : SymbolPlist(CheckType(ctx, CAR(arguments), FeTSymbol));
+      break;
+    default:
+      abort();
+  }
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, result);
+  return result;
+}
+
 static size_t GetSymbolObjectCount(const char* name) {
-  // A symbol object plus its one `(name . function) . value` cons chain:
-  // the symbol, the name string cells, and the single extra pair the 04B
-  // function cell added. `StringBufferSize` name characters fit in one
-  // string cell.
+  // A symbol object plus its one `((name . plist) . function) . value` cons
+  // chain: the symbol, the name string cells, the extra pair the 04B
+  // function cell added and the extra pair Phase 14's plist added.
+  // `StringBufferSize` name characters fit in one string cell.
   const size_t length = strlen(name);
   assert(length > 0);
-  return 5 + (length - 1) / StringBufferSize;
+  return 6 + (length - 1) / StringBufferSize;
 }
 
 static FeObject* native_sin(FeContext* ctx, FeObject* arg) {

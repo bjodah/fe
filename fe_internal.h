@@ -137,6 +137,25 @@ typedef enum Primitive {
   // `(let ((qq 1)) (eval 'qq))` is `(void-variable qq)` on 31.0.90 under
   // `lexical-binding: t`, while a `let` over a dynamic name IS visible.
   PEval,
+  // Phase 14 of kg's Emacs-subset program: the symbol surface. Eight
+  // ordinary functions -- every operand is evaluated, none of them touches
+  // the evaluator's state -- so the evaluator only routes them: the whole
+  // family sets up one `FeFrameEvalList` and finishes in fe.c's
+  // `EvaluateSymbolPrimitive`, beside the symbol accessors and the obarray
+  // the four interning ones read. They are CONTIGUOUS on purpose, and
+  // `IsSymbolPrimitive` is the range test both routing sites use: eight
+  // `case` labels in each of `DispatchPrimitive` and `ResumeEvalList` would
+  // be sixteen cyclomatic points spent saying "these eight are one family",
+  // which is what the predicate says in two. Keep `PIntern` first and
+  // `PSymbolPlist` last if this block ever grows.
+  PIntern,
+  PInternSoft,
+  PSymbolName,
+  PMakeSymbol,
+  PGensym,
+  PPut,
+  PGet,
+  PSymbolPlist,
   PSentinel
 } Primitive;
 
@@ -189,6 +208,14 @@ enum {
   // slots; see `FePushGC`.
   GcStackReserve = 64,
   StringBufferSize = (sizeof(FeObject*) - 1),
+  // The longest symbol name fe builds, in bytes. It has been the reader's
+  // token buffer since long before Phase 14; that phase made `intern`,
+  // `make-symbol` and `gensym` share it, so a name a program constructs is
+  // bounded exactly where a name a program writes is. A symbol's name is a
+  // cons chain and has no structural limit -- this is a policy, and the
+  // reason it is one is that a 64-byte stack buffer is also what the
+  // printer's number-lookalike test and `signal`'s condition-name copy use.
+  SymbolNameLimit = 63,
   DefaultEvalPollInterval = 1024,
   // Cleanup entries are pushed only by `unwind-protect` and
   // `FeProtectWithCleanup`, not by every object creation the way the GC
@@ -598,6 +625,20 @@ FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns
 FeObject* SymbolFunction(FeObject* sym);  // &unbound when no function binding
 void SetSymbolFunction(FeObject* sym, FeObject* fn);
+// Phase 14: the property list, nil until a `put` writes one. It lives in the
+// symbol object rather than in a context-side registry -- the shape the
+// special-variable list below uses -- because an UNINTERNED symbol is the
+// first symbol fe has that the collector may reclaim, and a registry keyed
+// by symbol would pin every one that ever carried a property.
+FeObject* SymbolPlist(FeObject* sym);
+void SetSymbolPlist(FeObject* sym, FeObject* plist);
+// Phase 14's symbol family (see the `PIntern`..`PSymbolPlist` block above):
+// the range test the evaluator routes on, and the one entry point that
+// finishes all eight from their evaluated operand list.
+bool IsSymbolPrimitive(Primitive primitive);
+FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
+                                  Primitive primitive,
+                                  FeObject* arguments);
 // The special-variable registry (sub-plan 11B), defined in fe.c beside the
 // symbol accessors because it is symbol metadata; the evaluator's binding
 // paths and the two primitives that expose it are in fe_eval.c.
@@ -890,6 +931,18 @@ struct FeContext {
   bool evaluation_limited;
   bool error_has_offset;
   char nextchr;
+  // Phase 14's reader flag: set by `ReadAtom` on every call, true when the
+  // token it just produced contained a backslash escape. `ReadList` reads
+  // it, and only when the object it holds IS the symbol `.` -- which nothing
+  // but `ReadAtom` can produce -- so a stale value from an earlier atom
+  // cannot be consulted. It is what keeps `(a \. b)` a three-element list
+  // where `(a . b)` is a pair: the two produce the same interned symbol, so
+  // the dotted-tail test cannot tell them apart from the object alone.
+  bool reader_atom_escaped;
+  // Phase 14's `gensym` sequence number, Emacs' `gensym-counter` without the
+  // Lisp variable: fe exposes no way to read or set it, so the names are
+  // unique within a context and nothing more is promised of them.
+  uint64_t gensym_counter;
 
   // Read-only arena/evaluator statistics, exposed by `FeGetArenaStats`.
   // Every field here is maintained at the one or two existing sites that

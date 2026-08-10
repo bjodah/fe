@@ -1,0 +1,6 @@
+{
+ "id": "reader-symbol-escaped-dot",
+ "setup": [],
+ "expr": "(cdr (cdr '(a \\. b)))",
+ "note": "Phase 14: an ESCAPED dot is an ordinary list element, where a bare one is the dotted-tail marker -- so this is a three-element list and its second cdr is `(b)`. Both spellings read to the same interned symbol, so the object alone cannot tell them apart and the reader's own knowledge of the escape has to."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "symbol-gensym-uninterned",
+ "setup": [],
+ "expr": "(list (eq (gensym) (gensym)) (intern-soft (symbol-name (gensym))))",
+ "note": "Phase 14: `gensym` hands out uninterned symbols nothing else can name -- two calls are two objects, and the name of one is in no obarray. The exact NAME is deliberately not pinned here: Emacs' counter is the Lisp variable `gensym-counter`, fe's is a context field with no Lisp spelling, and any program that loads before the case runs can move Emacs' one."
+}

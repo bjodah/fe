@@ -166,6 +166,38 @@ a host-driven `let` -- every mark is visible, because there is no unit there
 for one to be foreign to. See `doc/language.md` for the model and its two
 recorded residuals.
 
+`FE_LANGUAGE_VERSION` moved 11 -> 12 in Phase 14, with `FeVersion` "12.0" ->
+"13.0" and `FE_API_VERSION` left at 8 -- no declaration in `fe.h` changed.
+Unlike versions 8 and 11, this one IS a break, in three directions at once.
+
+New names: `intern`, `intern-soft`, `symbol-name`, `make-symbol`, `gensym`,
+`put`, `get` and `symbol-plist`, all ordinary functions, all answering
+`void-function` before. That much alone would be an addition, and would still
+be a bump for version 8's reason.
+
+The reader: a backslash in a token was a named read error and is now Emacs'
+symbol escape, so `(a\ b)` is a one-element list where it used to be a
+diagnostic, `\1` is the symbol `1`, an escaped `\.` inside a list is an
+ordinary element rather than the dotted-tail marker, and `##` is the symbol
+with the empty name. A program that did not read now reads.
+
+The writer: a symbol whose name would otherwise read back as something else
+prints with escapes, so the symbol `.` prints `\.` and `(intern "a b")`
+prints `a\ b`. A program that printed now prints differently -- which is what
+makes the reader change safe, the two being inverses.
+
+One behaviour outside those three moved with them: `keywordp` now asks
+whether the interner self-bound the name, not only whether it starts with a
+colon, so `(keywordp (make-symbol ":a"))` is nil as it is on Emacs 31.0.90.
+
+The object layout moved too, though no host can see it: a symbol's `cdr`
+chain widened from `((name . function) . value)` to
+`(((name . plist) . function) . value)`, one cons per symbol, which raises
+`FeMinimumArenaSize()` accordingly. The property list lives in the symbol
+rather than in a context-side registry because an uninterned symbol is the
+first symbol Fe has that the collector may reclaim, and a registry keyed by
+symbol would pin every symbol that ever carried a property.
+
 `FE_LANGUAGE_VERSION` moved 10 -> 11 in Phase 13.1, with `FeVersion` "11.0"
 -> "12.0" and `FE_API_VERSION` left at 8 -- no declaration in `fe.h` changed.
 The language change is one repair: `signal`, `error` and `keywordp` had no

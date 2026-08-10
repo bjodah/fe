@@ -1,0 +1,6 @@
+{
+ "id": "writer-symbol-roundtrip",
+ "setup": [],
+ "expr": "(list (eq 'a\\ b (intern \"a b\")) (eq '\\? (intern \"?\")) (eq '\\.. (intern \"..\")) (eq 'a\\(b (intern \"a(b\")) (eq '\\#ab (intern \"#ab\")) (eq '\\1.5 (intern \"1.5\")))",
+ "note": "Phase 14, the property the escapes exist for: what the printer emits for a name that needs them is what the reader turns back into the same object. Each element here spells the printer's own output for the name beside it and asserts the two are `eq`."
+}

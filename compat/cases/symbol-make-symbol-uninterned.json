@@ -1,0 +1,6 @@
+{
+ "id": "symbol-make-symbol-uninterned",
+ "setup": [],
+ "expr": "(list (eq (make-symbol \"foo\") 'foo) (symbol-name (make-symbol \"foo\")) (intern-soft (make-symbol \"foo\")))",
+ "note": "Phase 14: `make-symbol` builds a symbol that is in no obarray. It carries the name it was given and is a different object from the interned symbol of that name, which is why `intern-soft` of it is nil even though `foo` is interned -- the question `intern-soft` asks about a symbol is identity, not name equality."
+}

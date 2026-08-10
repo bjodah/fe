@@ -1,0 +1,6 @@
+{
+ "id": "symbol-intern-obarray",
+ "setup": [],
+ "expr": "(intern \"obarray-arg-probe\" nil)",
+ "note": "Phase 14, a recorded divergence: Emacs' `intern` and `intern-soft` take an optional OBARRAY, whose nil value means the default one. fe has exactly one obarray and no way to name a second, so a second operand is `wrong-number-of-arguments` here. Refusing it is the deliberate half of the choice -- accepting and ignoring an OBARRAY would make a program that meant a private obarray silently share the global one."
+}

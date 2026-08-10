@@ -45,10 +45,15 @@ of the string, or `nil` if this was the last part of the string.
 ### Symbols
 
 Symbols store a pair object in the `cdr`; the `car` of that pair is a second
-pair holding the symbol's name string and its function cell, and the `cdr`
-part of the outer pair contains the globally bound value for the symbol:
-`CDR(sym) = ((name . function) . value)` (sub-plan 04B of kg's Emacs-subset
-program). The function cell starts out holding `unbound`; sub-plan 04C made
+pair holding the symbol's name-and-plist pair and its function cell, and the
+`cdr` part of the outer pair contains the globally bound value for the symbol:
+`CDR(sym) = (((name . plist) . function) . value)` (sub-plan 04B of kg's
+Emacs-subset program, whose name slot Phase 14 widened into a pair). The
+property list is nil until a `put` writes one; it lives in the symbol object
+rather than in a context-side registry -- the shape the special-variable list
+uses -- because Phase 14's uninterned symbols are the first symbols the
+collector may reclaim, and a registry keyed by symbol would pin every symbol
+that ever carried a property. The function cell starts out holding `unbound`; sub-plan 04C made
 it live, not dormant: call position, `funcall`/`apply`, and `FeGetFunction`
 all read it through one shared resolver (`ResolveFunctionCallable`, below),
 and only the `fe_internal.h` accessors `SymbolFunction`/`SetSymbolFunction`
@@ -56,7 +61,11 @@ spell the cell. Every reader of this private
 layout goes through the named accessors (`SymbolName`, `SymbolBindingCell`,
 `SymbolFunction`) rather than spelling the pair walk itself, so the later
 Phase-4 lookup slices can change resolution without touching the
-representation readers. Symbols are interned.
+representation readers.
+
+Symbols are interned by default; `make-symbol` and `gensym` (Phase 14) build
+one that is on no list at all, which is what makes it collectable and what
+`intern-soft` answers nil for.
 
 The value cell of a newly interned symbol whose name begins with `:` points
 back to the symbol itself, making keywords self-evaluating without an
@@ -151,12 +160,12 @@ place of an arguments list.
 Environments are stored as association lists; for example, an environment with
 the symbol `x` bound to `10` and `y` bound to `20` would be `((x . 10) (y .
 20))`. Globally bound values are stored directly in the symbol object: a symbol's
-`cdr` is the pair `((name . function) . value)`, whose `cdr` -- the value cell
--- is the same shape as a lexical binding, so `GetBound`'s global path returns
-that cell (`SymbolBindingCell`) and one lookup returns the cell either way. The
-`(name . function)` inner pair is private to the symbol accessors; the value
-path's unit of currency is the binding cell, so there is deliberately no
-value-shaped accessor.
+`cdr` is the pair `(((name . plist) . function) . value)`, whose `cdr` -- the
+value cell -- is the same shape as a lexical binding, so `GetBound`'s global
+path returns that cell (`SymbolBindingCell`) and one lookup returns the cell
+either way. The `((name . plist) . function)` inner structure is private to
+the symbol accessors; the value path's unit of currency is the binding cell,
+so there is deliberately no value-shaped accessor.
 
 A symbol exists as soon as it is read, which is not the same as having a value.
 A fresh symbol's value cell and function cell both hold `unbound`, a private

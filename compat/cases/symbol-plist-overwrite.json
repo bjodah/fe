@@ -1,0 +1,10 @@
+{
+ "id": "symbol-plist-overwrite",
+ "setup": [
+  "(put 'plist-ovw 'a 1)",
+  "(put 'plist-ovw 'b 2)",
+  "(put 'plist-ovw 'a 9)"
+ ],
+ "expr": "(symbol-plist 'plist-ovw)",
+ "note": "Phase 14: writing a property that is already there overwrites it in place and does not append a second copy or move it."
+}

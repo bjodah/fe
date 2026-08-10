@@ -1,0 +1,6 @@
+{
+ "id": "symbol-intern-identity",
+ "setup": [],
+ "expr": "(list (eq (intern \"zz1\") (intern \"zz1\")) (eq (intern \"nil\") nil) (eq (intern \"foo\") 'foo))",
+ "note": "Phase 14: interning is by name, so two interns of one name are one object, and the name a quoted symbol carries reaches the same one. `(intern \"nil\")` is nil on both sides -- in Emacs because nil IS the symbol of that name, in fe because the interner routes the name to the nil object rather than minting a second thing that prints `nil`."
+}

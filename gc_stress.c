@@ -33,7 +33,7 @@
 #include "fe.h"
 
 static_assert(FE_API_VERSION == 8);
-static_assert(FE_LANGUAGE_VERSION == 11);
+static_assert(FE_LANGUAGE_VERSION == 12);
 
 #ifndef FE_GC_STRESS
 #define FE_GC_STRESS 0
@@ -86,6 +86,30 @@ static const char churn[] =
     "  (if (= (- n (* (/ n 100) 100)) 0) (setq kept (cons n kept)) nil))\n"
     "(list n kept (car kept))";
 
+// Phase 14's own seams, which are the reason this lane exists at all rather
+// than only the reason it was built: an UNINTERNED symbol is the first
+// symbol fe has that the collector may reclaim, so `make-symbol`/`gensym`
+// manufacture live-then-dead symbol objects by the hundred here, and `put`
+// appends two fresh pairs onto a plist whose symbol is reachable only
+// through the caller's operand list. What is asserted afterwards is that the
+// properties written across all that churn are still readable and that the
+// name a retained uninterned symbol carries is still its own.
+static const char symbols[] =
+    "(setq acc nil)\n"
+    "(setq keeper (make-symbol \"kept-name\"))\n"
+    "(setq k 0)\n"
+    "(while (< k 200)\n"
+    "  (setq k (+ k 1))\n"
+    "  (gensym \"tmp\")\n"
+    "  (make-symbol \"throwaway\")\n"
+    "  (intern-soft \"never-interned-here\")\n"
+    "  (if (= (- k (* (/ k 50) 50)) 0)\n"
+    "      (do (put 'gcprobe (intern \"p\") k)\n"
+    "          (setq acc (cons (get 'gcprobe 'p) acc)))\n"
+    "    nil))\n"
+    "(list k acc (get 'gcprobe 'p) (intern-soft \"never-interned-here\")\n"
+    "      (symbol-name keeper) (intern-soft keeper))";
+
 static bool RunStress(void) {
   static alignas(max_align_t) unsigned char arena[StressArenaSize];
   FeContext* context = FeOpenContext(arena, sizeof(arena));
@@ -109,6 +133,12 @@ static bool RunStress(void) {
   char rendered[128];
   (void)FeToString(context, result, rendered, sizeof(rendered));
   CHECK(strcmp(rendered, "(400 (400 300 200 100) 400)") == 0);
+
+  FeObject* const symbol_result =
+      FeEvaluateString(context, "gc-stress.fe", symbols, sizeof(symbols) - 1);
+  (void)FeToString(context, symbol_result, rendered, sizeof(rendered));
+  CHECK(strcmp(rendered, "(200 (200 150 100 50) 200 nil \"kept-name\" nil)") ==
+        0);
 
   const FeArenaStats after = FeGetArenaStats(context);
   // The standing assertion, true in both builds: the collector ran over the
