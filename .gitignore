@@ -1,6 +1,8 @@
 fe
 example_host
 test_api
+gc_stress
+gc_stress_on
 *.o
 *.dSYM
 .vscode

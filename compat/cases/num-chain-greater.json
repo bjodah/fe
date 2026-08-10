@@ -1,0 +1,6 @@
+{
+	"id": "num-chain-greater",
+	"setup": [],
+	"expr": "(> 3 2 1)",
+	"note": "Phase 13.4 trap battery: the descending chain, so the rule is pinned in both directions rather than only for `<`."
+}

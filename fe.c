@@ -24,6 +24,26 @@
 
 const char* FeVersion = "12.0";
 
+// Collect before *every* arena allocation, so an object that is live only
+// through an unrooted C local is reclaimed at the first opportunity rather
+// than at whatever unrelated allocation happens to empty the free list. Off
+// unless the build asks for it, the way kg's `KG_FUZZ` and
+// `KG_PERF_COUNTERS` knobs are: the whole thing compiles to nothing at 0, so
+// the shipped interpreter carries no test of it and no branch for it. It is
+// never on by default because the cost is a full mark-and-sweep per `cons`.
+//
+// What it defends against, both measured elsewhere and neither one visible
+// to an ordinary suite: a collector that is never actually invoked (a run
+// whose collection counter reads 0 from end to end, with nothing asserting
+// otherwise), and a use-after-free whose reproduction is *masked* by
+// unrelated work that happens to reduce churn. A build where every
+// allocation is a collection turns both into a first-run failure, and the
+// arena-stats collection count is what says the knob is on rather than
+// silently compiled out.
+#ifndef FE_GC_STRESS
+#define FE_GC_STRESS 0
+#endif
+
 #define COUNT(a) (sizeof((a)) / sizeof((a)[0]))
 
 static const char* primitive_names[] = {
@@ -736,6 +756,14 @@ bool ArenaCanAllocate(FeContext* ctx) {
 }
 
 FeObject* MakeObject(FeContext* ctx) {
+#if FE_GC_STRESS
+  // Every allocation is a collection point under the stress knob. This runs
+  // before the free-list test rather than instead of it: the test below is
+  // still the one that decides exhaustion, so an arena that genuinely cannot
+  // satisfy the request raises `out of memory` here exactly as it does in an
+  // ordinary build.
+  CollectGarbage(ctx);
+#endif
   // Run GC if free_list has no more objects:
   if (FeIsNil(ctx->free_list)) {
     CollectGarbage(ctx);

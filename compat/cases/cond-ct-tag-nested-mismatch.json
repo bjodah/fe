@@ -1,0 +1,6 @@
+{
+	"id": "cond-ct-tag-nested-mismatch",
+	"setup": [],
+	"expr": "(catch 'a (catch 'b (throw 'a 3)))",
+	"note": "Phase 13.4 trap battery: a throw whose tag matches the *outer* catch passes through the inner one rather than being swallowed by the nearest handler. cond-ct2 pins the nested-same-tag arm; this is its mismatched sibling."
+}

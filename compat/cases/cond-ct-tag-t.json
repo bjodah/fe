@@ -1,0 +1,6 @@
+{
+	"id": "cond-ct-tag-t",
+	"setup": [],
+	"expr": "(catch t (throw t 1))",
+	"note": "Phase 13.4 trap battery: `t` is a legal catch tag. nelisp's tag comparison type-checked both operands as symbols and rejected the constants, breaking the llama.el idiom; fe compares with the same `eq` rule cond-ct5-* pins for non-symbols. `nil` as a tag is cond-ct4 -- and it does NOT match, on Emacs as on fe, which is why both tags are pinned rather than assumed symmetric."
+}

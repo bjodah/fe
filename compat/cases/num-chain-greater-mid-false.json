@@ -1,0 +1,6 @@
+{
+	"id": "num-chain-greater-mid-false",
+	"setup": [],
+	"expr": "(> 3 1 2)",
+	"note": "Phase 13.4 trap battery: the `>` mirror of the first-pair bug -- arguments 0 and 1 satisfy the relation and the pair after them does not."
+}

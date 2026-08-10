@@ -1,0 +1,6 @@
+{
+	"id": "num-chain-less-mid-false",
+	"setup": [],
+	"expr": "(< 1 5 3)",
+	"note": "Phase 13.4 trap battery: the variadic comparisons are pairwise-all, not first-pair. A `<` that compares only arguments 0 and 1 answers t here; Emacs and fe answer nil. nelisp lost weeks to exactly this arm -- `rx` emitted garbled negated character classes because a three-argument `<` in its range check silently ignored the third."
+}

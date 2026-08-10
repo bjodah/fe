@@ -1,0 +1,6 @@
+{
+	"id": "num-chain-less-four",
+	"setup": [],
+	"expr": "(< 1 2 3 4)",
+	"note": "Phase 13.4 trap battery: four operands, so the rule is pinned past the three the first-pair bug happened to reach. `=`'s chain is pinned by primitive-numeric-eq-chain-true/-false and `/=`'s strict binary arity by num-not-equal-arity, which Emacs agrees with (`(/= 1 2 3)` is wrong-number-of-arguments there)."
+}

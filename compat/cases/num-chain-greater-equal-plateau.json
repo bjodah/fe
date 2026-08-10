@@ -1,0 +1,6 @@
+{
+	"id": "num-chain-greater-equal-plateau",
+	"setup": [],
+	"expr": "(>= 3 3 1)",
+	"note": "Phase 13.4 trap battery: `>=` over a plateau, completing the four-relation cross-product with num-chain-less-equal-plateau."
+}

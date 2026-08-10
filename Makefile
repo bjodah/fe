@@ -56,7 +56,7 @@ HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
-TEST_SRCS = test_api.c test_header.c test_internal_header.c
+TEST_SRCS = test_api.c test_header.c test_internal_header.c gc_stress.c
 EXAMPLE_HOST = example_host
 EXAMPLE_SRCS = example_host.c
 EXAMPLE_RUNNER ?=
@@ -769,7 +769,7 @@ all: $(TARGET)
 
 check: test
 
-test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET)
+test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET) check-gc-stress
 	./$(TEST_API)
 	$(EXAMPLE_RUNNER) ./$(EXAMPLE_HOST)
 	./test.sh
@@ -841,6 +841,41 @@ $(TEST_API): test_api.o $(FE_CORE_OBJS)
 $(EXAMPLE_HOST): example_host.o $(FE_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+# The GC stress pair.  `fe.c`'s FE_GC_STRESS knob compiles to nothing at 0,
+# so proving it does anything needs the same harness built both ways: the
+# off build is the standing assertion that the collector is invoked at all
+# (a collector that never runs looks like a working one to every other test
+# here), the on build is the assertion that the knob really collects per
+# allocation and that nothing the churn script keeps is taken when it does.
+# The stress objects get their own names rather than -B or a clean, so both
+# builds coexist in one tree and neither invalidates the ordinary ones.
+GC_STRESS = gc_stress
+GC_STRESS_ON = gc_stress_on
+GC_STRESS_ON_OBJS = gc_stress-stress.o fe-stress.o fe_eval-stress.o \
+	fe_run-stress.o
+
+$(GC_STRESS): gc_stress.o $(FE_CORE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(GC_STRESS_ON): $(GC_STRESS_ON_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+gc_stress-stress.o: gc_stress.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c gc_stress.c -o $@
+
+fe-stress.o: fe.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe.c -o $@
+
+fe_eval-stress.o: fe_eval.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_eval.c -o $@
+
+fe_run-stress.o: fe_run.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_run.c -o $@
+
+check-gc-stress: $(GC_STRESS) $(GC_STRESS_ON)
+	./$(GC_STRESS)
+	./$(GC_STRESS_ON)
+
 test-header: test_header.c test_internal_header.c fe.h fe_internal.h
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
@@ -896,7 +931,7 @@ sizes:
 
 clean:
 	-rm -f $(BUILD_STAMP)
-	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -997,7 +1032,7 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test core test-header sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
+.PHONY: all check test core test-header check-gc-stress sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
 	complexity complexity-check pmccabe \
 	pmccabe-check pmccabe-baseline coverage coverage-clean compat compat-oracle format format-check compile-db iwyu

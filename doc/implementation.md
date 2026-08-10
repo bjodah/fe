@@ -356,6 +356,22 @@ freelist. If there are no more objects on the freelist, the garbage collector
 does a full mark-and-sweep run, pushing unreachable objects back to the
 freelist. Thus, garbage collection may occur whenever a new object is created.
 
+`FE_GC_STRESS`, a build-time knob in `fe.c` that defaults to 0 and compiles
+to nothing there, makes `MakeObject()` collect before *every* allocation
+instead of only when the freelist is empty. It exists because "collection may
+occur whenever a new object is created" is a contract the ordinary suite
+never tests at its worst case: an object live only through an unrooted C
+local survives an ordinary run whenever nothing happens to collect between
+its creation and its last use, and the same luck hides a use-after-free until
+some unrelated change reduces churn. A stress build turns both into a
+first-run failure. The knob does not replace the freelist-empty test -- that
+is still what decides exhaustion, so `out of memory` is raised at the same
+point in both builds -- and the cost is a full mark-and-sweep per `cons`,
+which is why it is never on by default. `gc_stress.c` is the two-build
+harness: `make check-gc-stress` builds it with the knob off and on, and both
+runs assert that `FeGetArenaStats().collection_count` moved off zero over a
+churning script whose answer is still correct.
+
 The context maintains a `gc_stack` which protects objects that may not be
 otherwise reachable. Newly created objects are automatically pushed to this
 stack. Reader and evaluator results are either protected there or remain

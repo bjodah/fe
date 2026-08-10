@@ -2419,6 +2419,38 @@
    "kg_test": "fe/test_api.c:TestFunctionCells",
    "rationale": "Phase 13.1: `keywordp` is an ordinary predicate in Emacs and its arm here is the unary frame, which evaluates its operand, but it too had no primitive_is_function[] row -- so every higher-order use answered `invalid-function keywordp`, including (mapcar 'keywordp '(:a 1)), which kg's prelude mapcar reaches through funcall. Direct calls were never affected, which is why the gap survived a corpus that only ever calls it in call position.",
    "source_name": "keywordp"
+  },
+  {
+   "id": "comparison-chain-pairwise",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "num-chain-less-mid-false",
+    "num-chain-less-equal-plateau",
+    "num-chain-greater",
+    "num-chain-greater-mid-false",
+    "num-chain-greater-equal-plateau",
+    "num-chain-less-four"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 13.4 trap battery: `<`, `<=`, `>` and `>=` are variadic and pairwise-all, not first-pair. An implementation that compares only arguments 0 and 1 answers t for (< 1 5 3); Emacs and fe answer nil. Pinned rather than changed -- fe already agreed on all six -- because the failure mode is silent wrong answers in range checks rather than an error. `=`'s chain is primitive-numeric-eq-chain-true/-false and `/=`'s strict binary arity is num-not-equal-arity, which Emacs agrees with.",
+   "source_name": "<"
+  },
+  {
+   "id": "catch-tag-constants",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "cond-ct-tag-t",
+    "cond-ct-tag-nested-mismatch"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 13.4 trap battery: catch tags are compared with `eq` and nothing about the comparison type-checks the operands, so `t` is a legal tag and a throw whose tag matches an outer catch passes through an inner one. `nil` as a tag does NOT match, on Emacs as on fe -- cond-ct4 pins that -- so the two constants are pinned separately rather than assumed symmetric. Pinned, not changed.",
+   "source_name": "catch"
   }
  ]
 }

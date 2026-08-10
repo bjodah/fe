@@ -1,0 +1,6 @@
+{
+	"id": "num-chain-less-equal-plateau",
+	"setup": [],
+	"expr": "(<= 1 1 2)",
+	"note": "Phase 13.4 trap battery: `<=` over a plateau is t -- the pairwise-all rule with a non-strict relation, the arm a strict-only implementation gets wrong in the other direction from num-chain-less-mid-false."
+}
