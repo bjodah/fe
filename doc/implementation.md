@@ -221,7 +221,7 @@ per binding, which is the cost that would be on the hot path. Membership is
 one linear scan, the same shape `FeMakeSymbol`'s interning and `GetBound`'s
 environment walk already are.
 
-Binding a marked symbol is *shallow*: `PushDynamicBinding` (fe_eval.c) saves
+Binding a marked symbol is *shallow*: `PushDynamicBinding` (fe_unwind.c) saves
 the global value cell's current contents -- which may be the `unbound`
 object itself, the whole of row A10a -- as an `FeCleanupBinding` entry on the
 cleanup registry, then writes the new value into that same cell. The restore

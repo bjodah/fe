@@ -8,12 +8,14 @@ Fe is a small, embeddable Lisp-like language implemented in C23. Read
 
 - `fe.c` and `fe.h`: core interpreter, object model, garbage collector,
   reader/writer, and public embedding API.
-- `fe_eval.c`: the frame-driven evaluator, the cleanup registry and the raise
-  machinery, split out of `fe.c`.
+- `fe_eval.c`: the frame-driven evaluator, split out of `fe.c`.
 - `fe_run.c`: the run driver -- the two places a run's error barrier is
   installed -- and the public `FeEvaluate*`/`FeCall*` entry points, split out
   of `fe_eval.c`.
-- `fe_internal.h`: the private surface those three translation units share.
+- `fe_unwind.c`: the completion machinery -- the ambient evaluation-control
+  record, the condition hierarchy and its handler search, the cleanup
+  registry, and every raise -- also split out of `fe_eval.c`.
+- `fe_internal.h`: the private surface those four translation units share.
 - `fex.c`, `fex.h`, and `fex_*.c`: optional standard extensions for I/O, math,
   processes, regular expressions, and time.
 - `main.c`: command-line interpreter and recoverable REPL error handling.

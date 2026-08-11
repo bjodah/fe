@@ -175,7 +175,7 @@ static uint64_t rnd(void) {
 ```
 
 Counting "reaches an arm" needs a counter in the builder and counting "raises
-an arena exhaustion" needs one in `PublishExhaustion` (fe_eval.c); both are
+an arena exhaustion" needs one in `PublishExhaustion` (fe_unwind.c); both are
 temporary instrumentation, not tracked code. Anything that changes the
 grammar changes these numbers, and re-running is cheaper than reasoning about
 them: re-measure rather than adjust.

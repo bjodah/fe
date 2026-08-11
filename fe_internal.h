@@ -1129,4 +1129,32 @@ FeObject* Evaluate(FeContext* ctx,
                    FeObject** bind);
 FeObject* RunEvaluationBody(FeContext* ctx, FeObject* forms, FeObject* env);
 
+// The completion seam (Phase 20 of the same program). fe_unwind.c holds the
+// ambient evaluation-control record, the condition hierarchy and its handler
+// search, the cleanup registry and every raise; fe_eval.c keeps the
+// frame-driven evaluator. As with the run seam above, nothing here is new or
+// moved *code* -- each was `static` in fe_eval.c until the split, which
+// exists so the 520-per-file complexity cap keeps binding on the evaluator
+// at full strength.
+//
+// fe_eval.c -> fe_unwind.c (the raises, the two cleanup pushes, the drain,
+// and the `signal` name gate; `SaveEvaluationControl`,
+// `RestoreEvaluationControl`, `EnterNativeReentry` and `RaiseCompletionCore`
+// are declared above because fe_run.c reaches them too):
+[[noreturn]] void RaiseWrongType(FeContext* ctx,
+                                 const char* predicate,
+                                 FeObject* value);
+[[noreturn]] void RaiseNamedError(FeContext* ctx,
+                                  const char* name,
+                                  const char* message);
+[[noreturn]] void RaiseBudget(FeContext* ctx, const char* msg);
+void PushCleanup(FeContext* ctx, FeCleanupEntry entry);
+void PushDynamicBinding(FeContext* ctx, FeObject* symbol, FeObject* value);
+void RunCleanupsDownTo(FeContext* ctx, size_t target);
+void ValidateConditionHandlers(FeContext* ctx, FeObject* handlers);
+bool IsConditionSymbol(const FeObject* symbol);
+//
+// fe_unwind.c -> fe_eval.c: one edge, the throw a cleanup re-issues.
+bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value);
+
 #endif

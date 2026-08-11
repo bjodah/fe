@@ -64,7 +64,7 @@ as `FeCompletion` (in `fe.h` since 06B made the enum public; `fe_internal.h`
 before it) with only `Normal`/`Error` ever
 assigned (Phase 6 makes the other three true; it does not add the enum), and
 the checkpointed drain `RunCleanupsDownTo` (`RunCleanups`'s null-budget
-caller, `fe_eval.c`) is already live
+caller, `fe_unwind.c`) is already live
 and called by every completing pair frame, so the "Nested evaluation" note's
 "this has to change" is already half-built -- only the drain-to-zero
 `RunCleanupsAfterError` needs a `catch` frame to displace. Phase 5's residue
