@@ -477,6 +477,20 @@ bound value. The Lisp-level spellings are `(boundp 'name)` and
 `(makunbound 'name)`, which also see lexical bindings; `FeIsBound()` has no
 environment to consult and answers about the global one.
 
+`FeGetValue()` (FE_API_VERSION 9) is `FeSet()`'s inverse: the symbol's global
+value, or `nullptr` for an unbound name. It answers a pointer rather than
+`nil` precisely so a caller that takes a value out and puts it back later can
+tell "no value" from "the value nil" -- the sentinel that distinguishes them
+inside Fe is private and no API returns it. `FeMakeUnbound()` is the other
+direction, `(makunbound 'name)`'s global arm, and after it `FeIsBound()` is
+false and a reference raises `void-variable` again. Neither evaluates
+anything, so neither charges the step budget or can be caught by a Lisp
+handler; both type-check their symbol, and `FeMakeUnbound()` refuses `t`,
+`nil` and keywords with `setting-constant` exactly as `FeSet()` does. Both
+address the *global* binding and never an environment entry, which is the
+same rule `FeSet()`/`FeIsBound()` already live under: a host calling them is
+talking about the cell `setq` writes when nothing shadows the name.
+
 ### The function namespace (sub-plan 04C)
 
 `FeSetFunction()` writes `sym`'s *function* cell, storing the object or symbol

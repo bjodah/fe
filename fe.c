@@ -1522,6 +1522,24 @@ bool FeIsBound(FeContext* ctx, FeObject* sym) {
   return CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil)) != &unbound;
 }
 
+// The read half of `FeSet` (FE_API_VERSION 9). `&unbound` is fe's own
+// sentinel and never escapes into a host's hands, so it becomes `nullptr`
+// here: a caller that stashes a value away and puts it back later needs to
+// tell "no value" from "the value nil", and a sentinel it cannot name is no
+// use to it.
+FeObject* FeGetValue(FeContext* ctx, FeObject* sym) {
+  FeObject* const value =
+      CDR(GetBound(ctx, CheckType(ctx, sym, FeTSymbol), &nil));
+  return value == &unbound ? nullptr : value;
+}
+
+// `makunbound`'s global arm, spelled for a host. The constant check is
+// `FeSet`'s, not a second policy: `(makunbound t)` is `setting-constant`
+// from Lisp too.
+void FeMakeUnbound(FeContext* ctx, FeObject* sym) {
+  CDR(GetBound(ctx, CheckWritableSymbol(ctx, sym), &nil)) = &unbound;
+}
+
 // Sub-plan 04C/04D: the function namespace's public surface. `FeSetFunction`
 // and `FeIsFBound` are the cell accessors (`FeGetFunction` lives in fe_eval.c
 // with the evaluator, because following the designator chain charges the

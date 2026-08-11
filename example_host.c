@@ -6,7 +6,7 @@
 
 #include "fe.h"
 
-static_assert(FE_API_VERSION == 8);
+static_assert(FE_API_VERSION == 9);
 static_assert(FE_LANGUAGE_VERSION == 12);
 
 typedef struct HostState {

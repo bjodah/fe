@@ -140,7 +140,7 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 8);
+  static_assert(FE_API_VERSION == 9);
   static_assert(FE_LANGUAGE_VERSION == 12);
   CHECK(strcmp(FeVersion, "13.0") == 0);
 
@@ -1963,6 +1963,80 @@ static bool TestBinding(void) {
 
   CHECK(FeIsBound(context, FeMakeSymbol(context, "holds-nil")));
   CHECK(!FeIsBound(context, absent));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// FE_API_VERSION 9: the value namespace's remaining two C accessors. The
+// property under test is that `FeGetValue`/`FeMakeUnbound` are the exact
+// inverses of `FeSet` on the GLOBAL binding -- a host that reads a value
+// out, puts something else in, and later puts the original back has to end
+// up where it started, including when "the original" was no value at all.
+static bool TestValueCellAccessors(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  FeObject* const sym = FeMakeSymbol(context, "cell-probe");
+
+  // Unbound is `nullptr`, and distinct from the value nil.
+  CHECK(FeGetValue(context, sym) == nullptr);
+  FeSet(context, sym, FeNil(context));
+  CHECK(FeIsBound(context, sym));
+  CHECK(FeGetValue(context, sym) == FeNil(context));
+
+  // Round trip: what FeSet wrote is what FeGetValue reads, by identity.
+  FeObject* const value = FeMakeString(context, "held");
+  FeSet(context, sym, value);
+  CHECK(FeGetValue(context, sym) == value);
+
+  // ... and unboundness goes back in.
+  FeMakeUnbound(context, sym);
+  CHECK(!FeIsBound(context, sym));
+  CHECK(FeGetValue(context, sym) == nullptr);
+  CHECK(ExpectEvaluationError(context, &state, "cell.fe", "cell-probe", 10,
+                              "cell.fe:1: void-variable cell-probe"));
+
+  // The global binding, never an environment entry: a lambda parameter of
+  // the same name is invisible here, exactly as it is to `FeSet`/`FeIsBound`.
+  FeSet(context, sym, FeMakeInteger(context, 1));
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "cell.fe", expr, sizeof(expr) - 1), \
+      expected))
+  CHK("((lambda (cell-probe) cell-probe) 2)", "2");
+#undef CHK
+  CHECK(FeToInteger(context, FeGetValue(context, sym)) == 1);
+
+  // Both type-check their symbol, and FeMakeUnbound refuses a constant with
+  // the condition FeSet raises for it, rather than emptying `t`'s cell.
+  {
+    const size_t gc = FeSaveGC(context);
+    state.called = false;
+    state.expected_message = "expected symbol, got integer";
+    if (setjmp(state.jump) == 0) {
+      (void)FeGetValue(context, FeMakeInteger(context, 1));
+      CHECK(false);
+    }
+    FeRestoreGC(context, gc);
+    CHECK(state.called);
+  }
+  {
+    const size_t gc = FeSaveGC(context);
+    state.called = false;
+    state.expected_message = "setting-constant";
+    if (setjmp(state.jump) == 0) {
+      FeMakeUnbound(context, FeMakeSymbol(context, "t"));
+      CHECK(false);
+    }
+    FeRestoreGC(context, gc);
+    CHECK(state.called);
+    CHECK(FeIsBound(context, FeMakeSymbol(context, "t")));
+  }
 
   FeCloseContext(context);
   return true;
@@ -9230,10 +9304,10 @@ int main(void) {
                  TestMacroExpansion() && TestMacroexpandPrimitives() &&
                  TestMacroexpandBudget() && TestMacroexpandUnderCollection() &&
                  TestWriter() && TestParameterLists() && TestBinding() &&
-                 TestSymbolCells() && TestInteger() && TestFunctionCells() &&
-                 TestNamespaceCut() && TestSetqAndSet() &&
-                 TestConstantsAndKeywords() && TestNumericEqual() &&
-                 TestNumericTower() && TestNumericCut() &&
+                 TestValueCellAccessors() && TestSymbolCells() &&
+                 TestInteger() && TestFunctionCells() && TestNamespaceCut() &&
+                 TestSetqAndSet() && TestConstantsAndKeywords() &&
+                 TestNumericEqual() && TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
                  TestEvalPrimitive() && TestSymbolPrimitives() &&
                  TestUnwindLisp() && TestUnwindCleanupBudget() &&

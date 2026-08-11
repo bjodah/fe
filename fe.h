@@ -76,7 +76,22 @@
 // divergence sub-plan 12C Part 2 had just closed -- and reported every
 // error at the position of its own `eval` call rather than at the form's.
 // The bump is the same `static_assert` tripwire the earlier ones are.
-#define FE_API_VERSION 8
+//
+// Version 9 (Phase 18 of kg's Emacs-subset program) adds the two halves the
+// value namespace was missing from C: `FeGetValue`, the read half of
+// `FeSet`, and `FeMakeUnbound`, the C spelling of what `makunbound` does to
+// a global binding. Nothing is removed or changed in meaning. It exists
+// because a host that keeps a variable's value SOMEWHERE ELSE for a while
+// -- kg's buffer-local bindings stash the displaced value beside the symbol
+// and swap it back when the buffer comes round again -- has to be able to
+// read the cell it is about to overwrite and to put unboundness back into
+// it. Before this the value namespace could be written from C and asked
+// whether it was bound, but not read, so the only way to take a value out
+// was to evaluate `(symbol-value 'x)` -- a nested run, a step budget and a
+// raise, for a two-word load. Both are cell accessors in the shape
+// `FeSet`/`FeIsBound` already have: the GLOBAL binding, never an
+// environment entry.
+#define FE_API_VERSION 9
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -653,6 +668,22 @@ void FeLeaveInputUnit(FeContext* ctx, const FeInputUnit* enclosing);
 [[nodiscard]] void* FeToPtr(FeContext* ctx, FeObject* obj);
 void FeSet(FeContext* ctx, FeObject* sym, FeObject* v);
 [[nodiscard]] bool FeIsBound(FeContext* ctx, FeObject* sym);
+// The other two thirds of the value namespace from C (FE_API_VERSION 9).
+// All four functions address the symbol's GLOBAL binding and never a
+// lexical environment entry, which is the whole of their contract: a host
+// calling them is talking about the cell `setq` writes when nothing shadows
+// the name, not about whatever binding some frame currently has in force.
+//
+// `FeGetValue` is `FeSet`'s inverse and answers `nullptr` -- not `nil` --
+// for an unbound name, so the caller does not have to ask `FeIsBound`
+// first and cannot confuse "no value" with "the value nil". `FeMakeUnbound`
+// is `makunbound`'s global arm: after it `FeIsBound` is false and a
+// reference raises `void-variable`. Neither evaluates anything, so neither
+// charges the step budget; both type-check their symbol, and
+// `FeMakeUnbound` refuses a constant (`nil`, `t`, a keyword) with
+// `setting-constant`, exactly as `FeSet` does.
+[[nodiscard]] FeObject* FeGetValue(FeContext* ctx, FeObject* sym);
+void FeMakeUnbound(FeContext* ctx, FeObject* sym);
 // The Lisp-2 function namespace (sub-plans 04C/04D of kg's Emacs-subset
 // program). `FeSet`/`FeIsBound` above keep their Emacs meaning -- the value
 // namespace; these three address the function cell instead. `FeSetFunction`
