@@ -283,12 +283,13 @@
    "category": "errors-and-non-local-exits",
    "status": "divergent",
    "owner": "fe-core",
-   "comparison": "kg-policy",
+   "comparison": "emacs",
    "cases": [
-    "error-message-string-quoted-text"
+    "error-message-string-quoted-text",
+    "error-message-string-curled-text"
    ],
    "kg_test": "fe/test_api.c:TestErrorMessageString",
-   "rationale": "Emacs renders the `error-message` property through `substitute-quotes`, so under the default `text-quoting-style` the three messages containing an apostrophe come out curled: measured on 31.0.90, `(error-message-string '(void-variable foo))` is `Symbol’s value as variable is void: foo` there and `Symbol's ...` here. The PROPERTY is ASCII on both sides (see `error-message-property`); only the rendering differs, and only for those three. fe has no `text-quoting-style`, no `substitute-command-keys` and no place to put one: curving is a display policy about the host's terminal, not a property of the condition. `comparison` is kg-policy rather than emacs for a mechanical reason worth writing down: the oracle shim writes Emacs' INTERNAL representation of a non-ASCII character to stdout unencoded, so a snapshot of the curled text is not decodable UTF-8 and cannot be checked in. The agreement half is checked instead -- `error-message-string-quoted-text` binds `text-quoting-style` to `grave` and fe matches Emacs exactly -- and fe/test_api.c pins the ASCII text this side renders.",
+   "rationale": "Emacs renders the `error-message` property through `substitute-quotes`, so under a curling `text-quoting-style` the three messages containing an apostrophe come out curled: measured on 31.0.90, `(error-message-string '(void-variable foo))` is `Symbol’s value as variable is void: foo` there and `Symbol's ...` here. The PROPERTY is ASCII on both sides (see `error-message-property`); only the rendering differs, and only for those three. fe has no `text-quoting-style`, no `substitute-command-keys` and no place to put one: curving is a display policy about the host's terminal, not a property of the condition. Both halves are now snapshotted against the oracle: `error-message-string-quoted-text` binds `text-quoting-style` to `grave` and fe matches Emacs exactly, and `error-message-string-curled-text` binds it to `curve` and records the divergence itself. That second snapshot was impossible until Phase 20 fixed the oracle shim, which wrote Emacs' INTERNAL representation of a raw byte to stdout and so produced a record that was not decodable UTF-8; `comparison` was kg-policy for that mechanical reason and is `emacs` now that the reason is gone. fe/test_api.c pins the ASCII text this side renders.",
    "source_name": null
   },
   {
