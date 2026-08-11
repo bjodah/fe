@@ -156,6 +156,16 @@ typedef enum Primitive {
   PPut,
   PGet,
   PSymbolPlist,
+  // Phase 19 of kg's Emacs-subset program: `error-message-string`, Emacs'
+  // rendering of an ERROR object `(SYMBOL . DATA)` into the sentence a
+  // handler prints. An ordinary unary function -- its operand is evaluated
+  // and it touches no evaluator state -- so it rides the unary frame beside
+  // `keywordp`. The text it starts from is the condition symbol's
+  // `error-message` PROPERTY, seeded on the hierarchy's symbols when the
+  // context opens, which is why a program can `put` its own over one; the
+  // rendering rule is `ConditionMessageText`'s, in fe.c beside the writer it
+  // spends.
+  PErrorMessageString,
   PSentinel
 } Primitive;
 
@@ -1029,6 +1039,36 @@ size_t RenderObject(FeContext* ctx,
                     char* dst,
                     size_t size,
                     int qt);
+
+// The standard condition hierarchy: one row per condition symbol, holding
+// the name, the name of the condition it is a subtype of (null for a root)
+// and the text of its `error-message` property. The table itself stays in
+// fe_eval.c, where the handler search walks it; what fe.c needs from it is
+// the ability to walk every row once at context open -- to seed the
+// properties, and to count what that seeding allocates for
+// `FeMinimumArenaSize` -- and to ask whether a condition is a `file-error`,
+// which is the one class Emacs' rendering treats differently.
+// `ConditionRowAt` answers null past the last row, so a caller loops without
+// knowing the count.
+typedef struct ConditionParent {
+  const char* name;
+  const char* parent;
+  const char* message;
+} ConditionParent;
+const ConditionParent* ConditionRowAt(size_t index);
+bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor);
+// Emacs' `error-message-string` rendering of the ERROR object `error`,
+// written into `dst` (always NUL-terminated) and never allocating: both its
+// callers -- the primitive, and `FeErrorMessageString` on the host's error
+// path -- need a rendering that cannot itself fail for want of arena.
+// Defined in fe.c beside the writer it spends.
+size_t RenderErrorMessage(FeContext* ctx,
+                          FeObject* error,
+                          char* dst,
+                          size_t size);
+// The `error-message` property text seeded on every hierarchy symbol at
+// context open. Defined in fe.c; called from `OpenContext`.
+void SeedConditionMessages(FeContext* ctx);
 [[noreturn]] void RaiseCondition(FeContext* ctx,
                                  FeCompletion kind,
                                  const char* name,

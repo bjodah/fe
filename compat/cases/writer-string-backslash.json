@@ -1,0 +1,5 @@
+{
+ "id": "writer-string-backslash",
+ "expr": "(list \"x\\\\y\" \"a\\\"b\" \"plain\")",
+ "note": "Phase 19 took doc/TODO.md's recorded writer row while it was in the printer for `error-message-string`: `prin1` escapes the backslash as well as the quote, so a printed string reads back as itself. Before this the list printed as `(x\\y \"a\\\"b\" plain)` -- unescaped, unquoted and not re-readable."
+}

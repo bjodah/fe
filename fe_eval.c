@@ -107,20 +107,24 @@ static bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value);
                                          FeCompletion kind,
                                          const char* msg);
 
-typedef struct ConditionParent {
-  const char* name;
-  const char* parent;
-} ConditionParent;
-
+// The third column is Phase 19's `error-message` property text, seeded onto
+// each symbol when the context opens (`SeedConditionMessages`) and read back
+// by `error-message-string`. Every text down to `no-catch` is Emacs
+// 31.0.90's own `(get SYMBOL 'error-message)`, measured rather than
+// composed -- including the apostrophes in the two `Symbol's ...` messages,
+// which are ASCII in the property and which Emacs curls only when it
+// RENDERS one (`text-quoting-style`, which fe does not have; recorded as a
+// divergence rather than pre-curled here). The last two are fe's own
+// conditions and have no Emacs counterpart, so their text is fe policy.
 static const ConditionParent condition_parents[] = {
-    {"error", nullptr},
-    {"wrong-type-argument", "error"},
-    {"wrong-number-of-arguments", "error"},
-    {"void-variable", "error"},
-    {"void-function", "error"},
-    {"args-out-of-range", "error"},
-    {"arith-error", "error"},
-    {"file-error", "error"},
+    {"error", nullptr, "error"},
+    {"wrong-type-argument", "error", "Wrong type argument"},
+    {"wrong-number-of-arguments", "error", "Wrong number of arguments"},
+    {"void-variable", "error", "Symbol's value as variable is void"},
+    {"void-function", "error", "Symbol's function definition is void"},
+    {"args-out-of-range", "error", "Args out of range"},
+    {"arith-error", "error", "Arithmetic error"},
+    {"file-error", "error", "File error"},
     // Sub-plan 12C Part 1. Emacs' own chain, measured on 31.0.90: `(get
     // 'file-missing 'error-conditions)` is `(file-missing file-error error)`
     // and `(get 'file-error 'error-conditions)` is `(file-error error)`. It
@@ -131,19 +135,31 @@ static const ConditionParent condition_parents[] = {
     // for a missing file (sub-plan 12D); here it earns its place by making
     // `(signal 'file-missing ...)` legal at all, since `IsConditionSymbol`
     // gates `signal` on this table.
-    {"file-missing", "file-error"},
-    {"cyclic-function-indirection", "error"},
-    {"invalid-function", "error"},
-    {"setting-constant", "error"},
-    {"no-catch", "error"},
-    {"evaluation-stack-exhaustion", "error"},
-    {"arena-exhaustion", "error"},
+    {"file-missing", "file-error", "File is missing"},
+    {"cyclic-function-indirection", "error",
+     "Symbol's chain of function indirections contains a loop"},
+    {"invalid-function", "error", "Invalid function"},
+    {"setting-constant", "error", "Attempt to set a constant symbol"},
+    {"no-catch", "error", "No catch for tag"},
+    {"evaluation-stack-exhaustion", "error", "Evaluation stack exhausted"},
+    {"arena-exhaustion", "error", "Arena exhausted"},
+    // `quit` is a root of its own, as it is in Emacs -- `(get 'quit
+    // 'error-conditions)` is `(quit)` there, so `error` does not catch it --
+    // and it is here only for its name and its message: `ConditionMatches`
+    // decides a quit by the completion KIND before it reads the condition
+    // object at all, so this row is never on that path. Phase 19 added it;
+    // before that `IsConditionSymbol` named quit in an `if` of its own,
+    // which is what this row replaces.
+    {"quit", nullptr, "Quit"},
 };
 
+const ConditionParent* ConditionRowAt(size_t index) {
+  return index < sizeof(condition_parents) / sizeof(condition_parents[0])
+             ? &condition_parents[index]
+             : nullptr;
+}
+
 static bool IsConditionSymbol(const FeObject* symbol) {
-  if (IsNamedSymbol(symbol, "quit")) {
-    return true;
-  }
   for (size_t i = 0;
        i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
     if (IsNamedSymbol(symbol, condition_parents[i].name)) {
@@ -171,6 +187,21 @@ static const ConditionParent* FindConditionParentByName(const char* name) {
     }
   }
   return nullptr;
+}
+
+// Whether SYMBOL is ANCESTOR or a subtype of it, walking the same chain
+// `ConditionMatches` walks. Phase 19's renderer asks it one question --
+// "is this a `file-error`?" -- because that class alone takes its message
+// from the DATA rather than from the property, and prints its items with
+// `princ` rather than `prin1`.
+bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor) {
+  for (const ConditionParent* entry = FindConditionParent(symbol);
+       entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
+    if (strcmp(entry->name, ancestor) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static bool ConditionMatches(const FeObject* condition,
@@ -1940,6 +1971,11 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     // own arity, exactly one.
     [PMarkSpecial] = {2, 2},
     [PSpecialVariableP] = {1, 1},
+    // Phase 19: `(error-message-string ERROR)`, Emacs' own arity -- measured
+    // on the pinned 31.0.90, `(error-message-string)` and
+    // `(error-message-string '(error "a") 'extra)` are both
+    // `wrong-number-of-arguments`.
+    [PErrorMessageString] = {1, 1},
     // Sub-plan 12B: `(eval FORM &optional LEXICAL)`, Emacs' own arity --
     // measured on the pinned 31.0.90, `(eval)` is
     // `(wrong-number-of-arguments eval 0)` and `(eval '(+ 1 2) nil 'extra)`
@@ -2241,6 +2277,10 @@ static bool DispatchPrimitive(FeContext* ctx,
     case PIntegerp:
     case PFloatp:
     case PKeywordp:
+    // `error-message-string` (Phase 19): arity-exact, one evaluated operand,
+    // and no evaluator state touched -- the unary frame is the whole of its
+    // routing.
+    case PErrorMessageString:
     // `special-variable-p` (11B): arity-exact like `boundp` above, and it
     // answers the *special* flag alone, so a symbol marked by a one-arg
     // `defvar` answers nil while still binding dynamically -- the measured
@@ -2877,6 +2917,22 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       FeRequireNoArguments(ctx, frame->rest);
       *result = FeMakeBool(ctx, IsKeywordSymbol(value));
       break;
+    // `error-message-string` (Phase 19). The type check is Emacs' own: it
+    // takes the ERROR object apart with `car`/`cdr`, so a non-list is
+    // `(wrong-type-argument listp X)` there, measured, rather than a
+    // message about a condition. The buffer is this arm's own frame, sized
+    // like the one `error`'s formatter above uses, and the rendering never
+    // allocates -- only the string built from it does.
+    case PErrorMessageString: {
+      FeRequireNoArguments(ctx, frame->rest);
+      char message[1024];
+      if (!FeIsNil(value) && FeGetType(value) != FeTPair) {
+        RaiseWrongType(ctx, "listp", value);
+      }
+      (void)RenderErrorMessage(ctx, value, message, sizeof(message));
+      *result = FeMakeString(ctx, message);
+      break;
+    }
     // `special-variable-p` (11B) reads the *special* flag and nothing else,
     // so a symbol marked by a one-arg `defvar` answers nil here while still
     // binding dynamically -- the measured A7a/A7b pair. The constants are
@@ -3338,6 +3394,11 @@ static const bool primitive_is_function[PSentinel] = {
     [PPut] = true,
     [PGet] = true,
     [PSymbolPlist] = true,
+    // Phase 19: `error-message-string` is an ordinary function in Emacs too
+    // -- `(special-form-p 'error-message-string)` is nil there and
+    // `(mapcar 'error-message-string '((error "a")))` works -- and its arm
+    // evaluates its one operand on the unary frame beside `keywordp`.
+    [PErrorMessageString] = true,
     // Phase 13: all three are ordinary functions in Emacs -- `(special-form-p
     // 'signal)`, `'error` and `'keywordp` are all nil there, and
     // `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and

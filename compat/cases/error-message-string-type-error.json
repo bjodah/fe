@@ -1,0 +1,5 @@
+{
+ "id": "error-message-string-type-error",
+ "expr": "(condition-case e (error-message-string 5) (error e))",
+ "note": "Phase 19: `error-message-string` takes its argument apart with `car`/`cdr`, so a non-list is `(wrong-type-argument listp 5)` rather than a message about a condition."
+}

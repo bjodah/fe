@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "13.0";
+const char* FeVersion = "14.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -115,7 +115,8 @@ static const char* primitive_names[] = {
     [PGensym] = "gensym",
     [PPut] = "put",
     [PGet] = "get",
-    [PSymbolPlist] = "symbol-plist"};
+    [PSymbolPlist] = "symbol-plist",
+    [PErrorMessageString] = "error-message-string"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -1068,7 +1069,10 @@ static void EmitSymbolName(Writer* w, FeObject* name) {
   }
   bool escape_first = false;
   if (length <= SymbolNameLimit) {
-    char buf[SymbolNameLimit + 1];
+    // Zero-initialized so the first-byte tests below read a defined byte
+    // even to an analyzer that cannot see `CopyStoredStringBytes` filling
+    // it: `length` is nonzero here, so it always does.
+    char buf[SymbolNameLimit + 1] = "";
     (void)CopyStoredStringBytes(name, buf);
     buf[length] = '\0';
     escape_first = IsConfusingSymbolName(buf);
@@ -1088,13 +1092,23 @@ static void EmitSymbolName(Writer* w, FeObject* name) {
 }
 
 // A string or a symbol's name. Never recurses: the cells are a cdr chain.
+//
+// The two bytes `prin1` escapes inside a string are the two the reader would
+// otherwise take for itself: the closing quote, and the backslash that
+// introduces an escape. Escaping only the quote (which is what this did
+// until Phase 19) left `(prin1 "x\\y")` printing `"x\y"`, which reads back
+// as `"xy"` -- the one printed form in fe that was not re-readable once
+// Phase 14 made backslashes ordinary bytes rather than a read error.
+// Nothing else is escaped, Emacs included: a newline inside a string prints
+// as a newline there too.
 static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
   if (qt) {
     Emit(w, '"');
   }
   while (!FeIsNil(obj)) {
     for (size_t i = 0; i < StringBufferSize && STRING_BUFFER(obj)[i]; i++) {
-      if (qt && STRING_BUFFER(obj)[i] == '"') {
+      if (qt &&
+          (STRING_BUFFER(obj)[i] == '"' || STRING_BUFFER(obj)[i] == '\\')) {
         Emit(w, '\\');
       }
       Emit(w, STRING_BUFFER(obj)[i]);
@@ -2884,6 +2898,189 @@ FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
   return result;
 }
 
+static const char ArenaExhaustionName[] = "arena-exhaustion";
+static const char EvaluationStackExhaustionName[] =
+    "evaluation-stack-exhaustion";
+
+// The names `OpenContext` interns before Phase 19's seeding runs: every
+// primitive, its aliases, and the maths natives. The seeding asks, because
+// `error` is both a condition and a primitive and its symbol must be counted
+// once -- `FeMinimumArenaSize` is exact, not an upper bound (the exact-fit
+// arena in `test_api.c` asserts `free_slots == 0` at it), so an
+// over-estimate is as wrong here as an under-estimate.
+static const char* const math_names[] = {
+    "sin", "cos", "tan",   "asin",    "acos",  "atan",     "expt", "sqrt",
+    "exp", "log", "floor", "ceiling", "round", "truncate", "pi",   "e",
+};
+
+static bool IsCoreSymbolName(const char* name) {
+  for (Primitive i = PAssert; i < PSentinel; i++) {
+    if (strcmp(name, primitive_names[i]) == 0) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < COUNT(primitive_aliases); i++) {
+    if (strcmp(name, primitive_aliases[i].name) == 0) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < COUNT(math_names); i++) {
+    if (strcmp(name, math_names[i]) == 0) {
+      return true;
+    }
+  }
+  return strcmp(name, "t") == 0 || strcmp(name, ArenaExhaustionName) == 0 ||
+         strcmp(name, EvaluationStackExhaustionName) == 0;
+}
+
+// The name of the property Phase 19's messages live under. One spelling,
+// used by the seeding at context open and by the lookup in the renderer.
+static const char ErrorMessageProperty[] = "error-message";
+
+// Append TEXT, then whatever fits. `used` is always left at a NUL, so the
+// caller's buffer is a valid C string after every step.
+static void AppendMessageText(char* dst,
+                              size_t size,
+                              size_t* used,
+                              const char* text) {
+  for (; *text != '\0' && *used + 1 < size; text++) {
+    dst[(*used)++] = *text;
+  }
+  dst[*used] = '\0';
+}
+
+static void AppendMessageObject(FeContext* ctx,
+                                FeObject* obj,
+                                char* dst,
+                                size_t size,
+                                size_t* used,
+                                int qt) {
+  *used += RenderObject(ctx, obj, dst + *used, size - *used, qt);
+}
+
+// Emacs' `error-message-string`, byte for byte with `print_error_message`
+// (print.c) on 31.0.90, over the ERROR object `(SYMBOL . DATA)`:
+//
+//   * `error` alone takes its message from the DATA's first item, which is
+//     why `(error "boom")` reports `boom` and not the word `error`;
+//   * a `file-error` subtype takes its message from the DATA's first item
+//     too, and prints the remaining items with `princ`, which is what makes
+//     `Cannot open load file: No such file or directory, /nope/x.el` one
+//     sentence of three strings rather than three quoted objects;
+//   * everything else takes the `error-message` PROPERTY of its symbol and
+//     prints its data items with `prin1`;
+//   * a message that is not a string at all is `peculiar error`, and an
+//     EMPTY one drops the `: ` that would otherwise follow it.
+//
+// It allocates nothing and raises nothing: `FeErrorMessageString` renders on
+// the host's error path, where there may be no arena left to allocate from
+// and no frame to raise into. The `*used + 1 < size` bound is also what
+// terminates a circular DATA list -- a cycle costs `size` bytes of work, the
+// rule the writer already lives by -- since the loop cannot make progress
+// once the buffer is full.
+// The message half of the rule above: which object the sentence starts
+// from, with `*data` left at the items that follow it. Split out of the
+// renderer so that neither half is over `PMCCABE_NEW_FUNCTION_MAX`.
+static FeObject* SelectErrorMessage(FeContext* ctx,
+                                    FeObject* symbol,
+                                    FeObject** data,
+                                    bool file_error) {
+  const bool from_data = IsNamedSymbol(symbol, "error") || file_error;
+  if (from_data && FeGetType(*data) == FeTPair) {
+    FeObject* const message = CAR(*data);
+    *data = CDR(*data);
+    return message;
+  }
+  FeObject* const property = FeGetType(symbol) == FeTSymbol
+                                 ? FindInternedSymbol(ctx, ErrorMessageProperty)
+                                 : nullptr;
+  // `error` itself never falls back to its property: Emacs reads its
+  // message out of the data or reports `peculiar error`, and `(get 'error
+  // 'error-message)` -- the string "error" -- is not what it prints.
+  return property == nullptr || IsNamedSymbol(symbol, "error")
+             ? &nil
+             : PlistGet(SymbolPlist(symbol), property);
+}
+
+size_t RenderErrorMessage(FeContext* ctx,
+                          FeObject* error,
+                          char* dst,
+                          size_t size) {
+  if (size == 0) {
+    return 0;
+  }
+  size_t used = 0;
+  dst[0] = '\0';
+  const bool structured = FeGetType(error) == FeTPair;
+  FeObject* const symbol = structured ? CAR(error) : &nil;
+  FeObject* data = structured ? CDR(error) : &nil;
+  const bool file_error = ConditionInheritsFrom(symbol, "file-error");
+  FeObject* const message = SelectErrorMessage(ctx, symbol, &data, file_error);
+  const char* separator = ": ";
+  if (FeGetType(message) != FeTString) {
+    AppendMessageText(dst, size, &used, "peculiar error");
+  } else if (CopyStoredStringBytes(message, nullptr) != 0) {
+    AppendMessageObject(ctx, message, dst, size, &used, 0);
+  } else {
+    separator = nullptr;
+  }
+  while (FeGetType(data) == FeTPair && used + 1 < size) {
+    if (separator != nullptr) {
+      AppendMessageText(dst, size, &used, separator);
+    }
+    separator = ", ";
+    AppendMessageObject(ctx, CAR(data), dst, size, &used, file_error ? 0 : 1);
+    data = CDR(data);
+  }
+  return used;
+}
+
+// `error-message-string` from C (FE_API_VERSION 10), for the one caller a
+// primitive cannot serve: a host's `FeSetErrorFn` callback, which is handed
+// fe's own bare message text and wants Emacs' sentence for the condition
+// `FeGetCondition` is reporting.
+//
+// The step budget is suspended across the render, and this is the reason the
+// two entry points are not one line apart: printing is work, so `RenderObject`
+// charges the budget and polls the host's interrupt, and BOTH of those raise.
+// A raise from inside the error callback would abandon the error being
+// reported for one about the reporting. Inside the primitive the same charge
+// is correct -- that is ordinary evaluation -- so the suspension lives here
+// rather than in `RenderErrorMessage`.
+size_t FeErrorMessageString(FeContext* ctx,
+                            FeObject* error,
+                            char* dst,
+                            size_t size) {
+  const bool active = ctx->evaluation_active;
+  ctx->evaluation_active = false;
+  const size_t used = RenderErrorMessage(ctx, error, dst, size);
+  ctx->evaluation_active = active;
+  return used;
+}
+
+// The `error-message` property of every condition in the hierarchy, seeded
+// once while the arena is still empty. Seeded rather than looked up in the
+// C table on demand, because Emacs' properties are real -- `(get
+// 'wrong-type-argument 'error-message)` answers there -- and because it
+// gives a program one way to override a message (`put`) instead of none.
+// The cost is counted in `GetCoreObjectCount` below, so a context opened at
+// `FeMinimumArenaSize` can still do this.
+//
+// `FeMakeSymbol` interns on `ctx->symbol_list`, itself a mark root, so each
+// symbol is rooted before the string beside it is allocated; the GC stack
+// carries the string and the first pair across the second allocation.
+void SeedConditionMessages(FeContext* ctx) {
+  FeObject* const property = FeMakeSymbol(ctx, ErrorMessageProperty);
+  for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
+    const ConditionParent* const row = ConditionRowAt(i);
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const symbol = FeMakeSymbol(ctx, row->name);
+    FeObject* const text = FeMakeString(ctx, row->message);
+    SetSymbolPlist(symbol, FeCons(ctx, property, FeCons(ctx, text, &nil)));
+    FeRestoreGC(ctx, gc);
+  }
+}
+
 static size_t GetSymbolObjectCount(const char* name) {
   // A symbol object plus its one `((name . plist) . function) . value` cons
   // chain: the symbol, the name string cells, the extra pair the 04B
@@ -2892,6 +3089,28 @@ static size_t GetSymbolObjectCount(const char* name) {
   const size_t length = strlen(name);
   assert(length > 0);
   return 6 + (length - 1) / StringBufferSize;
+}
+
+// A string's cells: `StringBufferSize` bytes each, and one cell even for the
+// empty string.
+static size_t GetStringObjectCount(const char* text) {
+  const size_t length = strlen(text);
+  return 1 + (length == 0 ? 0 : (length - 1) / StringBufferSize);
+}
+
+// What `SeedConditionMessages` allocates: the shared property symbol, and
+// per row a message string, the two pairs of the plist, and the condition
+// symbol unless one of the tables above already interned it.
+static size_t GetConditionMessageObjectCount(void) {
+  size_t count = GetSymbolObjectCount(ErrorMessageProperty);
+  for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
+    const ConditionParent* const row = ConditionRowAt(i);
+    count += GetStringObjectCount(row->message) + 2;
+    if (!IsCoreSymbolName(row->name)) {
+      count += GetSymbolObjectCount(row->name);
+    }
+  }
+  return count;
 }
 
 static FeObject* native_sin(FeContext* ctx, FeObject* arg) {
@@ -3089,15 +3308,8 @@ static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
 // cannot allocate (sub-plan 09B). Both are already rows of `fe_eval.c`'s
 // static hierarchy with `error` as their parent, which is what makes
 // `(condition-case e BIG (error ...))` catch them.
-static const char ArenaExhaustionName[] = "arena-exhaustion";
-static const char EvaluationStackExhaustionName[] =
-    "evaluation-stack-exhaustion";
 
 static size_t GetCoreObjectCount(void) {
-  static const char* math_names[] = {
-      "sin", "cos", "tan",   "asin",    "acos",  "atan",     "expt", "sqrt",
-      "exp", "log", "floor", "ceiling", "round", "truncate", "pi",   "e",
-  };
   size_t count = GetSymbolObjectCount("t");
   for (Primitive i = PAssert; i < PSentinel; i++) {
     count += 1 + GetSymbolObjectCount(primitive_names[i]);
@@ -3114,6 +3326,8 @@ static size_t GetCoreObjectCount(void) {
   // minimum must still be able to build them.
   count += 1 + GetSymbolObjectCount(ArenaExhaustionName);
   count += 1 + GetSymbolObjectCount(EvaluationStackExhaustionName);
+  // Phase 19's seeded `error-message` properties, for the same reason.
+  count += GetConditionMessageObjectCount();
   return count;
 }
 
@@ -3253,6 +3467,12 @@ static FeContext* OpenContext(void* arena, size_t size) {
       FeMakeSymbol(ctx, EvaluationStackExhaustionName);
   ctx->evaluation_stack_exhaustion_condition =
       FeCons(ctx, ctx->evaluation_stack_exhaustion_name, &nil);
+
+  // Phase 19: the condition hierarchy's `error-message` properties. Here,
+  // while the arena is still empty, for the same reason the two conditions
+  // above are: what a raise renders with cannot depend on there being room
+  // to build it at the time of the raise.
+  SeedConditionMessages(ctx);
 
   // Register the built-in primitives (sub-plan 04D's cut): every callable --
   // the primitives, the `fn` alias, and the math natives registered through

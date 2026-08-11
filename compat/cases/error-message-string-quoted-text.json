@@ -1,0 +1,5 @@
+{
+ "id": "error-message-string-quoted-text",
+ "expr": "(let ((text-quoting-style 'grave)) (list (error-message-string '(void-variable foo)) (error-message-string '(void-function bar)) (error-message-string '(cyclic-function-indirection f))))",
+ "note": "Phase 19: the three hierarchy messages containing an apostrophe. Emacs applies `substitute-quotes` to the `error-message` property when it renders, so by default it answers `Symbol\u2019s value ...` with a curly quote; fe has no `text-quoting-style` and prints the property as stored, which is ASCII on both sides. The `let` asks Emacs for the untransformed text -- in fe the name is not special, so the binding is an inert lexical one and the expression means the same thing. The divergence the binding papers over is recorded as its own feature row (`error-message-quoting-style`), not hidden here."
+}

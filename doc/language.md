@@ -67,6 +67,14 @@ and the next byte is not an ASCII letter (`\.` and `\..`, but `.emacs`).
 Everything else prints bare. The rule was measured byte for byte on Emacs
 31.0.90; `compat/cases/writer-symbol-escapes` carries the snapshot.
 
+It is the reader's inverse for strings too: `prin1` escapes the two bytes the
+reader would otherwise take for itself, the closing quote and the backslash,
+so `(list "x\\y")` prints `("x\\y")` and reads back as the same string.
+Nothing else is escaped -- a newline inside a string prints as a newline,
+which is Emacs' answer as well. Until FE_LANGUAGE_VERSION 13 only the quote
+was escaped, and a string containing a backslash was the one printed form
+here that did not read back.
+
 Every one of these is recorded in `compat/features.json`, with the measured
 Emacs answer checked in beside it under `compat/oracle/`.
 
@@ -1667,6 +1675,40 @@ fe > (condition-case e (signal 'arith-error '(7)) (error e))
 fe > (condition-case nil (signal 'quit nil) (quit 'stopped))
 stopped
 ```
+
+#### `(error-message-string error)`
+
+Renders a condition object -- the `(SYMBOL . DATA)` cons a handler is
+handed -- as the sentence Emacs would print for it. Every condition symbol
+carries Emacs' own `error-message` property, seeded when the context opens,
+so `(get 'wrong-type-argument 'error-message)` is `"Wrong type argument"`
+and a program can replace one with `put`.
+
+```clojure
+fe > (error-message-string '(wrong-type-argument listp 6))
+Wrong type argument: listp, 6
+fe > (error-message-string '(error "custom msg"))
+custom msg
+fe > (condition-case e (car 6) (error (error-message-string e)))
+Wrong type argument: listp, 6
+```
+
+The rule is Emacs' own, and its three cases are worth knowing. An `error`
+takes its message from the DATA rather than from the property, which is why
+the second line above says `custom msg` and not `error`. A `file-error`
+subtype takes its message from the DATA too and prints the remaining items
+with `princ`, which is what makes `(file-missing "Cannot open load file"
+"No such file or directory" "/nope/x.el")` render as one sentence rather
+than as three quoted strings. Everything else takes the property and prints
+its items with `prin1`. A message that is not a string at all renders
+`peculiar error`, and an empty one drops the separator that would follow it.
+A non-list argument is `(wrong-type-argument listp X)`, as it is in Emacs.
+
+One difference from Emacs, and it is only in the rendering: Emacs passes the
+property through `substitute-quotes`, so under the default
+`text-quoting-style` its three messages containing an apostrophe come out
+curled (`Symbol’s value as variable is void`). The property is ASCII on both
+sides; Fe has no `text-quoting-style` and prints it as stored.
 
 #### Math functions
 

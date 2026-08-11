@@ -38,15 +38,17 @@ when the grammar moves.
   `(cons a b)` produced a pair with a freed cdr, which the writer then hit
   as `FeTFree` and aborted on. Latent while every completed sub-expression's
   result also sat on the GC stack; live once those per-level pushes were
-  removed. Needs the 64 KiB harness arena -- a roomier one collects too
-  rarely to land on that exact allocation.
+  removed. Needs the harness arena's small FREE portion -- a roomier one
+  collects too rarely to land on that exact allocation. That portion, not the
+  arena's nominal size, is what Phase 19 held constant when it raised
+  `FuzzArenaSize` 64 -> 68 KiB (see `fuzz/fuzz_support.h`).
 - `funcall-apply-redispatch` -- not a crash reproduction but the durable
   half of sub-plan 04C's fuzz gate: allocation-heavy forms interleaved with
   the four funcall/apply redispatch shapes (direct closure, `cons` symbol
   designator through the function cell, and the same two under `apply`'s
   spread). The corpus is gitignored and regenerated, so without a tracked
   seed a fresh checkout's `make fuzz-eval-smoke` would not necessarily fill
-  the 64 KiB arena while a redispatch is mid-flight; this file forces that
+  the harness arena while a redispatch is mid-flight; this file forces that
   exact boundary on every smoke run. The redispatch roots its evaluated
   operand buffer in the EvalList frame's `accumulator` and the relay frame's
   fields -- the 04C instance of the class 03F's `cons-second-operand-gc`

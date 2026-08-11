@@ -1,0 +1,62 @@
+;; Phase 19 of kg's Emacs-subset program: `error-message-string`, and the
+;; `error-message` property it reads.  Every line printed below was measured
+;; on Emacs 31.0.90 first -- `(error-message-string ERROR)` for the same
+;; object -- so the golden beside this script is Emacs' own text, not fe's
+;; idea of it.
+;;
+;; The one place fe deliberately answers differently is the two messages
+;; carrying an apostrophe: Emacs CURLS them when it renders (`Symbol’s`,
+;; `text-quoting-style`), while the property itself is ASCII on both sides.
+;; fe has no `text-quoting-style` and prints the property as stored.
+
+;; The properties are real, and seeded when the context opens.
+(print (get 'error 'error-message))
+(print (get 'wrong-type-argument 'error-message))
+(print (get 'file-missing 'error-message))
+(print (get 'quit 'error-message))
+(print (get 'not-a-condition 'error-message))
+
+;; The rendering.  A condition takes its text from the property and prints
+;; its data items with `prin1` ...
+(print (error-message-string '(wrong-type-argument listp 6)))
+(print (error-message-string '(wrong-type-argument stringp "x")))
+(print (error-message-string '(args-out-of-range 1 2)))
+(print (error-message-string '(setting-constant t)))
+(print (error-message-string '(arith-error)))
+;; ... `error` takes it from the data instead, which is the case a bare
+;; condition name got most visibly wrong ...
+(print (error-message-string '(error "custom msg")))
+(print (error-message-string '(error "a" "b")))
+;; ... and a `file-error` subtype takes it from the data AND princs the
+;; rest, which is what makes three strings one sentence.
+(print (error-message-string
+        '(file-missing "Cannot open load file" "No such file or directory"
+                       "/nope/x.el")))
+(print (error-message-string '(file-error "" "d" "p")))
+
+;; No message at all is Emacs' `peculiar error`, with the data still after
+;; it.
+(print (error-message-string nil))
+(print (error-message-string '(error)))
+(print (error-message-string '(nosuchcondition 1)))
+
+;; The object is taken apart with `car`/`cdr`, so a non-list is a `listp`
+;; type error rather than a message about a condition.
+(assert-equals '(wrong-type-argument listp 5)
+               (condition-case e (error-message-string 5) (error e)))
+
+;; It is an ordinary function: every operand evaluates, and `funcall`
+;; reaches it.
+(print (funcall 'error-message-string '(error "z")))
+
+;; The property is data, so a program can replace one -- which is the reason
+;; the messages live on the symbols rather than in a table only C can read.
+(put 'arith-error 'error-message "Bad sums")
+(print (error-message-string '(arith-error)))
+
+;; The writer escapes a backslash inside a printed string, so what `prin1`
+;; emits reads back as the same string.  Phase 19 fixed this; before it,
+;; `(print (list "x\\y"))` printed `(x\y)`, which reads as `xy`.
+(print (list "x\\y"))
+(print (list "a\"b"))
+(assert-equals "x\\y" (car (list "x\\y")))

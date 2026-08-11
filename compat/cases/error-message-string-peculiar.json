@@ -1,0 +1,5 @@
+{
+ "id": "error-message-string-peculiar",
+ "expr": "(list (error-message-string nil) (error-message-string '(nosuchcondition 1)))",
+ "note": "Phase 19: an object with no message to find renders Emacs' `peculiar error`, and the data items still follow it."
+}

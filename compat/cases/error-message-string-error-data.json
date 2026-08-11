@@ -1,0 +1,5 @@
+{
+ "id": "error-message-string-error-data",
+ "expr": "(list (error-message-string '(error \"custom msg\")) (error-message-string '(error \"a\" \"b\")) (error-message-string '(error)) (error-message-string '(error 5)))",
+ "note": "Phase 19: `error` alone takes its message from the DATA rather than from the property, which is why `(error \"custom msg\")` reports the message and not the word `error`. A message that is not a string at all is Emacs' `peculiar error`."
+}

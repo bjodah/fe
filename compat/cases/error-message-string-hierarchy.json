@@ -1,0 +1,5 @@
+{
+ "id": "error-message-string-hierarchy",
+ "expr": "(list (error-message-string '(error \"boom\")) (error-message-string '(wrong-type-argument listp 6)) (error-message-string '(wrong-number-of-arguments car 3)) (error-message-string '(args-out-of-range 1 2)) (error-message-string '(arith-error)) (error-message-string '(file-error \"op\" \"why\")) (error-message-string '(file-missing \"op\" \"why\" \"/p\")) (error-message-string '(invalid-function f)) (error-message-string '(setting-constant t)) (error-message-string '(no-catch tag 5)) (error-message-string '(quit)))",
+ "note": "Phase 19: the standard condition hierarchy rendered by `error-message-string`, every member whose `error-message` text carries no apostrophe (the three that do are the sibling case, for the reason recorded there). This is the phase's headline: a `signal` used to report the bare condition symbol and now reports Emacs' sentence."
+}

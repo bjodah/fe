@@ -5,7 +5,7 @@
 // only one of them hides the other. `FeVersion` is not asserted here -- it is
 // an extern pointer rather than a constant expression, so it cannot be part
 // of a syntax-only header check; test_api.c asserts its value instead.
-static_assert(FE_API_VERSION == 9);
-static_assert(FE_LANGUAGE_VERSION == 12);
+static_assert(FE_API_VERSION == 10);
+static_assert(FE_LANGUAGE_VERSION == 13);
 
 void TestPublicHeaderCompiles(void);

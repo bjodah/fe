@@ -459,6 +459,22 @@ it looks at the object's shape and an interrupt is not an exhaustion.
 `GetCoreObjectCount()` counts both names and both pairs, so
 `FeMinimumArenaSize()` still describes an arena that can open.
 
+`FeOpenContext()` builds one more thing before any host code runs, for the
+same reason: `SeedConditionMessages()` writes Emacs' `error-message` property
+onto every symbol in the static hierarchy, so the sentence
+`error-message-string` renders for a condition does not depend on there being
+arena left at the time of the raise. The property lives on the symbol rather
+than in the C table the renderer could have read directly because it is data
+a program can replace with `put`, and because `(get 'wrong-type-argument
+'error-message)` answers on Emacs. `GetConditionMessageObjectCount()` counts
+what the seeding allocates -- the shared property symbol, and per row a
+message string, two plist pairs, and the condition symbol unless the
+primitive/alias/maths tables already interned it. That last exclusion is
+`IsCoreSymbolName()`, and it exists because `FeMinimumArenaSize()` is EXACT
+rather than an upper bound: `test_api.c` opens a context at exactly that size
+and asserts `free_slots == 0`, so counting `error` twice would fail the
+assertion as surely as not counting it at all.
+
 Both objects are shared, and a handler receives the object itself, so
 `setcar`/`setcdr` on a caught condition would otherwise change what every
 later exhaustion signals -- for the rest of the context's life, since these

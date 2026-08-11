@@ -1,0 +1,5 @@
+{
+ "id": "error-message-property",
+ "expr": "(list (get 'error 'error-message) (get 'wrong-type-argument 'error-message) (get 'args-out-of-range 'error-message) (get 'file-missing 'error-message) (get 'quit 'error-message) (get 'void-variable 'error-message) (get 'kg-not-a-condition 'error-message))",
+ "note": "Phase 19: the properties are real and seeded on the hierarchy's symbols when the context opens, so `get` answers for them as it does on Emacs -- including the ASCII apostrophe in `Symbol's value as variable is void`, which Emacs curls only when it RENDERS the message. A symbol that is not a condition has no such property on either side."
+}

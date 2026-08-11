@@ -91,7 +91,16 @@
 // raise, for a two-word load. Both are cell accessors in the shape
 // `FeSet`/`FeIsBound` already have: the GLOBAL binding, never an
 // environment entry.
-#define FE_API_VERSION 9
+//
+// Version 10 (Phase 19) adds one declaration, `FeErrorMessageString`: Emacs'
+// `error-message-string` rendering of a condition object, written into the
+// caller's buffer. It exists for the one caller the Lisp primitive of the
+// same name cannot serve -- a host's `FeSetErrorFn` callback, which is
+// handed fe's own bare text and wants the sentence. It allocates nothing,
+// raises nothing, and suspends the step budget across the render, because
+// everything it might otherwise charge for happens while an error is
+// already being reported.
+#define FE_API_VERSION 10
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -219,7 +228,18 @@
 // a keyword: `keywordp` now asks whether the interner self-bound it, which
 // is what makes `(keywordp (make-symbol ":a"))` nil as it is on Emacs.
 // `FE_API_VERSION` stays at 8: no declaration in this header changed.
-#define FE_LANGUAGE_VERSION 12
+// Version 13 (Phase 19) is Emacs' error RENDERING, and it is a break in two
+// directions.  `error-message-string` is a new name that answered
+// `void-function`; every condition symbol in the standard hierarchy now
+// carries the `error-message` property Emacs gives it, so `(get
+// 'wrong-type-argument 'error-message)` answers "Wrong type argument" where
+// it answered nil, and a `signal` of that condition reports `Wrong type
+// argument: listp, 6` instead of the bare symbol.  And the writer now
+// escapes a backslash inside a printed string, so `(format "%S" "a\\b")` is
+// `"a\\b"` where it was `"a\b"` -- the last printed form that did not read
+// back.  `FE_API_VERSION` moves to 10 in the same slice for
+// `FeErrorMessageString`, the C half of the first of those.
+#define FE_LANGUAGE_VERSION 13
 
 extern const char* FeVersion;
 
@@ -658,6 +678,23 @@ void FeLeaveInputUnit(FeContext* ctx, const FeInputUnit* enclosing);
                                 FeObject* obj,
                                 char* dst,
                                 size_t size);
+// Emacs' `error-message-string` of an ERROR object `(SYMBOL . DATA)` -- the
+// same rendering the Lisp primitive of that name performs -- written into
+// `dst` and always NUL-terminated, with the number of bytes written
+// returned. `FeGetCondition`'s object is what a host passes: inside an
+// `FeSetErrorFn` callback this turns fe's bare `wrong-type-argument` text
+// into `Wrong type argument: listp, 6`.
+//
+// It allocates nothing, raises nothing, and does not charge the step budget
+// or poll the interrupt, so it is safe on the error path where a raise
+// cannot be delivered and the arena may be exhausted. Output beyond `size`
+// is dropped; a circular DATA list costs `size` bytes of work, the bound the
+// writer already lives by. A zero `size` renders nothing and writes nothing,
+// so `dst` may be null only then.
+[[nodiscard]] size_t FeErrorMessageString(FeContext* ctx,
+                                          FeObject* error,
+                                          char* dst,
+                                          size_t size);
 [[nodiscard]] size_t FeStringByteLength(FeContext* ctx, const FeObject* obj);
 [[nodiscard]] bool FeCopyStringBytes(FeContext* ctx,
                                      const FeObject* obj,

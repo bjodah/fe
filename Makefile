@@ -444,7 +444,36 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # "FAIL: total complexity 808 exceeds limit 807" and exits 2, and at 808 it
 # passes; at 510 it reports "FAIL: 1 file(s) exceed per-file limit 510" and
 # exits 2.
-SCC_COMPLEXITY_MAX ?= 832
+#
+# Set 832 -> 840 at Phase 19 (2026-08-11), pre-pin: that IS the measured
+# actual after the phase's whole fe workstream -- `error-message-string` and
+# its C entry point, the `error-message` properties seeded at context open,
+# and the writer's backslash escape. No raise-then-spend cycle this time:
+# the phase is small enough that its cost was measured directly and the cap
+# set to it, which is what every close in this file does anyway.
+#
+# The +8, by file: fe_eval.c 511 -> 519 (`ConditionRowAt` and
+# `ConditionInheritsFrom` beside the table, the `error-message-string`
+# dispatch and resume arms, and the quit row's `if` REMOVED from
+# `IsConditionSymbol`), fe.c 176 unchanged as scc counts it -- and that last
+# figure is the undercount this file has warned about since 03A, since the
+# renderer, the seeding and the arena accounting are all in fe.c and all
+# below its '"' character literal. `PMCCABE_TOTAL_MAX` moved +45 and is the
+# authoritative measure; read the two together and believe that one.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does NOT move, and the warning it has carried
+# since 12A now has ONE point of slack behind it rather than nine:
+# fe_eval.c is at 519 of 520. The Makefile-named second seam split
+# (`fe_eval.c`'s completion/cleanup machinery, lines 230-700) is not
+# optional headroom any more -- the next slice that adds a branch to that
+# file has to do it first.
+#
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire, exit status checked: at 839 `make complexity-check` reports
+# "FAIL: total complexity 840 exceeds limit 839" and exits 2, and at 840 it
+# passes; at 518 it reports "FAIL: 1 file(s) exceed per-file limit 518" and
+# exits 2, the one file being fe_eval.c at 519.
+SCC_COMPLEXITY_MAX ?= 840
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -740,7 +769,44 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1146 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 1
 # function(s) exceed complexity limit 14" and exits 2, the one function being
 # `RunEvaluationLoop` at 15.
-PMCCABE_TOTAL_MAX ?= 1213
+#
+# Set 1213 -> 1258 at Phase 19 (2026-08-11), pre-pin: the measured actual,
+# 1258 across 399 symbols, and the authoritative core measure, so this is
+# the number that says what the phase cost. Eleven symbols added, none over
+# `PMCCABE_NEW_FUNCTION_MAX`, and two existing entries moved:
+#
+#   +10  fe.c:RenderErrorMessage             Emacs' print_error_message rule
+#    +9  fe.c:IsCoreSymbolName               exact minimum-arena accounting
+#    +7  fe.c:SelectErrorMessage             which object the sentence starts from
+#    +3  fe.c:AppendMessageText              bounded append
+#    +3  fe.c:GetConditionMessageObjectCount what the seeding allocates
+#    +3  fe_eval.c:ConditionInheritsFrom     "is this a file-error?"
+#    +2  fe.c:SeedConditionMessages          the seeding loop
+#    +2  fe.c:GetStringObjectCount           string cells for a C string
+#    +2  fe_eval.c:ConditionRowAt            the table's one accessor
+#    +1  fe.c:AppendMessageObject            bounded append of an object
+#    +1  fe.c:FeErrorMessageString           the C entry point
+#    +1  fe.c:EmitStoredString       8 -> 9  the backslash escape
+#    +2  fe_eval.c:ResumeUnary       8 -> 10 the new arm
+#    -1  fe_eval.c:IsConditionSymbol 4 -> 3  the quit `if` became a table row
+#
+# `RenderErrorMessage` arrived at 16, one over `PMCCABE_NEW_FUNCTION_MAX`,
+# and `SelectErrorMessage` is the split that fixed it rather than a raise:
+# choosing the message is a question with its own answer and the two halves
+# read better apart. `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and
+# `PMCCABE_NEW_FUNCTION_MAX` at 15; the worst function in the tree is still
+# `RunEvaluationLoop` at 15 (with `ResumeEvalList` beside it, also 15),
+# both unmoved by this phase. The two per-symbol
+# regressions are banked with `PMCCABE_BASELINE_ARGS=--allow-regressions`,
+# which is the only way to bank one, and are listed above rather than
+# absorbed silently.
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1257 `make pmccabe-check` reports "FAIL:
+# total complexity 1258 exceeds funded budget 1257 (+1)" and exits 2, and at
+# 1258 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+PMCCABE_TOTAL_MAX ?= 1258
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

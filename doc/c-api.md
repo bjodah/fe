@@ -14,11 +14,20 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 8 adds the
+types, and callback signatures declared in `fe.h`; API version 10 adds
+`FeErrorMessageString`, Emacs' rendering of a condition object into a
+caller-owned buffer; API version 9 added the value-cell readers
+`FeGetValue`/`FeMakeUnbound`; API version 8 adds the
 input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
 API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+language version 13 is the error-rendering contract (`error-message-string`,
+the `error-message` property on every condition symbol, and a writer that
+escapes a backslash inside a printed string); language version 12 is the
+symbol contract (`intern`, `intern-soft`, `symbol-name`, `make-symbol`,
+`gensym`, `put`, `get`, `symbol-plist`, and the reader and writer escapes
+that make symbol names re-readable);
 language version 11 is the funcall-classification repair (`signal`, `error`
 and `keywordp` are reachable through `funcall`/`apply`, and `FeIsFunction`
 answers true for all three);
@@ -1054,6 +1063,41 @@ it with `FeCreateRoot()`.
 `FeGetCompletionMessage()` returns the completion's fully formatted message
 -- source label and all, the same string `error_fn` is handed. It is valid
 until the next completion in this context.
+
+### Rendering a condition (FE_API_VERSION 10)
+
+```c
+size_t FeErrorMessageString(FeContext* ctx, FeObject* error, char* dst,
+                            size_t size);
+```
+
+fe's own message for a *named* condition is the condition's name and nothing
+else: a raise names the symbol, and the sentence that explains it is Emacs'
+`error-message-string`, not the raise site's. `FeErrorMessageString()` is
+that rendering from C, over the object `FeGetCondition()` reports, so a host
+inside its `error_fn` prints `Wrong type argument: listp, 6` where fe handed
+it `wrong-type-argument`. The Lisp primitive `error-message-string` performs
+the same rendering; this exists for the caller the primitive cannot serve,
+because calling Lisp from inside an error callback is exactly what a host
+must not do.
+
+Everything about it is shaped by where it is called from. It **allocates
+nothing** -- the caller owns the buffer, and output past `size` is dropped
+-- because the arena may be exhausted. It **raises nothing**, and it
+suspends the step budget and the interrupt poll across the render, because
+printing is ordinarily charged work and both of those charges raise. A
+circular `DATA` list costs `size` bytes of work rather than looping, the
+same bound the writer lives by. A zero `size` renders nothing and writes
+nothing, so `dst` may be null only then.
+
+The rendering rule is Emacs' `print_error_message`: an `error` and the
+`file-error` subtypes take their message from the `DATA`, everything else
+from the condition symbol's `error-message` property; data items print with
+`prin1`, except under a `file-error` where they print with `princ`; a
+message that is not a string renders `peculiar error`, and an empty one
+drops the separator that would follow it. The properties are seeded onto the
+hierarchy's symbols when the context opens, so a program can replace one
+with `put`, and `FeMinimumArenaSize()` counts what that seeding costs.
 
 ### Raising a completion from the host
 

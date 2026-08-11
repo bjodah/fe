@@ -51,7 +51,13 @@ the letter the message names. The count is "corpus files whose *first*
 diagnostic was this arm", so it understates: a file that fails earlier for
 another reason hides whatever came after it.
 
-The harness uses a fresh 64 KiB arena for each input. Invalid syntax, excessive
+The harness uses a fresh 68 KiB arena for each input -- 64 KiB until Phase 19,
+raised there to hold the FREE portion at the ~290 object slots it had always
+been, because `FeMinimumArenaSize()` grew by 3248 bytes when the condition
+hierarchy's `error-message` properties started being seeded at context open
+(`fuzz/fuzz_support.h` carries the measurement). What steers this lane is how
+many allocations a generated form gets before the arena raises, not the
+arena's nominal size. Invalid syntax, excessive
 nesting, long symbols, and arena exhaustion are expected Fe errors and recover
 through the normal error-handler path. A sanitizer failure, abort outside that
 path, timeout, or libFuzzer resource-limit failure is a finding.
@@ -142,7 +148,7 @@ seed, so nobody could reproduce them or tell what had changed if they moved.
 The census below is one run of one generator, stated in full, over the
 pre-Phase-9 grammar (`MaxDepth` 4, `BuildExpression` modulus 34) and today's
 (`MaxDepth` 6, modulus 36), with everything else -- fe, the harness, the
-64 KiB arena -- held fixed:
+arena (64 KiB at the time; see above) -- held fixed:
 
 | over 1500 inputs of 16..128 bytes | before (acc94f7) | after (09B + 09C) |
 |---|---|---|
@@ -174,11 +180,14 @@ temporary instrumentation, not tracked code. Anything that changes the
 grammar changes these numbers, and re-running is cheaper than reasoning about
 them: re-measure rather than adjust.
 
-The harness's arena stays 64 KiB deliberately, and is *not* enlarged for this:
-the tracked `cons-second-operand-gc` seed reproduces only at that arena's
+The harness's arena is deliberately small and is *not* enlarged for this: the
+tracked `cons-second-operand-gc` seed reproduces only at that arena's
 collection rate ("a roomier one collects too rarely to land on that exact
 allocation"), and the depth this arm needs comes from its own loop rather than
-from arena size.
+from arena size. Phase 19's 64 -> 68 KiB is not an enlargement in that sense
+and was made for exactly this reason: it holds the free portion constant
+across a growth in `FeMinimumArenaSize()`, and all fifteen tracked seeds --
+`cons-second-operand-gc` included -- still do what they claim afterwards.
 
 The atom pool includes `t`, `:fuzz-keyword`, and the ordinary `:` symbol;
 binding targets independently choose `t`, `nil`, the keyword, or `x`. This

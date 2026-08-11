@@ -1,0 +1,21 @@
+error
+Wrong type argument
+File is missing
+Quit
+nil
+Wrong type argument: listp, 6
+Wrong type argument: stringp, "x"
+Args out of range: 1, 2
+Attempt to set a constant symbol: t
+Arithmetic error
+custom msg
+a: "b"
+Cannot open load file: No such file or directory, /nope/x.el
+d, p
+peculiar error
+peculiar error
+peculiar error: 1
+z
+Bad sums
+("x\\y")
+("a\"b")

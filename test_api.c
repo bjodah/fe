@@ -140,9 +140,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 9);
-  static_assert(FE_LANGUAGE_VERSION == 12);
-  CHECK(strcmp(FeVersion, "13.0") == 0);
+  static_assert(FE_API_VERSION == 10);
+  static_assert(FE_LANGUAGE_VERSION == 13);
+  CHECK(strcmp(FeVersion, "14.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -2028,6 +2028,10 @@ static bool TestValueCellAccessors(void) {
   {
     const size_t gc = FeSaveGC(context);
     state.called = false;
+    // Not a dead store above: `HandleError` reads the previous block's
+    // expectation out of the context's user data when the raise there
+    // fires, which cppcheck cannot see across the callback.
+    // cppcheck-suppress redundantAssignment
     state.expected_message = "setting-constant";
     if (setjmp(state.jump) == 0) {
       FeMakeUnbound(context, FeMakeSymbol(context, "t"));
@@ -4603,6 +4607,133 @@ static bool TestSymbolPrimitives(void) {
                               sizeof(too_long) - 1,
                               "symbols.fe:1: symbol name too long "
                               "(63-byte limit)"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Phase 19's C entry point, exercised the way a host uses it: from inside
+// the error callback, over the condition `FeGetCondition` reports. The
+// rendering is what the host would print instead of fe's own bare text.
+static char rendered_condition[256];
+
+[[noreturn]] static void HandleErrorRendering(
+    // cppcheck-suppress constParameterCallback
+    FeContext* context,
+    const char* message,
+    // cppcheck-suppress constParameterCallback
+    FeObject* stack) {
+  ErrorState* state = FeGetUserData(context);
+  (void)message;
+  (void)stack;
+  (void)FeErrorMessageString(context, FeGetCondition(context),
+                             rendered_condition, sizeof(rendered_condition));
+  state->called = true;
+  longjmp(state->jump, 1);
+}
+
+static bool RendersRaisedCondition(FeContext* context,
+                                   ErrorState* state,
+                                   const char* source,
+                                   const char* expected) {
+  FeContext* const volatile context_v = context;
+  ErrorState* const volatile state_v = state;
+  const size_t volatile gc = FeSaveGC(context);
+  state_v->called = false;
+  rendered_condition[0] = '\0';
+  if (setjmp(state_v->jump) == 0) {
+    (void)FeEvaluateString(context_v, "render.fe", source, strlen(source));
+    CHECK(false);
+  }
+  FeRestoreGC(context_v, gc);
+  CHECK(state_v->called);
+  if (strcmp(rendered_condition, expected) != 0) {
+    fprintf(stderr, "unexpected rendering\n  expected: %s\n  actual:   %s\n",
+            expected, rendered_condition);
+    return false;
+  }
+  return true;
+}
+
+static bool TestErrorMessageString(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                                    \
+  CHECK(IsRendered(                                                            \
+      context, FeEvaluateString(context, "errors.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // The properties are seeded on the hierarchy's symbols, so `get` answers
+  // for them exactly as it does on Emacs -- which is the whole reason they
+  // are seeded rather than kept in the C table the renderer could have read
+  // directly.
+  CHK("(get 'wrong-type-argument 'error-message)", "Wrong type argument");
+  CHK("(get 'error 'error-message)", "error");
+  CHK("(get 'quit 'error-message)", "Quit");
+  CHK("(get 'file-missing 'error-message)", "File is missing");
+
+  // The rendering itself, measured against Emacs 31.0.90 in every case.
+  CHK("(error-message-string '(wrong-type-argument listp 6))",
+      "Wrong type argument: listp, 6");
+  CHK("(error-message-string '(args-out-of-range 1 2))",
+      "Args out of range: 1, 2");
+  CHK("(error-message-string '(void-function bar))",
+      "Symbol's function definition is void: bar");
+  CHK("(error-message-string '(no-catch tag 5))", "No catch for tag: tag, 5");
+  CHK("(error-message-string '(arith-error))", "Arithmetic error");
+  CHK("(error-message-string '(quit))", "Quit");
+  // `error` takes its message from the DATA, not from the property: this is
+  // the case the bare-symbol reporting got most visibly wrong.
+  CHK("(error-message-string '(error \"custom msg\"))", "custom msg");
+  CHK("(error-message-string '(error \"a\" \"b\"))", "a: \"b\"");
+  // A `file-error` subtype takes its message from the DATA too, and princs
+  // the rest, which is what makes this one sentence rather than three
+  // quoted strings.
+  CHK("(error-message-string '(file-missing \"Cannot open load file\" "
+      "\"No such file or directory\" \"/nope/x.el\"))",
+      "Cannot open load file: No such file or directory, /nope/x.el");
+  // An EMPTY message drops the separator that would follow it.
+  CHK("(error-message-string '(file-error \"\" \"d\" \"p\"))", "d, p");
+  // Nothing to say: a message that is not a string at all is Emacs' own
+  // `peculiar error`, and the data items still follow it.
+  CHK("(error-message-string nil)", "peculiar error");
+  CHK("(error-message-string '(error))", "peculiar error");
+  CHK("(error-message-string '(error 5))", "peculiar error");
+  // Non-condition symbols have no property, so they render that way too.
+  CHK("(error-message-string '(nosuchcondition 1))", "peculiar error: 1");
+  // Emacs takes the object apart with `car`/`cdr`, so a non-list is a
+  // `listp` type error rather than a message about a condition.
+  CHK("(condition-case e (error-message-string 5) (error e))",
+      "(wrong-type-argument listp 5)");
+  // An ordinary function: reachable through `funcall` like every other.
+  CHK("(funcall 'error-message-string '(arith-error))", "Arithmetic error");
+  // The property is data, so a program can replace one.
+  CHK("(do (put 'arith-error 'error-message \"Bad sums\") "
+      "(error-message-string '(arith-error)))",
+      "Bad sums");
+
+#undef CHK
+
+  // The C entry point, from inside the error callback: what a host prints
+  // instead of the bare condition name fe hands it.
+  FeSetErrorFn(context, HandleErrorRendering);
+  CHECK(RendersRaisedCondition(context, &state,
+                               "(signal 'wrong-type-argument "
+                               "'(listp 6))",
+                               "Wrong type argument: listp, 6"));
+  CHECK(RendersRaisedCondition(context, &state, "(error \"boom %d\" 7)",
+                               "boom 7"));
+  CHECK(RendersRaisedCondition(context, &state, "(car 1)",
+                               "Wrong type argument: listp, 1"));
+  CHECK(RendersRaisedCondition(context, &state, "(undefined-name)",
+                               "Symbol's function definition is void: "
+                               "undefined-name"));
 
   FeCloseContext(context);
   return true;
@@ -7926,11 +8057,21 @@ static bool TestCaughtExhaustionSession(void) {
 // the minimum counts, which is why the live figure moves further than the
 // total. The collection count and the peak are unchanged for the fourth
 // time, which is the invariance 09C pinned.
+// Re-measured at Phase 19 for the fifth time, and this one moves by what the
+// context now builds before any program runs: one more primitive
+// (`error-message-string`) and the `error-message` property seeded onto the
+// hierarchy's sixteen condition symbols -- the property symbol, and per row a
+// message string and the two plist pairs. The arena grows with
+// `FeMinimumArenaSize()` and holds 203 more slots (15396 -> 15599), of which
+// the same 203 are live after a collection (1225 -> 1428): everything the
+// seeding builds is reachable from the symbol list forever, so it is charged
+// once to both figures. The collection count and the peak are unchanged for
+// the fifth time, which is the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 15396,
+  PinnedTotalSlots = 15599,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15396,
-  PinnedLiveAfterCollection = 1225,
+  PinnedPeakLive = 15599,
+  PinnedLiveAfterCollection = 1428,
 };
 
 // ---------------------------------------------------------------------------
@@ -9310,18 +9451,19 @@ int main(void) {
                  TestNumericEqual() && TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
                  TestEvalPrimitive() && TestSymbolPrimitives() &&
-                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
-                 TestFrameLimits() && TestFrameSubstrate() &&
-                 TestArenaStats() && TestEvaluationStackProbe() &&
-                 TestCallHeadProbe() && TestArgumentFrame() &&
-                 TestArgumentProbe() && TestLambdaBodyFrame() &&
-                 TestLambdaBodyChain() && TestMacroFrame() &&
-                 TestNativeReentry() && TestNativeOwningReentry() &&
-                 TestResumableFrameGC() && TestCleanupRunGC() &&
-                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
-                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
-                 TestGcStackConstantInNesting() && TestLongArgumentLists() &&
-                 TestNativeArityRecord() && TestExhaustionCatchability() &&
+                 TestErrorMessageString() && TestUnwindLisp() &&
+                 TestUnwindCleanupBudget() && TestFrameLimits() &&
+                 TestFrameSubstrate() && TestArenaStats() &&
+                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
+                 TestArgumentFrame() && TestArgumentProbe() &&
+                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
+                 TestMacroFrame() && TestNativeReentry() &&
+                 TestNativeOwningReentry() && TestResumableFrameGC() &&
+                 TestCleanupRunGC() && TestPrimitiveOrder() &&
+                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
+                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
+                 TestLongArgumentLists() && TestNativeArityRecord() &&
+                 TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
                  TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&
