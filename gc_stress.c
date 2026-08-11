@@ -32,7 +32,7 @@
 
 #include "fe.h"
 
-static_assert(FE_API_VERSION == 10);
+static_assert(FE_API_VERSION == 11);
 static_assert(FE_LANGUAGE_VERSION == 14);
 
 #ifndef FE_GC_STRESS

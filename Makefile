@@ -522,12 +522,24 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # the split above bought: fe_eval.c 404, fe.c 186, fe_unwind.c 115, main.c
 # 37, fex_io.c 28, fe_run.c 25.
 #
+# Set 850 -> 854 at the dynamic-binding location seam (FE_API_VERSION 11,
+# 2026-08-11), pre-pin: the measured actual after `FeSetBindingFns` and its
+# two call sites.  The +4 is entirely fe_unwind.c 115 -> 119 -- the two
+# `nullptr` tests that ask whether a host callback is installed, and the
+# `target != nullptr` test that lets one drop a saved value -- and no other
+# file moves (fe.c 186, fe_eval.c 404, fe_run.c 25).  Written the compact
+# way first: the branchy spelling of `RestoreDynamicBinding` measured 120,
+# and the conditional-expression one measured 119 for the same behaviour.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does not move and stays at 520: fe_eval.c 404,
+# fe.c 186, fe_unwind.c 119, main.c 37, fex_io.c 28, fe_run.c 25.
+#
 # Proved live at this head by temporarily lowering each cap and watching the
-# gate fire, exit status checked: at 849 `make complexity-check` reports
-# "FAIL: total complexity 850 exceeds limit 849" and exits 2, and at 850 it
+# gate fire, exit status checked: at 853 `make complexity-check` reports
+# "FAIL: total complexity 854 exceeds limit 853" and exits 2, and at 854 it
 # passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
 # exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 850
+SCC_COMPLEXITY_MAX ?= 854
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -870,13 +882,22 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and `PMCCABE_NEW_FUNCTION_MAX`
 # at 15.
 #
+# Set 1267 -> 1271 at the dynamic-binding location seam (FE_API_VERSION 11,
+# 2026-08-11), pre-pin: the measured actual, 402 symbols against 401. One
+# new symbol, `FeSetBindingFns` at 1, and two per-symbol regressions banked
+# with `--allow-regressions` and named here rather than absorbed silently --
+# `RestoreDynamicBinding` 1 -> 3 and `PushDynamicBinding` 1 -> 2, which are
+# the tests asking whether a host callback is installed and whether it
+# dropped the value. `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and
+# `PMCCABE_NEW_FUNCTION_MAX` at 15.
+#
 # Proved live at this head by temporarily lowering each gate and watching it
-# fire, exit status checked: at 1266 `make pmccabe-check` reports "FAIL:
-# total complexity 1267 exceeds funded budget 1266 (+1)" and exits 2, and at
-# 1267 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# fire, exit status checked: at 1270 `make pmccabe-check` reports "FAIL:
+# total complexity 1271 exceeds funded budget 1270 (+1)" and exits 2, and at
+# 1271 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1267
+PMCCABE_TOTAL_MAX ?= 1271
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

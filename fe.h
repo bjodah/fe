@@ -100,7 +100,20 @@
 // raises nothing, and suspends the step budget across the render, because
 // everything it might otherwise charge for happens while an error is
 // already being reported.
-#define FE_API_VERSION 10
+//
+// Version 11 (Phase 18's follow-up) adds the dynamic-binding location seam:
+// `FeBindingSaveFn`, `FeBindingTargetFn` and `FeSetBindingFns`. A shallow
+// dynamic binding saves a symbol's value cell and puts it back into that
+// same cell; a host that keeps a variable's value somewhere else *some of
+// the time* -- kg's buffer-local bindings, which stash the displaced value
+// beside the symbol and swap it back when the buffer comes round again --
+// needs the restore to name the storage the binding actually displaced,
+// which may be a different place by the time the form exits, or gone. The
+// two callbacks are how it says so; with neither set (the default) fe binds
+// and restores exactly as version 10 did, so no existing host changes
+// behaviour and none has to recompile for meaning. The bump is the same
+// `static_assert` tripwire every earlier one is.
+#define FE_API_VERSION 11
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -269,6 +282,23 @@ typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
 typedef void FeCleanupFn(FeContext* ctx, void* data);
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
+// The two halves of the dynamic-binding location seam (FE_API_VERSION 11),
+// installed together by `FeSetBindingFns`. See its comment for the whole
+// contract; in one line each: `FeBindingSaveFn` is asked, as a shallow
+// dynamic binding is pushed, for an opaque token naming the storage the
+// value cell it is about to shadow belongs to, and `FeBindingTargetFn` is
+// asked, as that binding is undone, which symbol's value cell the saved
+// value goes back into -- `nullptr` to drop it.
+//
+// The token is a `uintptr_t` and not a `void*` because that is what it is:
+// a number fe does not interpret, which a host is free to make an index, a
+// generation stamp, or (`(uintptr_t)p`) a pointer of its own. Zero is the
+// value a binding carries when no save callback is installed, so a host
+// that means something by zero must not mean something else by it.
+typedef uintptr_t FeBindingSaveFn(FeContext* ctx, FeObject* symbol);
+typedef FeObject* FeBindingTargetFn(FeContext* ctx,
+                                    FeObject* symbol,
+                                    uintptr_t tag);
 
 // The kind of the most recent evaluation completion, read through
 // `FeGetCompletion`. Sub-plan 06B (kg's Emacs-subset program) made the
@@ -466,6 +496,41 @@ void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
 // callback cannot trip the rule above.
 void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
+// Where a dynamic binding's saved value came from, and where it goes back
+// (FE_API_VERSION 11). Fe's `let` over a special variable is shallow: it
+// saves the symbol's one value cell and writes the saved value back into
+// that same cell when the form completes, on every completion kind. That is
+// the whole truth for a host whose variables live in that cell and nowhere
+// else. It is not the truth for a host that MOVES a variable's value --
+// kg's buffer-local bindings keep one cell per symbol holding whichever
+// per-buffer binding is current and stash the rest beside it -- because
+// between the save and the restore the cell can come to hold a different
+// buffer's binding, and the storage the `let` displaced can have moved
+// aside, or ceased to exist.
+//
+// `save` is called by every dynamic bind, *before* the cell is read, with
+// the symbol being bound. Whatever it answers is stored with the binding and
+// handed back later, uninterpreted: fe never reads the number, never
+// dereferences anything through it, and never frees anything. `target` is
+// called by the matching restore and answers the symbol whose value cell
+// receives the saved value -- the bound symbol itself for the ordinary
+// case, some other symbol for a host that moved the storage, or `nullptr`
+// to drop the saved value entirely, which is the answer for storage that no
+// longer exists. Passing `nullptr` for either function (the default state
+// of a fresh context) restores version 10's behaviour exactly, and one may
+// be set without the other; with `save` unset every tag is zero.
+//
+// Both run under `FeCleanupFn`'s contract and one rule more. They must not
+// raise, must not call back into the evaluator, and must not create Fe
+// objects: `target` in particular runs inside the unwind of a completion
+// that may already be a quit or an exhausted budget, where fe's own restore
+// is two stores that cannot fail and the drain does not give it a barrier.
+// The rule more is that they must not change which bindings exist: a
+// callback that pushed or popped a dynamic binding would be editing the
+// stack that is calling it.
+void FeSetBindingFns(FeContext* ctx,
+                     FeBindingSaveFn* save,
+                     FeBindingTargetFn* target);
 [[noreturn]] void FeHandleError(FeContext* ctx, const char* msg);
 [[noreturn]] void FeRaiseCompletion(FeContext* ctx,
                                     FeCompletion kind,

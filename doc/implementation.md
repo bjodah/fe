@@ -229,6 +229,21 @@ is `RestoreDynamicBinding`, two stores that cannot raise and evaluate
 nothing, which is why `RunCleanups` performs it inline rather than through
 `RunOneCleanupEntry`'s barrier and control-record save/restore.
 
+Where the restore *goes* is the host's to override since FE_API_VERSION 11.
+`FeSetBindingFns` installs two callbacks: one asked for an opaque
+`uintptr_t` token as the binding is pushed (before the cell is read), one
+asked at the restore for the symbol whose value cell receives the saved
+value, or `nullptr` to drop it. Fe stores the token in the
+`FeCleanupBinding` entry beside the saved value and never interprets it --
+it is a number, not an `FeObject*`, and is not marked. With
+neither callback installed, which is every host but kg, both call sites
+answer exactly what they answered before: no tag, and the bound symbol's own
+cell. The seam exists because kg's buffer-local bindings *move* a variable's
+value between cells as the current buffer changes, so the cell a `let`
+displaced may not be the cell that is there when the form exits, and may
+have been destroyed with its buffer -- the case in which the saved value is
+dropped, which is Emacs' own answer for it.
+
 Putting the obligation on the cleanup registry rather than in a registry of
 its own is the design decision worth stating: the property a dynamic binding
 needs is exactly the one every cleanup entry already has -- it must be

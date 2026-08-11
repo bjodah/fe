@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "15.0";
+const char* FeVersion = "16.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -204,6 +204,13 @@ void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn) {
 
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn) {
   ctx->gc_fn = fn;
+}
+
+void FeSetBindingFns(FeContext* ctx,
+                     FeBindingSaveFn* save,
+                     FeBindingTargetFn* target) {
+  ctx->binding_save_fn = save;
+  ctx->binding_target_fn = target;
 }
 
 void __attribute((format(printf, 3, 4))) Format(char* result,

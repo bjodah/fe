@@ -348,6 +348,14 @@ typedef struct FeCleanupEntry {
       // `MarkCleanupRoots` marks it: nothing else refers to a shadowed value
       // while the binding is in force.
       FeObject* value;
+      // What the host's `FeBindingSaveFn` answered when this binding was
+      // pushed, handed back to its `FeBindingTargetFn` at the restore and
+      // uninterpreted in between (FE_API_VERSION 11). Zero both when no host
+      // callback is installed and when one answered zero; fe never tells the
+      // two apart, because it never looks at the number.  NOT an `FeObject*`
+      // and deliberately not marked: it is host bookkeeping, and a host that
+      // wants an Fe object to survive the binding has to root it itself.
+      uintptr_t host_tag;
     } binding;
   } as;
 } FeCleanupEntry;
@@ -684,6 +692,14 @@ struct FeContext {
   FeErrorFn* error_fn;
   FeNativeFn* mark_fn;
   FeNativeFn* gc_fn;
+  // The dynamic-binding location seam (FE_API_VERSION 11), both null unless
+  // the host installed them with `FeSetBindingFns`. See fe.h for the
+  // contract; the two call sites are `PushDynamicBinding` and
+  // `RestoreDynamicBinding`, and null at either of them means fe's own
+  // answer -- the tag is null, and the saved value goes back into the bound
+  // symbol's own cell.
+  FeBindingSaveFn* binding_save_fn;
+  FeBindingTargetFn* binding_target_fn;
   // True for exactly as long as `CollectGarbage` is running, which is the
   // one window in which the object graph is not in a state anything else may
   // read: since 09C the mark phase reverses the pointers it walks, so a

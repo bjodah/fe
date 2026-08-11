@@ -326,19 +326,43 @@ void PushCleanup(FeContext* ctx, FeCleanupEntry entry) {
 //
 // The registration comes first so a `cleanup stack overflow` raise leaves the
 // cell untouched rather than shadowed with no way back.
+//
+// The host is asked for its tag BEFORE the cell is read (FE_API_VERSION 11):
+// a host whose storage moves answers about the storage the cell holds right
+// now, and the whole point of the tag is that this is the moment at which
+// that is knowable. `FeSetBindingFns`' contract forbids the callback from
+// changing which bindings exist, so `cell` is still this symbol's cell
+// afterwards.
 void PushDynamicBinding(FeContext* ctx, FeObject* symbol, FeObject* value) {
+  const uintptr_t tag =
+      ctx->binding_save_fn != nullptr ? ctx->binding_save_fn(ctx, symbol) : 0;
   FeObject* const cell = SymbolBindingCell(symbol);
-  PushCleanup(ctx, (FeCleanupEntry){
-                       .kind = FeCleanupBinding,
-                       .as.binding = {.symbol = symbol, .value = CDR(cell)}});
+  PushCleanup(ctx, (FeCleanupEntry){.kind = FeCleanupBinding,
+                                    .as.binding = {.symbol = symbol,
+                                                   .value = CDR(cell),
+                                                   .host_tag = tag}});
   CDR(cell) = value;
 }
 
 // The other half, run by `RunCleanups` on every completion kind. Two stores,
 // no allocation and nothing that can raise, which is what lets the drain do
-// it inline instead of through `RunOneCleanupEntry`'s barrier.
-static void RestoreDynamicBinding(const FeCleanupEntry* entry) {
-  CDR(SymbolBindingCell(entry->as.binding.symbol)) = entry->as.binding.value;
+// it inline instead of through `RunOneCleanupEntry`'s barrier -- and which
+// is why the host callback that may redirect the store lives under the same
+// prohibition (see `FeSetBindingFns`).
+//
+// A null answer from the host is "this storage is gone, drop the value", not
+// an error: kg's case is a `let` over a buffer-local binding whose buffer
+// was killed inside the form, where Emacs itself discards the saved value
+// rather than writing it anywhere.
+static void RestoreDynamicBinding(FeContext* ctx, const FeCleanupEntry* entry) {
+  FeObject* const target =
+      ctx->binding_target_fn != nullptr
+          ? ctx->binding_target_fn(ctx, entry->as.binding.symbol,
+                                   entry->as.binding.host_tag)
+          : entry->as.binding.symbol;
+  if (target != nullptr) {
+    CDR(SymbolBindingCell(target)) = entry->as.binding.value;
+  }
 }
 
 // Copies the completion raised while a cleanup entry was itself running
@@ -514,7 +538,7 @@ static void RunCleanups(FeContext* ctx,
       // barrier, a fresh control record or a budget of their own. This is
       // the single point at which "restored on all five completion kinds"
       // holds: every drain in the evaluator goes through here.
-      RestoreDynamicBinding(&entry);
+      RestoreDynamicBinding(ctx, &entry);
       continue;
     }
     RunOneCleanupEntry(ctx, &entry, budget);
