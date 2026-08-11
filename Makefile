@@ -45,13 +45,14 @@ $(shell [ "$$(cat $(BUILD_STAMP) 2>/dev/null)" = '$(BUILD_ID)' ] || \
 
 PROG = fe
 TARGET = $(PROG)
-SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fex.c fex_io.c fex_math.c \
-	fex_process.c fex_re.c fex_time.c
+SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fe_unwind.c fex.c fex_io.c \
+	fex_math.c fex_process.c fex_re.c fex_time.c
 # The evaluator's own object list, shared by every link rule that used to
-# name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split, and
-# sub-plan 11B's fe_eval.c -> fe_eval.c + fe_run.c one): a list so every
-# consumer below stays a one-line change.
-FE_CORE_OBJS = fe.o fe_eval.o fe_run.o
+# name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split, sub-plan
+# 11B's fe_eval.c -> fe_eval.c + fe_run.c one, and Phase 20's fe_eval.c ->
+# fe_eval.c + fe_unwind.c one): a list so every consumer below stays a
+# one-line change.
+FE_CORE_OBJS = fe.o fe_eval.o fe_run.o fe_unwind.o
 HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
@@ -66,7 +67,8 @@ CORE_GCC ?= gcc
 CORE_CLANG ?= clang
 CORE_CFLAGS ?= -Wall -Wextra -Werror -pedantic -std=c2x
 CORE_OBJS = fe-core-gcc.o fe-core-clang.o fe-eval-core-gcc.o \
-	fe-eval-core-clang.o fe-run-core-gcc.o fe-run-core-clang.o
+	fe-eval-core-clang.o fe-run-core-gcc.o fe-run-core-clang.o \
+	fe-unwind-core-gcc.o fe-unwind-core-clang.o
 
 # Fuzzing
 FUZZ_DIR ?= fuzz
@@ -473,7 +475,71 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # "FAIL: total complexity 840 exceeds limit 839" and exits 2, and at 840 it
 # passes; at 518 it reports "FAIL: 1 file(s) exceed per-file limit 518" and
 # exits 2, the one file being fe_eval.c at 519.
-SCC_COMPLEXITY_MAX ?= 840
+#
+# Left at 840 by Phase 20's translation-unit split (2026-08-11), which is the
+# second seam split this file has named as the funded answer since 12A and
+# has warned about with growing force since 10B: fe_eval.c 519 -> 404 and a
+# new fe_unwind.c at 115, summing to the same 519, so the total does not
+# move at all -- `utils/check_scc_complexity.py` sums per file and a split
+# therefore costs nothing, exactly as 11B's fe_run.c split measured. The seam
+# is the one this file named: the completion machinery -- the ambient
+# evaluation-control record, the condition hierarchy and its handler search,
+# the cleanup registry, and every raise. The new file's own boilerplate is
+# comments and includes, neither of which scc counts as complexity, which is
+# why the split price is zero rather than the few points a new file usually
+# costs.
+#
+# `SCC_FILE_COMPLEXITY_MAX` again does NOT move and stays at 520. Per-file
+# after the split: fe_eval.c 404, fe.c 176, fe_unwind.c 115, main.c 37,
+# fex_io.c 28, fe_run.c 25. The warning 10B/12A/19 carried -- one point of
+# slack on fe_eval.c -- is retired by this split, not by a raise: the
+# evaluator now has 116 points of headroom and the completion machinery 405,
+# and the per-file cap goes on both at full strength.
+#
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire, exit status checked: at 839 `make complexity-check` reports
+# "FAIL: total complexity 840 exceeds limit 839" and exits 2, and at 840 it
+# passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
+# exits 2, the one file being fe_eval.c at 404.
+#
+# Set 840 -> 850 at Phase 20's language slice (2026-08-11), pre-pin: the
+# measured actual after `string<`/`string>` and the two buffer-edge
+# conditions. No raise-then-spend cycle, as at Phase 19: the slice is small
+# enough to measure directly and set the cap to what it cost.
+#
+# The +10 is entirely fe.c 176 -> 186, and it is `StringOperandChain`'s three
+# type tests plus `StringOperandLess`'s loop, its `memcmp` test and the three
+# `&&`/`!=` operators scc counts beside them. fe_eval.c does not move at all
+# (404): the four `case` labels the two primitives add to `DispatchPrimitive`
+# and `ResumeBinary` cost nothing, because scc's C complexity keywords are
+# the branching ones and `case` is not among them -- a reminder, in the same
+# direction as the '"' desync, that this number is a floor.
+# fe_unwind.c does not move either (115): the two condition rows are data,
+# which is the property that made `file-missing` free in 12C too.
+# `PMCCABE_TOTAL_MAX` moved +9 and is the authoritative measure.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does not move and stays at 520, with the headroom
+# the split above bought: fe_eval.c 404, fe.c 186, fe_unwind.c 115, main.c
+# 37, fex_io.c 28, fe_run.c 25.
+#
+# Set 850 -> 854 at the dynamic-binding location seam (FE_API_VERSION 11,
+# 2026-08-11), pre-pin: the measured actual after `FeSetBindingFns` and its
+# two call sites.  The +4 is entirely fe_unwind.c 115 -> 119 -- the two
+# `nullptr` tests that ask whether a host callback is installed, and the
+# `target != nullptr` test that lets one drop a saved value -- and no other
+# file moves (fe.c 186, fe_eval.c 404, fe_run.c 25).  Written the compact
+# way first: the branchy spelling of `RestoreDynamicBinding` measured 120,
+# and the conditional-expression one measured 119 for the same behaviour.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does not move and stays at 520: fe_eval.c 404,
+# fe.c 186, fe_unwind.c 119, main.c 37, fex_io.c 28, fe_run.c 25.
+#
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire, exit status checked: at 853 `make complexity-check` reports
+# "FAIL: total complexity 854 exceeds limit 853" and exits 2, and at 854 it
+# passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
+# exits 2, the one file being fe_eval.c at 404.
+SCC_COMPLEXITY_MAX ?= 854
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -806,7 +872,32 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1258 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1258
+#
+# Set 1258 -> 1267 at Phase 20's language slice (2026-08-11), pre-pin: the
+# measured actual, and this time the whole of it is two new symbols and no
+# change to any existing one -- `StringOperandChain` at 4 and
+# `StringOperandLess` at 5, 401 symbols against 399. Both are well inside
+# `PMCCABE_NEW_FUNCTION_MAX`. Phase 20's split commit moved this number by
+# zero, as 03A's split spike measured it would.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and `PMCCABE_NEW_FUNCTION_MAX`
+# at 15.
+#
+# Set 1267 -> 1271 at the dynamic-binding location seam (FE_API_VERSION 11,
+# 2026-08-11), pre-pin: the measured actual, 402 symbols against 401. One
+# new symbol, `FeSetBindingFns` at 1, and two per-symbol regressions banked
+# with `--allow-regressions` and named here rather than absorbed silently --
+# `RestoreDynamicBinding` 1 -> 3 and `PushDynamicBinding` 1 -> 2, which are
+# the tests asking whether a host callback is installed and whether it
+# dropped the value. `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and
+# `PMCCABE_NEW_FUNCTION_MAX` at 15.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1270 `make pmccabe-check` reports "FAIL:
+# total complexity 1271 exceeds funded budget 1270 (+1)" and exits 2, and at
+# 1271 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+PMCCABE_TOTAL_MAX ?= 1271
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -918,7 +1009,7 @@ $(EXAMPLE_HOST): example_host.o $(FE_CORE_OBJS)
 GC_STRESS = gc_stress
 GC_STRESS_ON = gc_stress_on
 GC_STRESS_ON_OBJS = gc_stress-stress.o fe-stress.o fe_eval-stress.o \
-	fe_run-stress.o
+	fe_run-stress.o fe_unwind-stress.o
 
 $(GC_STRESS): gc_stress.o $(FE_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -937,6 +1028,9 @@ fe_eval-stress.o: fe_eval.c $(HDRS) $(BUILD_STAMP)
 
 fe_run-stress.o: fe_run.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_run.c -o $@
+
+fe_unwind-stress.o: fe_unwind.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_unwind.c -o $@
 
 check-gc-stress: $(GC_STRESS) $(GC_STRESS_ON)
 	./$(GC_STRESS)
@@ -966,6 +1060,12 @@ fe-run-core-gcc.o: fe_run.c fe.h fe_internal.h $(BUILD_STAMP)
 fe-run-core-clang.o: fe_run.c fe.h fe_internal.h $(BUILD_STAMP)
 	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_run.c -o $@
 
+fe-unwind-core-gcc.o: fe_unwind.c fe.h fe_internal.h $(BUILD_STAMP)
+	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_unwind.c -o $@
+
+fe-unwind-core-clang.o: fe_unwind.c fe.h fe_internal.h $(BUILD_STAMP)
+	$(CORE_CLANG) $(CPPFLAGS) $(CORE_CFLAGS) -c fe_unwind.c -o $@
+
 %.o: %.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -973,22 +1073,22 @@ tiny-regex-c/re.o: tiny-regex-c/re.c tiny-regex-c/re.h $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) $(RE_CFLAGS) -c $< -o $@
 
 $(FUZZ_READER_BIN): $(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe.h fe_internal.h \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe_unwind.c fe.h fe_internal.h \
 		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_reader.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c fe_unwind.c $(LDLIBS)
 
 $(FUZZ_EVAL_BIN): $(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe.h fe_internal.h \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe_unwind.c fe.h fe_internal.h \
 		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_eval.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c fe_unwind.c $(LDLIBS)
 
 $(FUZZ_WRITE_BIN): $(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) \
-		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe.h fe_internal.h \
+		$(FUZZ_DIR)/fuzz_support.h fe.c fe_eval.c fe_run.c fe_unwind.c fe.h fe_internal.h \
 		$(BUILD_STAMP)
 	$(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) -I. -o $@ \
-		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c $(LDLIBS)
+		$(FUZZ_DIR)/fuzz_write.c $(FUZZ_SUPPORT) fe.c fe_eval.c fe_run.c fe_unwind.c $(LDLIBS)
 
 sizes:
 	wc *.[ch]

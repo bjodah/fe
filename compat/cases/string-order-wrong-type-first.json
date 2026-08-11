@@ -1,0 +1,5 @@
+{
+ "id": "string-order-wrong-type-first",
+ "expr": "(condition-case e (string< 1 \"a\") (error e))",
+ "note": "Phase 20: the same answer when the offending operand is the first one -- Emacs reports the offender, not the position."
+}

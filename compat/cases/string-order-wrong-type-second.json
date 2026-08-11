@@ -1,0 +1,5 @@
+{
+ "id": "string-order-wrong-type-second",
+ "expr": "(condition-case e (string< \"a\" 1) (error e))",
+ "note": "Phase 20: an operand that is neither a string nor a symbol is `(wrong-type-argument stringp X)`, naming the operand."
+}

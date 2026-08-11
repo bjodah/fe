@@ -1,0 +1,5 @@
+{
+ "id": "string-order-symbols",
+ "expr": "(list (string< 'abc \"abd\") (string< \"abc\" 'abd) (string< 'abc 'abd) (string< nil \"a\") (string< \"n\" nil) (string< nil nil) (string> 'b 'a))",
+ "note": "Phase 20: `string<`/`string>` take a string or a SYMBOL on either side, comparing a symbol by its name. Fe's nil is not a symbol object and still compares as the name \"nil\", as Emacs' nil does."
+}

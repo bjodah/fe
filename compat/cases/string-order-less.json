@@ -1,0 +1,5 @@
+{
+ "id": "string-order-less",
+ "expr": "(list (string< \"abc\" \"abd\") (string< \"abc\" \"abc\") (string< \"abd\" \"abc\") (string< \"ab\" \"abc\") (string< \"abc\" \"ab\") (string< \"\" \"a\") (string< \"\" \"\"))",
+ "note": "Phase 20: Emacs' lexicographic string order. Equal strings are not less than each other and a proper prefix sorts first, at the empty string as anywhere else."
+}

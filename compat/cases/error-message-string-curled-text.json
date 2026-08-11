@@ -1,0 +1,5 @@
+{
+ "id": "error-message-string-curled-text",
+ "expr": "(let ((text-quoting-style 'curve)) (list (error-message-string '(void-variable foo)) (error-message-string '(void-function bar)) (error-message-string '(cyclic-function-indirection f))))",
+ "note": "Phase 20: the recorded divergence itself, now that a non-ASCII oracle record can be checked in (the shim wrote Emacs' internal representation of a raw byte until this phase). Emacs renders the `error-message` property through `substitute-quotes`, so the three hierarchy messages containing an apostrophe come out CURLED; fe has no `text-quoting-style` and prints the property as stored, which is ASCII. `curve` is bound explicitly rather than left to the default because the default follows the locale -- under LC_ALL=C Emacs itself renders the ASCII apostrophe -- and a snapshot that depends on the environment it was taken in is not a pin. In fe the name is not special, so the binding is an inert lexical one and the expression means what it says."
+}

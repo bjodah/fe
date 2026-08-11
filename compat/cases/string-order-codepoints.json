@@ -1,0 +1,5 @@
+{
+ "id": "string-order-codepoints",
+ "expr": "(list (string< \"é\" \"z\") (string< \"z\" \"é\") (string< \"Z\" \"a\") (string< \"a\" \"Z\"))",
+ "note": "Phase 20: Emacs compares by character and fe by byte, and the two agree because UTF-8 preserves codepoint order. U+00E9 sorts after every ASCII character on both sides; the ASCII pair pins that the order is codepoint order and not a case-folding one."
+}

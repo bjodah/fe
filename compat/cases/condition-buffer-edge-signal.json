@@ -1,0 +1,5 @@
+{
+ "id": "condition-buffer-edge-signal",
+ "expr": "(list (condition-case e (signal 'end-of-buffer nil) (error e)) (condition-case e (signal 'beginning-of-buffer nil) (error e)))",
+ "note": "Phase 20: `end-of-buffer` and `beginning-of-buffer` are children of `error` in Emacs -- `(get 'end-of-buffer 'error-conditions)` is `(end-of-buffer error)` -- so `signal` accepts them and an `error` handler catches them."
+}

@@ -140,9 +140,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 10);
-  static_assert(FE_LANGUAGE_VERSION == 13);
-  CHECK(strcmp(FeVersion, "14.0") == 0);
+  static_assert(FE_API_VERSION == 11);
+  static_assert(FE_LANGUAGE_VERSION == 14);
+  CHECK(strcmp(FeVersion, "16.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -4677,6 +4677,9 @@ static bool TestErrorMessageString(void) {
   CHK("(get 'error 'error-message)", "error");
   CHK("(get 'quit 'error-message)", "Quit");
   CHK("(get 'file-missing 'error-message)", "File is missing");
+  // Phase 20's two buffer-edge conditions, seeded the same way.
+  CHK("(get 'end-of-buffer 'error-message)", "End of buffer");
+  CHK("(get 'beginning-of-buffer 'error-message)", "Beginning of buffer");
 
   // The rendering itself, measured against Emacs 31.0.90 in every case.
   CHK("(error-message-string '(wrong-type-argument listp 6))",
@@ -4687,6 +4690,8 @@ static bool TestErrorMessageString(void) {
       "Symbol's function definition is void: bar");
   CHK("(error-message-string '(no-catch tag 5))", "No catch for tag: tag, 5");
   CHK("(error-message-string '(arith-error))", "Arithmetic error");
+  CHK("(error-message-string '(end-of-buffer))", "End of buffer");
+  CHK("(error-message-string '(beginning-of-buffer))", "Beginning of buffer");
   CHK("(error-message-string '(quit))", "Quit");
   // `error` takes its message from the DATA, not from the property: this is
   // the case the bare-symbol reporting got most visibly wrong.
@@ -4734,6 +4739,78 @@ static bool TestErrorMessageString(void) {
   CHECK(RendersRaisedCondition(context, &state, "(undefined-name)",
                                "Symbol's function definition is void: "
                                "undefined-name"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Phase 20's `string<`/`string>`. The order itself is exercised by
+// `scripts/strings.fe`; this is the C-side half -- the operand coercion, the
+// type and arity errors, and the cell-boundary cases the chunked string
+// representation makes interesting.
+static bool TestStringOrderPrimitives(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "strings.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("(string< \"abc\" \"abd\")", "t");
+  CHK("(string< \"abc\" \"abc\")", "nil");
+  CHK("(string< \"abd\" \"abc\")", "nil");
+  // A proper prefix sorts first, in both directions and at the empty string.
+  CHK("(string< \"ab\" \"abc\")", "t");
+  CHK("(string< \"abc\" \"ab\")", "nil");
+  CHK("(string< \"\" \"a\")", "t");
+  CHK("(string< \"\" \"\")", "nil");
+  // A string cell holds seven bytes, so these are the boundaries: two chains
+  // that differ only in a later cell, and one that ends exactly where the
+  // other continues.
+  CHK("(string< \"aaaaaaaX\" \"aaaaaaaY\")", "t");
+  CHK("(string< \"aaaaaaa\" \"aaaaaaaa\")", "t");
+  CHK("(string< \"aaaaaaaa\" \"aaaaaaa\")", "nil");
+  // Byte order is codepoint order: UTF-8 preserves it, so a two-byte "é"
+  // sorts after every ASCII character, as it does in Emacs.
+  CHK("(string< \"\303\251\" \"z\")", "nil");
+  // A symbol operand is its name, on either side; fe's nil owns no name
+  // chain and is still compared as "nil".
+  CHK("(string< 'abc \"abd\")", "t");
+  CHK("(string< \"abc\" 'abd)", "t");
+  CHK("(string< 'abc 'abd)", "t");
+  CHK("(string< nil \"a\")", "nil");
+  CHK("(string< \"n\" nil)", "t");
+  CHK("(string< nil nil)", "nil");
+  // `string>` is the same order with the operands swapped.
+  CHK("(string> \"abd\" \"abc\")", "t");
+  CHK("(string> \"abc\" \"abd\")", "nil");
+  CHK("(string> 'b 'a)", "t");
+  // Ordinary functions: `funcall` and `apply` reach them, and a prelude
+  // `sort` can take one as its comparator.
+  CHK("(funcall 'string< \"a\" \"b\")", "t");
+  CHK("(apply 'string> '(\"b\" \"a\"))", "t");
+  // Emacs names `stringp` for an operand that is neither, whichever side it
+  // is on, and the offending operand is the one reported.
+  CHK("(condition-case e (string< \"a\" 1) (error e))",
+      "(wrong-type-argument stringp 1)");
+  CHK("(condition-case e (string< 1 \"a\") (error e))",
+      "(wrong-type-argument stringp 1)");
+  CHK("(condition-case e (string> 2.5 \"a\") (error e))",
+      "(wrong-type-argument stringp 2.5)");
+  // Strictly binary.
+  CHK("(condition-case e (string< \"a\") (error (car e)))",
+      "wrong-number-of-arguments");
+  CHK("(condition-case e (string< \"a\" \"b\" \"c\") (error (car e)))",
+      "wrong-number-of-arguments");
+
+#undef CHK
 
   FeCloseContext(context);
   return true;
@@ -8067,11 +8144,23 @@ static bool TestCaughtExhaustionSession(void) {
 // seeding builds is reachable from the symbol list forever, so it is charged
 // once to both figures. The collection count and the peak are unchanged for
 // the fifth time, which is the invariance 09C pinned.
+// Re-measured at Phase 20 for the sixth time, and it moves by 38 for the
+// same reason: two more primitives and two more condition rows, all four
+// built before any program runs. The primitives are 7 each -- one primitive
+// object plus a 6-slot symbol for each of `string<` and `string>` -- and the
+// hierarchy rows are 24: the `end-of-buffer` symbol (7) and the
+// `beginning-of-buffer` one (8), their message strings "End of buffer" (2)
+// and "Beginning of buffer" (3), and the two plist pairs each. The arena
+// grows with `FeMinimumArenaSize()` and holds 38 more slots (15599 ->
+// 15637), of which the same 38 are live after a collection (1428 -> 1466),
+// everything here being reachable from the symbol list forever. The
+// collection count and the peak are unchanged for the sixth time, which is
+// the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 15599,
+  PinnedTotalSlots = 15637,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15599,
-  PinnedLiveAfterCollection = 1428,
+  PinnedPeakLive = 15637,
+  PinnedLiveAfterCollection = 1466,
 };
 
 // ---------------------------------------------------------------------------
@@ -9259,6 +9348,195 @@ static bool TestDynamicBinding(void) {
   return true;
 }
 
+// ---- The dynamic-binding location seam (FE_API_VERSION 11) --------------
+//
+// A host that moves a variable's value around -- kg's buffer-local bindings
+// are the motivating one -- needs a `let`'s restore to name the storage the
+// binding displaced rather than the cell that happens to be there at exit.
+// These four statics are a miniature of that host: `binding_seam_mode` says
+// what the target callback answers, and the tag stack is what proves fe
+// hands each binding's own tag back to its own restore, in LIFO order, on
+// every completion kind.
+typedef enum BindingSeamMode {
+  BindingSeamPassThrough,  // answer the bound symbol: fe's own behaviour
+  BindingSeamRedirect,     // answer another symbol: the storage moved
+  BindingSeamDrop,         // answer null: the storage is gone
+} BindingSeamMode;
+
+static BindingSeamMode binding_seam_mode;
+static FeObject* binding_seam_redirect;
+static uintptr_t binding_seam_tags[8];
+static size_t binding_seam_depth;
+static size_t binding_seam_saves;
+static size_t binding_seam_restores;
+static uintptr_t binding_seam_next_tag;
+// Set by either callback the moment it is handed something it did not
+// expect -- a null context or symbol, a tag that is not the one this
+// binding was pushed with, a restore with no matching save. Checked after
+// the fact rather than asserted inside, because a callback must not raise.
+static bool binding_seam_broken;
+
+static uintptr_t BindingSeamSave(
+    // cppcheck-suppress constParameterCallback
+    FeContext* ctx,
+    // cppcheck-suppress constParameterCallback
+    FeObject* symbol) {
+  if (ctx == nullptr || symbol == nullptr ||
+      binding_seam_depth >=
+          sizeof(binding_seam_tags) / sizeof(binding_seam_tags[0])) {
+    binding_seam_broken = true;
+    return 0;
+  }
+  binding_seam_saves++;
+  binding_seam_next_tag++;
+  binding_seam_tags[binding_seam_depth++] = binding_seam_next_tag;
+  return binding_seam_next_tag;
+}
+
+static FeObject* BindingSeamTarget(
+    // cppcheck-suppress constParameterCallback
+    FeContext* ctx,
+    FeObject* symbol,
+    uintptr_t tag) {
+  if (ctx == nullptr || symbol == nullptr) {
+    binding_seam_broken = true;
+    return symbol;
+  }
+  binding_seam_restores++;
+  if (binding_seam_depth == 0 ||
+      binding_seam_tags[--binding_seam_depth] != tag) {
+    binding_seam_broken = true;
+  }
+  switch (binding_seam_mode) {
+    case BindingSeamRedirect:
+      return binding_seam_redirect;
+    case BindingSeamDrop:
+      return nullptr;
+    case BindingSeamPassThrough:
+      break;
+  }
+  return symbol;
+}
+
+// The target callback alone, with no save callback installed: every binding's
+// tag is then zero, which is the state a host that only needs the redirect
+// half sees.
+static FeObject* BindingSeamTargetExpectingZeroTag(
+    // cppcheck-suppress constParameterCallback
+    FeContext* ctx,
+    FeObject* symbol,
+    uintptr_t tag) {
+  if (ctx == nullptr || tag != 0) {
+    binding_seam_broken = true;
+  }
+  binding_seam_restores++;
+  return symbol;
+}
+
+static bool TestBindingLocationSeam(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+  FeDefineNative(context, "contain-call", ContainCall);
+
+#define CHK(expr, expected)                                                  \
+  CHECK(IsRendered(                                                          \
+      context, FeEvaluateString(context, "seam.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  binding_seam_mode = BindingSeamPassThrough;
+  binding_seam_broken = false;
+  binding_seam_depth = 0;
+  binding_seam_saves = 0;
+  binding_seam_restores = 0;
+  binding_seam_redirect = FeMakeSymbol(context, "bs-stash");
+
+  CHK("(internal--mark-special 'bs t)", "bs");
+  CHK("(setq bs 'global)", "global");
+  CHK("(setq bs-stash 'stash)", "stash");
+  const size_t cleanups = context->cleanup_stack_index;
+
+  // With no callbacks installed nothing is asked and nothing changes: the
+  // control the three modes below are measured against.
+  CHK("(let ((bs 'inner)) bs)", "inner");
+  CHK("bs", "global");
+  CHECK(binding_seam_saves == 0 && binding_seam_restores == 0);
+
+  FeSetBindingFns(context, BindingSeamSave, BindingSeamTarget);
+
+  // Pass-through: the callbacks are asked about every binding and answer the
+  // bound symbol, so the observable behaviour is still fe's own.
+  CHK("(let ((bs 'inner)) bs)", "inner");
+  CHK("bs", "global");
+  CHECK(binding_seam_saves == 1 && binding_seam_restores == 1);
+  CHECK(!binding_seam_broken && binding_seam_depth == 0);
+
+  // Redirect: the saved value goes into ANOTHER symbol's cell and the bound
+  // symbol keeps what the body left there. Both halves are asserted, because
+  // a redirect that also wrote the original cell would pass a test that only
+  // looked at the destination.
+  binding_seam_mode = BindingSeamRedirect;
+  CHK("(let ((bs 'inner)) bs)", "inner");
+  CHK("bs", "inner");
+  CHK("bs-stash", "global");
+
+  // Nested bindings over one symbol are LIFO, and each restore is handed its
+  // own binding's tag (`binding_seam_broken` is what says so). The last
+  // write to the redirect target is therefore the OUTER binding's saved
+  // value, not the inner one's.
+  CHK("(setq bs 'g2)", "g2");
+  CHK("(setq bs-stash 'stash)", "stash");
+  CHK("(let ((bs 'outer)) (let ((bs 'inner)) bs))", "inner");
+  CHK("bs-stash", "g2");
+  CHECK(!binding_seam_broken && binding_seam_depth == 0);
+
+  // The abnormal paths take the same route: the restore runs from the
+  // cleanup drain on an error the host contains, and it is still redirected.
+  CHK("(setq bs 'g3)", "g3");
+  CHK("(setq bs-stash 'stash)", "stash");
+  CHK("(contain-call (lambda () (let ((bs 'inner)) (car 5))))",
+      "(contained (wrong-type-argument listp 5))");
+  CHK("bs-stash", "g3");
+  CHECK(context->cleanup_stack_index == cleanups);
+
+  // Drop: the storage the binding displaced is gone, so the saved value is
+  // not written anywhere at all -- not into the bound symbol, and not into
+  // the redirect target either.
+  binding_seam_mode = BindingSeamDrop;
+  CHK("(setq bs 'g4)", "g4");
+  CHK("(setq bs-stash 'stash)", "stash");
+  CHK("(let ((bs 'inner)) bs)", "inner");
+  CHK("bs", "inner");
+  CHK("bs-stash", "stash");
+  CHECK(!binding_seam_broken && binding_seam_depth == 0);
+
+  // A target callback with no save callback beside it: every tag is zero,
+  // which is also what fe stores when no save callback is installed.
+  FeSetBindingFns(context, nullptr, BindingSeamTargetExpectingZeroTag);
+  binding_seam_restores = 0;
+  CHK("(setq bs 'g5)", "g5");
+  CHK("(let ((bs 'inner)) bs)", "inner");
+  CHK("bs", "g5");
+  CHECK(binding_seam_restores == 1 && !binding_seam_broken);
+
+  // And uninstalling both puts version 10's behaviour back.
+  FeSetBindingFns(context, nullptr, nullptr);
+  binding_seam_saves = 0;
+  binding_seam_restores = 0;
+  CHK("(let ((bs 'inner)) bs)", "inner");
+  CHK("bs", "g5");
+  CHECK(binding_seam_saves == 0 && binding_seam_restores == 0);
+  CHECK(context->cleanup_stack_index == cleanups);
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
 // `doc/c-api.md`'s `Load` example, literally: contain, unwind the loader's
 // own bookkeeping while this frame is still live, then hand the value back.
 // The bookkeeping here is a forced collection, because "unwinds its own
@@ -9451,19 +9729,19 @@ int main(void) {
                  TestNumericEqual() && TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
                  TestEvalPrimitive() && TestSymbolPrimitives() &&
-                 TestErrorMessageString() && TestUnwindLisp() &&
-                 TestUnwindCleanupBudget() && TestFrameLimits() &&
-                 TestFrameSubstrate() && TestArenaStats() &&
-                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
-                 TestArgumentFrame() && TestArgumentProbe() &&
-                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
-                 TestMacroFrame() && TestNativeReentry() &&
-                 TestNativeOwningReentry() && TestResumableFrameGC() &&
-                 TestCleanupRunGC() && TestPrimitiveOrder() &&
-                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
-                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestLongArgumentLists() && TestNativeArityRecord() &&
-                 TestExhaustionCatchability() &&
+                 TestStringOrderPrimitives() && TestErrorMessageString() &&
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestFrameLimits() && TestFrameSubstrate() &&
+                 TestArenaStats() && TestEvaluationStackProbe() &&
+                 TestCallHeadProbe() && TestArgumentFrame() &&
+                 TestArgumentProbe() && TestLambdaBodyFrame() &&
+                 TestLambdaBodyChain() && TestMacroFrame() &&
+                 TestNativeReentry() && TestNativeOwningReentry() &&
+                 TestResumableFrameGC() && TestCleanupRunGC() &&
+                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
+                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
+                 TestGcStackConstantInNesting() && TestLongArgumentLists() &&
+                 TestNativeArityRecord() && TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
                  TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&
@@ -9471,8 +9749,9 @@ int main(void) {
                  TestArityDataUnderCollection() && TestCatchThrow() &&
                  TestConditionCaseResumesControl() && TestQuitIsCatchable() &&
                  TestProtectedCall() && TestHostRaiseCompletion() &&
-                 TestDynamicBinding() && TestOneArgDefvarScope() &&
-                 TestHostedInputUnit() && TestProtectedEvaluateString()
+                 TestDynamicBinding() && TestBindingLocationSeam() &&
+                 TestOneArgDefvarScope() && TestHostedInputUnit() &&
+                 TestProtectedEvaluateString()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

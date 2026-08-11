@@ -14,7 +14,11 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 10 adds
+types, and callback signatures declared in `fe.h`; API version 11 adds the
+dynamic-binding location seam
+`FeBindingSaveFn`/`FeBindingTargetFn`/`FeSetBindingFns`, which is how a host
+whose storage moves says where a `let`'s saved value goes back to; API
+version 10 adds
 `FeErrorMessageString`, Emacs' rendering of a condition object into a
 caller-owned buffer; API version 9 added the value-cell readers
 `FeGetValue`/`FeMakeUnbound`; API version 8 adds the
@@ -53,9 +57,14 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 8);
-static_assert(FE_LANGUAGE_VERSION == 11);
+static_assert(FE_API_VERSION == 11);
+static_assert(FE_LANGUAGE_VERSION == 14);
 ```
+
+Fe 16.0 moves `FE_API_VERSION` 10 -> 11 and leaves `FE_LANGUAGE_VERSION` at
+14: the dynamic-binding location seam is a C contract, and no program that
+ran under Fe 15.0 answers differently under 16.0 unless its host installs
+the callbacks. The reasoning is below, under the version history.
 
 Fe 12.0 moves `FE_LANGUAGE_VERSION` 10 -> 11 and leaves `FE_API_VERSION` at
 8; the reasoning is below, under the version history.
@@ -402,6 +411,56 @@ does not charge the evaluation step budget and does not poll the interrupt
 while a collection is running, precisely so that the obvious diagnostic
 callback -- `main.c`'s own `mark`/`gc` tracers are this -- cannot trip the rule
 above through a step-limit or interrupt raise.
+
+### Where a dynamic binding is restored to (FE_API_VERSION 11)
+
+```c
+typedef uintptr_t FeBindingSaveFn(FeContext* ctx, FeObject* symbol);
+typedef FeObject* FeBindingTargetFn(FeContext* ctx, FeObject* symbol,
+                                    uintptr_t tag);
+void FeSetBindingFns(FeContext* ctx, FeBindingSaveFn* save,
+                     FeBindingTargetFn* target);
+```
+
+Fe's `let` over a special variable is **shallow**: it saves the symbol's one
+value cell, writes the new value into it, and puts the saved value back into
+that same cell when the form completes, on every completion kind. For a host
+whose variables live in that cell and nowhere else -- which is every host
+that does not install these two callbacks -- that is the whole truth, and
+the paragraph ends here.
+
+It is not the truth for a host that *moves* a variable's value. kg's
+buffer-local bindings keep Emacs' representation: one value cell per symbol,
+holding whichever per-buffer binding is current, with the others stashed
+beside it and swapped in when the current buffer changes. Between a `let`'s
+save and its restore, that cell can come to hold a *different* buffer's
+binding, and the storage the `let` displaced can have moved aside, or been
+destroyed with its buffer. Writing the saved value back into the cell then
+puts it in the wrong place -- which is what Emacs' own specpdl avoids by
+recording, per binding, which buffer's storage it displaced.
+
+`save` is called by every dynamic bind, *before* the cell is read, and
+answers an opaque `uintptr_t` token. Fe stores the token with the binding,
+hands it back to `target` at the matching restore, and does nothing else
+with it: it never reads the number, never dereferences anything through it,
+and never marks anything, so a host that wants an Fe object to survive the
+binding must root it itself. It is a number and not a `void*` because that
+is what a host has to say here -- an index, a generation stamp, or
+`(uintptr_t)p` for a host that has a pointer. Zero is what a binding carries
+when no `save` callback is installed. `target` answers the
+symbol whose value cell receives the saved value -- the bound symbol for the
+ordinary case, another symbol for a host that moved the storage, or
+`nullptr` to drop the saved value entirely, which is the honest answer for
+storage that no longer exists. Either may be `nullptr`, independently; with
+`save` unset every tag is null.
+
+Both live under `FeCleanupFn`'s contract -- no raising, no re-entering the
+evaluator, no creating Fe objects -- and one rule more: they must not change
+which bindings exist, because they are called from inside the stack that
+holds them. `target` in particular runs from the cleanup drain, which
+restores a binding with two stores that cannot fail and gives them no
+barrier; it may be running inside a completion that is already a quit or an
+exhausted budget, where there is no way to deliver a raise.
 
 Lambda and macro arity is always strict. Missing required arguments and
 leftover arguments raise `wrong-number-of-arguments`; missing `&optional`

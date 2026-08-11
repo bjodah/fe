@@ -135,6 +135,21 @@
    "source_name": null
   },
   {
+   "id": "condition-hierarchy-buffer-edges",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "condition-buffer-edge-signal",
+    "condition-buffer-edge-handlers",
+    "condition-buffer-edge-message"
+   ],
+   "kg_test": "fe/test_api.c:TestErrorMessageString",
+   "rationale": "Phase 20: `end-of-buffer` and `beginning-of-buffer` join the hierarchy as children of `error` -- Emacs' own chain, measured on 31.0.90, `(get 'end-of-buffer 'error-conditions)` being `(end-of-buffer error)`. Two data lines and no code, like `file-missing` before them: the three consumers of `condition_parents` are sizeof-driven loops. What the lines buy is that `(signal 'end-of-buffer nil)` is legal at all -- `IsConditionSymbol` gates `signal` on this table and answered `Invalid error symbol` before -- and that the two carry Emacs' `error-message` text. Nothing in fe raises them; kg's motion and editing commands do, which is why they are here.",
+   "source_name": null
+  },
+  {
    "id": "condition-hierarchy-file-classes",
    "category": "errors-and-non-local-exits",
    "status": "supported",
@@ -268,12 +283,13 @@
    "category": "errors-and-non-local-exits",
    "status": "divergent",
    "owner": "fe-core",
-   "comparison": "kg-policy",
+   "comparison": "emacs",
    "cases": [
-    "error-message-string-quoted-text"
+    "error-message-string-quoted-text",
+    "error-message-string-curled-text"
    ],
    "kg_test": "fe/test_api.c:TestErrorMessageString",
-   "rationale": "Emacs renders the `error-message` property through `substitute-quotes`, so under the default `text-quoting-style` the three messages containing an apostrophe come out curled: measured on 31.0.90, `(error-message-string '(void-variable foo))` is `Symbol’s value as variable is void: foo` there and `Symbol's ...` here. The PROPERTY is ASCII on both sides (see `error-message-property`); only the rendering differs, and only for those three. fe has no `text-quoting-style`, no `substitute-command-keys` and no place to put one: curving is a display policy about the host's terminal, not a property of the condition. `comparison` is kg-policy rather than emacs for a mechanical reason worth writing down: the oracle shim writes Emacs' INTERNAL representation of a non-ASCII character to stdout unencoded, so a snapshot of the curled text is not decodable UTF-8 and cannot be checked in. The agreement half is checked instead -- `error-message-string-quoted-text` binds `text-quoting-style` to `grave` and fe matches Emacs exactly -- and fe/test_api.c pins the ASCII text this side renders.",
+   "rationale": "Emacs renders the `error-message` property through `substitute-quotes`, so under a curling `text-quoting-style` the three messages containing an apostrophe come out curled: measured on 31.0.90, `(error-message-string '(void-variable foo))` is `Symbol’s value as variable is void: foo` there and `Symbol's ...` here. The PROPERTY is ASCII on both sides (see `error-message-property`); only the rendering differs, and only for those three. fe has no `text-quoting-style`, no `substitute-command-keys` and no place to put one: curving is a display policy about the host's terminal, not a property of the condition. Both halves are now snapshotted against the oracle: `error-message-string-quoted-text` binds `text-quoting-style` to `grave` and fe matches Emacs exactly, and `error-message-string-curled-text` binds it to `curve` and records the divergence itself. That second snapshot was impossible until Phase 20 fixed the oracle shim, which wrote Emacs' INTERNAL representation of a raw byte to stdout and so produced a record that was not decodable UTF-8; `comparison` was kg-policy for that mechanical reason and is `emacs` now that the reason is gone. fe/test_api.c pins the ASCII text this side renders.",
    "source_name": null
   },
   {
@@ -2375,6 +2391,39 @@
    "kg_test": "fe/scripts/special-variables.fe",
    "rationale": null,
    "source_name": "special-variable-p"
+  },
+  {
+   "id": "string-order-greaterp",
+   "category": "sequences",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "string-order-greater"
+   ],
+   "kg_test": "fe/test_api.c:TestStringOrderPrimitives",
+   "rationale": "Phase 20: `string>` is `string<` with the operands the other way round, which is how Emacs defines `string-greaterp` too. One extra arm in the binary resume and no second implementation of the order.",
+   "source_name": "string>"
+  },
+  {
+   "id": "string-order-lessp",
+   "category": "sequences",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "string-order-less",
+    "string-order-cells",
+    "string-order-codepoints",
+    "string-order-symbols",
+    "string-order-wrong-type-first",
+    "string-order-wrong-type-second",
+    "string-order-arity",
+    "string-order-funcall"
+   ],
+   "kg_test": "fe/test_api.c:TestStringOrderPrimitives",
+   "rationale": "Phase 20: Emacs' `string<`, taking a string or a SYMBOL on either side and comparing by character. fe compares by BYTE and the two agree for every string either dialect can hold, because UTF-8 preserves codepoint order under byte-lexicographic comparison -- `string-order-codepoints` is that claim asked at the boundary that would show it. The implementation is `StringOperandLess` in fe.c, a cell at a time over the chunked string representation, which `string-order-cells` exercises at both kinds of cell boundary; the NUL padding of a short last cell is what makes a prefix sort first with no length test, since `memcmp` already orders NUL before every real byte. It arrives as a primitive rather than as kg prelude Lisp because kg's `apropos` sorts with it and a per-character prelude comparison spent an evaluation's whole step budget on 35 names.",
+   "source_name": "string<"
   },
   {
    "id": "symbol-family-are-functions",

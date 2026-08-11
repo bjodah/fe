@@ -59,5 +59,15 @@ read at run time, not files Emacs loads on its own."
   ;; Exactly one canonical record on stdout, nothing else; anything
   ;; Emacs prints incidentally (e.g. `message') goes to stderr in batch
   ;; mode already and is left unparsed.
-  (princ (json-serialize record))
-  (princ "\n"))
+  ;;
+  ;; `send-string-to-terminal' rather than `princ', and that is not a
+  ;; style choice.  `json-serialize' returns a UNIBYTE string of UTF-8
+  ;; bytes; `princ' would put those bytes through stdout's coding system
+  ;; a SECOND time, and every byte above 127 came out as Emacs' internal
+  ;; representation of a raw byte -- so a record containing any non-ASCII
+  ;; character (Emacs' curled quotes, most of all) was not decodable UTF-8
+  ;; and could not be checked in as a snapshot.  `send-string-to-terminal'
+  ;; writes a unibyte string to stdout verbatim, which is exactly what a
+  ;; byte-exact JSON record needs.
+  (send-string-to-terminal (json-serialize record))
+  (send-string-to-terminal "\n"))

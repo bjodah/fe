@@ -1,0 +1,5 @@
+{
+ "id": "condition-buffer-edge-handlers",
+ "expr": "(list (condition-case nil (signal 'end-of-buffer nil) (beginning-of-buffer 'BOB) (end-of-buffer 'EOB)) (condition-case e (signal 'beginning-of-buffer nil) (end-of-buffer 'EOB) (error (list 'E (car e)))))",
+ "note": "Phase 20: the two edges do not catch each other, and the more specific clause wins only when it names the condition actually raised."
+}

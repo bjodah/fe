@@ -1,0 +1,5 @@
+{
+ "id": "string-order-funcall",
+ "expr": "(list (funcall 'string< \"a\" \"b\") (apply 'string> (list \"b\" \"a\")) (funcall (lambda (a b) (string< a b)) \"a\" \"b\"))",
+ "note": "Phase 20: both are ordinary functions, not special forms, so `funcall`, `apply` and a lambda that closes over them all reach them -- which is what makes them usable as a sort comparator."
+}

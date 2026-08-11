@@ -166,6 +166,14 @@ typedef enum Primitive {
   // rendering rule is `ConditionMessageText`'s, in fe.c beside the writer it
   // spends.
   PErrorMessageString,
+  // Phase 20 of kg's Emacs-subset program: `string<` and `string>`, Emacs'
+  // lexicographic string order. Two ordinary binary functions that touch no
+  // evaluator state, so they ride the binary frame beside `eq`; the order
+  // itself is `StringOperandLess` in fe.c, beside the string model it walks,
+  // and `string>` is it with the operands swapped -- which is how Emacs'
+  // own `string-greaterp` is defined.
+  PStringLess,
+  PStringGreater,
   PSentinel
 } Primitive;
 
@@ -340,6 +348,14 @@ typedef struct FeCleanupEntry {
       // `MarkCleanupRoots` marks it: nothing else refers to a shadowed value
       // while the binding is in force.
       FeObject* value;
+      // What the host's `FeBindingSaveFn` answered when this binding was
+      // pushed, handed back to its `FeBindingTargetFn` at the restore and
+      // uninterpreted in between (FE_API_VERSION 11). Zero both when no host
+      // callback is installed and when one answered zero; fe never tells the
+      // two apart, because it never looks at the number.  NOT an `FeObject*`
+      // and deliberately not marked: it is host bookkeeping, and a host that
+      // wants an Fe object to survive the binding has to root it itself.
+      uintptr_t host_tag;
     } binding;
   } as;
 } FeCleanupEntry;
@@ -631,6 +647,7 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
 // would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
 // the independent function cell used by call-position resolution.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
+bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b);
 FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns
 FeObject* SymbolFunction(FeObject* sym);  // &unbound when no function binding
@@ -675,6 +692,14 @@ struct FeContext {
   FeErrorFn* error_fn;
   FeNativeFn* mark_fn;
   FeNativeFn* gc_fn;
+  // The dynamic-binding location seam (FE_API_VERSION 11), both null unless
+  // the host installed them with `FeSetBindingFns`. See fe.h for the
+  // contract; the two call sites are `PushDynamicBinding` and
+  // `RestoreDynamicBinding`, and null at either of them means fe's own
+  // answer -- the tag is null, and the saved value goes back into the bound
+  // symbol's own cell.
+  FeBindingSaveFn* binding_save_fn;
+  FeBindingTargetFn* binding_target_fn;
   // True for exactly as long as `CollectGarbage` is running, which is the
   // one window in which the object graph is not in a state anything else may
   // read: since 09C the mark phase reverses the pointers it walks, so a
@@ -1128,5 +1153,33 @@ FeObject* Evaluate(FeContext* ctx,
                    FeObject* env,
                    FeObject** bind);
 FeObject* RunEvaluationBody(FeContext* ctx, FeObject* forms, FeObject* env);
+
+// The completion seam (Phase 20 of the same program). fe_unwind.c holds the
+// ambient evaluation-control record, the condition hierarchy and its handler
+// search, the cleanup registry and every raise; fe_eval.c keeps the
+// frame-driven evaluator. As with the run seam above, nothing here is new or
+// moved *code* -- each was `static` in fe_eval.c until the split, which
+// exists so the 520-per-file complexity cap keeps binding on the evaluator
+// at full strength.
+//
+// fe_eval.c -> fe_unwind.c (the raises, the two cleanup pushes, the drain,
+// and the `signal` name gate; `SaveEvaluationControl`,
+// `RestoreEvaluationControl`, `EnterNativeReentry` and `RaiseCompletionCore`
+// are declared above because fe_run.c reaches them too):
+[[noreturn]] void RaiseWrongType(FeContext* ctx,
+                                 const char* predicate,
+                                 FeObject* value);
+[[noreturn]] void RaiseNamedError(FeContext* ctx,
+                                  const char* name,
+                                  const char* message);
+[[noreturn]] void RaiseBudget(FeContext* ctx, const char* msg);
+void PushCleanup(FeContext* ctx, FeCleanupEntry entry);
+void PushDynamicBinding(FeContext* ctx, FeObject* symbol, FeObject* value);
+void RunCleanupsDownTo(FeContext* ctx, size_t target);
+void ValidateConditionHandlers(FeContext* ctx, FeObject* handlers);
+bool IsConditionSymbol(const FeObject* symbol);
+//
+// fe_unwind.c -> fe_eval.c: one edge, the throw a cleanup re-issues.
+bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value);
 
 #endif
