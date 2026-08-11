@@ -239,7 +239,20 @@
 // `"a\\b"` where it was `"a\b"` -- the last printed form that did not read
 // back.  `FE_API_VERSION` moves to 10 in the same slice for
 // `FeErrorMessageString`, the C half of the first of those.
-#define FE_LANGUAGE_VERSION 13
+// Version 14 (Phase 20) is two additions, landed under one bump.  `string<`
+// and `string>` are new names that answered `void-function`: Emacs'
+// lexicographic string order, taking a string or a symbol on either side.
+// And `end-of-buffer` and `beginning-of-buffer` join the condition
+// hierarchy, so `(signal 'end-of-buffer nil)` is legal where it was
+// `(error "unknown condition ...")`, `(get 'end-of-buffer 'error-message)`
+// answers "End of buffer" where it answered nil, and an `error` handler now
+// catches both.  Neither is a break -- no program that ran under 13 answers
+// differently under 14 -- and both bump the macro for Phase 10's recorded
+// reason: kg's compile-time `static_assert` is the only consumer, and a
+// macro that does not move cannot tell kg whether the fe it links against
+// has the names it reflects with.  `FE_API_VERSION` stays at 10: no
+// declaration in this header changed.
+#define FE_LANGUAGE_VERSION 14
 
 extern const char* FeVersion;
 

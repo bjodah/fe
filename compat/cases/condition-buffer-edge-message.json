@@ -1,0 +1,5 @@
+{
+ "id": "condition-buffer-edge-message",
+ "expr": "(list (get 'end-of-buffer 'error-message) (get 'beginning-of-buffer 'error-message) (error-message-string '(end-of-buffer)) (error-message-string '(beginning-of-buffer)))",
+ "note": "Phase 20: the two new rows carry Emacs' own `error-message` text, seeded onto the symbols when the context opens like every other row of the hierarchy."
+}

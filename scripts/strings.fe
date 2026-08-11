@@ -1,0 +1,62 @@
+;; Emacs' lexicographic string order (Phase 20 of kg's Emacs-subset
+;; program).  Every expectation below was measured on GNU Emacs 31.0.90;
+;; `fe/compat/cases/string-order-*` carries the oracle snapshots and this
+;; script is the executable half.
+
+;; The order itself, on strings.  Equal strings are not less than each
+;; other, and a proper prefix sorts first.
+(assert-not-nil (string< "abc" "abd"))
+(assert-nil (string< "abc" "abc"))
+(assert-nil (string< "abd" "abc"))
+(assert-not-nil (string< "ab" "abc"))
+(assert-nil (string< "abc" "ab"))
+(assert-nil (string< "" ""))
+(assert-not-nil (string< "" "a"))
+
+;; Byte order is codepoint order, which is what Emacs compares by: UTF-8
+;; preserves it.  "é" is U+00E9 and sorts after every ASCII character, and
+;; ASCII "Z" sorts before "a" because the codepoints do.
+(assert-nil (string< "é" "z"))
+(assert-not-nil (string< "Z" "a"))
+
+;; Longer than one string cell, so the comparison crosses a cell boundary
+;; on both sides and on one side alone.
+(assert-not-nil (string< "aaaaaaaaaaaaaaaX" "aaaaaaaaaaaaaaaY"))
+(assert-nil (string< "aaaaaaaaaaaaaaaY" "aaaaaaaaaaaaaaaX"))
+(assert-not-nil (string< "aaaaaaa" "aaaaaaaa"))
+(assert-nil (string< "aaaaaaaa" "aaaaaaa"))
+
+;; A symbol operand is its name, on either side or both.  Fe's nil is not a
+;; symbol object and still compares as the name "nil", as Emacs' nil does.
+(assert-not-nil (string< 'abc "abd"))
+(assert-not-nil (string< "abc" 'abd))
+(assert-not-nil (string< 'abc 'abd))
+(assert-nil (string< nil "a"))
+(assert-not-nil (string< "n" nil))
+
+;; `string>` is `string<` with the operands the other way round, which is
+;; how Emacs defines `string-greaterp`.
+(assert-not-nil (string> "abd" "abc"))
+(assert-nil (string> "abc" "abd"))
+(assert-nil (string> "abc" "abc"))
+(assert-not-nil (string> 'b 'a))
+
+;; Ordinary functions, not special forms: reachable through `funcall` and
+;; `apply` and usable as a comparator.
+(assert-not-nil (funcall 'string< "a" "b"))
+(assert-not-nil (apply 'string> (list "b" "a")))
+
+;; Anything that is neither a string nor a symbol names the predicate Emacs
+;; names, on whichever side it appears.
+(assert-equals '(wrong-type-argument stringp 1)
+               (condition-case e (string< "a" 1) (error e)))
+(assert-equals '(wrong-type-argument stringp 1)
+               (condition-case e (string< 1 "a") (error e)))
+
+;; Strictly binary, as in Emacs.
+(assert-equals 'wrong-number-of-arguments
+               (condition-case e (string< "a") (error (car e))))
+(assert-equals 'wrong-number-of-arguments
+               (condition-case e (string< "a" "b" "c") (error (car e))))
+
+(print "strings ok")

@@ -1,0 +1,5 @@
+{
+ "id": "string-order-cells",
+ "expr": "(list (string< \"aaaaaaaX\" \"aaaaaaaY\") (string< \"aaaaaaaY\" \"aaaaaaaX\") (string< \"aaaaaaa\" \"aaaaaaaa\") (string< \"aaaaaaaa\" \"aaaaaaa\") (string< \"aaaaaaaaaaaaaaaX\" \"aaaaaaaaaaaaaaaY\"))",
+ "note": "Phase 20: fe stores a string as a chain of seven-byte cells and compares a cell at a time, so these are the boundary cases -- two chains differing only in a later cell, and one that ends exactly where the other continues. Emacs' representation is unrelated, which is the point of asking it."
+}

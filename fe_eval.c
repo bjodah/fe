@@ -959,6 +959,11 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PPut] = {3, 3},
     [PGet] = {2, 2},
     [PSymbolPlist] = {1, 1},
+    // Phase 20: `string<`/`string>` are strictly binary, Emacs' own arity --
+    // measured on the pinned 31.0.90, `(string<)`, `(string< "a")` and
+    // `(string< "a" "b" "c")` are all `wrong-number-of-arguments`.
+    [PStringLess] = {2, 2},
+    [PStringGreater] = {2, 2},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -1272,6 +1277,13 @@ static bool DispatchPrimitive(FeContext* ctx,
     // validated on delivery before the flag form is evaluated, which is the
     // validate-first ordering the rest of this family already has.
     case PMarkSpecial:
+    // `string<`/`string>` (Phase 20): the same `{2, 2}` contract as the rest
+    // of this family, and neither operand is validated before the other
+    // evaluates -- Emacs raises `(wrong-type-argument stringp 1)` for
+    // `(string< 1 "a")` only once both are in hand, which is where the
+    // comparison itself checks them.
+    case PStringLess:
+    case PStringGreater:
       frame->kind = FeFrameBinary;
       frame->fn = fn;
       frame->rest = arguments;
@@ -2038,6 +2050,15 @@ static bool ResumeBinary(FeContext* ctx,
       MarkSpecialSymbol(ctx, first, !FeIsNil(second));
       *result = first;
       break;
+    // `string<`/`string>` (Phase 20). One order, spent twice: Emacs defines
+    // `string-greaterp` as `string-lessp` with the operands the other way
+    // round, and so does this.
+    case PStringLess:
+      *result = FeMakeBool(ctx, StringOperandLess(ctx, first, second));
+      break;
+    case PStringGreater:
+      *result = FeMakeBool(ctx, StringOperandLess(ctx, second, first));
+      break;
     default:
       abort();
   }
@@ -2363,6 +2384,11 @@ static const bool primitive_is_function[PSentinel] = {
     // `(mapcar 'error-message-string '((error "a")))` works -- and its arm
     // evaluates its one operand on the unary frame beside `keywordp`.
     [PErrorMessageString] = true,
+    // Phase 20: `string<`/`string>` are ordinary functions in Emacs --
+    // `(special-form-p 'string<)` is nil and `(funcall 'string< "a" "b")` is
+    // t there -- and both operands evaluate here on the binary frame.
+    [PStringLess] = true,
+    [PStringGreater] = true,
     // Phase 13: all three are ordinary functions in Emacs -- `(special-form-p
     // 'signal)`, `'error` and `'keywordp` are all nil there, and
     // `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and

@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "14.0";
+const char* FeVersion = "15.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -116,7 +116,9 @@ static const char* primitive_names[] = {
     [PPut] = "put",
     [PGet] = "get",
     [PSymbolPlist] = "symbol-plist",
-    [PErrorMessageString] = "error-message-string"};
+    [PErrorMessageString] = "error-message-string",
+    [PStringLess] = "string<",
+    [PStringGreater] = "string>"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -682,6 +684,61 @@ bool Equal(FeObject* a, FeObject* b) {
     return a == b;
   }
   return false;
+}
+
+// The stored byte chain a `string<`/`string>` operand designates. Emacs takes
+// a string or a SYMBOL on either side, measured on 31.0.90: `(string< 'abc
+// "abd")` and `(string< "abc" 'abd)` are both t, and `(string< "n" nil)` is t
+// because nil's name is "nil" -- fe's nil owns no name chain, so it is the
+// one operand that has to be built. Anything else is `(wrong-type-argument
+// stringp X)` naming the operand, which is Emacs' own answer for `(string<
+// "a" 1)` and for `(string< 1 "a")` alike.
+static FeObject* StringOperandChain(FeContext* ctx, FeObject* obj) {
+  if (FeIsNil(obj)) {
+    return FeMakeString(ctx, "nil");
+  }
+  const FeType type = FeGetType(obj);
+  if (type == FeTSymbol) {
+    return SymbolName(obj);
+  }
+  if (type != FeTString) {
+    RaiseWrongType(ctx, "stringp", obj);
+  }
+  return obj;
+}
+
+// Phase 20's `string<`, and `string>` with the operands swapped. Emacs
+// compares by CHARACTER; this compares by BYTE, and the two agree for every
+// string either dialect can hold, because UTF-8 preserves codepoint order
+// under byte-lexicographic comparison -- measured against the oracle at the
+// boundary that would show it, `(string< "é" "z")` being nil in both.
+//
+// A cell at a time rather than a byte at a time, which `Equal` above already
+// does for string equality and for the same reason: every cell but the last
+// carries a full `StringBufferSize` bytes, so two chains' cell boundaries
+// always line up, and the unused tail of the last cell is `'\0'` -- which
+// `memcmp` already orders before every real byte, so a prefix sorts first
+// with no length test. The chain that runs out first is the shorter one only
+// when the other has not; equal chains end together and are not less.
+//
+// `left` is rooted across the second coercion because that one can allocate
+// (the nil operand above): the operands themselves are frame fields and
+// rooted by the caller, but a freshly built "nil" is not.
+bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* left = StringOperandChain(ctx, a);
+  FePushGC(ctx, left);
+  FeObject* right = StringOperandChain(ctx, b);
+  FeRestoreGC(ctx, gc);
+  for (; !FeIsNil(left) && !FeIsNil(right);
+       left = CDR(left), right = CDR(right)) {
+    const int order =
+        memcmp(STRING_BUFFER(left), STRING_BUFFER(right), StringBufferSize);
+    if (order != 0) {
+      return order < 0;
+    }
+  }
+  return FeIsNil(left) && !FeIsNil(right);
 }
 
 // Same-type doubles equal by their exact bits (05A Decision 2, rows E4-E5,

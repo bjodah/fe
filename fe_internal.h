@@ -166,6 +166,14 @@ typedef enum Primitive {
   // rendering rule is `ConditionMessageText`'s, in fe.c beside the writer it
   // spends.
   PErrorMessageString,
+  // Phase 20 of kg's Emacs-subset program: `string<` and `string>`, Emacs'
+  // lexicographic string order. Two ordinary binary functions that touch no
+  // evaluator state, so they ride the binary frame beside `eq`; the order
+  // itself is `StringOperandLess` in fe.c, beside the string model it walks,
+  // and `string>` is it with the operands swapped -- which is how Emacs'
+  // own `string-greaterp` is defined.
+  PStringLess,
+  PStringGreater,
   PSentinel
 } Primitive;
 
@@ -631,6 +639,7 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
 // would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
 // the independent function cell used by call-position resolution.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
+bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b);
 FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns
 FeObject* SymbolFunction(FeObject* sym);  // &unbound when no function binding

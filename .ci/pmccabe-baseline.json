@@ -172,6 +172,8 @@
   "fe.c:SetSymbolFunction": 1,
   "fe.c:SetSymbolPlist": 1,
   "fe.c:SetType": 1,
+  "fe.c:StringOperandChain": 4,
+  "fe.c:StringOperandLess": 5,
   "fe.c:SymbolBindingCell": 1,
   "fe.c:SymbolFunction": 1,
   "fe.c:SymbolIsLetDynamic": 5,

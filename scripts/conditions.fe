@@ -79,6 +79,26 @@
 (assert-equals '(file-error "x")
   (condition-case e (signal 'file-error '("x")) (file-error e)))
 
+;; Phase 20: `end-of-buffer` and `beginning-of-buffer`, the two edges an
+;; editor's motion commands reach constantly.  Emacs' chain, measured on
+;; 31.0.90: `(get 'end-of-buffer 'error-conditions)` is `(end-of-buffer
+;; error)`, so `error` catches one and the two do not catch each other.
+(assert-equals '(end-of-buffer)
+  (condition-case e (signal 'end-of-buffer nil) (error e)))
+(assert-equals '(beginning-of-buffer)
+  (condition-case e (signal 'beginning-of-buffer nil) (error e)))
+(assert-equals 'EOB
+  (condition-case nil (signal 'end-of-buffer nil)
+    (beginning-of-buffer 'BOB) (end-of-buffer 'EOB)))
+(assert-equals '(E beginning-of-buffer)
+  (condition-case e (signal 'beginning-of-buffer nil)
+    (end-of-buffer 'EOB) (error (list 'E (car e)))))
+;; Their rendered text is Emacs' own, from the `error-message` property.
+(assert-equals "End of buffer" (error-message-string '(end-of-buffer)))
+(assert-equals "Beginning of buffer"
+               (error-message-string '(beginning-of-buffer)))
+(assert-equals "End of buffer" (get 'end-of-buffer 'error-message))
+
 ;; The uncaught tail: everything above is caught, so nothing above this line
 ;; reaches the host. This one does, and the golden `tests/conditions.fe.err`
 ;; is what an uncaught condition looks like on its way out of the standalone

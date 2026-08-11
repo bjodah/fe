@@ -501,7 +501,33 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # "FAIL: total complexity 840 exceeds limit 839" and exits 2, and at 840 it
 # passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
 # exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 840
+#
+# Set 840 -> 850 at Phase 20's language slice (2026-08-11), pre-pin: the
+# measured actual after `string<`/`string>` and the two buffer-edge
+# conditions. No raise-then-spend cycle, as at Phase 19: the slice is small
+# enough to measure directly and set the cap to what it cost.
+#
+# The +10 is entirely fe.c 176 -> 186, and it is `StringOperandChain`'s three
+# type tests plus `StringOperandLess`'s loop, its `memcmp` test and the three
+# `&&`/`!=` operators scc counts beside them. fe_eval.c does not move at all
+# (404): the four `case` labels the two primitives add to `DispatchPrimitive`
+# and `ResumeBinary` cost nothing, because scc's C complexity keywords are
+# the branching ones and `case` is not among them -- a reminder, in the same
+# direction as the '"' desync, that this number is a floor.
+# fe_unwind.c does not move either (115): the two condition rows are data,
+# which is the property that made `file-missing` free in 12C too.
+# `PMCCABE_TOTAL_MAX` moved +9 and is the authoritative measure.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does not move and stays at 520, with the headroom
+# the split above bought: fe_eval.c 404, fe.c 186, fe_unwind.c 115, main.c
+# 37, fex_io.c 28, fe_run.c 25.
+#
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire, exit status checked: at 849 `make complexity-check` reports
+# "FAIL: total complexity 850 exceeds limit 849" and exits 2, and at 850 it
+# passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
+# exits 2, the one file being fe_eval.c at 404.
+SCC_COMPLEXITY_MAX ?= 850
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -834,7 +860,23 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1258 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1258
+#
+# Set 1258 -> 1267 at Phase 20's language slice (2026-08-11), pre-pin: the
+# measured actual, and this time the whole of it is two new symbols and no
+# change to any existing one -- `StringOperandChain` at 4 and
+# `StringOperandLess` at 5, 401 symbols against 399. Both are well inside
+# `PMCCABE_NEW_FUNCTION_MAX`. Phase 20's split commit moved this number by
+# zero, as 03A's split spike measured it would.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and `PMCCABE_NEW_FUNCTION_MAX`
+# at 15.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1266 `make pmccabe-check` reports "FAIL:
+# total complexity 1267 exceeds funded budget 1266 (+1)" and exits 2, and at
+# 1267 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+PMCCABE_TOTAL_MAX ?= 1267
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

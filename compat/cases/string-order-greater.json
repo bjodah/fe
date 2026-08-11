@@ -1,0 +1,5 @@
+{
+ "id": "string-order-greater",
+ "expr": "(list (string> \"abd\" \"abc\") (string> \"abc\" \"abd\") (string> \"abc\" \"abc\") (string> \"abc\" \"ab\") (string> \"ab\" \"abc\"))",
+ "note": "Phase 20: `string>` is `string<` with the operands the other way round, which is how Emacs defines `string-greaterp`."
+}

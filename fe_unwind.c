@@ -124,6 +124,18 @@ static const ConditionParent condition_parents[] = {
     {"void-variable", "error", "Symbol's value as variable is void"},
     {"void-function", "error", "Symbol's function definition is void"},
     {"args-out-of-range", "error", "Args out of range"},
+    // Phase 20. Emacs' own chain and text, measured on 31.0.90: `(get
+    // 'end-of-buffer 'error-conditions)` is `(end-of-buffer error)` and its
+    // `error-message` is "End of buffer", the same shape for
+    // `beginning-of-buffer`. Both are here because kg's motion and editing
+    // commands hit a buffer edge constantly and had no name for it: every
+    // such site raised a plain `error`, so a handler could only catch it by
+    // catching everything. Like `file-missing` below they need no code --
+    // the three consumers are `sizeof`-driven loops -- and like it they earn
+    // their place by making `(signal 'end-of-buffer nil)` legal at all,
+    // since `IsConditionSymbol` gates `signal` on this table.
+    {"end-of-buffer", "error", "End of buffer"},
+    {"beginning-of-buffer", "error", "Beginning of buffer"},
     {"arith-error", "error", "Arithmetic error"},
     {"file-error", "error", "File error"},
     // Sub-plan 12C Part 1. Emacs' own chain, measured on 31.0.90: `(get

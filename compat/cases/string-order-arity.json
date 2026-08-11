@@ -1,0 +1,5 @@
+{
+ "id": "string-order-arity",
+ "expr": "(list (condition-case e (string< \"a\") (error (car e))) (condition-case e (string< \"a\" \"b\" \"c\") (error (car e))))",
+ "note": "Phase 20: `string<` is strictly binary in Emacs, both too few and too many being `wrong-number-of-arguments`. The condition SYMBOL alone is compared because the data carries the function object, whose rendering the two dialects have never agreed on (phase7-arity-condition-rendering)."
+}

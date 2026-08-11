@@ -141,8 +141,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 10);
-  static_assert(FE_LANGUAGE_VERSION == 13);
-  CHECK(strcmp(FeVersion, "14.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 14);
+  CHECK(strcmp(FeVersion, "15.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -4677,6 +4677,9 @@ static bool TestErrorMessageString(void) {
   CHK("(get 'error 'error-message)", "error");
   CHK("(get 'quit 'error-message)", "Quit");
   CHK("(get 'file-missing 'error-message)", "File is missing");
+  // Phase 20's two buffer-edge conditions, seeded the same way.
+  CHK("(get 'end-of-buffer 'error-message)", "End of buffer");
+  CHK("(get 'beginning-of-buffer 'error-message)", "Beginning of buffer");
 
   // The rendering itself, measured against Emacs 31.0.90 in every case.
   CHK("(error-message-string '(wrong-type-argument listp 6))",
@@ -4687,6 +4690,8 @@ static bool TestErrorMessageString(void) {
       "Symbol's function definition is void: bar");
   CHK("(error-message-string '(no-catch tag 5))", "No catch for tag: tag, 5");
   CHK("(error-message-string '(arith-error))", "Arithmetic error");
+  CHK("(error-message-string '(end-of-buffer))", "End of buffer");
+  CHK("(error-message-string '(beginning-of-buffer))", "Beginning of buffer");
   CHK("(error-message-string '(quit))", "Quit");
   // `error` takes its message from the DATA, not from the property: this is
   // the case the bare-symbol reporting got most visibly wrong.
@@ -4734,6 +4739,78 @@ static bool TestErrorMessageString(void) {
   CHECK(RendersRaisedCondition(context, &state, "(undefined-name)",
                                "Symbol's function definition is void: "
                                "undefined-name"));
+
+  FeCloseContext(context);
+  return true;
+}
+
+// Phase 20's `string<`/`string>`. The order itself is exercised by
+// `scripts/strings.fe`; this is the C-side half -- the operand coercion, the
+// type and arity errors, and the cell-boundary cases the chunked string
+// representation makes interesting.
+static bool TestStringOrderPrimitives(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "strings.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  CHK("(string< \"abc\" \"abd\")", "t");
+  CHK("(string< \"abc\" \"abc\")", "nil");
+  CHK("(string< \"abd\" \"abc\")", "nil");
+  // A proper prefix sorts first, in both directions and at the empty string.
+  CHK("(string< \"ab\" \"abc\")", "t");
+  CHK("(string< \"abc\" \"ab\")", "nil");
+  CHK("(string< \"\" \"a\")", "t");
+  CHK("(string< \"\" \"\")", "nil");
+  // A string cell holds seven bytes, so these are the boundaries: two chains
+  // that differ only in a later cell, and one that ends exactly where the
+  // other continues.
+  CHK("(string< \"aaaaaaaX\" \"aaaaaaaY\")", "t");
+  CHK("(string< \"aaaaaaa\" \"aaaaaaaa\")", "t");
+  CHK("(string< \"aaaaaaaa\" \"aaaaaaa\")", "nil");
+  // Byte order is codepoint order: UTF-8 preserves it, so a two-byte "é"
+  // sorts after every ASCII character, as it does in Emacs.
+  CHK("(string< \"\303\251\" \"z\")", "nil");
+  // A symbol operand is its name, on either side; fe's nil owns no name
+  // chain and is still compared as "nil".
+  CHK("(string< 'abc \"abd\")", "t");
+  CHK("(string< \"abc\" 'abd)", "t");
+  CHK("(string< 'abc 'abd)", "t");
+  CHK("(string< nil \"a\")", "nil");
+  CHK("(string< \"n\" nil)", "t");
+  CHK("(string< nil nil)", "nil");
+  // `string>` is the same order with the operands swapped.
+  CHK("(string> \"abd\" \"abc\")", "t");
+  CHK("(string> \"abc\" \"abd\")", "nil");
+  CHK("(string> 'b 'a)", "t");
+  // Ordinary functions: `funcall` and `apply` reach them, and a prelude
+  // `sort` can take one as its comparator.
+  CHK("(funcall 'string< \"a\" \"b\")", "t");
+  CHK("(apply 'string> '(\"b\" \"a\"))", "t");
+  // Emacs names `stringp` for an operand that is neither, whichever side it
+  // is on, and the offending operand is the one reported.
+  CHK("(condition-case e (string< \"a\" 1) (error e))",
+      "(wrong-type-argument stringp 1)");
+  CHK("(condition-case e (string< 1 \"a\") (error e))",
+      "(wrong-type-argument stringp 1)");
+  CHK("(condition-case e (string> 2.5 \"a\") (error e))",
+      "(wrong-type-argument stringp 2.5)");
+  // Strictly binary.
+  CHK("(condition-case e (string< \"a\") (error (car e)))",
+      "wrong-number-of-arguments");
+  CHK("(condition-case e (string< \"a\" \"b\" \"c\") (error (car e)))",
+      "wrong-number-of-arguments");
+
+#undef CHK
 
   FeCloseContext(context);
   return true;
@@ -8067,11 +8144,23 @@ static bool TestCaughtExhaustionSession(void) {
 // seeding builds is reachable from the symbol list forever, so it is charged
 // once to both figures. The collection count and the peak are unchanged for
 // the fifth time, which is the invariance 09C pinned.
+// Re-measured at Phase 20 for the sixth time, and it moves by 38 for the
+// same reason: two more primitives and two more condition rows, all four
+// built before any program runs. The primitives are 7 each -- one primitive
+// object plus a 6-slot symbol for each of `string<` and `string>` -- and the
+// hierarchy rows are 24: the `end-of-buffer` symbol (7) and the
+// `beginning-of-buffer` one (8), their message strings "End of buffer" (2)
+// and "Beginning of buffer" (3), and the two plist pairs each. The arena
+// grows with `FeMinimumArenaSize()` and holds 38 more slots (15599 ->
+// 15637), of which the same 38 are live after a collection (1428 -> 1466),
+// everything here being reachable from the symbol list forever. The
+// collection count and the peak are unchanged for the sixth time, which is
+// the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 15599,
+  PinnedTotalSlots = 15637,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15599,
-  PinnedLiveAfterCollection = 1428,
+  PinnedPeakLive = 15637,
+  PinnedLiveAfterCollection = 1466,
 };
 
 // ---------------------------------------------------------------------------
@@ -9451,19 +9540,19 @@ int main(void) {
                  TestNumericEqual() && TestNumericTower() && TestNumericCut() &&
                  TestUnwindHostAPI() && TestNativeCleanupHandlerFloor() &&
                  TestEvalPrimitive() && TestSymbolPrimitives() &&
-                 TestErrorMessageString() && TestUnwindLisp() &&
-                 TestUnwindCleanupBudget() && TestFrameLimits() &&
-                 TestFrameSubstrate() && TestArenaStats() &&
-                 TestEvaluationStackProbe() && TestCallHeadProbe() &&
-                 TestArgumentFrame() && TestArgumentProbe() &&
-                 TestLambdaBodyFrame() && TestLambdaBodyChain() &&
-                 TestMacroFrame() && TestNativeReentry() &&
-                 TestNativeOwningReentry() && TestResumableFrameGC() &&
-                 TestCleanupRunGC() && TestPrimitiveOrder() &&
-                 TestResumableFrameBudget() && TestResumableFrameCancel() &&
-                 TestMixedCleanupLIFO() && TestGcStackConstantInNesting() &&
-                 TestLongArgumentLists() && TestNativeArityRecord() &&
-                 TestExhaustionCatchability() &&
+                 TestStringOrderPrimitives() && TestErrorMessageString() &&
+                 TestUnwindLisp() && TestUnwindCleanupBudget() &&
+                 TestFrameLimits() && TestFrameSubstrate() &&
+                 TestArenaStats() && TestEvaluationStackProbe() &&
+                 TestCallHeadProbe() && TestArgumentFrame() &&
+                 TestArgumentProbe() && TestLambdaBodyFrame() &&
+                 TestLambdaBodyChain() && TestMacroFrame() &&
+                 TestNativeReentry() && TestNativeOwningReentry() &&
+                 TestResumableFrameGC() && TestCleanupRunGC() &&
+                 TestPrimitiveOrder() && TestResumableFrameBudget() &&
+                 TestResumableFrameCancel() && TestMixedCleanupLIFO() &&
+                 TestGcStackConstantInNesting() && TestLongArgumentLists() &&
+                 TestNativeArityRecord() && TestExhaustionCatchability() &&
                  TestExhaustionHandlerReentry() &&
                  TestCaughtExhaustionSession() && TestMarkStackProbe() &&
                  TestMarkRaiseIsFatal() && TestMarkPrintingCallbackIsSafe() &&

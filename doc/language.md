@@ -1431,6 +1431,36 @@ P)` is nil.
 
 Returns the whole property list, `(PROPERTY VALUE ...)`.
 
+### Strings
+
+#### `(string< a b)` and `(string> a b)`
+
+Emacs' lexicographic string order. Each takes exactly two arguments, and
+each argument is a string or a **symbol** -- a symbol is compared by its
+name, and nil compares as `"nil"`. Anything else is `(wrong-type-argument
+stringp VALUE)`.
+
+`string<` is `t` when `a` sorts strictly before `b`. Equal strings are not
+less than each other, and a proper prefix sorts first, so `(string< "ab"
+"abc")` is `t` and `(string< "" "a")` is `t`. `string>` is `string<` with
+the arguments the other way round, which is how Emacs defines
+`string-greaterp` too. Neither has a `string=`: `is` and `eql` already
+compare strings by value, and a host that wants Emacs' name can bind it.
+
+Emacs compares by character and Fe compares by byte. The two agree for
+every string either dialect can hold, because UTF-8 preserves codepoint
+order under byte-lexicographic comparison -- `(string< "é" "z")` is nil on
+both sides, U+00E9 sorting after every ASCII character.
+
+```clojure
+fe > (string< "abc" "abd")
+t
+fe > (string< 'abc "abd")
+t
+fe > (string> "abd" "abc")
+t
+```
+
 ### Numbers
 
 Fe has two numeric types, like Emacs Lisp: **integers** (signed 64-bit,
@@ -1609,6 +1639,13 @@ producer needs them. Being absent from the table, both are refused by
 `signal` as well as unraisable: measured, `(signal 'file-already-exists
 '("a"))` is `(file-already-exists "a")` in Emacs 31.0.90 and
 `(error "Invalid error symbol" file-already-exists)` here.
+
+`end-of-buffer` and `beginning-of-buffer` are Emacs' two buffer-edge
+conditions and are ordinary children of `error` -- `(get 'end-of-buffer
+'error-conditions)` is `(end-of-buffer error)` there -- so an `error`
+handler catches either and neither catches the other. As with the file
+classes, nothing in Fe raises them; they are here for a host that edits
+text, and a host that does not can ignore them.
 
 `quit` is separate and requires a `quit` or
 `t` handler -- and that is true of a real host interrupt (a C-g) as well as
