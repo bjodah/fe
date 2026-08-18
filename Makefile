@@ -897,7 +897,23 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1271 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1271
+#
+# Set 1271 -> 1272 at the public collect-now entry point (FE_API_VERSION 12,
+# kg's embedded-prelude program's post-prelude collect, 2026-08-18): the
+# measured actual, 403 symbols against 402. One new symbol,
+# `FeCollectGarbage` at 1 -- a one-line wrapper around the already-counted
+# `CollectGarbage` -- and no change to any existing symbol.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and `PMCCABE_NEW_FUNCTION_MAX`
+# at 15; the worst function in the tree is still `RunEvaluationLoop` and
+# `ResumeEvalList`, both at 15, both unmoved.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1271 `make pmccabe-check` reports "FAIL:
+# total complexity 1272 exceeds funded budget 1271 (+1)" and exits 2, and at
+# 1272 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+PMCCABE_TOTAL_MAX ?= 1272
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

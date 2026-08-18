@@ -14,7 +14,9 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 11 adds the
+types, and callback signatures declared in `fe.h`; API version 12 adds
+`FeCollectGarbage`, an immediate, forced collection reachable from outside
+fe.c for the first time; API version 11 adds the
 dynamic-binding location seam
 `FeBindingSaveFn`/`FeBindingTargetFn`/`FeSetBindingFns`, which is how a host
 whose storage moves says where a `let`'s saved value goes back to; API
@@ -57,9 +59,16 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 11);
+static_assert(FE_API_VERSION == 12);
 static_assert(FE_LANGUAGE_VERSION == 14);
 ```
+
+Fe 17.0 moves `FE_API_VERSION` 11 -> 12 and leaves `FE_LANGUAGE_VERSION` at
+14: `FeCollectGarbage` is a C contract with no language surface at all --
+nothing a Lisp program evaluates can observe whether or when a collection
+ran, beyond the arena not running out -- so no program that ran under Fe
+16.0 answers differently under 17.0. The reasoning is below, under the
+version history.
 
 Fe 16.0 moves `FE_API_VERSION` 10 -> 11 and leaves `FE_LANGUAGE_VERSION` at
 14: the dynamic-binding location seam is a C contract, and no program that
@@ -369,6 +378,29 @@ This is a read-only accessor for baselining and margin questions -- "how
 close is the fixed arena to full" -- not a live diagnostic surface: there is
 no Lisp-visible primitive that exposes it, and a host that wants to surface
 it to users owns that decision and its own presentation.
+
+### Forcing a collection (FE_API_VERSION 12)
+
+`FeCollectGarbage(ctx)` runs an immediate mark-and-sweep: the same one
+`ArenaCanAllocate()` and `MakeObject()`'s exhaustion path already run when the
+free list runs dry, and the same one every allocation runs under the
+`FE_GC_STRESS` build knob, now reachable on demand rather than only as a side
+effect of allocation. `collection_count` in the next `FeGetArenaStats()`
+reading moves by exactly one; whatever was unreachable at the call returns to
+`free_slots`. It allocates nothing itself, so it is safe to call between
+evaluations, though not from inside a `mark_fn` or `gc_fn` callback (the same
+re-entrancy rule "Context Userdata And Callbacks" states below, enforced by
+the same `abort()`).
+
+It exists for a host that wants a collection's cost paid at a moment of its
+own choosing rather than fe's -- typically once, right after a large,
+fixed body of startup definitions has finished loading, to reclaim whatever
+reader and macro-expansion garbage that loading produced before a session's
+own work begins. Before this there was no way to ask for a collection from
+outside fe.c at all: `CollectGarbage()` stays `static`, and a host (or fe's
+own test suite) that wanted one had to allocate disposable objects until
+natural exhaustion happened to trigger one, which is a description of what
+it was trying to measure and not a control over when it happened.
 
 ## Context Userdata And Callbacks
 

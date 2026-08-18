@@ -36,6 +36,7 @@
   "fe.c:FeCar": 1,
   "fe.c:FeCdr": 1,
   "fe.c:FeCloseContext": 1,
+  "fe.c:FeCollectGarbage": 1,
   "fe.c:FeCons": 1,
   "fe.c:FeCopyStringBytes": 4,
   "fe.c:FeCreateRoot": 1,

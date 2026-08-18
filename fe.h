@@ -113,7 +113,26 @@
 // and restores exactly as version 10 did, so no existing host changes
 // behaviour and none has to recompile for meaning. The bump is the same
 // `static_assert` tripwire every earlier one is.
-#define FE_API_VERSION 11
+//
+// Version 12 (kg's embedded-prelude program, the post-prelude collect) adds
+// one declaration, `FeCollectGarbage`: an immediate, forced mark-and-sweep,
+// the same one `ArenaCanAllocate` and `MakeObject`'s exhaustion path already
+// run on their own schedule, now reachable from outside fe.c. Before this a
+// host had no way to ask for a collection -- `CollectGarbage` stays
+// `static`, unreachable from any other translation unit including fe's own
+// test suite, which is why `ForceCollection` in test_api.c allocates
+// disposable objects in a loop until natural exhaustion triggers one. kg's
+// motivating case is a startup-only host, evaluating a large, fixed set of
+// definitions once and wanting the transient reader/macro-expansion garbage
+// that loading them produced back before a session's own work starts,
+// without waiting for that session to allocate enough to trigger a
+// collection on its own. Nothing is removed and no existing declaration
+// changes meaning, so every existing call keeps compiling; the bump exists
+// because a version that does not move cannot tell kg whether the fe it is
+// linking against has the entry point at all -- the same reasoning
+// versions 7, 8 and 11 (the input-unit trio, the value-cell readers, the
+// binding-location seam) already used for an addition with no removal.
+#define FE_API_VERSION 12
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -462,6 +481,19 @@ typedef struct FeArenaStats {
 } FeArenaStats;
 
 [[nodiscard]] FeArenaStats FeGetArenaStats(const FeContext* ctx);
+
+// Force an immediate collection (FE_API_VERSION 12): the same
+// mark-and-sweep `ArenaCanAllocate`/`MakeObject`'s exhaustion path and the
+// `FE_GC_STRESS` build already run on their own schedule, now callable on
+// demand. `collection_count` in `FeGetArenaStats` moves by exactly one, and
+// whatever was unreachable at the call comes back to `free_slots`; a call
+// with nothing new to reclaim is still a real, counted collection rather
+// than a no-op. Safe to call whenever re-entering the collector would be
+// safe at all: not from inside a `mark_fn` or `gc_fn` callback, and not
+// while a collection this same call started is still running (both raise
+// through `FatalCollectorViolation`, exactly as an `ArenaCanAllocate`- or
+// `MakeObject`-triggered collection would). It allocates nothing itself.
+void FeCollectGarbage(FeContext* ctx);
 
 [[nodiscard]] FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);

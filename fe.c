@@ -22,7 +22,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-const char* FeVersion = "16.0";
+const char* FeVersion = "17.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -612,6 +612,15 @@ static void CollectGarbage(FeContext* ctx) {
     }
   }
   ctx->collecting = false;
+}
+
+// The public collect-now entry point (FE_API_VERSION 12): a thin wrapper so
+// the internal name stays internal and a host gets exactly the same
+// mark-and-sweep `ArenaCanAllocate`/`MakeObject` already run on their own
+// schedule. `CollectGarbage` itself already guards re-entrancy (the
+// `ctx->collecting` check above), so this adds no policy of its own.
+void FeCollectGarbage(FeContext* ctx) {
+  CollectGarbage(ctx);
 }
 
 // Translated from [the original

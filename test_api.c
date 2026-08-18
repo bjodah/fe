@@ -140,9 +140,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 11);
+  static_assert(FE_API_VERSION == 12);
   static_assert(FE_LANGUAGE_VERSION == 14);
-  CHECK(strcmp(FeVersion, "16.0") == 0);
+  CHECK(strcmp(FeVersion, "17.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -9713,6 +9713,65 @@ static bool TestProtectedEvaluateString(void) {
   return true;
 }
 
+// kg's embedded-prelude program, the post-prelude collect: the public
+// collect-now entry point (FE_API_VERSION 12). `CollectGarbage` stays
+// `static`, so even this translation unit could not call it directly
+// before now -- `ForceCollection` above exists only because every other
+// test in this file has to allocate disposable objects in a loop until
+// natural exhaustion happens to trigger one. This test builds the rooted
+// value and the garbage directly instead, and checks the collection
+// `FeCollectGarbage` runs is real rather than a stub: the count moves, the
+// unrooted objects come back, and the rooted one does not.
+static bool TestPublicCollectGarbage(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  const size_t collections_before = FeGetArenaStats(context).collection_count;
+
+  // A rooted pair that must survive the sweep: reachable only through
+  // `root`, which the collector marks by walking `ctx->root_list`.
+  FeObject* const kept =
+      FeCons(context, FeMakeInteger(context, 7), FeNil(context));
+  FeRoot* const root = FeCreateRoot(context, kept);
+  const size_t free_before_garbage = FeGetArenaStats(context).free_slots;
+
+  // 64 unrooted pairs that must not survive it: pushed onto the GC stack
+  // by `MakeObject` as every allocation is, and dropped from it by one
+  // `FeRestoreGC` rather than kept alive by anything else.
+  const size_t gc = FeSaveGC(context);
+  for (size_t i = 0; i < 64; i++) {
+    (void)FeCons(context, FeNil(context), FeNil(context));
+  }
+  FeRestoreGC(context, gc);
+  CHECK(FeGetArenaStats(context).free_slots == free_before_garbage - 64);
+
+  FeCollectGarbage(context);
+
+  const FeArenaStats after = FeGetArenaStats(context);
+  CHECK(after.collection_count == collections_before + 1);
+  // Exactly the 64 unrooted pairs came back -- free_slots returns to what
+  // it read before they were allocated, not merely "some slots freed".
+  CHECK(after.free_slots == free_before_garbage);
+  CHECK(FeGetRoot(root) == kept);
+  CHECK(IsRendered(context, FeGetRoot(root), "(7)"));
+
+  // A second call with nothing new to reclaim is still a real, counted
+  // collection -- not a cached answer -- and idempotent: nothing else
+  // moves.
+  FeCollectGarbage(context);
+  const FeArenaStats twice = FeGetArenaStats(context);
+  CHECK(twice.collection_count == after.collection_count + 1);
+  CHECK(twice.free_slots == after.free_slots);
+
+  FeReleaseRoot(context, root);
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -9751,7 +9810,7 @@ int main(void) {
                  TestProtectedCall() && TestHostRaiseCompletion() &&
                  TestDynamicBinding() && TestBindingLocationSeam() &&
                  TestOneArgDefvarScope() && TestHostedInputUnit() &&
-                 TestProtectedEvaluateString()
+                 TestProtectedEvaluateString() && TestPublicCollectGarbage()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }
