@@ -191,3 +191,23 @@ publish function, which roots the owner across its own allocation.
 
 Rows A3, A4, A6, A7, A8, A9, A10 and B11 are the ones that pay it.  Every
 other row is safe by holding a header instead.
+
+## Status after Phase 23.1
+
+The substrate this census was taken for landed: `fe_internal.h` describes the
+block layout and the protocol, `fe.c` holds the region, the allocator, the
+compactor and the collector's payload arm, and `payload_tests.c` is the
+harness that exercises them.  Nothing in the table above changed, because
+nothing in it moved onto the substrate: strings are still a cdr chain of
+seven-byte cells and `STRING_BUFFER` is still fe's only interior pointer.
+Phase 25 is when rows A1-A13 and B1-B32 start being read through storage that
+slides, and this file is the checklist for that phase rather than a record of
+this one.
+
+Finding 2 -- fe's `FeWriteFn` contract does not forbid allocation, and the
+printer holds a payload pointer across it (A6-A10, D9) -- STILL STANDS,
+unresolved and unchanged.  Phase 23.1 touched no printer path, so A6-A10's
+re-derive-per-use property is exactly as the sweep found it: the address is
+derived at every use and never cached across an `Emit`.  Keeping that
+deliberately, rather than accidentally, is still the cheap answer, and the
+choice between it and a sentence in `fe.h` is still Phase 25's to make.

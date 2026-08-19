@@ -4,13 +4,17 @@
 
 The implementation uses a fixed-size region of memory supplied by the caller
 when creating the `FeContext`. The implementation stores the context at the
-start of this memory region, then an evaluator-frame region, then the
-`FeObject` region. The frame region has a 64-frame floor, a 32-frame cleanup
-reserve, and receives 10% of bytes beyond the minimum; the remaining bytes
-become object slots. The arena must satisfy `alignof(FeContext)`; static
-assertions ensure that both following regions are aligned. Fe neither
-reallocates nor frees this storage; its address, size, and exclusive lifetime
-are controlled by the caller through `FeCloseContext()`.
+start of this memory region, then an evaluator-frame region, then the payload
+region, then the `FeObject` region. The frame region has a 64-frame floor, a
+32-frame cleanup reserve, and receives 10% of bytes beyond the minimum; the
+payload region takes an agreed percentage of what is left, and the remaining
+bytes become object slots. `FeOpenContext()` asks for **zero** percent, so
+today's partition is exactly what it has always been and a host that has not
+asked for payload storage does not pay for it; see "The payload region"
+below. The arena must satisfy `alignof(FeContext)`; static assertions ensure
+that every following region is aligned. Fe neither reallocates nor frees this
+storage; its address, size, and exclusive lifetime are controlled by the
+caller through `FeCloseContext()`.
 
 `FeMinimumArenaSize()` derives its result from the private context and object
 layouts and from the objects required to intern and bind every core primitive.
@@ -409,13 +413,63 @@ extent by one alignment unit and pattern-fills the bytes it vacates, so an
 address held across an allocation reads poison rather than data -- a natural
 compaction moves only sometimes, and a bug that surfaces only sometimes is
 the one that ships. `.ci/ci-04-clang-asan-ubsan.sh` arms it, and
-`test_api.c`'s `TestPayloadPublishProtocol` -- compiled only when the knob is
-on -- is where a deliberately stale pointer is proved to read poison and an
-owner is proved to survive the collection its own publish triggers.
+`payload_tests.c`'s `TestPoisonedPointerFailsLoudly` -- compiled only when
+the knob is on -- is where a deliberately stale pointer is proved to stop
+naming its data and the vacated unit is proved to read poison.
 `doc/payload-pointer-census.md` is the inventory of every site in fe and in
-kg that the protocol governs. No live object owns a payload yet; the region
-is a scaffold the test uses, and the phase that gives it real owners moves it
-into the arena the caller supplied.
+kg that the protocol governs.
+
+### The payload region
+
+A payload is storage an object OWNS but does not contain. It lives in the
+region carved out of the caller's arena described under "Memory", and it is
+laid out one block per owner:
+
+    [ FePayloadBlock header ][ `children` FeObject* ][ `bytes` raw bytes ]
+
+The header records its owner, how many leading words are object pointers, how
+long the block is, and -- while the mark phase is inside the block -- which
+child the walk is currently in. The collector traces the leading `children`
+words and never looks at the bytes after them, so one region serves an
+aggregate (all children) and a string (all bytes) without either knowing
+about the other.
+
+An owner names its block by a HANDLE, not an address: the storage moves and
+the `FeObject*` header does not. `PublishPayload()` is the only way a block
+reaches an owner, for a first block and for a replacement alike, and it roots
+the owner across the collection it may run. A request the region cannot hold
+after that collection raises `(payload-exhaustion)`, which degrades to the
+pre-built `(arena-exhaustion)` when the cell pool is spent too -- naming a
+condition costs cells, and the pre-built one is the only condition a state
+with none can signal. Both are catchable, and `error` catches either.
+
+Allocation is a bump. Reclamation is a compaction that runs inside
+`CollectGarbage()`, AFTER the mark phase has restored the graph it reversed
+and BEFORE the sweep clears the mark bits: a block is live only when its
+owner survived the mark AND the owner still names that block, which is what
+makes a REPLACED block dead though its owner lives, and both halves of that
+rule read state the sweep is about to destroy. The compactor scans the region
+from its base and slides survivors down IN ALLOCATION ORDER, so a given
+history produces the same handles every time, which is what lets
+`payload_tests.c` assert addresses rather than relationships between them.
+`FE_PAYLOAD_COMPACT_ORDER_BUG`, 0 in every configuration and set by no
+target, reverses that ordering on purpose so the substrate's tests can be
+watched to fail.
+
+The mark phase reaches a block's children through the same Deutsch-Schorr-Waite
+pointer reversal the rest of the walk uses, with the block's cursor standing
+in for the tag bit a pair uses to say which half it is in. An aggregate's
+WIDTH therefore costs no C stack, and neither does a CHAIN of aggregates:
+`payload_tests.c` measures `__builtin_frame_address(0)` from inside the mark
+phase at chain depths of 10, 1000 and 100 000 and finds it flat.
+
+NO TYPE OWNS A PAYLOAD in a shipped interpreter. Strings still live as a cdr
+chain of seven-byte cells, and a Lisp-visible aggregate does not exist yet;
+`PayloadSlot()` in `fe.c` is the single place that says which types keep a
+handle, and the one type that answers today exists only under
+`FE_PAYLOAD_TEST_OBJECT`, the knob `payload_tests.c` is built with. Nothing a
+Lisp program can write reaches any of this, which is why the language version
+does not move for it.
 
 The context maintains a `gc_stack` which protects objects that may not be
 otherwise reachable. Newly created objects are automatically pushed to this

@@ -367,6 +367,207 @@ static FeObject* TakeMarkLink(FeObject* obj) {
   return CAR(obj);
 }
 
+// ---------------------------------------------------------------------------
+// The payload region (Phase 23.1; the Phase 22 ADR's Design B). What a block
+// is, and the publish protocol these functions implement, is stated once in
+// fe_internal.h beside the block layout they share.
+// ---------------------------------------------------------------------------
+
+// The one type whose objects keep a payload handle. A shipped interpreter has
+// none, so this names the type no object ever has and every payload arm below
+// is a comparison that answers false; the test build's aggregate is what makes
+// it answer, and Phase 25 replaces it with `FeTString`.
+#if FE_PAYLOAD_TEST_OBJECT
+#define PayloadOwnerType FeTFex2
+#else
+#define PayloadOwnerType FeTSentinel
+#endif
+
+static bool OwnsPayload(const FeObject* obj) {
+  return FeGetType(obj) == PayloadOwnerType;
+}
+
+// Where an object of a payload-owning type keeps its handle. ONE function, so
+// that Phase 25 adds a type here rather than teaching the collector a second
+// place to look.
+static FePayloadHandle* PayloadSlot(FeObject* obj) {
+  assert(OwnsPayload(obj));
+  return &PAYLOAD(obj);
+}
+
+// The region's own address arithmetic, and the one place the const rule below
+// is worth stating. These read the CONTEXT and never write it: what a caller
+// goes on to write is arena storage, whose mutability travels with the
+// returned pointer rather than with the context that located it. So they take
+// a `const FeContext*`, and the functions that really do change the region --
+// `PublishPayload`, `CompactPayloads`, `MovePayloadRegion` -- are exactly the
+// ones that do not.
+static unsigned char* PayloadAt(const FeContext* ctx, size_t offset) {
+  assert(ctx->payload_start + offset <= ctx->payload_capacity);
+  return ctx->payload_base + ctx->payload_start + offset;
+}
+
+static FePayloadBlock* PayloadBlockAt(const FeContext* ctx, size_t offset) {
+  void* const at = PayloadAt(ctx, offset);
+  return at;
+}
+
+// A block's payload starts one header past the block, and a handle is that
+// offset plus one -- the plus one being what reserves zero for "no block".
+static FePayloadHandle HandleOfBlockAt(size_t offset) {
+  return offset + sizeof(FePayloadBlock) + 1;
+}
+
+unsigned char* PayloadBytes(const FeContext* ctx, FePayloadHandle handle) {
+  assert(handle != FePayloadNone && handle - 1 < ctx->payload_used);
+  return PayloadAt(ctx, handle - 1);
+}
+
+// The owner's block, or null when it has not published one yet: a constructor
+// is in that state between retyping the cell and publishing, and a collection
+// can land in that window.
+static FePayloadBlock* OwnedBlock(const FeContext* ctx, FeObject* owner) {
+  const FePayloadHandle handle = *PayloadSlot(owner);
+  return handle == FePayloadNone
+             ? nullptr
+             : PayloadBlockAt(ctx, handle - 1 - sizeof(FePayloadBlock));
+}
+
+// The block's `index`th traced word. Clause 1 of the protocol applies to the
+// result and to `block` itself: both are derived where they are spent.
+static FeObject** PayloadChildSlot(FePayloadBlock* block, size_t index) {
+  assert(index < block->children);
+  void* const at = (unsigned char*)block + sizeof(FePayloadBlock) +
+                   index * sizeof(FeObject*);
+  return at;
+}
+
+// Bump-allocate one block, or answer `FePayloadNone` when the region cannot
+// hold it. It publishes nothing: `PublishPayload` is the one function allowed
+// to hand a block to an owner, and it is this function's only caller.
+static FePayloadHandle AllocatePayloadBlock(FeContext* ctx,
+                                            size_t children,
+                                            size_t bytes) {
+  size_t want = 0;
+  size_t total = 0;
+  size_t reach = 0;
+  if (ckd_mul(&want, children, sizeof(FeObject*)) ||
+      ckd_add(&want, want, bytes) ||
+      ckd_add(&want, want, FePayloadAlignment - 1)) {
+    return FePayloadNone;
+  }
+  want -= want % FePayloadAlignment;
+  if (ckd_add(&total, want, sizeof(FePayloadBlock)) ||
+      ckd_add(&reach, ctx->payload_used, total) ||
+      ckd_add(&reach, reach, ctx->payload_start) ||
+      reach > ctx->payload_capacity) {
+    return FePayloadNone;
+  }
+  const size_t offset = ctx->payload_used;
+  // Zero-filled, so a caller that publishes object slots has null-not-garbage
+  // in them until it fills them in, and a byte payload starts NUL-terminated.
+  memset(PayloadAt(ctx, offset), 0, total);
+  FePayloadBlock* const block = PayloadBlockAt(ctx, offset);
+  block->children = children;
+  block->bytes = want;
+  ctx->payload_used += total;
+  if (ctx->payload_used > ctx->payload_peak_used) {
+    ctx->payload_peak_used = ctx->payload_used;
+  }
+  return HandleOfBlockAt(offset);
+}
+
+// Whether the block at OFFSET survives this collection. Two halves: its owner
+// survived the mark phase, AND the owner still names THIS block -- which is
+// what makes a REPLACED block dead though its owner lives. Both are read
+// before the sweep clears the mark bits, which is why `CompactPayloads` runs
+// where it does.
+static bool PayloadBlockIsLive(const FeContext* ctx, size_t offset) {
+  FeObject* const owner = PayloadBlockAt(ctx, offset)->owner;
+  assert(owner != nullptr);
+  if (~TAG(owner) & GcMarkBit) {
+    return false;
+  }
+  return *PayloadSlot(owner) == HandleOfBlockAt(offset);
+}
+
+// Compaction preserves ALLOCATION ORDER: the region is scanned from its base
+// and survivors slide down in the order they were published, so a given
+// history produces the same handles every time. That determinism is what lets
+// the tests assert addresses rather than relationships between them.
+void CompactPayloads(FeContext* ctx) {
+  size_t source = 0;
+  size_t target = 0;
+  while (source < ctx->payload_used) {
+    const size_t total =
+        sizeof(FePayloadBlock) + PayloadBlockAt(ctx, source)->bytes;
+    if (PayloadBlockIsLive(ctx, source)) {
+      if (target != source) {
+        // Overlapping by construction -- a survivor slides down over the gap
+        // a shorter dead block left -- so this is `memmove` and can never be
+        // `memcpy`.
+        memmove(PayloadAt(ctx, target), PayloadAt(ctx, source), total);
+      }
+      *PayloadSlot(PayloadBlockAt(ctx, target)->owner) =
+          HandleOfBlockAt(target);
+      target += total;
+    }
+    source += total;
+  }
+  if (target != ctx->payload_used) {
+    ctx->payload_compaction_count++;
+    ctx->payload_used = target;
+  }
+}
+
+#if FE_DEBUG_PAYLOAD_MOVE
+
+void MovePayloadRegion(FeContext* ctx) {
+  if (ctx->payload_used == 0) {
+    // Nothing live: park the extent at the region's base, so a build with no
+    // payloads in flight -- which is every shipped one -- pays one comparison
+    // per allocation and moves nothing.
+    ctx->payload_start = 0;
+    return;
+  }
+  unsigned char* const live = ctx->payload_base + ctx->payload_start;
+  // Forward by one unit, vacating the unit at the extent's old START, which is
+  // the address a caller that ignored clause 1 is holding.
+  if (ctx->payload_start + ctx->payload_used + FePayloadAlignment <=
+      ctx->payload_capacity) {
+    memmove(live + FePayloadAlignment, live, ctx->payload_used);
+    memset(live, FePayloadPoisonByte, FePayloadAlignment);
+    ctx->payload_start += FePayloadAlignment;
+    return;
+  }
+  // No room ahead: back to the base instead, vacating the extent's old TAIL.
+  // Still a move, so a held pointer is still stale.
+  memmove(ctx->payload_base, live, ctx->payload_used);
+  memset(ctx->payload_base + ctx->payload_used, FePayloadPoisonByte,
+         ctx->payload_start);
+  ctx->payload_start = 0;
+}
+
+#endif  // FE_DEBUG_PAYLOAD_MOVE
+
+// The mark phase's payload arm, descending half: the first traced child of
+// OWNER's block, with the walk's return link left in its place. Null when the
+// owner has published no block or its block has no children, which makes it a
+// leaf like any other cell.
+static FeObject* DescendIntoPayload(const FeContext* ctx,
+                                    FeObject* owner,
+                                    FeObject* parent) {
+  FePayloadBlock* const block = OwnedBlock(ctx, owner);
+  if (block == nullptr || block->children == 0) {
+    return nullptr;
+  }
+  block->mark_cursor = 0;
+  FeObject** const slot = PayloadChildSlot(block, 0);
+  FeObject* const child = *slot;
+  *slot = parent;
+  return child;
+}
+
 // The mark phase, with the C stack out of it (sub-plan 09C).
 //
 // The old walk recursed once per `car` level, so a chain of `car`s cost C
@@ -449,6 +650,19 @@ descend:
     // cell this is" is the order the recursive walk had and the order the
     // invariant is stated in: every intermediate state has `GcMarkBit` set.
     TAG(current) |= GcMarkBit;
+    if (OwnsPayload(current)) {
+      // Phase 23.1's payload arm. An owner's children live in its block, not
+      // in `car`/`cdr`, so the walk descends into the block instead of into
+      // the switch below -- by the same pointer reversal, which is what keeps
+      // an aggregate's WIDTH off the C stack however many children it has.
+      FeObject* const child = DescendIntoPayload(ctx, current, parent);
+      if (child == nullptr) {
+        goto ascend;
+      }
+      parent = current;
+      current = child;
+      goto descend;
+    }
     switch (FeGetType(current)) {
       case FeTPair:
         // The reversed link goes in `car`, which is also where the mark bit
@@ -496,6 +710,29 @@ descend:
 ascend:
   if (parent == nullptr) {
     return;
+  }
+  if (OwnsPayload(parent)) {
+    // The payload arm's ascent: put the child just finished back, then take
+    // the next one. The block's cursor is the walk's position in it -- which
+    // is what `GcMarkCdrBit` is for a pair, one bit being enough for two
+    // halves where n children need a word.
+    // Non-null by construction: the walk is here only because it descended
+    // into this owner's block, and nothing between the descent and this
+    // ascent can allocate, publish or compact.
+    FePayloadBlock* const block = OwnedBlock(ctx, parent);
+    assert(block != nullptr);
+    FeObject** const done = PayloadChildSlot(block, block->mark_cursor);
+    FeObject* const grandparent = *done;
+    *done = current;
+    if (++block->mark_cursor < block->children) {
+      FeObject** const next = PayloadChildSlot(block, block->mark_cursor);
+      current = *next;
+      *next = grandparent;
+      goto descend;
+    }
+    current = parent;
+    parent = grandparent;
+    goto ascend;
   }
   if (FeGetType(parent) == FeTPair && (~TAG(parent) & GcMarkCdrBit)) {
     // The car half is finished: put the car child back with the half flag
@@ -588,6 +825,17 @@ static void CollectGarbage(FeContext* ctx) {
   FeMarkEvaluatorRoots(ctx);
   MarkCleanupRoots(ctx);
 
+  // Compact: AFTER the mark phase has restored the graph it reversed, and
+  // BEFORE the sweep clears the mark bits. That order is the payload
+  // substrate's correctness argument, not an accident of layout -- the
+  // liveness rule reads a mark bit the sweep is about to clear -- so
+  // `FE_PAYLOAD_COMPACT_ORDER_BUG` exists to break it on purpose and watch
+  // the substrate's tests fail. It is 0 in every configuration and no target
+  // sets it; an ordering that is merely currently right is not evidence.
+#if !FE_PAYLOAD_COMPACT_ORDER_BUG
+  CompactPayloads(ctx);
+#endif
+
   // Sweep and unmark:
   for (size_t i = 0; i < ctx->object_count; i++) {
     FeObject* obj = &ctx->objects[i];
@@ -623,6 +871,9 @@ static void CollectGarbage(FeContext* ctx) {
       TAG(obj) &= ~GcMarkBit;
     }
   }
+#if FE_PAYLOAD_COMPACT_ORDER_BUG
+  CompactPayloads(ctx);
+#endif
   ctx->collecting = false;
 }
 
@@ -852,97 +1103,44 @@ static void InitializeKeywordValue(FeObject* symbol, const char* name) {
   }
 }
 
-#if FE_DEBUG_PAYLOAD_MOVE
-
-// The poison mode's payload region (Phase 23.0).  See the publish protocol
-// in fe_internal.h for what it is enforcing and for this scaffold's scope.
-//
-// One region per process rather than one per context, because the scaffold
-// owns no arena bytes: 23.1's region is a carve out of the arena the caller
-// supplied, and carving it now would decide the split that phase owes an
-// options-bearing API for.  A `static` here decides nothing and still lets
-// the poison step run at every allocation.
-static struct {
-  unsigned char bytes[FePayloadRegionBytes];
-  // Where the live extent starts, and how long it is.  A handle is an offset
-  // WITHIN the extent, so it survives every slide; an address does not, which
-  // is the whole point.
-  size_t start;
-  size_t used;
-} payload_region;
-
-unsigned char* PayloadBytes(FePayloadHandle handle) {
-  assert(handle != FePayloadNone && handle - 1 < payload_region.used);
-  return payload_region.bytes + payload_region.start + (handle - 1);
-}
-
-void MovePayloadRegion(void) {
-  if (payload_region.used == 0) {
-    // Nothing live: park at the base, so a run with no payloads in flight
-    // pays one comparison per allocation and moves nothing.
-    payload_region.start = 0;
-    return;
-  }
-  unsigned char* const live = payload_region.bytes + payload_region.start;
-  // Forward by one unit, vacating the unit at the extent's old START -- which
-  // is the address a caller that ignored clause 1 is holding.
-  if (payload_region.start + payload_region.used + FePayloadAlignment <=
-      FePayloadRegionBytes) {
-    memmove(live + FePayloadAlignment, live, payload_region.used);
-    memset(live, FePayloadPoisonByte, FePayloadAlignment);
-    payload_region.start += FePayloadAlignment;
-    return;
-  }
-  // No room ahead: back to the base instead, vacating the extent's old TAIL.
-  // Still a move, so a held pointer is still stale.
-  memmove(payload_region.bytes, live, payload_region.used);
-  memset(payload_region.bytes + payload_region.used, FePayloadPoisonByte,
-         payload_region.start);
-  payload_region.start = 0;
-}
-
-void ResetPayloadRegion(void) {
-  payload_region.start = 0;
-  payload_region.used = 0;
-  memset(payload_region.bytes, FePayloadPoisonByte, FePayloadRegionBytes);
-}
-
-bool PublishPayload(FeContext* ctx,
+// Clause 3 of the publish protocol: the ONE way a block reaches its owner.
+// Allocation and publication are one function on purpose -- an allocated
+// block that no owner names yet is exactly the thing the compactor reclaims,
+// so there is no safe moment between them for a caller to stand in.
+void PublishPayload(FeContext* ctx,
                     FeObject* owner,
-                    FePayloadHandle* slot,
+                    size_t children,
                     size_t bytes) {
-  const size_t units = (bytes + FePayloadAlignment - 1) / FePayloadAlignment;
-  const size_t want = units * FePayloadAlignment;
+  FePayloadHandle* const slot = PayloadSlot(owner);
   // A payload allocation is an allocation, so it invalidates outstanding
-  // pointers exactly as a cell allocation does.
-  MovePayloadRegion();
-  // Rooted because the retry below collects, and a collection with the owner
-  // reachable from nowhere else sweeps it -- after which this function would
-  // publish a handle into a free cell.  Clause 3 of the protocol is this
+  // payload pointers exactly as a cell allocation does (clause 2).
+  FE_POISON_PAYLOAD_POINTERS(ctx);
+  // Rooted because the collection below may run, and a collection with the
+  // owner reachable from nowhere else sweeps it -- after which this function
+  // would publish a handle into a free cell. Clause 3 is this
   // Save/Push/Restore, not the store at the end.
   const size_t gc = FeSaveGC(ctx);
   FePushGC(ctx, owner);
-  if (payload_region.start + payload_region.used + want >
-      FePayloadRegionBytes) {
-    // 23.1 compacts here and retries; the scaffold has no marking arm, so
-    // the retry can only succeed if the collection freed cells rather than
-    // blocks.  Either way the collection is real and the rooting above is
-    // what makes it safe.
+  FePayloadHandle handle = AllocatePayloadBlock(ctx, children, bytes);
+  if (handle == FePayloadNone) {
+    // The region is full of blocks nothing has been asked about yet: collect,
+    // which marks, compacts and sweeps, and try once more. A second failure
+    // is a region that genuinely cannot hold the request.
     CollectGarbage(ctx);
+    handle = AllocatePayloadBlock(ctx, children, bytes);
   }
-  const bool published =
-      payload_region.start + payload_region.used + want <= FePayloadRegionBytes;
-  if (published) {
-    memset(payload_region.bytes + payload_region.start + payload_region.used, 0,
-           want);
-    *slot = payload_region.used + 1;
-    payload_region.used += want;
+  if (handle == FePayloadNone) {
+    ctx->payload_allocation_failures++;
+    FeRestoreGC(ctx, gc);
+    RaisePayloadExhaustion(ctx);
   }
+  PayloadBlockAt(ctx, handle - 1 - sizeof(FePayloadBlock))->owner = owner;
+  // Last, and only now: any block this owner named before this line is dead
+  // from here on, though the owner itself is very much alive. That is the
+  // replacement half of the liveness rule.
+  *slot = handle;
   FeRestoreGC(ctx, gc);
-  return published;
 }
-
-#endif  // FE_DEBUG_PAYLOAD_MOVE
 
 // "Could an allocation still succeed?", which is what the raise paths mean
 // when they ask whether they can build a condition object. `FeIsNil(free_list)`
@@ -970,11 +1168,10 @@ FeObject* MakeObject(FeContext* ctx) {
   // ordinary build.
   CollectGarbage(ctx);
 #endif
-#if FE_DEBUG_PAYLOAD_MOVE
   // Clause 2 of the publish protocol, made to happen at every allocation
-  // rather than at the rare one that would naturally compact.
-  MovePayloadRegion();
-#endif
+  // rather than at the rare one that would naturally compact. Compiles to
+  // nothing unless the poison lane armed it.
+  FE_POISON_PAYLOAD_POINTERS(ctx);
   // Run GC if free_list has no more objects:
   if (FeIsNil(ctx->free_list)) {
     CollectGarbage(ctx);
@@ -994,6 +1191,56 @@ FeObject* MakeObject(FeContext* ctx) {
   FePushGC(ctx, obj);
   return obj;
 }
+
+#if FE_PAYLOAD_TEST_OBJECT
+
+// The substrate's test object (Phase 23.1). See its declaration in
+// fe_internal.h for why it exists only under this knob and why it borrows the
+// extension type slot.
+//
+// The order here is the one every Phase 24/25 constructor will copy: retype
+// the cell, clear its handle, THEN publish. The window between the retype and
+// the publish is one a collection can land in -- `PublishPayload` allocates --
+// so the cleared handle is what tells the collector this owner has no block
+// yet.
+FeObject* MakeAggregate(FeContext* ctx, size_t children, size_t bytes) {
+  FeObject* const obj = MakeObject(ctx);
+  SetType(obj, PayloadOwnerType);
+  PAYLOAD(obj) = FePayloadNone;
+  PublishPayload(ctx, obj, children, bytes);
+  for (size_t i = 0; i < children; i++) {
+    // A zero-filled slot is a null pointer, which is not an object; nothing
+    // may mark this block until every child is nil. No allocation runs in
+    // this loop, which is what makes that true.
+    *PayloadChildSlot(OwnedBlock(ctx, obj), i) = &nil;
+  }
+  return obj;
+}
+
+FeObject* AggregateChild(const FeContext* ctx,
+                         FeObject* aggregate,
+                         size_t index) {
+  return *PayloadChildSlot(OwnedBlock(ctx, aggregate), index);
+}
+
+void SetAggregateChild(const FeContext* ctx,
+                       FeObject* aggregate,
+                       size_t index,
+                       FeObject* value) {
+  *PayloadChildSlot(OwnedBlock(ctx, aggregate), index) = value;
+}
+
+unsigned char* AggregateBytes(const FeContext* ctx, FeObject* aggregate) {
+  FePayloadBlock* const block = OwnedBlock(ctx, aggregate);
+  return (unsigned char*)block + sizeof(FePayloadBlock) +
+         block->children * sizeof(FeObject*);
+}
+
+FePayloadHandle AggregateHandle(const FeObject* aggregate) {
+  return PAYLOAD(aggregate);
+}
+
+#endif  // FE_PAYLOAD_TEST_OBJECT
 
 FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr) {
   FeObject* obj = MakeObject(ctx);
@@ -3585,11 +3832,29 @@ FeArenaStats FeGetArenaStats(const FeContext* ctx) {
   };
 }
 
-static bool InitializeArenaLayout(FeContext* ctx, void* arena, size_t size) {
+// The payload region's share of what is left once the frame region is funded,
+// rounded DOWN to a whole alignment unit so that the cells laid out after it
+// keep their own alignment. Zero percent is zero bytes and therefore today's
+// partition byte for byte, which is what `FeOpenContext` asks for.
+static size_t PayloadCarveBytes(size_t bytes, size_t percent) {
+  const size_t share = (bytes / 100) * percent + (bytes % 100) * percent / 100;
+  return share - share % FePayloadAlignment;
+}
+
+static bool InitializeArenaLayout(FeContext* ctx,
+                                  void* arena,
+                                  size_t size,
+                                  size_t payload_percent) {
   const size_t minimum = GetMinimumArenaSize();
   const size_t remainder = size - minimum;
   const size_t frame_bonus_bytes = (remainder / 100) * FrameArenaPercent +
                                    (remainder % 100) * FrameArenaPercent / 100;
+  // What frames did not take, which the payload region and the cells then
+  // split. The split is priced against the frame region rather than out of
+  // it, which is the Phase 22 ADR's "no unpriced split" rule: frames are the
+  // pool Phase 21 measured as kg's real scarcity.
+  const size_t cell_bytes = remainder - frame_bonus_bytes;
+  const size_t payload_bytes = PayloadCarveBytes(cell_bytes, payload_percent);
   size_t frame_capacity = 0;
   size_t frame_storage_capacity = 0;
   size_t frame_bytes = 0;
@@ -3600,30 +3865,37 @@ static bool InitializeArenaLayout(FeContext* ctx, void* arena, size_t size) {
       ckd_add(&frame_storage_capacity, frame_capacity, CleanupFrameReserve) ||
       ckd_mul(&frame_bytes, frame_storage_capacity, sizeof(FeEvalFrame)) ||
       ckd_add(&object_count, GetCoreObjectCount(),
-              (remainder - frame_bonus_bytes) / sizeof(FeObject));
+              (cell_bytes - payload_bytes) / sizeof(FeObject));
   if (layout_overflow) {
     return false;
   }
 
-  // Initialize the context and its two arena-resident regions. Frames precede
-  // objects; both types have the same alignment and each region's element size
-  // is a multiple of it, so no implicit padding is needed at this seam.
+  // Initialize the context and its three arena-resident regions. Frames, then
+  // payload, then objects; every region's size is a multiple of the shared
+  // 8-byte alignment, so no implicit padding is needed at either seam.
   memset(ctx, 0, sizeof(FeContext));
   void* const frame_region = (unsigned char*)arena + sizeof(FeArena);
-  void* const object_region = (unsigned char*)frame_region + frame_bytes;
+  unsigned char* const payload_region =
+      (unsigned char*)frame_region + frame_bytes;
+  void* const object_region = payload_region + payload_bytes;
   ctx->frame_stack = frame_region;
   ctx->frame_stack_capacity = frame_capacity;
+  ctx->payload_base = payload_region;
+  ctx->payload_capacity = payload_bytes;
   ctx->objects = object_region;
   ctx->object_count = object_count;
   return true;
 }
 
-static FeContext* OpenContext(void* arena, size_t size) {
+FeContext* OpenContextWithPayload(void* arena,
+                                  size_t size,
+                                  size_t payload_percent) {
   uintptr_t arena_end;
   const uintptr_t arena_address = (uintptr_t)arena;
   bool invalid = arena == nullptr;
   invalid |= size < FeMinimumArenaSize();
   invalid |= arena_address % FeArenaAlignment() != 0;
+  invalid |= payload_percent > 100;
   invalid |= ckd_add(&arena_end, arena_address, size);
   if (invalid) {
     return nullptr;
@@ -3631,7 +3903,7 @@ static FeContext* OpenContext(void* arena, size_t size) {
 
   FeArena* storage = arena;
   FeContext* ctx = &storage->context;
-  if (!InitializeArenaLayout(ctx, arena, size)) {
+  if (!InitializeArenaLayout(ctx, arena, size, payload_percent)) {
     return nullptr;
   }
 
@@ -3731,8 +4003,14 @@ static FeContext* OpenContext(void* arena, size_t size) {
   return ctx;
 }
 
+// No payload carve. The Phase 22 ADR requires this entry point to keep
+// today's behaviour as the default -- the split it recorded is the spike's,
+// "not a shipped constant" -- and a host that has not asked for a region
+// should not lose a quarter of its cells to one nothing can allocate from
+// until Phase 25. `OpenContextWithPayload` is what asks for one, and Phase
+// 23.2's options-bearing public API is what will offer it to a host.
 FeContext* FeOpenContext(void* arena, size_t size) {
-  return OpenContext(arena, size);
+  return OpenContextWithPayload(arena, size, 0);
 }
 
 void FeCloseContext(FeContext* ctx) {

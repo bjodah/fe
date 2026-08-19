@@ -19,6 +19,11 @@ Fe is a small, embeddable Lisp-like language implemented in C23. Read
 - `fex.c`, `fex.h`, and `fex_*.c`: optional standard extensions for I/O, math,
   processes, regular expressions, and time.
 - `main.c`: command-line interpreter and recoverable REPL error handling.
+- `payload_tests.c`: the payload substrate's own harness, built twice by
+  `make check-payload` (plain and `FE_GC_STRESS=1`) against core objects
+  carrying `FE_PAYLOAD_TEST_OBJECT=1`.  A shipped interpreter has no type
+  that owns a payload, so this knob is what gives the region something to
+  hold; see "The payload region" in `doc/implementation.md`.
 - `auto.[ch]`: cleanup helpers based on the compiler `cleanup` attribute.
 - `scripts/*.fe`: executable examples and regression-test inputs.
 - `tests/*.out` and `tests/*.err`: exact golden output for the scripts.

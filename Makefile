@@ -29,6 +29,11 @@ CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -Itiny-regex-c
 # .build-flags -- which hashes CPPFLAGS -- rebuilds when the knob moves.
 FE_DEBUG_PAYLOAD_MOVE ?= 0
 CPPFLAGS += -DFE_DEBUG_PAYLOAD_MOVE=$(FE_DEBUG_PAYLOAD_MOVE)
+# Phase 23.1's payload TEST OBJECT knob.  A shipped interpreter has no type
+# that owns a payload -- strings migrate in Phase 25 -- so the substrate's own
+# tests need a build that has one.  Unlike the poison knob above it is NOT
+# appended to CPPFLAGS: it is set per object, by the `%-payload.o` rules
+# below, so that the ordinary binaries in the same tree never carry it.
 LDLIBS ?= -lm
 
 # tiny-regex-c is third-party and is not held to Fe's -Weverything build, but it
@@ -69,7 +74,7 @@ OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
 TEST_SRCS = test_api.c test_header.c test_internal_header.c gc_stress.c \
-	perf_workloads.c
+	payload_tests.c perf_workloads.c
 EXAMPLE_HOST = example_host
 EXAMPLE_SRCS = example_host.c
 EXAMPLE_RUNNER ?=
@@ -586,12 +591,40 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # this slice: fe_eval.c 404, fe.c 187, fe_unwind.c 119, main.c 43, fex_io.c
 # 28, fe_run.c 25, fex_re.c 21, fex_process.c 20, fe_perf.c 6.
 #
+#
+# Raised 874 -> 902 by Phase 23.1 of kg's Elisp data-model program: the
+# payload substrate the Phase 22 ADR selected (Design B -- stable `FeObject*`
+# headers over a bump-allocated, compactable region inside the caller's
+# arena).  The ADR priced the whole design at roughly +32; the measured cost
+# is +28.  By file:
+#   fe.c          194 -> 220  the region and its allocator, the compactor,
+#                             the collector's payload arm in `FeMark`, the
+#                             arena carve, and the test object's four
+#                             accessors.  A third of it is code a shipped
+#                             build does not compile: scc reads source text
+#                             and does not evaluate `#if`, so every line
+#                             under `FE_PAYLOAD_TEST_OBJECT` and
+#                             `FE_DEBUG_PAYLOAD_MOVE` is counted here even
+#                             though both are 0 in every configuration this
+#                             repository ships -- the same price the
+#                             `FE_PERF_COUNTERS` raise above paid.
+#   fe_unwind.c   119 -> 120  `RaisePayloadExhaustion`, whose one branch is
+#                             the degradation to `(arena-exhaustion)`.
+#   fe_internal.h   9 ->  10  the substrate's declarations and its two knobs
+#                             (headers together, which scc reports only in
+#                             the total).
+# fe_eval.c (404), main.c (43), fex_io.c (28), fe_run.c (25), fex_re.c (21),
+# fex_process.c (20), fe_perf.c (6) and auto.c (5) do not move at all.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does NOT move and stays at 520; the most complex
+# file is still fe_eval.c at 404.
+#
 # Proved live at this head by temporarily lowering each cap and watching the
-# gate fire, exit status checked: at 873 `make complexity-check` reports
-# "FAIL: total complexity 874 exceeds limit 873" and exits 2, and at 874 it
+# gate fire, exit status checked: at 902 `make complexity-check` reports
+# "FAIL: total complexity 903 exceeds limit 902" and exits 2, and at 903 it
 # passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
 # exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 874
+SCC_COMPLEXITY_MAX ?= 903
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -993,7 +1026,56 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1294 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1294
+#
+# Set 1294 -> 1333 at Phase 23.1's payload substrate (2026-08-20), pre-pin:
+# the measured actual, 1333 across 429 symbols against 1294 across 412, and
+# the authoritative core measure, so it is the one that says what the phase
+# cost. The Phase 22 ADR priced the whole design at roughly +28; measured,
+# +39 = 42 in new symbols, +4 in the one existing symbol that moved, less 7
+# for two symbols that went away.
+#
+#   +9  fe.c:AllocatePayloadBlock    the bump allocator: two overflow-checked
+#                                    `ckd_*` chains and the capacity test
+#   +6  fe.c:OpenContextWithPayload  the old `OpenContext`, renamed, plus the
+#                                    percent validation (its 6 is the old
+#                                    one's 6, so the rename is free)
+#   +5  fe.c:CompactPayloads         the scan, the slide and the count
+#   +3  fe.c:DescendIntoPayload      the mark arm's "no block / no children"
+#   +2  fe.c:MakeAggregate           the test object's nil fill
+#   +2  fe.c:OwnedBlock              the not-published-yet answer
+#   +2  fe.c:PayloadBlockIsLive      the two halves of the liveness rule
+#   +2  fe_unwind.c:RaisePayloadExhaustion  the degradation branch
+#   +1  each, ten straight-line accessors: fe.c's `AggregateBytes`,
+#       `AggregateChild`, `AggregateHandle`, `HandleOfBlockAt`, `OwnsPayload`,
+#       `PayloadAt`, `PayloadBlockAt`, `PayloadCarveBytes`,
+#       `PayloadChildSlot`, `PayloadSlot`, `SetAggregateChild`
+#   +4  fe.c:FeMark  8 -> 12         the collector's payload arm: one test on
+#                                    the way down, one on the way up, and the
+#                                    block cursor's own bound
+#   -6  fe.c:OpenContext             renamed (see above)
+#   -1  fe.c:ResetPayloadRegion      23.0's scaffold reset, which a real
+#                                    per-context region does not need: a
+#                                    fresh context IS the known starting state
+#
+# Nine of the nineteen new symbols are compiled out of every build this
+# repository ships -- the test object's accessors and its constructor live
+# under `FE_PAYLOAD_TEST_OBJECT` -- and pmccabe, like scc, reads source text
+# and takes the first arm of an `#if`, so they are measured here anyway. That
+# is the same price the `FE_PERF_COUNTERS` raise above paid.
+# All nineteen are inside `PMCCABE_NEW_FUNCTION_MAX` (15).
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22, with the worst functions in
+# the tree still `RunEvaluationLoop` and `ResumeEvalList`, both at 15, both
+# unmoved. `FeMark`'s one per-symbol regression is banked with
+# `PMCCABE_BASELINE_ARGS=--allow-regressions`, which is the only way to bank
+# one, and is named above rather than absorbed silently.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1332 `make pmccabe-check` reports "FAIL:
+# total complexity 1333 exceeds funded budget 1332 (+1)" and exits 2, and at
+# 1333 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+PMCCABE_TOTAL_MAX ?= 1333
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -1022,7 +1104,8 @@ all: $(TARGET)
 
 check: test
 
-test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET) check-gc-stress
+test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET) check-gc-stress \
+	check-payload
 	./$(TEST_API)
 	$(EXAMPLE_RUNNER) ./$(EXAMPLE_HOST)
 	./test.sh
@@ -1138,6 +1221,44 @@ fe_perf-stress.o: fe_perf.c $(HDRS) $(BUILD_STAMP)
 check-gc-stress: $(GC_STRESS) $(GC_STRESS_ON)
 	./$(GC_STRESS)
 	./$(GC_STRESS_ON)
+
+# The payload substrate's harness (Phase 23.1).  Built against core objects
+# that carry `FE_PAYLOAD_TEST_OBJECT=1`, because a shipped interpreter has no
+# type that owns a payload and there would otherwise be nothing to allocate a
+# block for.  The `-payload.o` names are the `-stress.o` names' argument: the
+# link is made entirely of objects that cannot be confused with the ordinary
+# ones, so both builds coexist in one tree and neither invalidates the other.
+# Pattern rules rather than one rule per translation unit, since every object
+# in the set differs from its ordinary twin by exactly the one flag.
+# The second build is the compactor's: `FE_GC_STRESS=1` collects before every
+# allocation, so every one of these cases runs its own compaction between each
+# pair of allocations rather than at the handful of points an ordinary run
+# would.  A compactor that left a handle stale for one allocation looks
+# correct in the off build and cannot in the on one.
+PAYLOAD_TESTS = payload_tests
+PAYLOAD_TESTS_ON = payload_tests_stress
+PAYLOAD_TESTS_OBJS = payload_tests-payload.o fe-payload.o fe_eval-payload.o \
+	fe_run-payload.o fe_unwind-payload.o fe_perf-payload.o
+PAYLOAD_TESTS_ON_OBJS = payload_tests-payload-stress.o fe-payload-stress.o \
+	fe_eval-payload-stress.o fe_run-payload-stress.o \
+	fe_unwind-payload-stress.o fe_perf-payload-stress.o
+
+$(PAYLOAD_TESTS): $(PAYLOAD_TESTS_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PAYLOAD_TESTS_ON): $(PAYLOAD_TESTS_ON_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+%-payload.o: %.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 $(CFLAGS) -c $< -o $@
+
+%-payload-stress.o: %.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 -DFE_GC_STRESS=1 $(CFLAGS) \
+		-c $< -o $@
+
+check-payload: $(PAYLOAD_TESTS) $(PAYLOAD_TESTS_ON)
+	./$(PAYLOAD_TESTS)
+	./$(PAYLOAD_TESTS_ON)
 
 # The counting build (Phase 21.1 of kg's elisp data-model plan).  `fe_perf.h`
 # compiles to nothing unless FE_PERF_COUNTERS is 1, so proving the counters
@@ -1289,7 +1410,7 @@ sizes:
 
 clean:
 	-rm -f $(BUILD_STAMP)
-	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o $(PERF_DIR)
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) $(PAYLOAD_TESTS) $(PAYLOAD_TESTS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o $(PERF_DIR)
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -1390,7 +1511,8 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test core test-header check-gc-stress perf perf-check \
+.PHONY: all check test core test-header check-gc-stress check-payload \
+	perf perf-check \
 	perf-workloads sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
 	complexity complexity-check pmccabe \

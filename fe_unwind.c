@@ -157,6 +157,13 @@ static const ConditionParent condition_parents[] = {
     {"no-catch", "error", "No catch for tag"},
     {"evaluation-stack-exhaustion", "error", "Evaluation stack exhausted"},
     {"arena-exhaustion", "error", "Arena exhausted"},
+    // Phase 23.1's payload region. Its own condition rather than a second
+    // arena-exhaustion, because the two name different pools and a handler
+    // that wants to shrink what it is building needs to know which one ran
+    // out. Nothing in a shipped interpreter can raise it yet -- no release
+    // type owns a payload before Phase 25 -- and it is here now because the
+    // substrate that raises it is here now.
+    {"payload-exhaustion", "error", "Payload region exhausted"},
     // `quit` is a root of its own, as it is in Emacs -- `(get 'quit
     // 'error-conditions)` is `(quit)` there, so `error` does not catch it --
     // and it is here only for its name and its message: `ConditionMatches`
@@ -878,6 +885,23 @@ static void PublishExhaustion(FeContext* ctx,
                                   const char* name,
                                   const char* message) {
   RaiseCondition(ctx, FeCompletionError, name, &nil, message);
+}
+
+// The payload region is full and the compacting collection `PublishPayload`
+// ran did not free enough of it. Naming that takes cells -- `RaiseNamedError`
+// builds a condition object -- so when the cell pool is spent too this
+// degrades to the one condition a state with no cells can signal, the
+// pre-built `(arena-exhaustion)`. Both are catchable by name and both are
+// caught by `error`, which is the whole point of the degradation being a
+// different condition rather than a bare message.
+[[noreturn]] void RaisePayloadExhaustion(FeContext* ctx) {
+  static const char message[] = "payload region exhausted";
+  if (!ArenaCanAllocate(ctx)) {
+    PublishExhaustion(ctx, ctx->arena_exhaustion_condition,
+                      ctx->arena_exhaustion_name);
+    RaiseCompletion(ctx, FeCompletionError, message);
+  }
+  RaiseNamedError(ctx, "payload-exhaustion", message);
 }
 
 // The condition data is deliberately built in one place.  Keep both values
