@@ -852,6 +852,98 @@ static void InitializeKeywordValue(FeObject* symbol, const char* name) {
   }
 }
 
+#if FE_DEBUG_PAYLOAD_MOVE
+
+// The poison mode's payload region (Phase 23.0).  See the publish protocol
+// in fe_internal.h for what it is enforcing and for this scaffold's scope.
+//
+// One region per process rather than one per context, because the scaffold
+// owns no arena bytes: 23.1's region is a carve out of the arena the caller
+// supplied, and carving it now would decide the split that phase owes an
+// options-bearing API for.  A `static` here decides nothing and still lets
+// the poison step run at every allocation.
+static struct {
+  unsigned char bytes[FePayloadRegionBytes];
+  // Where the live extent starts, and how long it is.  A handle is an offset
+  // WITHIN the extent, so it survives every slide; an address does not, which
+  // is the whole point.
+  size_t start;
+  size_t used;
+} payload_region;
+
+unsigned char* PayloadBytes(FePayloadHandle handle) {
+  assert(handle != FePayloadNone && handle - 1 < payload_region.used);
+  return payload_region.bytes + payload_region.start + (handle - 1);
+}
+
+void MovePayloadRegion(void) {
+  if (payload_region.used == 0) {
+    // Nothing live: park at the base, so a run with no payloads in flight
+    // pays one comparison per allocation and moves nothing.
+    payload_region.start = 0;
+    return;
+  }
+  unsigned char* const live = payload_region.bytes + payload_region.start;
+  // Forward by one unit, vacating the unit at the extent's old START -- which
+  // is the address a caller that ignored clause 1 is holding.
+  if (payload_region.start + payload_region.used + FePayloadAlignment <=
+      FePayloadRegionBytes) {
+    memmove(live + FePayloadAlignment, live, payload_region.used);
+    memset(live, FePayloadPoisonByte, FePayloadAlignment);
+    payload_region.start += FePayloadAlignment;
+    return;
+  }
+  // No room ahead: back to the base instead, vacating the extent's old TAIL.
+  // Still a move, so a held pointer is still stale.
+  memmove(payload_region.bytes, live, payload_region.used);
+  memset(payload_region.bytes + payload_region.used, FePayloadPoisonByte,
+         payload_region.start);
+  payload_region.start = 0;
+}
+
+void ResetPayloadRegion(void) {
+  payload_region.start = 0;
+  payload_region.used = 0;
+  memset(payload_region.bytes, FePayloadPoisonByte, FePayloadRegionBytes);
+}
+
+bool PublishPayload(FeContext* ctx,
+                    FeObject* owner,
+                    FePayloadHandle* slot,
+                    size_t bytes) {
+  const size_t units = (bytes + FePayloadAlignment - 1) / FePayloadAlignment;
+  const size_t want = units * FePayloadAlignment;
+  // A payload allocation is an allocation, so it invalidates outstanding
+  // pointers exactly as a cell allocation does.
+  MovePayloadRegion();
+  // Rooted because the retry below collects, and a collection with the owner
+  // reachable from nowhere else sweeps it -- after which this function would
+  // publish a handle into a free cell.  Clause 3 of the protocol is this
+  // Save/Push/Restore, not the store at the end.
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, owner);
+  if (payload_region.start + payload_region.used + want >
+      FePayloadRegionBytes) {
+    // 23.1 compacts here and retries; the scaffold has no marking arm, so
+    // the retry can only succeed if the collection freed cells rather than
+    // blocks.  Either way the collection is real and the rooting above is
+    // what makes it safe.
+    CollectGarbage(ctx);
+  }
+  const bool published =
+      payload_region.start + payload_region.used + want <= FePayloadRegionBytes;
+  if (published) {
+    memset(payload_region.bytes + payload_region.start + payload_region.used, 0,
+           want);
+    *slot = payload_region.used + 1;
+    payload_region.used += want;
+  }
+  FeRestoreGC(ctx, gc);
+  return published;
+}
+
+#endif  // FE_DEBUG_PAYLOAD_MOVE
+
 // "Could an allocation still succeed?", which is what the raise paths mean
 // when they ask whether they can build a condition object. `FeIsNil(free_list)`
 // on its own answers a narrower question -- whether the free list happens to
@@ -877,6 +969,11 @@ FeObject* MakeObject(FeContext* ctx) {
   // satisfy the request raises `out of memory` here exactly as it does in an
   // ordinary build.
   CollectGarbage(ctx);
+#endif
+#if FE_DEBUG_PAYLOAD_MOVE
+  // Clause 2 of the publish protocol, made to happen at every allocation
+  // rather than at the rare one that would naturally compact.
+  MovePayloadRegion();
 #endif
   // Run GC if free_list has no more objects:
   if (FeIsNil(ctx->free_list)) {

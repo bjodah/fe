@@ -10065,6 +10065,90 @@ static bool TestPerfCounters(void) {
 
 #endif  // FE_PERF_COUNTERS
 
+#if FE_DEBUG_PAYLOAD_MOVE
+
+// The publish protocol's proof (Phase 23.0).  Three claims, each asserted
+// rather than argued:
+//
+//   * clause 2 has teeth -- an address held across ONE allocation reads
+//     poison afterwards, and re-deriving it from the handle reads the data;
+//   * clause 3 has teeth -- the owner survives the collection that
+//     `PublishPayload`'s own allocation triggers, and dies at the very next
+//     collection once the publish has restored the GC stack, which is what
+//     says it was unreachable and the rooting was load-bearing;
+//   * a request the region cannot hold is refused rather than half-done.
+//
+// Runs only in the poison build, which is the lane that arms
+// `FE_DEBUG_PAYLOAD_MOVE`; the ordinary build has no payload region at all.
+static bool TestPayloadPublishProtocol(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  ResetPayloadRegion();
+
+  FePayloadHandle handle = FePayloadNone;
+  FeObject* const owner = FeCons(context, FeNil(context), FeNil(context));
+  CHECK(PublishPayload(context, owner, &handle, 7));
+  CHECK(handle != FePayloadNone);
+
+  // Written through the accessor, immediately before use, as clause 1 says.
+  unsigned char* const first = PayloadBytes(handle);
+  memcpy(first, "abcdefg", 7);
+
+  // ...and then held across an allocation, which clause 1 says not to do.
+  (void)FeCons(context, FeNil(context), FeNil(context));
+  const unsigned char poison[FePayloadAlignment] = {
+      FePayloadPoisonByte, FePayloadPoisonByte, FePayloadPoisonByte,
+      FePayloadPoisonByte, FePayloadPoisonByte, FePayloadPoisonByte,
+      FePayloadPoisonByte, FePayloadPoisonByte};
+  CHECK(memcmp(first, poison, sizeof(poison)) == 0);
+
+  // The address moved by exactly one alignment unit, and the bytes came with
+  // it: re-deriving from the handle is the fix, and the only one.
+  const unsigned char* const second = PayloadBytes(handle);
+  CHECK(second == first + FePayloadAlignment);
+  CHECK(memcmp(second, "abcdefg", 7) == 0);
+
+  // An owner reachable from nowhere but `PublishPayload`'s own rooting: the
+  // checkpoint is taken BEFORE it is built, so the restore drops it off the
+  // GC stack, exactly as TestPublicCollectGarbage does.
+  const size_t gc = FeSaveGC(context);
+  FeObject* const unrooted = FeMakeInteger(context, 4242);
+  FeRestoreGC(context, gc);
+
+  // A block the region cannot hold whatever the extent has already taken,
+  // so the publish takes its collect-then-refuse path deterministically.
+  FePayloadHandle refused = FePayloadNone;
+  CHECK(!PublishPayload(context, unrooted, &refused, FePayloadRegionBytes));
+  CHECK(refused == FePayloadNone);
+  CHECK(FeGetType(unrooted) == FeTInteger);
+
+  // The complement: nothing else retained it, so the next collection takes
+  // it. Without that line "it survived" would be a claim about this test's
+  // reachability rather than about the rooting.
+  FeCollectGarbage(context);
+  CHECK(FeGetType(unrooted) == FeTFree);
+
+  ResetPayloadRegion();
+  FeCloseContext(context);
+  return true;
+}
+
+#else
+
+// No payload region without the knob, so the protocol has nothing to assert
+// against and its absence is not a failure. `.ci/ci-04-clang-asan-ubsan.sh`
+// is the build that asks.
+static bool TestPayloadPublishProtocol(void) {
+  return true;
+}
+
+#endif  // FE_DEBUG_PAYLOAD_MOVE
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -10104,7 +10188,7 @@ int main(void) {
                  TestDynamicBinding() && TestBindingLocationSeam() &&
                  TestOneArgDefvarScope() && TestHostedInputUnit() &&
                  TestProtectedEvaluateString() && TestPublicCollectGarbage() &&
-                 TestPerfCounters()
+                 TestPayloadPublishProtocol() && TestPerfCounters()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

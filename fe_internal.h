@@ -630,6 +630,105 @@ extern FeObject unbound;
 #define NATIVE_FN(x) ((x)->cdr.f)
 #define STRING_BUFFER(x) (&(x)->car.c + 1)
 
+// THE PAYLOAD PUBLISH PROTOCOL (Phase 23.0 of kg's Elisp data-model
+// program).  `STRING_BUFFER` above is fe's only interior pointer today: an
+// address into the cell that holds the bytes.  The Phase 22 ADR selected a
+// design in which stored bytes move out of the cell into a bump-allocated,
+// COMPACTABLE payload region, while the `FeObject*` header does not move.
+// From then on an interior pointer is a pointer into storage that slides,
+// and the whole class of bugs nelisp documented -- a raw pointer held across
+// an allocation that compacts under it -- becomes available to fe.
+//
+// One protocol keeps it unavailable, and it has three clauses:
+//
+//   1. A payload pointer is obtained through the one accessor, IMMEDIATELY
+//      before the read or write that spends it.  Never parked in a local
+//      that outlives the statement, never hoisted out of a loop, never
+//      returned to a caller and never handed to a host.
+//   2. A payload pointer is INVALID after ANY allocation.  "Any allocation"
+//      means anything that reaches `MakeObject` or the payload allocator,
+//      including through a host callback: an `FeWriteFn` running inside the
+//      printer, an `FeReadFn` running inside the reader.  Re-derive from the
+//      header afterwards; the header is what stays valid.
+//   3. A new or replacement block reaches its owning header through the ONE
+//      publish function and no other way.  That function roots the owner
+//      across its own allocation, because that allocation may collect and an
+//      unrooted owner would be swept out from under the handle about to be
+//      written into it.
+//
+// `doc/payload-pointer-census.md` is the checklist: every site in fe and in
+// kg that will read through a payload pointer once payloads exist, each with
+// the clause that keeps it correct.  Rows A3, A4 and A6-A10 are the ones
+// that straddle an allocation and therefore pay clause 2.
+//
+// The knob below is the protocol's enforcement arm.
+
+#ifndef FE_DEBUG_PAYLOAD_MOVE
+#define FE_DEBUG_PAYLOAD_MOVE 0
+#endif
+
+#if FE_DEBUG_PAYLOAD_MOVE
+
+// The poison mode, in the shape kg's `KG_DEBUG_COORDS` and fe's own
+// `FE_GC_STRESS` have: the whole facility compiles to nothing at 0, so the
+// shipped interpreter carries neither the storage nor a branch for it, and a
+// CI lane arms it.  At 1, EVERY allocation slides the live payload extent by
+// one alignment unit and pattern-fills the bytes it vacates, so a pointer
+// held across an allocation reads `FePayloadPoisonByte` instead of data.
+// Natural compaction is rare and moves only sometimes; this moves always,
+// which is what turns "corrupts quietly one run in a thousand" into "fails
+// on the first run, in the lane".
+//
+// Phase 23.0 SCOPE.  No live object owns a payload yet -- string migration is
+// Phase 25 -- so what exists here is the protocol's scaffold and its proof:
+// a bump-allocated region, the one accessor, the one publish function, and
+// the poison step wired into `MakeObject`.  `test_api.c`'s
+// `TestPayloadPublishProtocol` is the only caller.  23.1 moves the region
+// into the arena the caller supplied, gives the collector its marking arm and
+// gives the compactor its real reason to move; the protocol and the poison
+// step do not change when it does.
+typedef size_t FePayloadHandle;
+
+enum {
+  // No block.  A handle is a one-based offset into the live extent, so zero
+  // can never name one.
+  FePayloadNone = 0,
+  // The poison step's stride, and the granularity a block is rounded to.
+  // `alignof(FeObject)` is 8 and the ADR's payload words are pointer-sized,
+  // so one unit is one word either way.
+  FePayloadAlignment = 8,
+  // What a vacated byte reads as.  Not 0 and not 0xff: both of those are
+  // values real data takes, and a NUL in particular is what fe's string
+  // walks stop on, so poisoning with one would look like an empty string
+  // rather than like a bug.
+  FePayloadPoisonByte = 0xa5,
+  // The scaffold's region.  Sized for the test that proves the protocol and
+  // nothing else; 23.1 replaces it with a carve out of the caller's arena.
+  FePayloadRegionBytes = 4096,
+};
+
+// Turn a handle into bytes.  Clause 1: call it immediately before the access
+// and let the result die there.
+unsigned char* PayloadBytes(FePayloadHandle handle);
+// Clause 3: the one way a block reaches its owner.  Rounds `bytes` up to
+// `FePayloadAlignment`, zero-fills the block, writes its handle into `*slot`
+// and answers true; answers false, leaving `*slot` alone, when the region
+// cannot hold it.  `owner` is rooted across the allocation, which may
+// collect.
+bool PublishPayload(FeContext* ctx,
+                    FeObject* owner,
+                    FePayloadHandle* slot,
+                    size_t bytes);
+// Clause 2, made to happen: slide the live extent and poison what it
+// vacates.  `MakeObject` calls it, so every cell allocation invalidates
+// every payload pointer, whether or not a real compaction would have.
+void MovePayloadRegion(void);
+// Drop every block and park the extent at the region's base.  For the test,
+// which needs a known starting state; nothing else calls it.
+void ResetPayloadRegion(void);
+
+#endif  // FE_DEBUG_PAYLOAD_MOVE
+
 // Small object-layer accessors both translation units use. Defined in fe.c,
 // declared here instead of kept `static` because fe_eval.c calls them too.
 FeDouble GetDouble(const FeObject* o);

@@ -6,6 +6,14 @@ source .ci/ci-env.sh
 
 export CC="ccache clang"
 export CFLAGS="-Werror -Wall -Wextra -pedantic -std=c2x -fsanitize=address,undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -O1 -g"
+# Phase 23.0's payload poison mode, the publish protocol's enforcement arm
+# (fe_internal.h).  This lane arms it rather than a lane of its own: the
+# protocol's failure is a read through storage that moved, which is what a
+# sanitizer build is for, and `test_api.c`'s TestPayloadPublishProtocol --
+# compiled only when the knob is on -- is where the deliberately stale
+# pointer is proved to read poison.  The knob rides CPPFLAGS (see the
+# Makefile), so the standalone header checks compile the armed header too.
+export FE_DEBUG_PAYLOAD_MOVE=1
 
 "${MAKE_PARALLEL[@]}" -B check
 

@@ -21,6 +21,14 @@ CFLAGS ?= -Weverything -Werror -std=c2x \
 	-Wno-reserved-identifier \
 	-Wno-extra-semi-stmt
 CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -Itiny-regex-c
+# Phase 23.0's payload poison knob (see the publish protocol in
+# fe_internal.h).  0 in every configuration but the lane that arms it, where
+# every allocation slides the payload region and pattern-fills what it
+# vacates.  Appended to CPPFLAGS rather than named in each rule so that the
+# standalone header checks compile the armed header too, and so that
+# .build-flags -- which hashes CPPFLAGS -- rebuilds when the knob moves.
+FE_DEBUG_PAYLOAD_MOVE ?= 0
+CPPFLAGS += -DFE_DEBUG_PAYLOAD_MOVE=$(FE_DEBUG_PAYLOAD_MOVE)
 LDLIBS ?= -lm
 
 # tiny-regex-c is third-party and is not held to Fe's -Weverything build, but it
@@ -579,11 +587,11 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # 28, fe_run.c 25, fex_re.c 21, fex_process.c 20, fe_perf.c 6.
 #
 # Proved live at this head by temporarily lowering each cap and watching the
-# gate fire, exit status checked: at 866 `make complexity-check` reports
-# "FAIL: total complexity 867 exceeds limit 866" and exits 2, and at 867 it
+# gate fire, exit status checked: at 873 `make complexity-check` reports
+# "FAIL: total complexity 874 exceeds limit 873" and exits 2, and at 874 it
 # passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
 # exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 867
+SCC_COMPLEXITY_MAX ?= 874
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -980,12 +988,12 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # record the five new symbols; no recorded symbol's value changes.
 #
 # Proved live at this head by temporarily lowering each gate and watching it
-# fire, exit status checked: at 1284 `make pmccabe-check` reports "FAIL:
-# total complexity 1285 exceeds funded budget 1284 (+1)" and exits 2, and at
-# 1285 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# fire, exit status checked: at 1293 `make pmccabe-check` reports "FAIL:
+# total complexity 1294 exceeds funded budget 1293 (+1)" and exits 2, and at
+# 1294 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1285
+PMCCABE_TOTAL_MAX ?= 1294
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

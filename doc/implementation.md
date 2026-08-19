@@ -396,6 +396,27 @@ harness: `make check-gc-stress` builds it with the knob off and on, and both
 runs assert that `FeGetArenaStats().collection_count` moved off zero over a
 churning script whose answer is still correct.
 
+`FE_DEBUG_PAYLOAD_MOVE` is the second knob in the same family, and it
+defaults to 0 and compiles to nothing in exactly the same way. It belongs to
+the payload substrate the Phase 22 ADR selected -- stable `FeObject*` headers
+over a bump-allocated, compactable payload region -- and it enforces that
+design's publish protocol, which is stated in `fe_internal.h` beside
+`STRING_BUFFER`: a payload pointer is obtained immediately before use, is
+invalid after ANY allocation, and a new or replacement block reaches its
+owning header only through the one publish function, which roots the owner
+across its own allocation. At 1, every allocation slides the live payload
+extent by one alignment unit and pattern-fills the bytes it vacates, so an
+address held across an allocation reads poison rather than data -- a natural
+compaction moves only sometimes, and a bug that surfaces only sometimes is
+the one that ships. `.ci/ci-04-clang-asan-ubsan.sh` arms it, and
+`test_api.c`'s `TestPayloadPublishProtocol` -- compiled only when the knob is
+on -- is where a deliberately stale pointer is proved to read poison and an
+owner is proved to survive the collection its own publish triggers.
+`doc/payload-pointer-census.md` is the inventory of every site in fe and in
+kg that the protocol governs. No live object owns a payload yet; the region
+is a scaffold the test uses, and the phase that gives it real owners moves it
+into the arena the caller supplied.
+
 The context maintains a `gc_stack` which protects objects that may not be
 otherwise reachable. Newly created objects are automatically pushed to this
 stack. Reader and evaluator results are either protected there or remain
