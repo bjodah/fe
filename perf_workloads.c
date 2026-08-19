@@ -1255,6 +1255,47 @@ static void WriteArenaJson(FILE* out, const FeArenaStats* stats) {
                 stats->allocation_failures);
 }
 
+// The artifact line: which fe tree, and which binary, produced these numbers.
+// Neither can be a compiled-in constant -- a describe baked into an object
+// file names the tree that last triggered a rebuild, not the tree the run
+// measured -- so the driver that starts the measurement passes them in, and a
+// value it could not supply is reported as null rather than guessed at.
+static const char* artifact_describe = nullptr;
+static const char* artifact_sha256 = nullptr;
+
+// A supplied value is a git describe or a hex digest. Anything carrying a
+// character JSON would have to escape did not come from either, so it is
+// reported as absent rather than written into the file.
+static void WriteIdentityJson(FILE* out,
+                              const char* key,
+                              const char* value,
+                              const char* tail) {
+  bool plain = value != nullptr && value[0] != '\0';
+  for (const char* c = value; plain && *c != '\0'; c++) {
+    const unsigned char byte = (unsigned char)*c;
+    plain = byte >= ' ' && byte < 0x7f && *c != '"' && *c != '\\';
+  }
+  if (plain) {
+    (void)fprintf(out, "    \"%s\": \"%s\"%s\n", key, value, tail);
+  } else {
+    (void)fprintf(out, "    \"%s\": null%s\n", key, tail);
+  }
+}
+
+// The header a reader checks before reading a single number below it: the
+// three identifiers the binary knows about itself, then the two the driver
+// supplied. A number whose artifact line is not the tree under discussion is
+// not evidence about it.
+static void WriteArtifactJson(FILE* out) {
+  (void)fprintf(out, "  \"artifact\": {\n");
+  (void)fprintf(out, "    \"fe_version\": \"%s\",\n", FeVersion);
+  (void)fprintf(out, "    \"fe_api_version\": %d,\n", FE_API_VERSION);
+  (void)fprintf(out, "    \"fe_language_version\": %d,\n", FE_LANGUAGE_VERSION);
+  WriteIdentityJson(out, "fe_git_describe", artifact_describe, ",");
+  WriteIdentityJson(out, "binary_sha256", artifact_sha256, "");
+  (void)fprintf(out, "  },\n");
+}
+
 static void WriteExtraJson(FILE* out, const WorkloadRun* run) {
   (void)fprintf(out, "      \"extra\": {");
   for (size_t i = 0; i < run->extra_count; i++) {
@@ -1299,9 +1340,8 @@ static bool WriteJson(const char* path) {
     (void)fprintf(stderr, "perf_workloads: cannot write %s\n", path);
     return false;
   }
-  (void)fprintf(out, "{\n  \"schema\": \"fe-perf-workloads/1\",\n");
-  (void)fprintf(out, "  \"fe_api_version\": %d,\n", FE_API_VERSION);
-  (void)fprintf(out, "  \"fe_language_version\": %d,\n", FE_LANGUAGE_VERSION);
+  (void)fprintf(out, "{\n  \"schema\": \"fe-perf-workloads/2\",\n");
+  WriteArtifactJson(out);
   (void)fprintf(out, "  \"string_buffer_size\": %d,\n", (int)StringBufferSize);
   (void)fprintf(out, "  \"workloads\": [\n");
   for (size_t i = 0; i < ran_count; i++) {
@@ -1393,9 +1433,13 @@ static void PrintExtras(void) {
 static void PrintUsage(FILE* out) {
   (void)fprintf(out,
                 "usage: perf_workloads [--json PATH] [--list]\n"
+                "                      [--git-describe TEXT] "
+                "[--binary-sha256 HEX]\n"
                 "  --json PATH  write the machine-readable record set "
                 "(\"-\" for stdout)\n"
-                "  --list       print the battery and exit\n");
+                "  --list       print the battery and exit\n"
+                "  --git-describe TEXT  the fe tree these numbers came from\n"
+                "  --binary-sha256 HEX  digest of the measured binary\n");
 }
 
 static void PrintList(void) {
@@ -1411,6 +1455,12 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
       i++;
       json_path = argv[i];
+    } else if (strcmp(argv[i], "--git-describe") == 0 && i + 1 < argc) {
+      i++;
+      artifact_describe = argv[i];
+    } else if (strcmp(argv[i], "--binary-sha256") == 0 && i + 1 < argc) {
+      i++;
+      artifact_sha256 = argv[i];
     } else if (strcmp(argv[i], "--list") == 0) {
       PrintList();
       return EXIT_SUCCESS;

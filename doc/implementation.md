@@ -1408,17 +1408,28 @@ Three properties are what make the numbers usable.
   its counters. The fixed arena is exercised where it collects often as well
   as where it does not.
 
-The record schema is `fe-perf-workloads/1`: a top-level object carrying the
-schema name, `FE_API_VERSION`, `FE_LANGUAGE_VERSION` and `StringBufferSize`,
-then one object per workload with its name, family, note, `param`,
-`arena_bytes`, `cell_capacity`, `context_open_cells`,
-`includes_context_open`, `answer`, `seconds`, an `extra` object of
-workload-specific probes, and `counters`/`arena` objects whose keys are
-exactly the ones `FePerfWriteJson` writes. The counters are a delta over the
-workload's own measured region -- the context open is excluded from every
-workload except `context-open`, whose measured region *is* the open, which is
-what `includes_context_open` reports -- so a consumer never has to subtract a
-baseline itself.
+The record schema is `fe-perf-workloads/2`: a top-level object carrying the
+schema name, an `artifact` header, `StringBufferSize`, then one object per
+workload with its name, family, note, `param`, `arena_bytes`,
+`cell_capacity`, `context_open_cells`, `includes_context_open`, `answer`,
+`seconds`, an `extra` object of workload-specific probes, and
+`counters`/`arena` objects whose keys are exactly the ones `FePerfWriteJson`
+writes. The counters are a delta over the workload's own measured region --
+the context open is excluded from every workload except `context-open`, whose
+measured region *is* the open, which is what `includes_context_open` reports
+-- so a consumer never has to subtract a baseline itself.
+
+The `artifact` header names what produced the numbers, because a number whose
+artifact line is not the tree under discussion is not evidence about it. It
+carries `fe_version` (`FeVersion`), `fe_api_version` (`FE_API_VERSION`) and
+`fe_language_version` (`FE_LANGUAGE_VERSION`), which the binary knows about
+itself and which schema `/1` wrote at the top level, plus `fe_git_describe`
+and `binary_sha256`, which it cannot: a describe compiled into an object file
+names the tree that last triggered a rebuild, not the tree that ran. Those
+two arrive as `--git-describe` and `--binary-sha256`, which `make
+perf-workloads` fills in from `git describe --always --dirty` and
+`sha256sum` at measurement time. A value the driver did not supply -- a run
+of the binary by hand, a box with no `git` -- is `null`, never a guess.
 
 The `context` pair is two workloads because `FeCloseContext` is not a small
 destructor: it clears every root and runs a full `CollectGarbage` over the

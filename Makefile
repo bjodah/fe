@@ -1165,6 +1165,14 @@ PERF_WORKLOADS = $(PERF_DIR)/perf_workloads
 # a phase argues from belong in a commit message or a checked-in report, not
 # in a file a build rewrites.
 PERF_WORKLOAD_JSON ?= $(PERF_DIR)/workloads.json
+# The artifact line the battery writes into its JSON header: which fe tree,
+# and which binary, produced the numbers.  Both are taken here, at
+# measurement time, rather than compiled into `perf_workloads.c`: a describe
+# baked into an object file names the tree that last triggered a rebuild.  A
+# box without `git` or `sha256sum` passes an empty string, which the battery
+# reports as null rather than as an answer.
+PERF_DESCRIBE = git describe --always --dirty 2>/dev/null
+PERF_SHA256 = sha256sum ./$(PERF_WORKLOADS) 2>/dev/null | cut -d" " -f1
 # Extra arguments for the battery (`--list`).  There is no "slow" tier and
 # no flag to enable one: the whole battery, 8192-symbol interning tier
 # included, is 0.75 s here and 0.80 s under ASan+UBSan, against the ~12 s
@@ -1190,6 +1198,8 @@ perf-check: perf perf-workloads
 # times it prints are a report and nothing reads them.
 perf-workloads: $(PERF_WORKLOADS)
 	$(EXAMPLE_RUNNER) ./$(PERF_WORKLOADS) --json $(PERF_WORKLOAD_JSON) \
+		--git-describe "$$($(PERF_DESCRIBE))" \
+		--binary-sha256 "$$($(PERF_SHA256))" \
 		$(PERF_WORKLOAD_ARGS)
 
 $(PERF_DIR):
