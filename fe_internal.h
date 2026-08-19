@@ -727,12 +727,14 @@ enum {
   // empty string rather than like a bug.
   FePayloadPoisonByte = 0xa5,
   // The Phase 22 ADR's selected split, as a percentage of the bytes left
-  // after the frame region is funded. It is what Phase 23.2's
-  // options-bearing context-open API will default to. `FeOpenContext` does
-  // NOT apply it: the ADR requires that entry point to keep today's
-  // behaviour, and carving a quarter of every host's cells for a region
-  // nothing can allocate from until Phase 25 is not today's behaviour.
-  PayloadArenaPercent = 25,
+  // after the frame region is funded. The number itself lives in fe.h, where
+  // a host reads it as the default `FeOpenContextWithOptions` applies; this
+  // is the internal name for it, so there is one constant and not two.
+  // `FeOpenContext` does NOT apply it: the ADR requires that entry point to
+  // keep today's behaviour, and carving a quarter of every host's cells for
+  // a region nothing can allocate from until Phase 25 is not today's
+  // behaviour.
+  PayloadArenaPercent = FeDefaultPayloadPercent,
 };
 
 static_assert(sizeof(FePayloadBlock) % FePayloadAlignment == 0);
@@ -1221,12 +1223,13 @@ struct FeContext {
   size_t payload_allocation_failures;
 };
 
-// The context open the payload region needs, and the shape Phase 23.2's
-// public options-bearing API will take: `payload_percent` of the bytes left
-// after the frame region is funded becomes the payload region, and the rest
-// stays cells. `FeOpenContext` passes 0, which is byte-for-byte today's
-// partition; `PayloadArenaPercent` is the ADR's selected split, and the
-// substrate's own tests are what pass it today.
+// The context open the payload region needs, and what
+// `FeOpenContextWithOptions` resolves its options to: `payload_percent` of
+// the bytes left after the frame region is funded becomes the payload
+// region, and the rest stays cells. `FeOpenContext` passes 0, which is
+// byte-for-byte today's partition; `PayloadArenaPercent` is the ADR's
+// selected split, which is what default options ask for. A percentage above
+// 100 is refused here as it is there, by returning null.
 FeContext* OpenContextWithPayload(void* arena,
                                   size_t size,
                                   size_t payload_percent);

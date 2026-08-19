@@ -1075,7 +1075,7 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1333 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1333
+PMCCABE_TOTAL_MAX ?= 1341
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -1290,6 +1290,18 @@ PERF_OBJS = $(addprefix $(PERF_DIR)/,$(SRCS:.c=.o)) tiny-regex-c/re.o
 # `format-check` covers it.  It exists only in the counting build: an
 # ordinary one has no FePerfRead to call.
 PERF_WORKLOADS = $(PERF_DIR)/perf_workloads
+# The payload harness, counting: the one build in which fe_perf.h's payload
+# counters can be asserted at all.  The shipped counting build above has no
+# type that owns a payload -- deliberately, since none exists before Phase 25
+# -- so every payload counter in it is zero by construction, and a counter
+# nothing exercises is untested code.  Same objects as `$(PAYLOAD_TESTS)`,
+# with `FE_PERF_COUNTERS=1` on top, in `$(PERF_DIR)` so a counting object
+# still cannot reach an ordinary link.
+PAYLOAD_TESTS_PERF = $(PERF_DIR)/payload_tests
+PAYLOAD_TESTS_PERF_OBJS = $(PERF_DIR)/payload_tests-payload.o \
+	$(PERF_DIR)/fe-payload.o $(PERF_DIR)/fe_eval-payload.o \
+	$(PERF_DIR)/fe_run-payload.o $(PERF_DIR)/fe_unwind-payload.o \
+	$(PERF_DIR)/fe_perf-payload.o
 # Where the battery's machine-readable records go.  Not tracked: the numbers
 # a phase argues from belong in a commit message or a checked-in report, not
 # in a file a build rewrites.
@@ -1309,16 +1321,18 @@ PERF_SHA256 = sha256sum ./$(PERF_WORKLOADS) 2>/dev/null | cut -d" " -f1
 # made optional to save a fraction of that.
 PERF_WORKLOAD_ARGS ?=
 
-perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST) $(PERF_WORKLOADS)
+perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST) $(PERF_WORKLOADS) \
+	$(PAYLOAD_TESTS_PERF)
 
 # The counting build's own `check`: the C API suite -- which is where the
-# counter relationships are asserted -- the workload battery, the example
-# host, and the whole script corpus against the counting interpreter, so
-# every instrumented line is executed rather than merely compiled.  `FE_BIN`
-# is what keeps test.sh from rebuilding and re-cleaning the ordinary tree
-# underneath it.
+# counter relationships are asserted -- the payload harness, which is where
+# the payload counters are, the workload battery, the example host, and the
+# whole script corpus against the counting interpreter, so every instrumented
+# line is executed rather than merely compiled.  `FE_BIN` is what keeps
+# test.sh from rebuilding and re-cleaning the ordinary tree underneath it.
 perf-check: perf perf-workloads
 	./$(PERF_TEST_API)
+	./$(PAYLOAD_TESTS_PERF)
 	$(EXAMPLE_RUNNER) ./$(PERF_EXAMPLE_HOST)
 	FE_BIN=./$(PERF_TARGET) ./test.sh
 
@@ -1346,8 +1360,16 @@ $(PERF_EXAMPLE_HOST): $(PERF_DIR)/example_host.o $(PERF_CORE_OBJS)
 $(PERF_WORKLOADS): $(PERF_DIR)/perf_workloads.o $(PERF_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+$(PAYLOAD_TESTS_PERF): $(PAYLOAD_TESTS_PERF_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 $(PERF_DIR)/%.o: %.c $(HDRS) $(BUILD_STAMP) | $(PERF_DIR)
 	$(CC) $(PERF_CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+# Counting AND payload-owning.  Make prefers the shorter stem, so this rule
+# wins over `%-payload.o` for a target inside $(PERF_DIR).
+$(PERF_DIR)/%-payload.o: %.c $(HDRS) $(BUILD_STAMP) | $(PERF_DIR)
+	$(CC) $(PERF_CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 $(CFLAGS) -c $< -o $@
 
 test-header: test_header.c test_internal_header.c fe.h fe_internal.h
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c

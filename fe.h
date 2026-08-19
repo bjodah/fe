@@ -132,7 +132,26 @@
 // linking against has the entry point at all -- the same reasoning
 // versions 7, 8 and 11 (the input-unit trio, the value-cell readers, the
 // binding-location seam) already used for an addition with no removal.
-#define FE_API_VERSION 12
+//
+// Version 13 (Phase 23.2 of kg's Elisp data-model program) is the payload
+// substrate's host surface: `FeOpenContextWithOptions` with the
+// `FeOpenOptions` record it takes, and five payload fields on
+// `FeArenaStats`. Phase 23.1 built the substrate itself -- a bump-allocated,
+// compactable region carved out of the caller's arena, which the Phase 22
+// ADR selected -- entirely inside fe, with nothing in this header at all.
+// What this version adds is the two things a host cannot do without: ASK for
+// a region (the arena is the host's memory, so how it is divided is the
+// host's decision, not a compiled-in constant), and SEE what the region is
+// doing (capacity, live bytes, high-water mark, compactions, and requests
+// that could not be met). Nothing is removed and no existing declaration
+// changes meaning -- `FeOpenContext` opens the same partition, byte for
+// byte, that it did under version 12 -- so every existing call keeps
+// compiling; the bump exists because a version that does not move cannot
+// tell a host whether the fe it is linking against has the entry point and
+// the fields at all, the same reasoning versions 7, 8, 11 and 12 used.
+// `FE_LANGUAGE_VERSION` does not move: no Lisp program can reach any of
+// this, since no release type owns a payload until Phase 25.
+#define FE_API_VERSION 13
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -491,6 +510,24 @@ typedef struct FeArenaStats {
   size_t peak_native_reentry;
   size_t allocation_failures;  // MakeObject() calls that still found no free
                                // slot after a collection.
+
+  // The payload region (FE_API_VERSION 13), the pool the cells are priced
+  // against: `FeOpenOptions.payload_percent` is what divides them, and the
+  // frame capacity above is funded before either. All five read zero in a
+  // context opened by `FeOpenContext`, or with `FePayloadPercentNone`, which
+  // carve no region at all -- and, until a Fe release type owns a payload,
+  // all but the first read zero in a carved context too.
+  size_t payload_capacity_bytes;    // bytes carved for the region; the
+                                    // denominator the other four are read
+                                    // against.
+  size_t payload_live_bytes;        // bytes currently held by published blocks,
+                                    // block headers included.
+  size_t payload_peak_bytes;        // high-water mark of payload_live_bytes.
+  size_t payload_compaction_count;  // collections that moved survivors
+                                    // down over reclaimed blocks.
+  size_t payload_allocation_failures;  // payload requests the region could
+                                       // not meet even after a collection,
+                                       // i.e. `(payload-exhaustion)` raises.
 } FeArenaStats;
 
 [[nodiscard]] FeArenaStats FeGetArenaStats(const FeContext* ctx);
@@ -508,6 +545,66 @@ typedef struct FeArenaStats {
 // `MakeObject`-triggered collection would). It allocates nothing itself.
 void FeCollectGarbage(FeContext* ctx);
 
+// The two named values `FeOpenOptions.payload_percent` takes besides an
+// ordinary percentage (FE_API_VERSION 13).
+enum {
+  // What a zero-initialized `FeOpenOptions` asks for, and what a null
+  // `options` selects: Fe's own split of the arena, which is the Phase 22
+  // ADR's selected 25% of what is left once the frame region is funded. Zero
+  // means "Fe decides" here for the same reason it does in `FeEvalOptions` --
+  // a host that has an opinion about one knob writes that one field and
+  // leaves the rest alone.
+  FeDefaultPayloadPercent = 25,
+  // An explicit request for NO payload region: a context whose payload
+  // capacity is zero and whose partition is therefore byte for byte what
+  // `FeOpenContext` produces. It needs a name of its own because zero is
+  // already spoken for by the default above, and a host that has decided to
+  // carve nothing is saying something different from a host that has not
+  // decided anything.
+  FePayloadPercentNone = -1,
+};
+
+// The knobs `FeOpenContextWithOptions` takes (FE_API_VERSION 13). Zero-
+// initialize it -- `(FeOpenOptions){0}`, or a designated initializer that
+// names only the fields it cares about -- and every field it does not name
+// takes its documented default, which is what lets a later version add a
+// field without touching a host that does not want it.
+typedef struct FeOpenOptions {
+  // How much of the arena becomes the payload region, as a percentage of the
+  // bytes left once the frame region is funded. The cells get the rest, so
+  // this is a division between the two pools and never a raid on the third:
+  // frame capacity is identical at every value here.
+  //
+  // `FeDefaultPayloadPercent` (0, the zero-initialized value) selects Fe's
+  // own split; `FePayloadPercentNone` asks for no region; 1 to 100 ask for
+  // exactly that percentage.
+  //
+  // OUT OF RANGE IS REFUSED, NOT CLAMPED: anything below
+  // `FePayloadPercentNone` or above 100 makes `FeOpenContextWithOptions`
+  // return null, exactly as a null arena or one below `FeMinimumArenaSize`
+  // does. A clamp would hand back a context partitioned to a number the host
+  // never asked for and no way to find out, which is a lie about the one
+  // budget Fe's product contract is built on.
+  int payload_percent;
+} FeOpenOptions;
+
+// Open a context with knobs (FE_API_VERSION 13). `ptr` and `size` are
+// `FeOpenContext`'s arena, with the same requirements; `options` may be null,
+// which selects every default.
+//
+// This is NOT a renamed `FeOpenContext`, and the difference is deliberate:
+// the default here is `FeDefaultPayloadPercent`, while `FeOpenContext` --
+// which cannot express an opinion and must not acquire one -- carves nothing
+// and keeps the partition it has always produced. A host that calls this
+// with default options is asking Fe to divide its arena Fe's way; a host
+// that calls `FeOpenContext` is asking for the arena it already had.
+[[nodiscard]] FeContext* FeOpenContextWithOptions(void* ptr,
+                                                  size_t size,
+                                                  const FeOpenOptions* options);
+// The whole arena to cells and frames, with no payload region:
+// `FeOpenContextWithOptions` with `payload_percent` of
+// `FePayloadPercentNone`, and the entry point every host that has no opinion
+// about the split should keep calling.
 [[nodiscard]] FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);
 void FeSetUserData(FeContext* ctx, void* userdata);

@@ -23,7 +23,7 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-const char* FeVersion = "18.0";
+const char* FeVersion = "19.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -470,6 +470,8 @@ static FePayloadHandle AllocatePayloadBlock(FeContext* ctx,
   FePayloadBlock* const block = PayloadBlockAt(ctx, offset);
   block->children = children;
   block->bytes = want;
+  FE_PERF_INC(FePerfPayloadAlloc);
+  FE_PERF_ADD(FePerfPayloadByte, total);
   ctx->payload_used += total;
   if (ctx->payload_used > ctx->payload_peak_used) {
     ctx->payload_peak_used = ctx->payload_used;
@@ -498,6 +500,7 @@ static bool PayloadBlockIsLive(const FeContext* ctx, size_t offset) {
 void CompactPayloads(FeContext* ctx) {
   size_t source = 0;
   size_t target = 0;
+  FE_PERF_INC(FePerfPayloadCompact);
   while (source < ctx->payload_used) {
     const size_t total =
         sizeof(FePayloadBlock) + PayloadBlockAt(ctx, source)->bytes;
@@ -507,6 +510,7 @@ void CompactPayloads(FeContext* ctx) {
         // a shorter dead block left -- so this is `memmove` and can never be
         // `memcpy`.
         memmove(PayloadAt(ctx, target), PayloadAt(ctx, source), total);
+        FE_PERF_INC(FePerfPayloadCompactMoved);
       }
       *PayloadSlot(PayloadBlockAt(ctx, target)->owner) =
           HandleOfBlockAt(target);
@@ -3829,6 +3833,16 @@ FeArenaStats FeGetArenaStats(const FeContext* ctx) {
       .peak_cleanup_stack_depth = ctx->arena_peak_cleanup_stack_depth,
       .peak_native_reentry = ctx->arena_peak_native_reentry,
       .allocation_failures = ctx->arena_allocation_failures,
+      // The region, whose bookkeeping is already tracked at the sites that
+      // change it, exactly as the cell gauges above are. `payload_used` is
+      // the live extent's length rather than its end address, so it is what
+      // a host reads as "bytes in use" whether or not the poison knob has
+      // slid the extent forward.
+      .payload_capacity_bytes = ctx->payload_capacity,
+      .payload_live_bytes = ctx->payload_used,
+      .payload_peak_bytes = ctx->payload_peak_used,
+      .payload_compaction_count = ctx->payload_compaction_count,
+      .payload_allocation_failures = ctx->payload_allocation_failures,
   };
 }
 
@@ -4003,14 +4017,45 @@ FeContext* OpenContextWithPayload(void* arena,
   return ctx;
 }
 
-// No payload carve. The Phase 22 ADR requires this entry point to keep
-// today's behaviour as the default -- the split it recorded is the spike's,
-// "not a shipped constant" -- and a host that has not asked for a region
-// should not lose a quarter of its cells to one nothing can allocate from
-// until Phase 25. `OpenContextWithPayload` is what asks for one, and Phase
-// 23.2's options-bearing public API is what will offer it to a host.
+// The percentage `options` asks for, or false when it asks for one no
+// partition can be made from. Refusal rather than a clamp, per the contract
+// in fe.h: a host that asks for 150% has a bug, and a context quietly
+// partitioned to 100 would hide it behind a split the host never chose.
+static bool SelectedPayloadPercent(const FeOpenOptions* options,
+                                   size_t* percent) {
+  const int asked = options == nullptr ? 0 : options->payload_percent;
+  if (asked == FePayloadPercentNone) {
+    *percent = 0;
+    return true;
+  }
+  if (asked < 0 || asked > 100) {
+    return false;
+  }
+  // Zero is "Fe decides", which is what makes a zero-initialized record mean
+  // the default; an explicit none is the case above.
+  *percent = asked == 0 ? (size_t)FeDefaultPayloadPercent : (size_t)asked;
+  return true;
+}
+
+FeContext* FeOpenContextWithOptions(void* arena,
+                                    size_t size,
+                                    const FeOpenOptions* options) {
+  size_t percent = 0;
+  if (!SelectedPayloadPercent(options, &percent)) {
+    return nullptr;
+  }
+  return OpenContextWithPayload(arena, size, percent);
+}
+
+// No payload carve, expressed the one way the options record can say so. The
+// Phase 22 ADR requires this entry point to keep today's behaviour -- the
+// split it recorded is the spike's, "not a shipped constant" -- and a host
+// that has not asked for a region should not lose a quarter of its cells to
+// one nothing can allocate from until Phase 25. A host that wants the ADR's
+// split asks for it, through `FeOpenContextWithOptions` and its default.
 FeContext* FeOpenContext(void* arena, size_t size) {
-  return OpenContextWithPayload(arena, size, 0);
+  const FeOpenOptions options = {.payload_percent = FePayloadPercentNone};
+  return FeOpenContextWithOptions(arena, size, &options);
 }
 
 void FeCloseContext(FeContext* ctx) {

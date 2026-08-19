@@ -8,10 +8,16 @@ start of this memory region, then an evaluator-frame region, then the payload
 region, then the `FeObject` region. The frame region has a 64-frame floor, a
 32-frame cleanup reserve, and receives 10% of bytes beyond the minimum; the
 payload region takes an agreed percentage of what is left, and the remaining
-bytes become object slots. `FeOpenContext()` asks for **zero** percent, so
-today's partition is exactly what it has always been and a host that has not
-asked for payload storage does not pay for it; see "The payload region"
-below. The arena must satisfy `alignof(FeContext)`; static assertions ensure
+bytes become object slots. The percentage is the host's to choose:
+`FeOpenContextWithOptions()` takes it in `FeOpenOptions.payload_percent`,
+where zero -- what a zero-initialized record and a null `options` both mean --
+selects Fe's own `FeDefaultPayloadPercent` of 25, `FePayloadPercentNone` asks
+for no region at all, and anything outside that range is refused with a null
+context rather than clamped. `FeOpenContext()` asks for **none**, so today's
+partition is exactly what it has always been and a host that has not asked for
+payload storage does not pay for it; see "The payload region" below. Whatever
+the split, the frame region is funded before it and is identical at every
+percentage. The arena must satisfy `alignof(FeContext)`; static assertions ensure
 that every following region is aligned. Fe neither reallocates nor frees this
 storage; its address, size, and exclusive lifetime are controlled by the
 caller through `FeCloseContext()`.
@@ -462,6 +468,16 @@ in for the tag bit a pair uses to say which half it is in. An aggregate's
 WIDTH therefore costs no C stack, and neither does a CHAIN of aggregates:
 `payload_tests.c` measures `__builtin_frame_address(0)` from inside the mark
 phase at chain depths of 10, 1000 and 100 000 and finds it flat.
+
+What a host SEES of the region is five fields of `FeArenaStats`
+(`FE_API_VERSION` 13): the capacity the carve produced, the bytes live in it
+now, the high-water mark of those bytes, the compactions that have run, and
+the requests that could not be met. They are tracked at the sites that change
+them, exactly as the cell gauges beside them are, so reading them costs
+nothing and changes nothing. `fe_perf.h`'s `payload_alloc`, `payload_byte`,
+`payload_compact` and `payload_compact_moved` are the counting build's view of
+the same work -- blocks handed out, region bytes they took, compactor calls,
+and survivors slid down over a reclaimed block.
 
 NO TYPE OWNS A PAYLOAD in a shipped interpreter. Strings still live as a cdr
 chain of seven-byte cells, and a Lisp-visible aggregate does not exist yet;

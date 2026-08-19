@@ -47,6 +47,11 @@ const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FePerfGcSweepExamined] = "gc_sweep_examined",
     [FePerfGcReclaimed] = "gc_reclaimed",
 
+    [FePerfPayloadAlloc] = "payload_alloc",
+    [FePerfPayloadByte] = "payload_byte",
+    [FePerfPayloadCompact] = "payload_compact",
+    [FePerfPayloadCompactMoved] = "payload_compact_moved",
+
     [FePerfStringCell] = "string_cell",
     [FePerfStringByte] = "string_byte",
     [FePerfStringWalk] = "string_walk",
@@ -130,8 +135,16 @@ void FePerfWriteJson(FILE* out, const FeArenaStats* stats) {
           stats->peak_cleanup_stack_depth);
   fprintf(out, "    \"peak_native_reentry\": %zu,\n",
           stats->peak_native_reentry);
-  fprintf(out, "    \"allocation_failures\": %zu\n",
+  fprintf(out, "    \"allocation_failures\": %zu,\n",
           stats->allocation_failures);
+  fprintf(out, "    \"payload_capacity_bytes\": %zu,\n",
+          stats->payload_capacity_bytes);
+  fprintf(out, "    \"payload_live_bytes\": %zu,\n", stats->payload_live_bytes);
+  fprintf(out, "    \"payload_peak_bytes\": %zu,\n", stats->payload_peak_bytes);
+  fprintf(out, "    \"payload_compaction_count\": %zu,\n",
+          stats->payload_compaction_count);
+  fprintf(out, "    \"payload_allocation_failures\": %zu\n",
+          stats->payload_allocation_failures);
   fputs("  }\n}\n", out);
 }
 

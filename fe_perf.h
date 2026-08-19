@@ -81,6 +81,19 @@ typedef enum FePerfCounter {
   FePerfGcSweepExamined,
   FePerfGcReclaimed,
 
+  // The payload region (Phase 23). ALLOC counts the blocks the bump
+  // allocator handed out and BYTE the region bytes they took, block headers
+  // included, so the two together are what a region's capacity is spent on.
+  // COMPACT counts `CompactPayloads` calls -- every collection makes one,
+  // whether or not anything died -- and COMPACT_MOVED the surviving blocks
+  // it slid down over a reclaimed one, which is the memmove work a
+  // compaction actually costs. A shipped build leaves all four at zero: no
+  // release type owns a payload until Phase 25.
+  FePerfPayloadAlloc,
+  FePerfPayloadByte,
+  FePerfPayloadCompact,
+  FePerfPayloadCompactMoved,
+
   // Strings, whose representation is a chain of `StringBufferSize`-byte
   // cells. CELL and BYTE are creation: cells `BuildString` allocated and
   // payload bytes it stored. The WALK trio is traversal --

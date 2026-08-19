@@ -141,9 +141,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 12);
+  static_assert(FE_API_VERSION == 13);
   static_assert(FE_LANGUAGE_VERSION == 15);
-  CHECK(strcmp(FeVersion, "18.0") == 0);
+  CHECK(strcmp(FeVersion, "19.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();

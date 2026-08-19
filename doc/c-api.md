@@ -14,7 +14,10 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 12 adds
+types, and callback signatures declared in `fe.h`; API version 13 adds the
+payload region's host surface -- `FeOpenContextWithOptions` with the
+`FeOpenOptions` record it takes, and five payload fields on `FeArenaStats`;
+API version 12 adds
 `FeCollectGarbage`, an immediate, forced collection reachable from outside
 fe.c for the first time; API version 11 adds the
 dynamic-binding location seam
@@ -64,9 +67,18 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 12);
+static_assert(FE_API_VERSION == 13);
 static_assert(FE_LANGUAGE_VERSION == 15);
 ```
+
+Fe 19.0 moves `FE_API_VERSION` 12 -> 13 and leaves `FE_LANGUAGE_VERSION` at
+15: the payload region's host surface is a C contract with no language
+surface at all -- no Fe type owns a payload yet, so nothing a Lisp program
+evaluates can observe whether a region exists, and no program that ran under
+Fe 18.0 answers differently under 19.0. Nothing is removed and no existing
+declaration changes meaning: `FeOpenContext` opens the same partition it
+always has, byte for byte, and every existing `FeArenaStats` field keeps its
+meaning and its place. The reasoning is under "The payload region" above.
 
 Fe 18.0 moves `FE_LANGUAGE_VERSION` 14 -> 15 and leaves `FE_API_VERSION` at
 12: the form feed (`\f`, 0x0C) is reader whitespace, which it was not, and no
@@ -410,6 +422,46 @@ This is a read-only accessor for baselining and margin questions -- "how
 close is the fixed arena to full" -- not a live diagnostic surface: there is
 no Lisp-visible primitive that exposes it, and a host that wants to surface
 it to users owns that decision and its own presentation.
+
+### The payload region (FE_API_VERSION 13)
+
+`FeOpenContextWithOptions(ptr, size, options)` opens a context with knobs.
+`FeOpenOptions` today carries one, `payload_percent`, and the record is meant
+to be zero-initialized: every field a host does not name takes its documented
+default, which is what lets a later version add a field without touching a
+host that does not want it. A null `options` selects every default.
+
+For `payload_percent` the values are: `FeDefaultPayloadPercent` (0, and
+therefore what a zero-initialized record asks for) for Fe's own split of the
+arena, which is 25% of the bytes left once the frame region is funded;
+`FePayloadPercentNone` for no payload region at all; and 1 to 100 for exactly
+that percentage. Anything else -- above 100, or below `FePayloadPercentNone`
+-- IS REFUSED, and `FeOpenContextWithOptions` returns null exactly as it does
+for a null arena or one below `FeMinimumArenaSize()`. It is never clamped: a
+clamp would hand back a context partitioned to a number the host did not
+choose, with no way to find out.
+
+`FeOpenContext(ptr, size)` is `FeOpenContextWithOptions` with
+`FePayloadPercentNone`, and that is deliberate rather than incidental: the
+entry point that cannot express an opinion must not acquire one, so it opens
+byte for byte the partition it always has. A host that wants Fe's split asks
+for it.
+
+The carve is priced against the CELLS and never against the frames: frame
+capacity is identical at every percentage, because the frame region is funded
+first. At a 1 MiB arena the two ends are 56145 cells with no region, and
+42335 cells beside 220952 payload bytes at the default 25%, with a 1086-frame
+capacity either way.
+
+`FeArenaStats` reports the region in five fields: `payload_capacity_bytes`
+(what the carve produced -- the denominator the rest are read against),
+`payload_live_bytes`, `payload_peak_bytes` (the high-water mark, which does
+not follow the live bytes back down), `payload_compaction_count` and
+`payload_allocation_failures` (requests the region could not meet even after
+a collection, i.e. `(payload-exhaustion)` raises). All five are zero in a
+context opened by `FeOpenContext`, and all but the first are zero even in a
+carved one until a Fe type owns a payload, which none does yet: the storage
+exists and the language cannot reach it.
 
 ### Forcing a collection (FE_API_VERSION 12)
 
