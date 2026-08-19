@@ -86,6 +86,13 @@ enum {
 
 static alignas(max_align_t) unsigned char arena_bytes[ArenaMax];
 
+// The second arena. One workload -- `context-open-close` -- opens a context
+// of its own INSIDE its measured region, and cannot use `arena_bytes`: the
+// harness context it runs under is still open there, and is what `run->stats`
+// reads afterwards. The counters, being global, see both. Sized at the arena
+// that workload names, and asserted equal to it where it is opened.
+static alignas(max_align_t) unsigned char scratch_arena_bytes[ArenaTight];
+
 // Longest generated program: the depth-64 environment form.
 enum { SourceMax = 8192 };
 // The longest string workload, plus its NUL.
@@ -168,8 +175,9 @@ struct Workload {
   // The workload's own scale: symbol count, environment width or depth,
   // string length, or loop trip count.
   size_t param;
-  // True for `context-open-close` alone: its measured region IS the open, so
-  // the harness does not reset the counters after it.
+  // True for `context-open` alone: its measured region IS the open, so the
+  // harness does not reset the counters after it. Every other workload,
+  // `context-open-close` included, measures its body.
   bool measure_open;
   // Runs after the open and before the counters are reset: whatever a
   // workload needs in place but does not want to measure.
@@ -250,13 +258,22 @@ static double Now(void) {
 }
 
 // ---------------------------------------------------------------------------
-// 21.2 item 1: bare context open/close.
+// 21.2 item 1: a bare context open, and a bare open together with its close.
+// Two workloads rather than one, because `FeCloseContext` is not a
+// destructor small enough to hide inside the open's number: it clears every
+// root and runs a full `CollectGarbage` over the whole arena, and the
+// difference between these two records is what that costs. The harness runs
+// the close of an ordinary workload's context AFTER the counters are
+// snapshotted, so the open-only shape cannot measure it by accident and the
+// open/close shape has to open a context of its own to measure it at all.
 // ---------------------------------------------------------------------------
 
 static bool BodyContextOpen(const Workload* workload, WorkloadRun* run) {
   (void)workload;
-  // Nothing: `measure_open` makes the open itself the measured region, and
-  // the harness's own `FeCloseContext` is the close.
+  // Nothing: `measure_open` makes the open itself the measured region. The
+  // harness's own `FeCloseContext` runs after the snapshot, which is why
+  // every check below is an open-only identity -- and why the close has a
+  // workload of its own.
   (void)snprintf(run->answer, sizeof(run->answer), "opened");
   return true;
 }
@@ -292,6 +309,72 @@ static bool CheckContextOpen(const Workload* workload, const WorkloadRun* run) {
   // stays out of the measurement.
   CHECK(FeIsFBound(run->context, FeMakeSymbol(run->context, "car")));
   CHECK(FeIsFBound(run->context, FeMakeSymbol(run->context, "+")));
+  return true;
+}
+
+static bool BodyContextOpenClose(const Workload* workload, WorkloadRun* run) {
+  CHECK(workload->arena == sizeof(scratch_arena_bytes));
+  FeContext* const scratch =
+      FeOpenContext(scratch_arena_bytes, workload->arena);
+  CHECK(scratch != nullptr);
+  // The measured region is exactly the pair. Nothing is asked of `scratch`
+  // in between, so no probe of the harness's own can be blamed for the
+  // difference against `context-open`.
+  FeCloseContext(scratch);
+  (void)snprintf(run->answer, sizeof(run->answer), "opened and closed");
+  return true;
+}
+
+static bool CheckContextOpenClose(const Workload* workload,
+                                  const WorkloadRun* run) {
+  CHECK(AllocationIsPartitioned(run));
+  // The close IS the collection, and there is exactly one of it: an open
+  // never collects (see `CheckContextOpen`), so this counter is the whole
+  // evidence that the close is inside the region rather than after it.
+  CHECK(CounterOf(run, FePerfGcCollection) == 1);
+  // `FeCloseContext` clears every root before collecting, so nothing is
+  // reachable and every cell the open took comes back -- and nothing is
+  // marked on the way.
+  CHECK(CounterOf(run, FePerfGcReclaimed) == CounterOf(run, FePerfAllocObject));
+  CHECK(CounterOf(run, FePerfGcMarkNew) == 0);
+  // The open half costs what any other open costs: the same names and the
+  // same tables whatever the arena (see `CheckOpenIsArenaIndependent`), so
+  // the scratch context's allocations equal the harness context's.
+  CHECK(CounterOf(run, FePerfAllocObject) == run->open_cells);
+  // The sweep is proportional to the ARENA and not to the live set: it
+  // examines every slot, and the scratch arena is the same size as the
+  // harness's, so the counter and that arena's capacity are one number.
+  // Phase 22 changes this ratio; it should not quietly change the identity.
+  CHECK(CounterOf(run, FePerfGcSweepExamined) ==
+        (unsigned long long)run->stats.total_slots);
+  CHECK(CounterOf(run, FePerfGcSweepExamined) >
+        CounterOf(run, FePerfGcReclaimed));
+  // Interning, as in `context-open`: a bare open makes no uninterned symbol,
+  // and asks for a few names twice.
+  CHECK(CounterOf(run, FePerfInternMiss) == AllocOf(run, FeTSymbol));
+  CHECK(CounterOf(run, FePerfInternLookup) > CounterOf(run, FePerfInternMiss));
+  // No Lisp ran, in either half.
+  CHECK(CounterOf(run, FePerfEvalDispatch) == 0);
+  CHECK(CounterOf(run, FePerfDispatchLambda) == 0);
+  CHECK(CounterOf(run, FePerfMacroExpansion) == 0);
+  // `run->stats` -- and therefore this workload's row in the arena table --
+  // describes the HARNESS context, which took no part: it neither collected
+  // nor allocated while the scratch pair ran, and still holds exactly what
+  // its own open cost.
+  CHECK(run->stats.collection_count == 0);
+  CHECK(run->stats.allocation_failures == 0);
+  CHECK((unsigned long long)(run->stats.total_slots - run->stats.free_slots) ==
+        run->baseline_cells);
+  // The answer: the open half really did build a working context. Asked of a
+  // THIRD context, opened here, because the body's own is closed by the time
+  // a check could ask it and a probe inside the region would intern names
+  // the measurement is not about.
+  FeContext* const probe = FeOpenContext(scratch_arena_bytes, workload->arena);
+  CHECK(probe != nullptr);
+  const bool callable = FeIsFBound(probe, FeMakeSymbol(probe, "car")) &&
+                        FeIsFBound(probe, FeMakeSymbol(probe, "+"));
+  FeCloseContext(probe);
+  CHECK(callable);
   return true;
 }
 
@@ -790,15 +873,24 @@ static bool CheckDense(const Workload* workload, const WorkloadRun* run) {
 // ---------------------------------------------------------------------------
 
 static const Workload workloads[] = {
-    {.name = "context-open-close",
+    {.name = "context-open",
      .family = "context",
-     .note = "21.2/1: FeOpenContext plus FeCloseContext, nothing else",
+     .note = "21.2/1: FeOpenContext and nothing else; the close is excluded",
      .arena = ArenaTight,
      .param = 0,
      .measure_open = true,
      .setup = nullptr,
      .body = BodyContextOpen,
      .check = CheckContextOpen},
+    {.name = "context-open-close",
+     .family = "context",
+     .note = "21.2/1: FeOpenContext plus FeCloseContext, both measured",
+     .arena = ArenaTight,
+     .param = 0,
+     .measure_open = false,
+     .setup = nullptr,
+     .body = BodyContextOpenClose,
+     .check = CheckContextOpenClose},
 
     {.name = "list-walk",
      .family = "eval",

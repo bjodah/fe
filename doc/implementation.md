@@ -1370,14 +1370,14 @@ runs it and writes `perfobj/workloads.json`; `make perf-check` runs it too, so
 `perf_workloads.c` is in `TEST_SRCS`, not `SRCS` -- so it costs the `scc` and
 `pmccabe` ratchets nothing while `format-check` still covers it.
 
-Nineteen workloads in six families: `context` (a bare open/close), `eval` (the
-four shapes kg's `utils/bench.py` benchmarks, respelled for a Lisp-2 without
-kg's prelude), `intern` (128, 1024 and 8192 distinct symbols, then a miss and
-two hits), `env` (lexical lookup by environment width and by depth,
-separately), `string` (0, 7, 8, 256 and 8192 bytes -- 7 and 8 straddle the
-`StringBufferSize` cell boundary) and `gc` (sparse-garbage and dense-live
-collections). `./perfobj/perf_workloads --list` prints them with the arena each
-one uses and why.
+Twenty workloads in six families: `context` (a bare open, and a bare open
+together with its close), `eval` (the four shapes kg's `utils/bench.py`
+benchmarks, respelled for a Lisp-2 without kg's prelude), `intern` (128, 1024
+and 8192 distinct symbols, then a miss and two hits), `env` (lexical lookup by
+environment width and by depth, separately), `string` (0, 7, 8, 256 and 8192
+bytes -- 7 and 8 straddle the `StringBufferSize` cell boundary) and `gc`
+(sparse-garbage and dense-live collections). `./perfobj/perf_workloads --list`
+prints them with the arena each one uses and why.
 
 Three properties are what make the numbers usable.
 
@@ -1406,8 +1406,20 @@ then one object per workload with its name, family, note, `param`,
 workload-specific probes, and `counters`/`arena` objects whose keys are
 exactly the ones `FePerfWriteJson` writes. The counters are a delta over the
 workload's own measured region -- the context open is excluded from every
-workload except `context-open-close`, whose measured region *is* the open --
-so a consumer never has to subtract a baseline itself.
+workload except `context-open`, whose measured region *is* the open, which is
+what `includes_context_open` reports -- so a consumer never has to subtract a
+baseline itself.
+
+The `context` pair is two workloads because `FeCloseContext` is not a small
+destructor: it clears every root and runs a full `CollectGarbage` over the
+whole arena. The harness closes an ordinary workload's context *after* the
+counters are snapshotted, so `context-open` cannot measure the close even by
+accident; `context-open-close` therefore opens and closes a context of its own,
+in a second arena, inside its measured region -- one collection, every cell the
+open took reclaimed, and a sweep that examined every slot in the arena. Its
+`arena` object and the arena table's `capacity`/`end-live` columns describe the
+harness context it ran under, which is the one still open when the snapshot is
+taken; its `counters` describe the scratch pair.
 
 The GC-root stack decides how a workload is written. `MakeObject` pushes every
 new object onto a fixed root stack (`GcStackSize` less `GcStackReserve`, so
