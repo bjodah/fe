@@ -847,13 +847,34 @@ static size_t EndLive(const WorkloadRun* run) {
   return run->stats.total_slots - run->stats.free_slots;
 }
 
+// The live set once nothing collectable is left, which is what "the live set
+// this shape leaves" means. `EndLive` alone cannot answer that: the free list
+// runs out on a schedule set by how much each collection frees, so the
+// garbage still standing at the last allocation is a PHASE and not a
+// property of the shape.
+//
+// Measured while landing Phase 23.1's payload substrate, and the reason this
+// reads a settled figure rather than the residue: adding fourteen objects to
+// what a context open builds (that phase's `payload-exhaustion` condition
+// row) moves every collection in `gc-sparse-garbage` fourteen allocations
+// earlier. Over 45 collections that drifts the residue from 110 live to 830
+// -- with the allocation count (80030), the collection count (45), the
+// reclaimed count and the marked count all still exactly what they were, plus
+// the 45 x 14 the fourteen new permanent objects are marked for. The counters
+// were right and the assertion was reading a coincidence.
+static size_t SettledLive(const WorkloadRun* run) {
+  FeCollectGarbage(run->context);
+  const FeArenaStats settled = FeGetArenaStats(run->context);
+  return settled.total_slots - settled.free_slots;
+}
+
 static bool CheckSparse(const Workload* workload, const WorkloadRun* run) {
   (void)workload;
   CHECK(CheckCollecting(run));
   // Sparse: the loop keeps nothing, so collection reclaims far more than it
   // marks, and the live set it leaves is a small fraction of the arena.
   CHECK(CounterOf(run, FePerfGcReclaimed) > CounterOf(run, FePerfGcMarkNew));
-  CHECK(EndLive(run) * 2 < run->stats.total_slots);
+  CHECK(SettledLive(run) * 2 < run->stats.total_slots);
   return true;
 }
 
@@ -864,7 +885,7 @@ static bool CheckDense(const Workload* workload, const WorkloadRun* run) {
   // exact mirror of the sparse case, on the same collector -- and the live
   // set it leaves is most of the arena.
   CHECK(CounterOf(run, FePerfGcMarkNew) > CounterOf(run, FePerfGcReclaimed));
-  CHECK(EndLive(run) * 2 > run->stats.total_slots);
+  CHECK(SettledLive(run) * 2 > run->stats.total_slots);
   return true;
 }
 
