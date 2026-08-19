@@ -9722,7 +9722,9 @@ static bool TestProtectedEvaluateString(void) {
 // natural exhaustion happens to trigger one. This test builds the rooted
 // value and the garbage directly instead, and checks the collection
 // `FeCollectGarbage` runs is real rather than a stub: the count moves, the
-// unrooted objects come back, and the rooted one does not.
+// unrooted objects come back, the rooted one does not -- and once its root
+// is released it does too, which is the half that says the root list is
+// what was holding it.
 static bool TestPublicCollectGarbage(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -9733,17 +9735,28 @@ static bool TestPublicCollectGarbage(void) {
 
   const size_t collections_before = FeGetArenaStats(context).collection_count;
 
+  // The checkpoint comes BEFORE the value is built, because `MakeObject`
+  // pushes everything it hands out onto the GC stack. Taken afterwards it
+  // would leave the integer and the pair rooted by the stack as well, and
+  // then "reachable only through `root`" would hold whatever the collector
+  // did with `ctx->root_list` -- which is what this test is for.
+  const size_t gc = FeSaveGC(context);
+
   // A rooted pair that must survive the sweep: reachable only through
-  // `root`, which the collector marks by walking `ctx->root_list`.
+  // `root`, which the collector marks by walking `ctx->root_list`. Three
+  // slots go out here -- the integer, the pair, and the cons cell
+  // `FeCreateRoot` allocates for the root itself, over whose pushes it
+  // restores the stack on its own -- and the restore below drops the other
+  // two, so from that line on the root list is the only retainer.
   FeObject* const kept =
       FeCons(context, FeMakeInteger(context, 7), FeNil(context));
   FeRoot* const root = FeCreateRoot(context, kept);
+  FeRestoreGC(context, gc);
   const size_t free_before_garbage = FeGetArenaStats(context).free_slots;
 
   // 64 unrooted pairs that must not survive it: pushed onto the GC stack
-  // by `MakeObject` as every allocation is, and dropped from it by one
-  // `FeRestoreGC` rather than kept alive by anything else.
-  const size_t gc = FeSaveGC(context);
+  // by `MakeObject` as every allocation is, and dropped from it by a second
+  // restore to that same checkpoint rather than kept alive by anything else.
   for (size_t i = 0; i < 64; i++) {
     (void)FeCons(context, FeNil(context), FeNil(context));
   }
@@ -9768,7 +9781,18 @@ static bool TestPublicCollectGarbage(void) {
   CHECK(twice.collection_count == after.collection_count + 1);
   CHECK(twice.free_slots == after.free_slots);
 
+  // The complement: with the root gone and the GC stack still at the
+  // checkpoint taken before the value existed, nothing retains it and the
+  // next collection takes it. Three slots come back -- the pair, its
+  // integer, and the root's own cons cell, which `FeReleaseRoot` unlinks
+  // from `ctx->root_list` and nothing else refers to. `root` is dangling
+  // from here and is never read again.
   FeReleaseRoot(context, root);
+  FeCollectGarbage(context);
+  const FeArenaStats released = FeGetArenaStats(context);
+  CHECK(released.collection_count == twice.collection_count + 1);
+  CHECK(released.free_slots == twice.free_slots + 3);
+
   FeCloseContext(context);
   return true;
 }
