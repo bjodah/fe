@@ -60,7 +60,8 @@ HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
-TEST_SRCS = test_api.c test_header.c test_internal_header.c gc_stress.c
+TEST_SRCS = test_api.c test_header.c test_internal_header.c gc_stress.c \
+	perf_workloads.c
 EXAMPLE_HOST = example_host
 EXAMPLE_SRCS = example_host.c
 EXAMPLE_RUNNER ?=
@@ -1153,18 +1154,43 @@ PERF_TEST_API = $(PERF_DIR)/$(TEST_API)
 PERF_EXAMPLE_HOST = $(PERF_DIR)/$(EXAMPLE_HOST)
 PERF_CORE_OBJS = $(addprefix $(PERF_DIR)/,$(FE_CORE_OBJS))
 PERF_OBJS = $(addprefix $(PERF_DIR)/,$(SRCS:.c=.o)) tiny-regex-c/re.o
+# Phase 21.2's workload battery: one binary, built from the counting objects,
+# that runs each named shape in its own FeContext with the counters reset
+# around it.  It lives on the test side (`perf_workloads.c` is in TEST_SRCS,
+# not SRCS), so it costs the scc and pmccabe ratchets nothing and
+# `format-check` covers it.  It exists only in the counting build: an
+# ordinary one has no FePerfRead to call.
+PERF_WORKLOADS = $(PERF_DIR)/perf_workloads
+# Where the battery's machine-readable records go.  Not tracked: the numbers
+# a phase argues from belong in a commit message or a checked-in report, not
+# in a file a build rewrites.
+PERF_WORKLOAD_JSON ?= $(PERF_DIR)/workloads.json
+# Extra arguments for the battery (`--list`).  There is no "slow" tier and
+# no flag to enable one: the whole battery, 8192-symbol interning tier
+# included, is 0.75 s here and 0.80 s under ASan+UBSan, against the ~12 s
+# `make check` already costs, so a workload the plan names by number is not
+# made optional to save a fraction of that.
+PERF_WORKLOAD_ARGS ?=
 
-perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST)
+perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST) $(PERF_WORKLOADS)
 
 # The counting build's own `check`: the C API suite -- which is where the
-# counter relationships are asserted -- the example host, and the whole
-# script corpus against the counting interpreter, so every instrumented line
-# is executed rather than merely compiled.  `FE_BIN` is what keeps test.sh
-# from rebuilding and re-cleaning the ordinary tree underneath it.
-perf-check: perf
+# counter relationships are asserted -- the workload battery, the example
+# host, and the whole script corpus against the counting interpreter, so
+# every instrumented line is executed rather than merely compiled.  `FE_BIN`
+# is what keeps test.sh from rebuilding and re-cleaning the ordinary tree
+# underneath it.
+perf-check: perf perf-workloads
 	./$(PERF_TEST_API)
 	$(EXAMPLE_RUNNER) ./$(PERF_EXAMPLE_HOST)
 	FE_BIN=./$(PERF_TARGET) ./test.sh
+
+# The battery at its default sizes, which are chosen to stay inside the
+# perf-check lane's budget.  Its counter assertions are the gate; the wall
+# times it prints are a report and nothing reads them.
+perf-workloads: $(PERF_WORKLOADS)
+	$(EXAMPLE_RUNNER) ./$(PERF_WORKLOADS) --json $(PERF_WORKLOAD_JSON) \
+		$(PERF_WORKLOAD_ARGS)
 
 $(PERF_DIR):
 	mkdir -p $(PERF_DIR)
@@ -1176,6 +1202,9 @@ $(PERF_TEST_API): $(PERF_DIR)/test_api.o $(PERF_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(PERF_EXAMPLE_HOST): $(PERF_DIR)/example_host.o $(PERF_CORE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_WORKLOADS): $(PERF_DIR)/perf_workloads.o $(PERF_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(PERF_DIR)/%.o: %.c $(HDRS) $(BUILD_STAMP) | $(PERF_DIR)
@@ -1343,7 +1372,8 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test core test-header check-gc-stress perf perf-check sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
+.PHONY: all check test core test-header check-gc-stress perf perf-check \
+	perf-workloads sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
 	complexity complexity-check pmccabe \
 	pmccabe-check pmccabe-baseline coverage coverage-clean compat compat-oracle format format-check compile-db iwyu

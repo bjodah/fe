@@ -1337,11 +1337,11 @@ ordinary object can never be linked into a counting one; `tiny-regex-c/re.o` is
 shared, since `FE_PERF_COUNTERS` does not appear in `RE_CFLAGS`.
 
 `make perf-check` is the counting build's own `check`: it runs the C API suite
--- where the counter relationships are asserted -- the example host, and the
-whole `scripts/` corpus against the counting interpreter, so every instrumented
-line is executed and not merely compiled. `.ci/ci-10-perf-counters.sh` is that
-target as a CI stage, which is what keeps a facility nobody compiles by
-default from rotting.
+-- where the counter relationships are asserted -- the workload battery below,
+the example host, and the whole `scripts/` corpus against the counting
+interpreter, so every instrumented line is executed and not merely compiled.
+`.ci/ci-10-perf-counters.sh` is that target as a CI stage, which is what keeps
+a facility nobody compiles by default from rotting.
 
 There are two ways to read the counters:
 
@@ -1358,6 +1358,66 @@ $ FE_PERF_OUT=/tmp/fe.json ./perfobj/fe -e '(print (+ 1 2))'
 
 A run that ends through an escaping error exits before that report by design:
 the counters describe a completed run.
+
+### The workload battery
+
+`perf_workloads.c` is Phase 21.2's in-process runner: one binary, built from
+the counting objects into `perfobj/perf_workloads`, that runs each named
+workload in its own `FeContext` with the counters reset around it, checks the
+workload's own answer, and emits a record per workload. `make perf-workloads`
+runs it and writes `perfobj/workloads.json`; `make perf-check` runs it too, so
+`.ci/ci-10-perf-counters.sh` is its CI home. It lives on the test side --
+`perf_workloads.c` is in `TEST_SRCS`, not `SRCS` -- so it costs the `scc` and
+`pmccabe` ratchets nothing while `format-check` still covers it.
+
+Nineteen workloads in six families: `context` (a bare open/close), `eval` (the
+four shapes kg's `utils/bench.py` benchmarks, respelled for a Lisp-2 without
+kg's prelude), `intern` (128, 1024 and 8192 distinct symbols, then a miss and
+two hits), `env` (lexical lookup by environment width and by depth,
+separately), `string` (0, 7, 8, 256 and 8192 bytes -- 7 and 8 straddle the
+`StringBufferSize` cell boundary) and `gc` (sparse-garbage and dense-live
+collections). `./perfobj/perf_workloads --list` prints them with the arena each
+one uses and why.
+
+Three properties are what make the numbers usable.
+
+* **Every workload checks its own answer.** A workload whose result is not
+  asserted can silently stop doing its work while its counters still look
+  plausible.
+* **The counter assertions are the gate; wall time is a report.** `seconds`
+  travels with every record and nothing reads it, because a sanitizer lane or
+  a loaded box must not be able to fail this. The assertions prefer
+  relationships to golden constants, and are chosen so that the phases after
+  this one make them fail *loudly*: the `string` checks pin the seven-byte cell
+  chain, the `intern` checks pin the linear `symbol_list` scan, the `env`
+  checks pin the single flat alist, and the `gc` checks pin the
+  arena-proportional sweep.
+* **A counter read from a differently sized arena is a different
+  measurement.** Each workload names its own arena (96 KiB, 256 KiB, kg's
+  1 MiB, or 4 MiB for the intern tiers), and its cell capacity travels with
+  its counters. The fixed arena is exercised where it collects often as well
+  as where it does not.
+
+The record schema is `fe-perf-workloads/1`: a top-level object carrying the
+schema name, `FE_API_VERSION`, `FE_LANGUAGE_VERSION` and `StringBufferSize`,
+then one object per workload with its name, family, note, `param`,
+`arena_bytes`, `cell_capacity`, `context_open_cells`,
+`includes_context_open`, `answer`, `seconds`, an `extra` object of
+workload-specific probes, and `counters`/`arena` objects whose keys are
+exactly the ones `FePerfWriteJson` writes. The counters are a delta over the
+workload's own measured region -- the context open is excluded from every
+workload except `context-open-close`, whose measured region *is* the open --
+so a consumer never has to subtract a baseline itself.
+
+The GC-root stack decides how a workload is written. `MakeObject` pushes every
+new object onto a fixed root stack (`GcStackSize` less `GcStackReserve`, so
+4032 in practice), so a C loop that allocates a caller-controlled number of
+times overflows it. The `intern` and `string` workloads are C loops that take
+one `FeSaveGC` checkpoint and restore it every pass -- safe for interning
+because `symbol_list` is a permanent root -- and they measure the cost of an
+*operation*. Everything whose size is the point of the workload is a Lisp loop
+instead, whose accumulator lives in a value cell the collector marks directly
+and which therefore has no such ceiling; those measure the cost of a *shape*.
 
 ## Known Issues
 
