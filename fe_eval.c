@@ -25,11 +25,13 @@
 #include <stdlib.h>
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
 
 static FeObject* Bind(FeContext* ctx,
                       FeObject* env,
                       FeObject* name,
                       FeObject* value) {
+  FE_PERF_INC(FePerfEnvBind);
   return FeCons(ctx, FeCons(ctx, name, value), env);
 }
 
@@ -62,7 +64,9 @@ static FeObject* BindLambda(FeContext* ctx,
 }
 
 static bool HasLexicalBinding(FeObject* env, const FeObject* name) {
+  FE_PERF_INC(FePerfEnvLookup);
   while (!FeIsNil(env)) {
+    FE_PERF_INC(FePerfEnvCell);
     const FeObject* cell = CAR(env);
     if (CAR(cell) == name) {
       return true;
@@ -554,6 +558,7 @@ static FeObject* ReportFunctionCycle(FeContext* ctx, bool* cycle) {
 // host-facing `FeGetFunction`, which may be called with no evaluation running
 // at all and so has no frame to raise into.
 FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn, bool* cycle) {
+  FE_PERF_INC(FePerfFunctionResolve);
   FeObject* slow = fn;
   FeObject* fast = fn;
   while (FeGetType(slow) == FeTSymbol) {
@@ -565,6 +570,10 @@ FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn, bool* cycle) {
       return cell;
     }
     EvaluationStep(ctx);
+    // One `defalias` link followed. The two-pointer cycle detector below
+    // reads function cells of its own; those are deliberately not counted,
+    // so this is the length of the chain walked and not the memory traffic.
+    FE_PERF_INC(FePerfFunctionHop);
     slow = cell;
     if (FeGetType(fast) == FeTSymbol) {
       FeObject* const f1 = SymbolFunction(fast);
@@ -664,6 +673,7 @@ static void EnterMacroBody(FeContext* ctx,
                            FeObject* call,
                            FeObject* identity,
                            FeObject* caller_env) {
+  FE_PERF_INC(FePerfMacroExpansion);
   frame->kind = FeFrameMacro;
   // Root the callable while `ArgsToEnv` below allocates (a collection may
   // run inside it): `frame->fn` is a collector root. It is then overwritten
@@ -700,6 +710,7 @@ static bool DispatchResolvedCall(FeContext* ctx,
                                  FeObject** frame_bind,
                                  FeObject** result) {
   if (FeGetType(fn) == FeTPrimitive) {
+    FE_PERF_INC(FePerfDispatchPrimitive);
     PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn),
                        CallIdentity(frame->expr, fn), CDR(frame->expr));
     if (PRIM(fn) == PQuote) {
@@ -710,6 +721,10 @@ static bool DispatchResolvedCall(FeContext* ctx,
     return DispatchPrimitive(ctx, frame, fn, frame_bind, result);
   }
   if (FeGetType(fn) == FeTNativeFn || FeGetType(fn) == FeTFn) {
+    // The family the two share: an ordinary callable whose arguments are
+    // about to be evaluated. Which of the two it is becomes a
+    // `dispatch_native` or a `dispatch_lambda` once that list is complete.
+    FE_PERF_INC(FePerfDispatchCallable);
     frame->kind = FeFrameCallArguments;
     frame->fn = fn;
     frame->rest = CDR(frame->expr);
@@ -724,6 +739,7 @@ static bool DispatchResolvedCall(FeContext* ctx,
     return false;
   }
   if (FeGetType(fn) == FeTMacro) {
+    FE_PERF_INC(FePerfDispatchMacro);
     EnterMacroBody(ctx, frame, fn, frame->expr, CallIdentity(frame->expr, fn),
                    frame->env);
     return false;
@@ -763,6 +779,7 @@ static FeEvalFrame* AllocateFrame(FeContext* ctx) {
     // are not refused by the same wall the body just hit.
     RaiseBudget(ctx, "evaluation frame limit exceeded");
   }
+  FE_PERF_INC(FePerfFramePush);
   FeEvalFrame* const frame = &ctx->frame_stack[ctx->frame_stack_index++];
   if (ctx->frame_stack_index > ctx->arena_peak_frame_depth) {
     ctx->arena_peak_frame_depth = ctx->frame_stack_index;
@@ -1362,6 +1379,7 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
     frame->callee = &unbound;
     return false;
   }
+  FE_PERF_INC(FePerfDispatchLambda);
   FeObject* va = CDR(fn);  // (env params ...)
   FeObject* vb = CDR(va);  // (params ...)
   frame->kind = FeFrameLambda;
@@ -3260,6 +3278,7 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   ctx->native_argc = saved_native_argc;
   ctx->native_call_active = saved_native_active;
   while (ctx->frame_stack_index > base) {
+    FE_PERF_INC(FePerfEvalDispatch);
     FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
     FeObject* const expr = frame->expr;
     FeObject* const frame_env = frame->env;
@@ -3397,6 +3416,7 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         ctx->native_identity = CallIdentity(frame->expr, frame->fn);
         ctx->native_argc = CountRawArguments(ctx, CDR(frame->expr));
         ctx->native_call_active = true;
+        FE_PERF_INC(FePerfDispatchNative);
         result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
         ctx->native_identity = saved_identity;
         ctx->native_argc = saved_argc;

@@ -27,6 +27,7 @@
 #include <string.h>
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
 
 FeEvaluationControl SaveEvaluationControl(const FeContext* ctx) {
   return (FeEvaluationControl){
@@ -1047,6 +1048,7 @@ bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
 }
 
 void EvaluationStep(FeContext* ctx) {
+  FE_PERF_INC(FePerfEvalStep);
   if (ctx->evaluation_limited) {
     if (ctx->evaluation_steps == 0) {
       // Step-budget exhaustion is a Budget completion (06B): the host set a

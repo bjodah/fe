@@ -21,6 +21,7 @@
 
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
 
 const char* FeVersion = "17.0";
 
@@ -173,6 +174,9 @@ FeNativeFn* GetNativeFn(const FeObject* o) {
 }
 
 void SetType(FeObject* o, FeType type) {
+  // The by-type allocation charge, before the write: `FePerfCountRetype`
+  // reads the type the cell is leaving. See its comment in fe_perf.c.
+  FE_PERF_RETYPE(o, type);
   o->car.c = (char)((type) << GcMarkBit | OtherCell);
 }
 
@@ -430,7 +434,9 @@ void FeMark(FeContext* ctx, FeObject* obj) {
   FeObject* current = obj;
 
 descend:
+  FE_PERF_INC(FePerfGcMarkVisit);
   if (~TAG(current) & GcMarkBit) {
+    FE_PERF_INC(FePerfGcMarkNew);
     // Read `car` before the mark bit goes in: on a pair, the word the mark
     // bit lives in *is* the car pointer. (Meaningless on any other cell,
     // where `car` is a tag -- and never dereferenced there, exactly as in the
@@ -548,6 +554,7 @@ static void CollectGarbage(FeContext* ctx) {
     FatalCollectorViolation("a callback allocated", nullptr);
   }
   ctx->arena_collection_count++;
+  FE_PERF_INC(FePerfGcCollection);
   // Stop-the-world means exactly this flag: from here to the last line of
   // the sweep the graph is the mark phase's own working state, and a raise
   // out of `mark_fn` or `gc_fn` would abandon it half-reversed. See
@@ -584,6 +591,10 @@ static void CollectGarbage(FeContext* ctx) {
   // Sweep and unmark:
   for (size_t i = 0; i < ctx->object_count; i++) {
     FeObject* obj = &ctx->objects[i];
+    // Counted before the free-cell skip: the sweep's cost is proportional to
+    // the arena, not to the live set, and that is the property this number
+    // exists to show.
+    FE_PERF_INC(FePerfGcSweepExamined);
     if (FeGetType(obj) == FeTFree) {
       continue;
     }
@@ -607,6 +618,7 @@ static void CollectGarbage(FeContext* ctx) {
       CDR(obj) = ctx->free_list;
       ctx->free_list = obj;
       ctx->arena_live_count--;
+      FE_PERF_INC(FePerfGcReclaimed);
     } else {
       TAG(obj) &= ~GcMarkBit;
     }
@@ -790,8 +802,10 @@ bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats) {
 }
 
 static int IsStringEqual(FeObject* obj, const char* str) {
+  FE_PERF_INC(FePerfNameCompare);
   while (!FeIsNil(obj)) {
     for (size_t i = 0; i < StringBufferSize; i++) {
+      FE_PERF_INC(FePerfNameByte);
       if (STRING_BUFFER(obj)[i] != *str) {
         return 0;
       }
@@ -821,11 +835,14 @@ static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym);
 // `(while (setq x (intern-soft (format ...))) ...)` is a real idiom, and an
 // intern-on-miss makes it never terminate.
 static FeObject* FindInternedSymbol(FeContext* ctx, const char* name) {
+  FE_PERF_INC(FePerfInternLookup);
   for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
+    FE_PERF_INC(FePerfInternCandidate);
     if (IsStringEqual(SymbolName(CAR(rest)), name)) {
       return CAR(rest);
     }
   }
+  FE_PERF_INC(FePerfInternMiss);
   return nullptr;
 }
 
@@ -873,6 +890,7 @@ FeObject* MakeObject(FeContext* ctx) {
   FeObject* obj = ctx->free_list;
   ctx->free_list = CDR(obj);
   ctx->arena_live_count++;
+  FE_PERF_INC(FePerfAllocObject);
   if (ctx->arena_live_count > ctx->arena_peak_live_count) {
     ctx->arena_peak_live_count = ctx->arena_live_count;
   }
@@ -882,6 +900,11 @@ FeObject* MakeObject(FeContext* ctx) {
 
 FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr) {
   FeObject* obj = MakeObject(ctx);
+  // A pair is the one cell whose type is never spelled: writing `car` with
+  // an aligned pointer is what makes it one, so this is the by-type charge's
+  // only site outside `SetType`. `BuildString` retypes such a cell, and
+  // `FePerfCountRetype` moves the charge when it does.
+  FE_PERF_ALLOC(FeTPair);
   CAR(obj) = car;
   CDR(obj) = cdr;
   return obj;
@@ -909,12 +932,17 @@ static FeObject* BuildString(FeContext* ctx, FeObject* tail, char chr) {
   if (!tail || STRING_BUFFER(tail)[StringBufferSize - 1] != '\0') {
     FeObject* obj = FeCons(ctx, NULL, &nil);
     SetType(obj, FeTString);
+    FE_PERF_INC(FePerfStringCell);
     if (tail) {
       CDR(tail) = obj;
       ctx->gc_stack_index--;
     }
     tail = obj;
   }
+  // The opening `BuildString(ctx, NULL, '\0')` stores no byte; every other
+  // call stores exactly one, so this is the string's byte length and not its
+  // call count.
+  FE_PERF_ADD(FePerfStringByte, chr != '\0');
   STRING_BUFFER(tail)[strlen(STRING_BUFFER(tail))] = chr;
   return tail;
 }
@@ -1529,15 +1557,19 @@ static const FeObject* GetStringObject(FeContext* ctx, const FeObject* obj) {
 
 static size_t CopyStoredStringBytes(const FeObject* string, char* dst) {
   size_t length = 0;
+  FE_PERF_INC(FePerfStringWalk);
   while (!FeIsNil(string)) {
+    FE_PERF_INC(FePerfStringWalkCell);
     const char* buffer = STRING_BUFFER(string);
     const char* end = memchr(buffer, '\0', StringBufferSize);
     const size_t count =
         end == nullptr ? StringBufferSize : (size_t)(end - buffer);
     if (dst != nullptr) {
+      FE_PERF_ADD(FePerfStringByteCopied, count);
       memcpy(dst, buffer, count);
       dst += count;
     }
+    FE_PERF_ADD(FePerfStringWalkByte, count);
     length += count;
     string = CDR(string);
   }
@@ -1581,8 +1613,10 @@ void* FeToPtr(FeContext*, FeObject* obj) {
 }
 
 FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env) {
+  FE_PERF_INC(FePerfEnvLookup);
   // Try to find the symbol in the environment:
   for (; !FeIsNil(env); env = CDR(env)) {
+    FE_PERF_INC(FePerfEnvCell);
     EvaluationStep(ctx);
     FeObject* x = CAR(env);
     if (CAR(x) == sym) {

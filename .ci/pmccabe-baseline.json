@@ -289,6 +289,10 @@
   "fe_eval.c:ValidateParameters": 9,
   "fe_eval.c:ValidateSetqTarget": 6,
   "fe_eval.c:ValidateValueTarget": 3,
+  "fe_perf.c:FePerfCountRetype": 3,
+  "fe_perf.c:FePerfRead": 1,
+  "fe_perf.c:FePerfReset": 1,
+  "fe_perf.c:FePerfWriteJson": 4,
   "fe_run.c:Evaluate": 1,
   "fe_run.c:FeCall": 5,
   "fe_run.c:FeCallWithOptions": 1,
@@ -406,6 +410,7 @@
   "main.c:PrintHelp": 1,
   "main.c:ReadEvaluatePrint": 5,
   "main.c:ReleaseInterpreter": 3,
+  "main.c:WritePerfCounters": 4,
   "main.c:main": 13
  }
 }

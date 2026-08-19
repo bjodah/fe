@@ -10,6 +10,7 @@
 
 #include "auto.h"
 #include "fe.h"
+#include "fe_perf.h"
 #include "fex.h"
 #include "fex_io.h"
 #include "fex_math.h"
@@ -147,6 +148,30 @@ static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
   exit(status);
 }
 
+#if FE_PERF_COUNTERS
+// The counting build's report (`make perf`): every counter, and the arena
+// gauges beside them, written to $FE_PERF_OUT as JSON when a run completes.
+// Unset, or unwritable, means "not measuring" -- a counting interpreter still
+// has to be a usable one, so nothing here fails loudly. A run that ends
+// through an escaping error exits before this by design: the counters
+// describe a completed run.
+static void WritePerfCounters(FeContext* ctx) {
+  const char* const path = getenv("FE_PERF_OUT");
+  if (path == nullptr || *path == '\0') {
+    return;
+  }
+  FILE* const out = fopen(path, "w");
+  if (out == nullptr) {
+    return;
+  }
+  const FeArenaStats stats = FeGetArenaStats(ctx);
+  FePerfWriteJson(out, &stats);
+  (void)fclose(out);
+}
+#else
+#define WritePerfCounters(ctx) ((void)0)
+#endif
+
 static size_t ReadEvaluatePrint(FeContext* context, FILE* input, size_t gc) {
   while (true) {
     FeRestoreGC(context, gc);
@@ -263,4 +288,5 @@ int main(int count, char* arguments[]) {
   if (interactive) {
     ReadEvaluatePrint(context, stdin, gc);
   }
+  WritePerfCounters(context);
 }

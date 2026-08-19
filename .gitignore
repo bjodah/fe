@@ -19,3 +19,4 @@ fuzz/artifacts/
 .repomixignore
 repomix-output.*
 .cache
+perfobj/

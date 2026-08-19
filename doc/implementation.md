@@ -1256,6 +1256,109 @@ for *any* data shape costs one slot per object, which for kg's 1 MiB arena is
 puts a failable allocation inside the one routine that runs after allocation
 has already failed. Pointer reversal costs neither.
 
+## Performance Counters
+
+`fe_perf.h` declares 48 compile-time performance counters -- 32 named ones
+plus one slot per `FeType` -- and `fe_perf.c` holds their storage, their names
+and their JSON report. They exist
+because Phase 21 of kg's data-model plan has to *measure* fe's engine -- what
+allocates, what is looked up linearly, what the collector walks -- before a
+later phase changes any representation, and because a counter is a
+deterministic number a unit test can assert, while a wall-clock reading is not.
+
+### The compile-to-nothing contract
+
+Everything is behind `FE_PERF_COUNTERS`, which defaults to 0. In that build:
+
+* every `FE_PERF_*` macro expands to `((void)0)`;
+* `fe_perf.c` compiles to a single typedef and defines no symbol at all, so a
+  host that links the core without it (kg does) still links;
+* no declaration in `fe.h` changes, so `FE_API_VERSION` does not move; and
+* the generated code is identical at every instrumented site. The proof is
+  mechanical rather than asserted: build `fe.o fe_eval.o fe_run.o fe_unwind.o`
+  from the instrumented sources with counters off, build them again from a
+  control copy in which every instrumentation line has been replaced by a bare
+  `//` comment -- same line count, so `__LINE__` and therefore `assert`'s
+  arguments are unchanged -- and the object files compare byte for byte
+  identical at `-O0` and at `-O2`. Comparing against the pre-instrumentation
+  revision instead leaves exactly one class of difference, the `__LINE__`
+  immediates that `assert` passes, which is what the comment control removes.
+
+Counter storage is one process-wide static array and deliberately *not* a
+field of `FeContext`: the context lives inside the caller's arena, so widening
+it in a counting build would move the object/frame partition and measure a
+different arena from the one being described. Measured both ways, a 1 MiB
+arena partitions into 56 147 object slots in the counting build and in the
+ordinary one. The price of a process-wide array is that the counters are
+totals across every context a process opens, while `FeArenaStats` is per
+context; a measurement that reads both uses one context.
+
+### What is counted, and where
+
+| Group | Counters | Site |
+| --- | --- | --- |
+| allocation | `alloc_object`, `alloc_pair` … `alloc_fex2`, `alloc_retyped` | `MakeObject`, `FeCons`, `SetType` |
+| collector | `gc_collection`, `gc_mark_visit`, `gc_mark_new`, `gc_sweep_examined`, `gc_reclaimed` | `CollectGarbage`, `FeMark` |
+| strings | `string_cell`, `string_byte`, `string_walk`, `string_walk_cell`, `string_walk_byte`, `string_byte_copied` | `BuildString`, `CopyStoredStringBytes` |
+| interning | `intern_lookup`, `intern_miss`, `intern_candidate` | `FindInternedSymbol` |
+| symbol names | `name_compare`, `name_byte` | `IsStringEqual` |
+| environments | `env_lookup`, `env_cell`, `env_bind` | `GetBound`, `HasLexicalBinding`, `Bind` |
+| function cells | `function_resolve`, `function_hop` | `ResolveFunctionCallable` |
+| evaluator | `eval_step`, `eval_dispatch`, `frame_push`, `dispatch_primitive`, `dispatch_callable`, `dispatch_native`, `dispatch_lambda`, `dispatch_macro`, `macro_expansion` | `EvaluationStep`, `RunEvaluationLoop`, `AllocateFrame`, `DispatchResolvedCall`, `ResumeArguments`, `EnterMacroBody` |
+
+The by-final-type block is one slot per `FeType`, indexed by the type itself
+(`FE_PERF_ALLOC_SLOT`), so a new type gets a slot by existing rather than by
+being added to a switch. A cell is charged where its type is settled: a pair in
+`FeCons`, which is the only place a cell becomes one, and everything else in
+`SetType`, which is the only place a type is spelled. `BuildString` is the one
+constructor that does both -- it takes its cell through `FeCons` and then
+retypes it -- so `FePerfCountRetype` moves that charge and counts the move in
+`alloc_retyped`. The invariant this buys, and the first thing `test_api.c`'s
+`TestPerfCounters` asserts, is that `alloc_object` equals the sum of the
+by-type block.
+
+Peak live cells, peak GC-root depth and peak frame depth are *not* counters:
+`FeArenaStats` already tracks them in the shipped build, and `FePerfWriteJson`
+reports them in an `"arena"` object beside the counter totals rather than
+tracking the same thing twice.
+
+Nothing here reads a clock, allocates, or touches the GC root stack. Every
+instrumented site is a bare macro call with no branch of its own, which is also
+why the counters cost the complexity ratchets nothing outside `fe_perf.c` and
+`main.c` -- `scc` and `pmccabe` both read source text and do not evaluate
+`#if`, so code that never compiles is still measured by them.
+
+### Building and reading a counting fe
+
+`make perf` builds the counting interpreter, the counting `test_api` and the
+counting example host into `perfobj/`. The objects live in their own directory
+so a counting object can never be linked into an ordinary binary and an
+ordinary object can never be linked into a counting one; `tiny-regex-c/re.o` is
+shared, since `FE_PERF_COUNTERS` does not appear in `RE_CFLAGS`.
+
+`make perf-check` is the counting build's own `check`: it runs the C API suite
+-- where the counter relationships are asserted -- the example host, and the
+whole `scripts/` corpus against the counting interpreter, so every instrumented
+line is executed and not merely compiled. `.ci/ci-10-perf-counters.sh` is that
+target as a CI stage, which is what keeps a facility nobody compiles by
+default from rotting.
+
+There are two ways to read the counters:
+
+* in process, with `FePerfRead(counter)` (and `FePerfReset()` to scope a
+  measurement to one workload). This is what a test and Phase 21.2's workload
+  runner use.
+* as JSON, with `FePerfWriteJson(out, &stats)`. The counting `fe` writes it to
+  `$FE_PERF_OUT` when a run completes:
+
+```
+$ make perf
+$ FE_PERF_OUT=/tmp/fe.json ./perfobj/fe -e '(print (+ 1 2))'
+```
+
+A run that ends through an escaping error exits before that report by design:
+the counters describe a completed run.
+
 ## Known Issues
 
 The implementation has some known issues. These exist as a side effect of trying

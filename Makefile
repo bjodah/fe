@@ -45,14 +45,17 @@ $(shell [ "$$(cat $(BUILD_STAMP) 2>/dev/null)" = '$(BUILD_ID)' ] || \
 
 PROG = fe
 TARGET = $(PROG)
-SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fe_unwind.c fex.c fex_io.c \
-	fex_math.c fex_process.c fex_re.c fex_time.c
+SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fe_unwind.c fe_perf.c fex.c \
+	fex_io.c fex_math.c fex_process.c fex_re.c fex_time.c
 # The evaluator's own object list, shared by every link rule that used to
 # name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split, sub-plan
 # 11B's fe_eval.c -> fe_eval.c + fe_run.c one, and Phase 20's fe_eval.c ->
 # fe_eval.c + fe_unwind.c one): a list so every consumer below stays a
 # one-line change.
-FE_CORE_OBJS = fe.o fe_eval.o fe_run.o fe_unwind.o
+# `fe_perf.o` is one of them: an ordinary build compiles it to nothing (see
+# fe_perf.h), and a counting build needs it wherever the instrumented core
+# is linked.
+FE_CORE_OBJS = fe.o fe_eval.o fe_run.o fe_unwind.o fe_perf.o
 HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
@@ -539,7 +542,47 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # "FAIL: total complexity 854 exceeds limit 853" and exits 2, and at 854 it
 # passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
 # exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 854
+#
+# Set 854 -> 867 at Phase 21.1's compile-time performance counters (kg's
+# doc/plans/2026-08-18-elisp-data-model.md, 2026-08-19), pre-pin: the measured
+# actual after `fe_perf.h`/`fe_perf.c`, the instrumentation in fe.c,
+# fe_eval.c and fe_unwind.c, and main.c's $FE_PERF_OUT report. No
+# raise-then-spend cycle, as at Phase 19 and Phase 20's language slice: the
+# work is small enough to measure directly and set the cap to what it cost.
+#
+# The +13 is entirely code that a shipped build does not compile. scc reads
+# source text and does not evaluate `#if`, so every line inside
+# `FE_PERF_COUNTERS` is counted here even though `FE_PERF_COUNTERS` is 0 in
+# every build this repository ships; that is the price of the facility being
+# a compile-time knob rather than a runtime one, and it is why the
+# instrumentation itself was written as plain macro calls with no branch of
+# their own. By file:
+#   fe.c        186 -> 187  the one `chr != '\0'` in `BuildString`'s byte
+#                           charge, which scc counts as a comparison. Every
+#                           other instrumented site in fe.c, fe_eval.c and
+#                           fe_unwind.c is a bare macro call and costs zero,
+#                           which is why those two files do not move at all
+#                           (fe_eval.c 404, fe_unwind.c 119).
+#   main.c       37 ->  43  `WritePerfCounters`: two `if`s, one `||` and
+#                           three `==`, all of them the "not measuring" and
+#                           "cannot open the file" paths a counting
+#                           interpreter must not die on.
+#   fe_perf.c     0 ->   6  the new file: the report's `for`, the retype
+#                           rule's two type tests, and the unnamed-counter
+#                           guard's `!=`. The 45-entry name table and the
+#                           counter enum are data and cost nothing.
+# `fe_perf.h` measures 0: it is macros, an enum and comments.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does NOT move and stays at 520. Per-file after
+# this slice: fe_eval.c 404, fe.c 187, fe_unwind.c 119, main.c 43, fex_io.c
+# 28, fe_run.c 25, fex_re.c 21, fex_process.c 20, fe_perf.c 6.
+#
+# Proved live at this head by temporarily lowering each cap and watching the
+# gate fire, exit status checked: at 866 `make complexity-check` reports
+# "FAIL: total complexity 867 exceeds limit 866" and exits 2, and at 867 it
+# passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
+# exits 2, the one file being fe_eval.c at 404.
+SCC_COMPLEXITY_MAX ?= 867
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -913,7 +956,35 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1272 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1272
+#
+# Set 1272 -> 1285 at Phase 21.1's compile-time performance counters
+# (2026-08-19), pre-pin: the measured actual, 1285 across 408 symbols against
+# 1272 across 403, and this is the authoritative core measure, so it is the
+# one that says what the slice cost. Five new symbols and NO existing symbol
+# moved -- the instrumentation in fe.c, fe_eval.c and fe_unwind.c is macro
+# calls with no branch of their own, so every function it lands in measures
+# exactly what it measured before:
+#   main.c:WritePerfCounters      4  the $FE_PERF_OUT report's two guards
+#   fe_perf.c:FePerfWriteJson     4  the counter loop and its two `?:`
+#   fe_perf.c:FePerfCountRetype   3  the by-final-type charge's two tests
+#   fe_perf.c:FePerfRead          1
+#   fe_perf.c:FePerfReset         1
+# All five are inside `PMCCABE_NEW_FUNCTION_MAX` (15), and all five are
+# compiled out of every build this repository ships: pmccabe, like scc, reads
+# source text and takes the first arm of an `#if`, so a facility that
+# compiles to nothing is still measured here.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 with the worst functions in
+# the tree still `RunEvaluationLoop` and `ResumeEvalList`, both at 15, both
+# unmoved. `.ci/pmccabe-baseline.json` is regenerated in this commit to
+# record the five new symbols; no recorded symbol's value changes.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1284 `make pmccabe-check` reports "FAIL:
+# total complexity 1285 exceeds funded budget 1284 (+1)" and exits 2, and at
+# 1285 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+PMCCABE_TOTAL_MAX ?= 1285
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -1025,7 +1096,7 @@ $(EXAMPLE_HOST): example_host.o $(FE_CORE_OBJS)
 GC_STRESS = gc_stress
 GC_STRESS_ON = gc_stress_on
 GC_STRESS_ON_OBJS = gc_stress-stress.o fe-stress.o fe_eval-stress.o \
-	fe_run-stress.o fe_unwind-stress.o
+	fe_run-stress.o fe_unwind-stress.o fe_perf-stress.o
 
 $(GC_STRESS): gc_stress.o $(FE_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -1048,9 +1119,67 @@ fe_run-stress.o: fe_run.c $(HDRS) $(BUILD_STAMP)
 fe_unwind-stress.o: fe_unwind.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_unwind.c -o $@
 
+# fe_perf.c reads no FE_GC_STRESS of its own, and gets a stress object anyway:
+# the whole point of the -stress.o names is that the on-build's link is made
+# entirely of objects that cannot be confused with the off-build's, and one
+# shared object in the middle of it is how a stale mixed-flag link starts.
+fe_perf-stress.o: fe_perf.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_perf.c -o $@
+
 check-gc-stress: $(GC_STRESS) $(GC_STRESS_ON)
 	./$(GC_STRESS)
 	./$(GC_STRESS_ON)
+
+# The counting build (Phase 21.1 of kg's elisp data-model plan).  `fe_perf.h`
+# compiles to nothing unless FE_PERF_COUNTERS is 1, so proving the counters
+# do anything needs the same sources built both ways -- the GC stress pair's
+# argument above, at a larger scale: every core translation unit is
+# instrumented here, not one knob in one file, so the whole interpreter is
+# relinked rather than four objects.
+#
+# The objects go in their own directory instead of taking the `-stress.o`
+# suffix the stress pair uses.  There are twelve of them rather than four,
+# they are the whole program rather than the collector, and a directory is
+# the discipline kg's own counting build (`test/perfobj/`) established: a
+# counting object cannot be linked into an ordinary binary, an ordinary
+# object cannot be linked into a counting one, and neither build invalidates
+# the other's objects.  `tiny-regex-c/re.o` is shared rather than duplicated
+# -- it carries no counter code and is compiled from RE_CFLAGS, which
+# FE_PERF_COUNTERS does not appear in.
+PERF_DIR ?= perfobj
+PERF_CPPFLAGS = $(CPPFLAGS) -DFE_PERF_COUNTERS=1
+PERF_TARGET = $(PERF_DIR)/$(PROG)
+PERF_TEST_API = $(PERF_DIR)/$(TEST_API)
+PERF_EXAMPLE_HOST = $(PERF_DIR)/$(EXAMPLE_HOST)
+PERF_CORE_OBJS = $(addprefix $(PERF_DIR)/,$(FE_CORE_OBJS))
+PERF_OBJS = $(addprefix $(PERF_DIR)/,$(SRCS:.c=.o)) tiny-regex-c/re.o
+
+perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST)
+
+# The counting build's own `check`: the C API suite -- which is where the
+# counter relationships are asserted -- the example host, and the whole
+# script corpus against the counting interpreter, so every instrumented line
+# is executed rather than merely compiled.  `FE_BIN` is what keeps test.sh
+# from rebuilding and re-cleaning the ordinary tree underneath it.
+perf-check: perf
+	./$(PERF_TEST_API)
+	$(EXAMPLE_RUNNER) ./$(PERF_EXAMPLE_HOST)
+	FE_BIN=./$(PERF_TARGET) ./test.sh
+
+$(PERF_DIR):
+	mkdir -p $(PERF_DIR)
+
+$(PERF_TARGET): $(PERF_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_TEST_API): $(PERF_DIR)/test_api.o $(PERF_CORE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_EXAMPLE_HOST): $(PERF_DIR)/example_host.o $(PERF_CORE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_DIR)/%.o: %.c $(HDRS) $(BUILD_STAMP) | $(PERF_DIR)
+	$(CC) $(PERF_CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 test-header: test_header.c test_internal_header.c fe.h fe_internal.h
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
@@ -1113,7 +1242,7 @@ sizes:
 
 clean:
 	-rm -f $(BUILD_STAMP)
-	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o $(PERF_DIR)
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -1214,7 +1343,7 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test core test-header check-gc-stress sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
+.PHONY: all check test core test-header check-gc-stress perf perf-check sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
 	complexity complexity-check pmccabe \
 	pmccabe-check pmccabe-baseline coverage coverage-clean compat compat-oracle format format-check compile-db iwyu

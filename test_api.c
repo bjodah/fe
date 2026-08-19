@@ -12,6 +12,7 @@
 
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
 
 #define CHECK(condition)                                                     \
   do {                                                                       \
@@ -9772,6 +9773,257 @@ static bool TestPublicCollectGarbage(void) {
   return true;
 }
 
+// Phase 21.1's counter gate: the DETERMINISTIC RELATIONSHIPS between the
+// counters declared in fe_perf.h, which is what Phase 21.2's workload
+// battery will build its assertions on. Relationships, not magic constants:
+// a constant here would be a golden number that any later change to the
+// prelude, the primitive table or the Fex surface invalidates without
+// telling anyone what actually broke.
+//
+// The whole test is compiled out of an ordinary build, where the counters do
+// not exist; `make perf-check` builds and runs the counting one.
+#if FE_PERF_COUNTERS
+
+// The sum of the by-final-type block, which must always be the number of
+// cells the arena handed out.
+static unsigned long long PerfAllocByType(void) {
+  unsigned long long total = 0;
+  for (int type = 0; type <= (int)FeTSentinel; type++) {
+    total += FePerfRead((FePerfCounter)((int)FePerfAllocType + type));
+  }
+  return total;
+}
+
+static unsigned long long PerfAllocOf(FeType type) {
+  return FePerfRead((FePerfCounter)FE_PERF_ALLOC_SLOT(type));
+}
+
+// Every cell handed out is charged to exactly one final type, and the live
+// arena is what has been allocated and not yet reclaimed. Both hold at every
+// point of a run, which is why this is asked repeatedly below rather than
+// once at the end.
+static bool PerfAllocationIsAccountedFor(const FeContext* context) {
+  const FeArenaStats stats = FeGetArenaStats(context);
+  CHECK(FePerfRead(FePerfAllocObject) == PerfAllocByType());
+  CHECK(FePerfRead(FePerfAllocObject) - FePerfRead(FePerfGcReclaimed) ==
+        (unsigned long long)(stats.total_slots - stats.free_slots));
+  return true;
+}
+
+static bool TestPerfCounters(void) {
+  static TestArena arena;
+  // The counters are process-wide, so the measurement starts here rather
+  // than at process start: every test above this one has allocated.
+  FePerfReset();
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Opening a context allocates and never collects, so this is also the
+  // assertion that the by-type block is complete for every type the
+  // primitive table, the symbol surface and the exhaustion conditions
+  // build.
+  CHECK(PerfAllocationIsAccountedFor(context));
+  CHECK(FePerfRead(FePerfGcCollection) == 0);
+  CHECK(PerfAllocOf(FeTFree) == 0);
+  CHECK(PerfAllocOf(FeTNil) == 0);
+  CHECK(PerfAllocOf(FeTSentinel) == 0);
+
+  // A pair is one cell, charged to the pair slot and to nothing else.
+  const unsigned long long objects_before = FePerfRead(FePerfAllocObject);
+  const unsigned long long pairs_before = PerfAllocOf(FeTPair);
+  (void)FeCons(context, FeNil(context), FeNil(context));
+  CHECK(FePerfRead(FePerfAllocObject) == objects_before + 1);
+  CHECK(PerfAllocOf(FeTPair) == pairs_before + 1);
+
+  // A string is a chain of `StringBufferSize`-byte cells with at least one
+  // cell even when empty, it stores exactly its own bytes, and every one of
+  // its cells is a pair the constructor retyped -- the one thing that makes
+  // "allocations by final type sum to total allocations" non-trivial.
+  static const char* const texts[] = {"", "1234567", "12345678",
+                                      "123456789012345"};
+  static const unsigned long long expected_cells[] = {1, 1, 2, 3};
+  for (size_t i = 0; i < sizeof(expected_cells) / sizeof(*expected_cells);
+       i++) {
+    const unsigned long long objects = FePerfRead(FePerfAllocObject);
+    const unsigned long long cells = FePerfRead(FePerfStringCell);
+    const unsigned long long strings = PerfAllocOf(FeTString);
+    const unsigned long long bytes = FePerfRead(FePerfStringByte);
+    const unsigned long long retyped = FePerfRead(FePerfAllocRetyped);
+    const size_t gc = FeSaveGC(context);
+    (void)FeMakeString(context, texts[i]);
+    FeRestoreGC(context, gc);
+    CHECK(FePerfRead(FePerfStringCell) == cells + expected_cells[i]);
+    CHECK(PerfAllocOf(FeTString) == strings + expected_cells[i]);
+    CHECK(FePerfRead(FePerfAllocObject) == objects + expected_cells[i]);
+    CHECK(FePerfRead(FePerfStringByte) == bytes + strlen(texts[i]));
+    CHECK(FePerfRead(FePerfAllocRetyped) == retyped + expected_cells[i]);
+    CHECK(PerfAllocationIsAccountedFor(context));
+  }
+  // Nothing but a string cell is ever retyped, which is what lets the
+  // correction stay one rule in one place.
+  CHECK(FePerfRead(FePerfAllocRetyped) == PerfAllocOf(FeTString));
+  CHECK(FePerfRead(FePerfStringCell) == PerfAllocOf(FeTString));
+
+  // Interning: a MISS examines every interned symbol, because the obarray is
+  // a list and the scan has to reach its end to conclude anything; a HIT on
+  // the name just interned examines exactly one, because a new symbol goes
+  // on the head. This is the relationship Phase 26's index has to change.
+  const unsigned long long lookups = FePerfRead(FePerfInternLookup);
+  const unsigned long long misses = FePerfRead(FePerfInternMiss);
+  unsigned long long candidates = FePerfRead(FePerfInternCandidate);
+  const FeObject* const fresh = FeMakeSymbol(context, "perf-counter-probe");
+  const unsigned long long miss_candidates =
+      FePerfRead(FePerfInternCandidate) - candidates;
+  CHECK(FePerfRead(FePerfInternLookup) == lookups + 1);
+  CHECK(FePerfRead(FePerfInternMiss) == misses + 1);
+  candidates = FePerfRead(FePerfInternCandidate);
+  CHECK(FeMakeSymbol(context, "perf-counter-probe") == fresh);
+  const unsigned long long hit_candidates =
+      FePerfRead(FePerfInternCandidate) - candidates;
+  CHECK(FePerfRead(FePerfInternLookup) == lookups + 2);
+  CHECK(FePerfRead(FePerfInternMiss) == misses + 1);
+  CHECK(hit_candidates == 1);
+  CHECK(miss_candidates > hit_candidates);
+  // One name comparison per candidate, and a comparison reads whole cells,
+  // so it never reads fewer bytes than there were comparisons.
+  CHECK(FePerfRead(FePerfNameCompare) >= FePerfRead(FePerfInternCandidate));
+  CHECK(FePerfRead(FePerfNameByte) >= FePerfRead(FePerfNameCompare));
+
+  // One `defalias` link is one function-cell indirection, measured as the
+  // difference between calling the alias and calling the name it resolves
+  // to. Everything else about the two calls is identical, so the +1 is the
+  // hop and nothing else.
+  static const char definitions[] =
+      "(fset 'perf-direct (fn () 1)) (fset 'perf-alias 'perf-direct)";
+  (void)FeEvaluateString(context, "perf.fe", definitions,
+                         sizeof(definitions) - 1);
+  static const char direct_call[] = "(perf-direct)";
+  static const char alias_call[] = "(perf-alias)";
+  unsigned long long hops = FePerfRead(FePerfFunctionHop);
+  (void)FeEvaluateString(context, "perf.fe", direct_call,
+                         sizeof(direct_call) - 1);
+  const unsigned long long direct_hops = FePerfRead(FePerfFunctionHop) - hops;
+  hops = FePerfRead(FePerfFunctionHop);
+  (void)FeEvaluateString(context, "perf.fe", alias_call,
+                         sizeof(alias_call) - 1);
+  CHECK(FePerfRead(FePerfFunctionHop) == hops + direct_hops + 1);
+
+  // A lambda call binds one environment pair per parameter, evaluates its
+  // body on the frame stack, and is one of the two callable families. The
+  // native family is exercised beside it so the identity below is not
+  // trivially true.
+  static const char calls[] =
+      "(fset 'perf-two (fn (a b) (+ a b))) (perf-two (sin 0) 2)";
+  const unsigned long long binds = FePerfRead(FePerfEnvBind);
+  const unsigned long long frames = FePerfRead(FePerfFramePush);
+  const unsigned long long dispatches = FePerfRead(FePerfEvalDispatch);
+  const unsigned long long steps = FePerfRead(FePerfEvalStep);
+  const unsigned long long natives = FePerfRead(FePerfDispatchNative);
+  const unsigned long long lambdas = FePerfRead(FePerfDispatchLambda);
+  (void)FeEvaluateString(context, "perf.fe", calls, sizeof(calls) - 1);
+  CHECK(FePerfRead(FePerfEnvBind) == binds + 2);
+  CHECK(FePerfRead(FePerfDispatchLambda) == lambdas + 1);
+  CHECK(FePerfRead(FePerfDispatchNative) == natives + 1);
+  // A frame is pushed for work the loop then has to turn over, so a
+  // dispatch happens for every frame and usually for more than one. Steps
+  // are NOT bounded by dispatches and deliberately are not asserted to be:
+  // an environment walk and a function-designator chain each charge a step
+  // per link without turning the loop over at all, which is exactly the
+  // asymmetry Phase 22 has to look at.
+  CHECK(FePerfRead(FePerfFramePush) - frames <=
+        FePerfRead(FePerfEvalDispatch) - dispatches);
+  CHECK(FePerfRead(FePerfEvalStep) > steps);
+  // Every callable whose arguments were evaluated was afterwards invoked as
+  // exactly one of the two families -- no call went missing and none was
+  // counted twice. True across the whole test because nothing above it
+  // unwinds out of a call.
+  CHECK(FePerfRead(FePerfDispatchCallable) ==
+        FePerfRead(FePerfDispatchNative) + FePerfRead(FePerfDispatchLambda));
+  CHECK(PerfAllocationIsAccountedFor(context));
+
+  // A macro call and a reflective expansion both evaluate the transformer
+  // once, so both are counted, and a macro is not one of the two ordinary
+  // callable families.
+  static const char macros[] =
+      "(fset 'perf-macro (macro (x) (list '+ x 1)))"
+      " (perf-macro 1) (macroexpand-1 '(perf-macro 2))";
+  const unsigned long long expansions = FePerfRead(FePerfMacroExpansion);
+  const unsigned long long macro_calls = FePerfRead(FePerfDispatchMacro);
+  const unsigned long long callables = FePerfRead(FePerfDispatchCallable);
+  (void)FeEvaluateString(context, "perf.fe", macros, sizeof(macros) - 1);
+  CHECK(FePerfRead(FePerfMacroExpansion) == expansions + 2);
+  CHECK(FePerfRead(FePerfDispatchMacro) == macro_calls + 1);
+  // A macro is its own family: the expansion above calls only primitives,
+  // so nothing joined the ordinary callable count.
+  CHECK(FePerfRead(FePerfDispatchCallable) == callables);
+
+  // The collector. A sweep looks at the whole arena rather than at the live
+  // set -- which is the cost Phase 22 has to price -- it reclaims exactly
+  // the cells the free list got back, and the mark walk visits at least as
+  // many objects as it newly marks (a revisit stops at the mark bit).
+  const size_t gc = FeSaveGC(context);
+  for (size_t i = 0; i < 64; i++) {
+    (void)FeCons(context, FeNil(context), FeNil(context));
+  }
+  FeRestoreGC(context, gc);
+  const FeArenaStats before_collection = FeGetArenaStats(context);
+  const unsigned long long collections = FePerfRead(FePerfGcCollection);
+  const unsigned long long swept = FePerfRead(FePerfGcSweepExamined);
+  const unsigned long long reclaimed = FePerfRead(FePerfGcReclaimed);
+  const unsigned long long visits = FePerfRead(FePerfGcMarkVisit);
+  const unsigned long long marks = FePerfRead(FePerfGcMarkNew);
+  FeCollectGarbage(context);
+  const FeArenaStats after_collection = FeGetArenaStats(context);
+  CHECK(FePerfRead(FePerfGcCollection) == collections + 1);
+  CHECK(FePerfRead(FePerfGcSweepExamined) - swept ==
+        (unsigned long long)after_collection.total_slots);
+  CHECK(FePerfRead(FePerfGcReclaimed) - reclaimed ==
+        (unsigned long long)(after_collection.free_slots -
+                             before_collection.free_slots));
+  CHECK(FePerfRead(FePerfGcReclaimed) - reclaimed >= 64);
+  CHECK(FePerfRead(FePerfGcMarkVisit) - visits >=
+        FePerfRead(FePerfGcMarkNew) - marks);
+  CHECK(PerfAllocationIsAccountedFor(context));
+
+  // A second collection with nothing new to reclaim marks every live arena
+  // cell exactly once: the two static objects outside the arena (`nil` and
+  // `unbound`) kept the mark bit the first collection set, since the sweep
+  // walks the arena only, so this delta is the live set itself and not the
+  // live set plus a constant.
+  const unsigned long long second_marks = FePerfRead(FePerfGcMarkNew);
+  const unsigned long long second_reclaimed = FePerfRead(FePerfGcReclaimed);
+  FeCollectGarbage(context);
+  const FeArenaStats twice = FeGetArenaStats(context);
+  CHECK(FePerfRead(FePerfGcReclaimed) == second_reclaimed);
+  CHECK(FePerfRead(FePerfGcMarkNew) - second_marks ==
+        (unsigned long long)(twice.total_slots - twice.free_slots));
+
+  // The JSON report is what a workload runner serialises, so it is exercised
+  // rather than only declared. Its shape is checked by writing it, not by a
+  // golden: the counter set moves with the plan.
+  FILE* const report = tmpfile();
+  CHECK(report != nullptr);
+  FePerfWriteJson(report, &twice);
+  CHECK(ftell(report) > 0);
+  (void)fclose(report);
+
+  FeCloseContext(context);
+  return true;
+}
+
+#else
+
+// Counters compiled out: the relationships above cannot be asked, and their
+// absence is not a failure. `make perf-check` is the build that asks them.
+static bool TestPerfCounters(void) {
+  return true;
+}
+
+#endif  // FE_PERF_COUNTERS
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -9810,7 +10062,8 @@ int main(void) {
                  TestProtectedCall() && TestHostRaiseCompletion() &&
                  TestDynamicBinding() && TestBindingLocationSeam() &&
                  TestOneArgDefvarScope() && TestHostedInputUnit() &&
-                 TestProtectedEvaluateString() && TestPublicCollectGarbage()
+                 TestProtectedEvaluateString() && TestPublicCollectGarbage() &&
+                 TestPerfCounters()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

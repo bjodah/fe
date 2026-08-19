@@ -27,20 +27,30 @@ run_test() {
         ;;
     esac
     # A script may die on purpose; the golden stderr is what decides.
-    ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} scripts/assert.fe "$s" > out 2> err || true
+    ${FE_RUNNER:-} "${FE_BIN}" ${FE_FLAGS:-} scripts/assert.fe "$s" > out 2> err || true
     check_results "tests/$b.out" "tests/$b.err" "$s${FE_COMMENT:-}"
   done
-  ${FE_RUNNER:-} ./fe ${FE_FLAGS:-} -e '(print "hello, world!")' > out 2> err || true
+  ${FE_RUNNER:-} "${FE_BIN}" ${FE_FLAGS:-} -e '(print "hello, world!")' > out 2> err || true
   check_results "tests/one-liner.out" "tests/one-liner.err" "one-liner${FE_COMMENT:-}"
   rm out err
 }
 
-make clean
-make fe
-run_test
-make clean
-RELEASE=1 make fe
-run_test
+# FE_BIN names an interpreter the caller has already built -- `make
+# perf-check`'s counting build, which lives in its own object directory and
+# must not be rebuilt or cleaned away by the suite it is being measured
+# through. Unset (every ordinary `make check`) means the two builds below,
+# exactly as before.
+if [[ -n ${FE_BIN:-} ]]; then
+  run_test
+else
+  FE_BIN=./fe
+  make clean
+  make fe
+  run_test
+  make clean
+  RELEASE=1 make fe
+  run_test
+fi
 
 if [[ $failed -eq 0 ]]; then
   echo "✅ all tests passed"
