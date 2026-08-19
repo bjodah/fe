@@ -1,0 +1,6 @@
+{
+	"id": "reader-form-feed-string-byte",
+	"setup": [],
+	"expr": "(string< \"a\fb\" \"ab\")",
+	"note": "Inside a string body a form feed is not reader syntax at all but the byte itself, which orders before `b`."
+}

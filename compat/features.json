@@ -2160,6 +2160,24 @@
    "source_name": null
   },
   {
+   "id": "reader-form-feed-whitespace",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-form-feed-token-separator",
+    "reader-form-feed-symbol-terminator",
+    "reader-form-feed-character-delimiter",
+    "reader-form-feed-radix-delimiter",
+    "reader-form-feed-escaped-symbol",
+    "reader-form-feed-string-byte"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "rationale": "Phase C2: the form feed (0x0C) is reader whitespace, which it was not. Emacs' `read1` retries on exactly space, form feed, newline, tab and carriage return; fe had the other four, so a page separator -- the conventional Elisp section break, `s.el:770` and `f.el:39` -- was an ordinary symbol constituent and `nil\\fnil` read as one symbol rather than two forms. One case per arm the fix touches: the skip loop (token-separator), the atom delimiter (symbol-terminator), the `?` literal's own delimiter (character-delimiter) and the radix digits' (radix-delimiter); plus the two arms it must not touch -- an escaped form feed, still a constituent as an escaped space is (escaped-symbol), and a string body, where it was never reader syntax (string-byte). The six snapshots were taken on 31.0.91, the version this box's Emacs pin now reports; the corpus's older snapshots stay at the 31.0.90 that produced them, since a snapshot carries the Emacs that made it.",
+   "source_name": null
+  },
+  {
    "id": "reader-hash-syntax-unsupported",
    "category": "reader-and-literals",
    "status": "divergent",

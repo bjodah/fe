@@ -28,6 +28,11 @@ input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
 API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+language version 15 is the reader's whitespace set: the form
+feed (`\f`, 0x0C) joins space, newline, tab and carriage return, so an
+Elisp page separator separates forms instead of being read into the symbol
+beside it; language version 14 added `string<` and `string>` and the
+`end-of-buffer`/`beginning-of-buffer` conditions;
 language version 13 is the error-rendering contract (`error-message-string`,
 the `error-message` property on every condition symbol, and a writer that
 escapes a backslash inside a printed string); language version 12 is the
@@ -60,8 +65,17 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 12);
-static_assert(FE_LANGUAGE_VERSION == 14);
+static_assert(FE_LANGUAGE_VERSION == 15);
 ```
+
+Fe 18.0 moves `FE_LANGUAGE_VERSION` 14 -> 15 and leaves `FE_API_VERSION` at
+12: the form feed (`\f`, 0x0C) is reader whitespace, which it was not, and no
+declaration in `fe.h` changed. It is a language break in one narrow
+direction -- a symbol whose name held a literal form feed no longer reads
+back as itself unless the byte is escaped -- and a fix in the direction that
+matters, since an Elisp page separator now separates forms instead of being
+read into the symbol beside it. The reasoning is below, under the version
+history.
 
 Fe 17.0 moves `FE_API_VERSION` 11 -> 12 and leaves `FE_LANGUAGE_VERSION` at
 14: `FeCollectGarbage` is a C contract with no language surface at all --
@@ -192,6 +206,24 @@ answer there, which is what Emacs gives for two separate files. Full marks
 a host-driven `let` -- every mark is visible, because there is no unit there
 for one to be foreign to. See `doc/language.md` for the model and its two
 recorded residuals.
+
+`FE_LANGUAGE_VERSION` moved 14 -> 15 in Phase C2 of kg's fe-simplification
+plan, with `FeVersion` "17.0" -> "18.0" and `FE_API_VERSION` left at 12 -- no
+declaration in `fe.h` changed. Emacs' `read1` retries on exactly space, form
+feed, newline, tab and carriage return; fe had the other four, so the form
+feed was an ordinary symbol constituent and `nil\fnil` read as one symbol
+whose name carried the byte, answering `void-variable` where Emacs reads two
+`nil`s. Elisp files use the byte as a page separator between sections
+(`s.el:770`, `f.el:39`), which is how the gap was found. The set is one
+definition in `fe.c` now, pasted into the three delimiter tests beside it, so
+a form feed separates tokens AND ends a symbol, a `?` literal and a radix
+literal's digits -- whitespace that did not terminate a token is what the bug
+was. Two things deliberately do not move: an ESCAPED form feed is a symbol
+constituent, exactly as an escaped space is, and a form feed inside a string
+body is the byte, never reader syntax. A comment still ends at a newline and
+nothing else, which is Emacs' rule too. The break a program can notice is
+narrow -- a symbol name holding a literal form feed -- and the printer has
+escaped that byte since version 12.
 
 `FE_LANGUAGE_VERSION` moved 11 -> 12 in Phase 14, with `FeVersion` "12.0" ->
 "13.0" and `FE_API_VERSION` left at 8 -- no declaration in `fe.h` changed.

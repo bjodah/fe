@@ -142,8 +142,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 12);
-  static_assert(FE_LANGUAGE_VERSION == 14);
-  CHECK(strcmp(FeVersion, "17.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 15);
+  CHECK(strcmp(FeVersion, "18.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -1037,6 +1037,23 @@ static bool TestReaderLiterals(void) {
   REJECTS("?\x80", "unsupported read syntax: invalid UTF-8 character");
   REJECTS("?\xC3(", "unsupported read syntax: invalid UTF-8 character");
   REJECTS("?\xED\xA0\x80", "unsupported read syntax: invalid UTF-8 character");
+
+  // The form feed (0x0C) is whitespace, as it is in Emacs' `read1`, which
+  // retries on exactly space, form feed, newline, tab and carriage return.
+  // Fe had the other four, so a page separator -- the conventional Elisp
+  // section break -- was an ordinary symbol constituent and `(nil\fnil)` was
+  // a one-element list holding a symbol whose name carried the byte. One row
+  // per arm the fix touches: the skip loop, the atom delimiter, the `?`
+  // literal's own delimiter, and the radix digits' -- plus the two arms it
+  // must NOT touch, an escaped form feed (a constituent again, exactly as an
+  // escaped space is) and a string body, where it was never reader syntax.
+  READS("\f1", "1");
+  READS("(nil\fnil)", "(nil nil)");
+  READS("(a\fb)", "(a b)");
+  READS("(?a\f1)", "(97 1)");
+  READS("(#x10\f1)", "(16 1)");
+  READS("(a\\\fb)", "(a\\\fb)");
+  READS("\"a\fb\"", "a\fb");
 
 #undef READS
 #undef REJECTS

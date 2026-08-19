@@ -1,0 +1,6 @@
+{
+	"id": "reader-form-feed-token-separator",
+	"setup": [],
+	"expr": "(list 1\f2)",
+	"note": "A form feed between two tokens, which is what a page separator is: Emacs' `read1` retries on it exactly as on a space."
+}

@@ -890,6 +890,16 @@ the duplicate-modifier rejection. A literal must end at a delimiter, so
 leftover token; that check is the one place the reader looks one byte ahead
 and pushes it back.
 
+The reader's whitespace is one definition, `ReaderWhitespace`, pasted into
+the three delimiter sets beside the skip loop that spells it: space, form
+feed, newline, tab and carriage return, which is byte for byte what Emacs'
+`read1` retries on. One definition rather than four literals because the
+question is asked four times -- skip a byte, end an atom, end a `?` literal,
+end a radix literal's digits -- and a byte added to one of them and forgotten
+in the others is exactly the bug the form feed was: whitespace that did not
+terminate a symbol is not whitespace. Comments are not part of it and end at
+a newline only, as they do in Emacs.
+
 Evaluated input maintains a one-based line counter in its string/file adapter
 and records the line before each top-level form is evaluated. `Read` skips
 whitespace and comments in one loop *before* latching that line: the latch

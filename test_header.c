@@ -6,6 +6,6 @@
 // an extern pointer rather than a constant expression, so it cannot be part
 // of a syntax-only header check; test_api.c asserts its value instead.
 static_assert(FE_API_VERSION == 12);
-static_assert(FE_LANGUAGE_VERSION == 14);
+static_assert(FE_LANGUAGE_VERSION == 15);
 
 void TestPublicHeaderCompiles(void);

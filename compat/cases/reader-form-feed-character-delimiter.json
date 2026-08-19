@@ -1,0 +1,6 @@
+{
+	"id": "reader-form-feed-character-delimiter",
+	"setup": [],
+	"expr": "(list ?a\f1)",
+	"note": "A `?` literal ends at a delimiter, and a form feed is one."
+}

@@ -23,7 +23,7 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-const char* FeVersion = "17.0";
+const char* FeVersion = "18.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -1904,12 +1904,25 @@ static double NanWithSign(bool negative) {
   return value;
 }
 
+// The reader's whitespace, byte for byte the set Emacs' own `read1` retries
+// on: space, form feed, newline, tab, carriage return. The form feed (0x0C)
+// is the one that was missing. Elisp files use it as a page separator
+// (`s.el:770`, `f.el:39`), and while it was not in this set it was an
+// ordinary symbol constituent, so `nil\f\nnil` read as the single symbol
+// named "nil\f" and answered `void-variable` where Emacs reads two `nil`s.
+// It is spelled once here and pasted into the delimiter sets below, so the
+// three places that ask "does this byte end a token?" cannot drift apart
+// from the one that asks "does this byte separate them?". A form feed inside
+// a STRING body is not reader syntax at all: `ReadStringLiteral` copies
+// every byte up to the closing quote and never consults this.
+#define ReaderWhitespace " \f\n\t\r"
+
 // A number, `nil`, or a symbol. `chr` is the first character; a character
 // already pushed back into `ctx->nextchr` is consumed before the input.
 static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   char buf[SymbolNameLimit + 1];
   char* p = buf;
-  const char* delimiter = " \n\t\r();`,";
+  const char* delimiter = ReaderWhitespace "();`,";
   bool escaped = false;
   do {
     // Emacs' symbol escapes (Phase 14): a backslash takes the next byte into
@@ -2195,7 +2208,7 @@ static void RequireCharacterDelimiter(FeContext* ctx,
                                       void* udata) {
   const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
   ctx->nextchr = chr;
-  if (chr != '\0' && strchr(" \n\t\r();`,\"'", chr) == NULL) {
+  if (chr != '\0' && strchr(ReaderWhitespace "();`,\"'", chr) == NULL) {
     FeHandleError(ctx, "unsupported read syntax: ? literal without delimiter");
   }
 }
@@ -2240,7 +2253,7 @@ static RadixDigits ReadRadixDigits(FeContext* ctx,
   // overflow flag and a `double` fallback, never into a buffer, so a long
   // literal follows the recorded radix-overflow policy instead of reporting
   // the 63-byte *symbol* limit for something that is not a symbol.
-  while (chr && !strchr(" \n\t\r();`,", chr)) {
+  while (chr && !strchr(ReaderWhitespace "();`,", chr)) {
     const int digit = HexDigit(chr);
     if (digit < 0 || digit >= base) {
       FeHandleError(ctx, "unsupported read syntax: malformed radix integer");
@@ -2445,7 +2458,7 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
   // of the leading `;` for every form a comment block precedes -- which is how
   // every real init file begins.
   while (true) {
-    while (chr && strchr(" \n\t\r", chr)) {
+    while (chr && strchr(ReaderWhitespace, chr)) {
       chr = fn(ctx, udata);
     }
     if (chr != ';') {

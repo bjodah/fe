@@ -47,6 +47,17 @@ list element where a bare one is the dotted-tail marker, so `(a \. b)` is a
 three-element list and `(a . b)` is a pair. A backslash with nothing after it
 is a read error.
 
+Whitespace is space, form feed (0x0C), newline, tab and carriage return --
+byte for byte the set Emacs' own reader skips. It both separates tokens and
+ends the one being read, so a form feed written between two symbols makes two
+forms rather than one symbol whose name carries the byte; that is why it is in
+the set at all, since Elisp files use a form feed as the page separator
+between sections. Escaped, it is an ordinary constituent like any other
+escaped byte (`a\ b` and its form-feed equivalent are both one symbol), and
+inside a string body it is not reader syntax at all. A comment runs from `;`
+to the end of the LINE, and nothing else ends one -- a form feed in a comment
+is comment text, which is Emacs' rule too.
+
 `##` is the symbol with the empty name, read and printed the way Emacs does
 it. It is the one `#` dispatch Fe implements.
 

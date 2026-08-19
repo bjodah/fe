@@ -284,7 +284,20 @@
 // macro that does not move cannot tell kg whether the fe it links against
 // has the names it reflects with.  `FE_API_VERSION` stays at 10: no
 // declaration in this header changed.
-#define FE_LANGUAGE_VERSION 14
+// Version 15 (Phase C2 of kg's fe-simplification plan) is one byte in the
+// reader: the form feed (`\f`, 0x0C) is whitespace, which it was not.  Emacs'
+// `read1` retries on exactly space, form feed, newline, tab and carriage
+// return; fe had the other four, so a page separator -- the conventional
+// Elisp section break, `s.el:770` and `f.el:39` -- was a symbol constituent,
+// and `nil\f\nnil` read as one symbol named "nil\f" and answered
+// `void-variable` where Emacs reads two `nil`s.  It IS a break, in the
+// narrow direction a program can notice: a symbol whose name contained a
+// literal form feed no longer reads back as itself unless the byte is
+// escaped, which is what `(intern "a\fb")` has printed as `a\<FF>b` since
+// version 12's printer escapes.  A form feed inside a string body is
+// unaffected -- it never was reader syntax there.  `FE_API_VERSION` stays at
+// 12: no declaration in this header changed.
+#define FE_LANGUAGE_VERSION 15
 
 extern const char* FeVersion;
 
