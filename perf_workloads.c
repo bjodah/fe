@@ -769,6 +769,10 @@ static bool CheckString(const Workload* workload, const WorkloadRun* run) {
                   : (unsigned long long)((length + StringBufferSize - 1) /
                                          StringBufferSize);
   CHECK(AllocationIsPartitioned(run));
+  // One string was made, at every length: the object count is what the
+  // Phase 22 ADR could only bracket between `bytes / StringBufferSize` and
+  // the cell count, and it is a different measurement from either.
+  CHECK(CounterOf(run, FePerfStringObject) == 1);
   CHECK(CounterOf(run, FePerfStringCell) == cells);
   CHECK(AllocOf(run, FeTString) == cells);
   // Every string cell is a pair the constructor retyped, and the string is
@@ -1217,6 +1221,13 @@ static bool CheckStringBoundary(void) {
   CHECK(CounterOf(empty, FePerfStringCell) == 1);
   CHECK(CounterOf(seven, FePerfStringCell) == 1);
   CHECK(CounterOf(eight, FePerfStringCell) == 2);
+  // And the cell count is NOT a proxy for the object count, which is the
+  // whole reason the second counter exists: one string at 0 bytes and one at
+  // 8192 differ by 1170 cells and not at all in objects.
+  CHECK(CounterOf(empty, FePerfStringObject) ==
+        CounterOf(huge, FePerfStringObject));
+  CHECK(CounterOf(huge, FePerfStringCell) >
+        CounterOf(huge, FePerfStringObject));
   // A 1171-cell chain costs no root-stack slots at all: `BuildString` does not
   // leave one entry per cell behind, so a string longer than the 4032-slot
   // practical ceiling is not by itself a GC-root problem. Worth pinning

@@ -108,12 +108,17 @@ typedef enum FePerfCounter {
   FePerfVectorElement,
 
   // Strings, whose representation is a chain of `StringBufferSize`-byte
-  // cells. CELL and BYTE are creation: cells `BuildString` allocated and
-  // payload bytes it stored. The WALK trio is traversal --
-  // `CopyStoredStringBytes` calls, the cells they visited and the bytes
-  // they measured -- and BYTE_COPIED is the subset actually memcpy'd out,
-  // which is smaller than WALK_BYTE because a caller that needs a length
-  // first walks the chain twice.
+  // cells. OBJECT is how many strings were made and CELL and BYTE what they
+  // cost: cells `BuildString` allocated and payload bytes it stored. OBJECT
+  // is the one the Phase 22 ADR had to bound rather than read -- a string of
+  // L bytes takes ceil(L/7) cells, so cells and bytes together only bracket
+  // the object count between `bytes/7` and `cells`, and the payload pool a
+  // string representation would need is `bytes + header * OBJECT`. The WALK
+  // trio is traversal -- `CopyStoredStringBytes` calls, the cells they
+  // visited and the bytes they measured -- and BYTE_COPIED is the subset
+  // actually memcpy'd out, which is smaller than WALK_BYTE because a caller
+  // that needs a length first walks the chain twice.
+  FePerfStringObject,
   FePerfStringCell,
   FePerfStringByte,
   FePerfStringWalk,

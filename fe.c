@@ -1443,6 +1443,12 @@ FeObject* FeMakeInteger(FeContext* ctx, int64_t n) {
 }
 
 static FeObject* BuildString(FeContext* ctx, FeObject* tail, char chr) {
+  // A null tail opens a new string; every other call extends the chain it is
+  // handed. Counted here rather than at the two call sites so the object
+  // count is a property of the constructor, which a third way to build a
+  // string cannot forget, and charged as a predicate the way the byte count
+  // below is, so an instrumented build adds no branch of its own.
+  FE_PERF_ADD(FePerfStringObject, !tail);
   if (!tail || STRING_BUFFER(tail)[StringBufferSize - 1] != '\0') {
     FeObject* obj = FeCons(ctx, NULL, &nil);
     SetType(obj, FeTString);

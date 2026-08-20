@@ -1440,12 +1440,20 @@ context; a measurement that reads both uses one context.
 | --- | --- | --- |
 | allocation | `alloc_object`, `alloc_pair` … `alloc_fex2`, `alloc_retyped` | `MakeObject`, `FeCons`, `SetType` |
 | collector | `gc_collection`, `gc_mark_visit`, `gc_mark_new`, `gc_sweep_examined`, `gc_reclaimed` | `CollectGarbage`, `FeMark` |
-| strings | `string_cell`, `string_byte`, `string_walk`, `string_walk_cell`, `string_walk_byte`, `string_byte_copied` | `BuildString`, `CopyStoredStringBytes` |
+| strings | `string_object`, `string_cell`, `string_byte`, `string_walk`, `string_walk_cell`, `string_walk_byte`, `string_byte_copied` | `BuildString`, `CopyStoredStringBytes` |
 | interning | `intern_lookup`, `intern_miss`, `intern_candidate` | `FindInternedSymbol` |
 | symbol names | `name_compare`, `name_byte` | `IsStringEqual` |
 | environments | `env_lookup`, `env_cell`, `env_bind` | `GetBound`, `HasLexicalBinding`, `Bind` |
 | function cells | `function_resolve`, `function_hop` | `ResolveFunctionCallable` |
 | evaluator | `eval_step`, `eval_dispatch`, `frame_push`, `dispatch_primitive`, `dispatch_callable`, `dispatch_native`, `dispatch_lambda`, `dispatch_macro`, `macro_expansion` | `EvaluationStep`, `RunEvaluationLoop`, `AllocateFrame`, `DispatchResolvedCall`, `ResumeArguments`, `EnterMacroBody` |
+
+`string_object` counts strings, not the cells they cost: `BuildString` opens a
+chain when it is handed a null tail and extends one otherwise, so the object
+count is charged there and a second constructor cannot forget it. Cells and
+bytes only *bracket* it -- a string of L bytes takes `ceil(L/7)` cells, so the
+object count lies between `string_byte / 7` and `string_cell` -- and a
+representation priced per object (a header plus its payload bytes) needs the
+number rather than the bracket.
 
 The by-final-type block is one slot per `FeType`, indexed by the type itself
 (`FE_PERF_ALLOC_SLOT`), so a new type gets a slot by existing rather than by

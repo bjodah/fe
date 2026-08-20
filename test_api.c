@@ -10239,12 +10239,17 @@ static bool TestPerfCounters(void) {
        i++) {
     const unsigned long long objects = FePerfRead(FePerfAllocObject);
     const unsigned long long cells = FePerfRead(FePerfStringCell);
+    const unsigned long long made = FePerfRead(FePerfStringObject);
     const unsigned long long strings = PerfAllocOf(FeTString);
     const unsigned long long bytes = FePerfRead(FePerfStringByte);
     const unsigned long long retyped = FePerfRead(FePerfAllocRetyped);
     const size_t gc = FeSaveGC(context);
     (void)FeMakeString(context, texts[i]);
     FeRestoreGC(context, gc);
+    // One string made, whatever it cost in cells. The two counters are a
+    // different measurement and the fourth text is where that is visible:
+    // three cells, one object.
+    CHECK(FePerfRead(FePerfStringObject) == made + 1);
     CHECK(FePerfRead(FePerfStringCell) == cells + expected_cells[i]);
     CHECK(PerfAllocOf(FeTString) == strings + expected_cells[i]);
     CHECK(FePerfRead(FePerfAllocObject) == objects + expected_cells[i]);
@@ -10256,6 +10261,15 @@ static bool TestPerfCounters(void) {
   // correction stay one rule in one place.
   CHECK(FePerfRead(FePerfAllocRetyped) == PerfAllocOf(FeTString));
   CHECK(FePerfRead(FePerfStringCell) == PerfAllocOf(FeTString));
+  // The bracket the Phase 22 ADR had to reason inside, now that both ends of
+  // it are counted: a string never costs fewer than one cell and never more
+  // than one per `StringBufferSize` bytes, so the object count sits between
+  // `string_byte / StringBufferSize` and `string_cell`. Phase 25 replaces the
+  // chain, and this is the relationship that stops holding when it does.
+  CHECK(FePerfRead(FePerfStringObject) <= FePerfRead(FePerfStringCell));
+  CHECK(StringBufferSize * FePerfRead(FePerfStringCell) <=
+        FePerfRead(FePerfStringByte) +
+            StringBufferSize * FePerfRead(FePerfStringObject));
 
   // Interning: a MISS examines every interned symbol, because the obarray is
   // a list and the scan has to reach its end to conclude anything; a HIT on

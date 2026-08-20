@@ -57,6 +57,7 @@ const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FePerfVectorSet] = "vector_set",
     [FePerfVectorElement] = "vector_element",
 
+    [FePerfStringObject] = "string_object",
     [FePerfStringCell] = "string_cell",
     [FePerfStringByte] = "string_byte",
     [FePerfStringWalk] = "string_walk",
