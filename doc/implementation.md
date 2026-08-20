@@ -23,7 +23,8 @@ storage; its address, size, and exclusive lifetime are controlled by the
 caller through `FeCloseContext()`.
 
 `FeMinimumArenaSize()` derives its result from the private context and object
-layouts and from the objects required to intern and bind every core primitive.
+layouts, from the objects required to intern and bind every core primitive,
+and from the region bytes those names and the symbol index's first table take.
 `FeOpenContext()` validates null pointers, alignment, size, and address-space
 boundaries with checked arithmetic before writing to the arena. Invalid arenas
 return `nullptr` without invoking the error machinery.
@@ -120,6 +121,41 @@ representation readers.
 Symbols are interned by default; `make-symbol` and `gensym` (Phase 14) build
 one that is on no list at all, which is what makes it collectable and what
 `intern-soft` answers nil for.
+
+Interning goes through a SYMBOL INDEX (Phase 26). `symbol_list` is still the
+obarray -- the permanent GC root, the enumeration order, and the authority on
+what is interned -- but a name no longer finds its symbol by walking it. The
+index is an open-addressed table with linear probing, from a hash of the name
+BYTES to the stable `FeObject*` header, held in one payload block owned by one
+private header the context roots (`ctx->symbol_index`, a string header of
+length zero, a string's block being exactly the shape the table needs). It
+holds no tombstone and has no delete, because fe has no `unintern`: a symbol
+reaches `symbol_list` and stays for the life of its context. It doubles when
+two thirds of it is taken, and a resize rebuilds it from `symbol_list` rather
+than rehashing in place, the list being the authority.
+
+Creating a symbol publishes it to both structures as ONE RECOVERABLE
+OPERATION: the table's room for one more entry is reserved first, then the
+symbol object is built, then the `symbol_list` cell is consed, and only then
+is the slot written -- and that last step allocates nothing and cannot fail.
+A raise from any of the fallible steps leaves the symbol in NEITHER structure,
+so there is no state in which the two disagree and nothing needs a repair
+pass. A failed resize is invisible for the same reason `PublishPayload` is
+safe in general: a replacement block keeps its owner's child count, so a
+region that cannot hold the bigger table raises with the old block still owned
+and the old table still whole.
+
+The key is the name bytes and never a block address, which is what makes the
+table survive compaction with no rehash: the table's own storage moves and so
+do the name bytes, but a hash of the bytes is the same number wherever they
+are and the header a slot holds does not move at all.
+`SymbolIndexMatchesSymbolList` is the debug check -- every listed symbol where
+a lookup by its name would find it, the occupied slots numbering what the list
+holds and what the count claims, and nothing but a symbol in a slot -- and it
+allocates nothing, so it can be asked in an exhausted arena and between two
+allocations in the poison lane alike. `fe_internal.h` carries the hash and
+equality contracts the index is the first consumer of, and which Phase 27's
+`eq`/`eql`/`equal` tables would be the second.
 
 The value cell of a newly interned symbol whose name begins with `:` points
 back to the symbol itself, making keywords self-evaluating without an
@@ -534,8 +570,12 @@ Strings are why every context has a region and why `FeMinimumArenaSize()`
 funds one: a symbol's name is a string, so an interpreter whose region cannot
 hold the name `car` cannot finish opening. The core names' blocks are funded
 out of the minimum beside the core cells, and `payload_percent` divides only
-the surplus above that floor. At kg's 1 MiB arena the floor is 6232 bytes of
-a 225928-byte region.
+the surplus above that floor. Since Phase 26 the floor also funds the symbol
+index's first table, whose owner is a string header of length zero and whose
+block is therefore one of the string blocks above rather than a fourth kind of
+thing: the index is the third payload owner in the tree and needed no fourth
+entry in `OwnsPayload()`. At kg's 1 MiB arena the floor is 8312 bytes of a
+227536-byte region, of which 2080 are the table.
 
 A STRING's own layout is the division that matters. The byte LENGTH is in the
 header, in the bytes of the `car` word that are not the type tag -- where the
@@ -1476,11 +1516,20 @@ context; a measurement that reads both uses one context.
 | allocation | `alloc_object`, `alloc_pair` … `alloc_fex2` | `MakeObject`, `FeCons`, `SetType` |
 | collector | `gc_collection`, `gc_mark_visit`, `gc_mark_new`, `gc_sweep_examined`, `gc_reclaimed` | `CollectGarbage`, `FeMark` |
 | strings | `string_object`, `string_byte`, `string_copy`, `string_byte_copied` | `MakeStringObject`, `FeMakeStringBytes`, `AppendStringByte`, `CopyStringBytes` |
-| interning | `intern_lookup`, `intern_miss`, `intern_candidate` | `FindInternedSymbol` |
+| interning | `intern_lookup`, `intern_miss`, `intern_candidate`, `intern_probe` | `FindInternedSymbol` |
 | symbol names | `name_compare`, `name_byte` | `IsStringEqual` |
 | environments | `env_lookup`, `env_cell`, `env_bind` | `GetBound`, `HasLexicalBinding`, `Bind` |
 | function cells | `function_resolve`, `function_hop` | `ResolveFunctionCallable` |
 | evaluator | `eval_step`, `eval_dispatch`, `frame_push`, `dispatch_primitive`, `dispatch_callable`, `dispatch_native`, `dispatch_lambda`, `dispatch_macro`, `macro_expansion` | `EvaluationStep`, `RunEvaluationLoop`, `AllocateFrame`, `DispatchResolvedCall`, `ResumeArguments`, `EnterMacroBody` |
+
+`intern_candidate` kept its meaning across Phase 26 -- it was the interned
+symbols a linear scan examined and it is now the OCCUPIED slots an
+open-addressed probe examines -- so a measurement taken before the index and
+one taken after compare the same quantity, which is what the phase's gate
+rests on. `intern_probe` is the number a probe has that a scan did not: slots
+looked at, including the free one a miss stops on. Probes are candidates plus
+exactly one free slot per miss, since a hit stops ON its candidate, and the
+workload battery asserts that identity rather than assuming it.
 
 `string_object` counts strings and `alloc_string` counts the cells they cost,
 which since Phase 25 are the same number: a string is one cell whatever its
@@ -1591,8 +1640,11 @@ Three properties are what make the numbers usable.
   this one make them fail *loudly*: the `string` checks pin ONE cell per
   string at every length (which is what Phase 25 made true, and what made
   every earlier version of those checks fail), the `intern` checks pin the
-  linear `symbol_list` scan, the `env` checks pin the single flat alist, and
-  the `gc` checks pin the arena-proportional sweep.
+  symbol index's BOUNDED PROBE -- candidates per lookup under a literal at
+  every tier, and the 8192 tier within a factor of two of the 1024 one, where
+  the linear `symbol_list` scan they replaced was 629.85 and 4213.98 -- the
+  `env` checks pin the single flat alist, and the `gc` checks pin the
+  arena-proportional sweep.
 * **A counter read from a differently sized arena is a different
   measurement.** Each workload names its own arena (96 KiB, 320 KiB, kg's
   1 MiB, or 4 MiB for the intern tiers), and its cell capacity travels with

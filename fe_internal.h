@@ -866,6 +866,108 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
 // would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
 // the independent function cell used by call-position resolution.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
+// HASH AND EQUALITY CONTRACTS (Phase 26 of kg's Elisp data-model program,
+// doc/plans/2026-08-18-elisp-data-model.md).
+//
+// Phase 26 gave fe its first hash table -- the symbol index in fe.c, keyed on
+// name bytes -- and Phase 27's user tables would be its second, keyed on
+// `eq`, `eql` and `equal`. These are the rules a key hash obeys, written
+// before anything is built on them, because each one is a rule a plausible
+// implementation gets wrong in a way that no test of the index alone would
+// show. Nothing here is Lisp-visible; the index's own name hash is the first
+// and so far only consumer.
+//
+// THE ONE-WAY RULE, which everything below is an application of. A hash owes
+// its equality predicate exactly one implication:
+//
+//     EQUAL(a, b)  =>  hash(a) == hash(b)
+//
+// and never the converse. Two keys that are NOT equal may hash the same; the
+// table probes on and compares, which is what a probe is for. So a hash may
+// lose information freely -- stop early, ignore part of a structure, fold a
+// whole subtree to a constant -- and stay correct, while a hash that
+// distinguishes two keys the predicate calls equal is broken however clever
+// it is. Every bound below is licensed by this and is not a compromise on it.
+//
+// `eq` KEYS. fe's `eq` is `IdentityObjects(a, b, false)`: pointer identity,
+// or two INTEGERS with equal values, `(eq 3 3)` being t. So an `eq` hash
+// hashes the ADDRESS of every object except an integer, and an integer by its
+// VALUE. Hashing an integer's address instead is the one way to get this
+// wrong, and it puts two `eq` fixnums in different slots. Addresses are safe
+// to hash at all because Design B never moves a header: a payload block
+// slides under compaction and an `FeObject*` does not, so an `eq` table needs
+// no rehash after a collection -- which is the same property the symbol index
+// relies on. Doubles take the address route, `(eq 3.0 3.0)` being nil.
+//
+// `eql` KEYS. `IdentityObjects(a, b, true)` adds same-type doubles equal BY
+// BITS, so an `eql` hash reads a double's 64 BITS and nothing derived from
+// its value:
+//   * `(eql 0.0 -0.0)` is nil -- the sign bit is the one distinction IEEE
+//     `==` folds away. A hash that folded -0.0 onto 0.0 would only be
+//     colliding, which is free; but a hash computed by floating-point
+//     arithmetic can go the other way and give two bit-identical doubles
+//     different numbers, and THAT is the broken direction. Hash the bytes.
+//   * a NaN is `eql` to itself and to any NaN with the same bits, and a bit
+//     hash agrees with that for free. NaNs with different payloads are not
+//     `eql` and may hash apart; nothing has to canonicalise a NaN, and
+//     nothing may read its payload as a number.
+//   * `(eql 1 1.0)` is nil and `(equal 1 1.0)` is nil: an integer and a
+//     double are never equal across the type boundary. Mixing the type tag
+//     into the hash is therefore a quality choice and not a correctness one.
+//
+// `equal` KEYS, and the trap in fe's own source. fe has no `equal` primitive.
+// It has `eq`, `eql` and `is` -- and `bool Equal(...)` in fe.c is `is`, the
+// TOLERANT comparator: it calls `1` and `1.0` equal and compares two doubles
+// within an epsilon. Emacs' `equal`, which is what a Phase 27 `:test equal`
+// would mean, is the structural one kg defines in `lisp/prelude.el`:
+// iterative on the spine, recursive on the car, strings by content, numbers
+// by `eql`, vectors element by element, everything else by identity. A hash
+// written against fe's `Equal` would fold `1` onto `1.0`, which is harmless,
+// and would also be free to call two doubles an epsilon apart equal, which
+// the table would then have to make good on. An `equal` hash is written
+// against the structural rule and against nothing in fe.c.
+//
+// CYCLES, and what fe does at its bound. `equal` on circular structure does
+// not return. That is Emacs' behaviour and it is kg's: the prelude's spine
+// loop keeps no visited set, so it runs until the evaluator's step budget
+// trips or `C-g` interrupts it, and what comes back is a raise rather than an
+// answer. A HASH has no such liberty, because it is asked BEFORE any
+// comparison is possible -- so an `equal` hash carries a bound and folds a
+// constant when it reaches it. The one-way rule is what makes that sound: two
+// structures that are `equal` agree on every prefix, so they agree on the
+// bounded prefix too. The consequence, stated here so that nobody discovers
+// it during Phase 27: a cyclic key can be HASHED, and therefore inserted and
+// found by identity, while a lookup that has to compare two DISTINCT cyclic
+// structures still does not return. A hash table does not make `equal`
+// terminate. It makes the HASH terminate.
+//
+// THE STEP BOUND, which Phase 27 spells as two constants: at most 32 levels
+// of car descent and at most 1024 elements consumed in total, whichever comes
+// first, after which the hash folds a fixed constant and stops. Depth and
+// work rather than a visited set, because a visited set is an allocation
+// inside a hash, and a hash that allocates is a hash that can raise, collect,
+// and move the very storage the table is about to write into.
+//
+// MUTABLE KEYS. A hash by content is a hash of the content AT INSERTION TIME,
+// and the slot does not move when the content does. fe's strings and vectors
+// are mutable (`aset` writes both) and so are pairs (`setcar`), so a key
+// mutated after insertion is LOST to any lookup by content while remaining
+// reachable by `eq`. fe will not detect that and will not rehash; Emacs
+// behaves the same way and documents it. So the rule is a rule for the
+// caller: a key in an `equal` table is immutable for as long as it is a key.
+// `eq` and `eql` tables are unaffected -- an address does not change, and an
+// integer or a double object holds no mutable part.
+//
+// WHAT THE SYMBOL INDEX IS UNDER THESE RULES: an `equal` hash restricted to
+// strings, which is the case with no recursion, no cycles and no bound to
+// reach -- `HashNameBytes` over the bytes, and a comparison that is length
+// then bytes, embedded NUL included. It is exempt from the mutable-key rule
+// for a reason particular to it rather than by luck: a symbol's name string
+// is written by the constructor and by nothing afterwards, `symbol-name`
+// handing out a fresh copy (`SymbolNameString`), so no Lisp program has a
+// reference to mutate. If that ever stopped being true the debug check below
+// would say so, a mutated name being a symbol no longer found at its own
+// name.
 // Phase 26's debug check: does the symbol index still say exactly what
 // `symbol_list` says? Every listed symbol reachable in the table from its own
 // name's home slot, no slot holding anything else, and the three counts --
