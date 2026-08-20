@@ -41,9 +41,12 @@ when the grammar moves.
   removed. Needs the harness arena's small FREE portion -- a roomier one
   collects too rarely to land on that exact allocation. That portion, not the
   arena's nominal size, is what Phase 19 held constant when it raised
-  `FuzzArenaSize` 64 -> 68 KiB, and what Phase 25.0 held constant again -- at
-  288 free slots, measured -- when it armed the payload carve and raised it
-  70 -> 72.75 KiB (see `fuzz/fuzz_support.h`).
+  `FuzzArenaSize` 64 -> 68 KiB, what Phase 25.0 held constant again -- at 288
+  free slots, measured -- when it armed the payload carve and raised it
+  70 -> 72.75 KiB, and what Phase 25.1 held constant a third time at
+  77 KiB + 128 bytes, when strings moved onto the payload region and
+  `FeMinimumArenaSize()` grew by the core names' blocks (see
+  `fuzz/fuzz_support.h`).
 - `funcall-apply-redispatch` -- not a crash reproduction but the durable
   half of sub-plan 04C's fuzz gate: allocation-heavy forms interleaved with
   the four funcall/apply redispatch shapes (direct closure, `cons` symbol
@@ -87,12 +90,16 @@ when the grammar moves.
   Five of the six were re-derived in the Phase 9 fix cycle, and four of them
   again in sub-plan 11B's, both times having stopped reaching their shape
   when the grammar moved. Measured on the current grammar (modulus 37),
-  replayed without mutation:
+  replayed without mutation. `strict-arity-rest` reached three `(x &rest y)`
+  and two `(x &optional y)` until Phase 25.1 -- where the ARENA moved rather
+  than the grammar, and the re-derived `FuzzArenaSize` restored the free
+  portion to its old 288 slots but not the byte-for-byte allocation history a
+  form-count depends on:
 
   | seed | bytes | reaches |
   |---|---|---|
   | `strict-arity-optional` | 30 | `(x &optional y)` x1 |
-  | `strict-arity-rest` | 97 | `(x &rest y)` x3, `(x &optional y)` x2 |
+  | `strict-arity-rest` | 97 | `(x &rest y)` x2 |
   | `strict-arity-malformed` | 59 | `(&rest y x)` x2 |
   | `strict-arity-primitive` | 8 | `(not t)` then `(car)` |
   | `strict-arity-native` | 9 | `(native-arity nil nil nil)`, i.e. `FeRequireNoArguments`' "too many arguments" |

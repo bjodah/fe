@@ -15,25 +15,23 @@
 // whenever the core interns something new at open, or the context itself
 // widens: it was 60344 bytes when this was a flat 64 KiB; Phase 19's seeded
 // `error-message` properties took it to 63592, API version 11's per-binding
-// host tag to 66264, and Phase 24's vector family plus the `end-of-file`
-// condition row to 67664. Each of those would have left the free portion
-// shorter and silently re-steered every tracked seed by making forms raise
-// sooner, so this constant is re-derived to restore the free portion rather
-// than the total, which is what keeps `fuzz/seeds/reachability.json`
-// measuring the grammar instead of the arena. Re-measure it whenever either
-// term moves: `strict-arity-rest` is the seed that fails first, and it did.
+// host tag to 66264, Phase 24's vector family plus the `end-of-file`
+// condition row to 67664, and Phase 25's core payload floor -- one block per
+// core symbol name, which the minimum now has to fund -- to 72136. Each of
+// those would have left the free portion shorter and silently re-steered
+// every tracked seed by making forms raise sooner, so this constant is
+// re-derived to restore the free portion rather than the total, which is what
+// keeps `fuzz/seeds/reachability.json` measuring the grammar instead of the
+// arena. Re-measure it whenever either term moves: `strict-arity-rest` is the
+// seed that fails first, and it has now done so twice.
 //
-// The harness opens with `FeOpenContextWithOptions` and null options, which
-// is Fe's own split -- a quarter of what is left once frames are funded goes
-// to the payload region -- so a generated `[...]` BUILDS a vector here
-// instead of raising `(payload-exhaustion)` the way an `FeOpenContext` arena
-// makes it. That is the whole reason the size moved in Phase 25.0: the carve
-// takes 25% of the cells, and holding the free portion steady across it is a
-// re-derivation of the constant, not a one-line change. Measured, at this
-// size: 288 free cell slots either way -- exactly what the uncarved arena had
-// before the carve -- 71 frames, and 1536 payload bytes, room for a vector of
-// up to 188 elements.
-enum { FuzzArenaSize = 72 * 1024 + 768 };
+// Every context carves a payload region since Phase 25 -- a symbol's name is
+// a string -- so a generated `[...]` BUILDS a vector here rather than raising
+// `(payload-exhaustion)`, and a generated string body is region bytes rather
+// than cells. Measured, at this size: 288 free cell slots, which is what this
+// arena has had since before either carve existed, 71 frames, and 1536 free
+// payload bytes, room for a vector of up to 188 elements.
+enum { FuzzArenaSize = 77 * 1024 + 128 };
 
 typedef union {
   max_align_t alignment;
