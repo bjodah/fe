@@ -166,7 +166,25 @@
 // quartet -- and, for the first time, an `FeArenaStats` whose payload fields
 // move in an ordinary run: a vector's elements ARE its payload block, so a
 // host that carves no region cannot make one.
-#define FE_API_VERSION 14
+//
+// Version 15 (Phase 25 of the same program) is the string cut, and four
+// things in this header follow from it. A string is a header plus a payload
+// block of bytes now, with its LENGTH in the header, where it was a chain of
+// seven-byte cells terminated by a NUL: so `FeMakeStringBytes` builds one
+// from a buffer and a length, and a host can hold a string with a NUL in it,
+// while `FeMakeString` is that same function called with `strlen`.
+// `FeStringBytes` asks for the length and the bytes in ONE call, which is
+// what a host copying into a fixed buffer wants; `FeStringByteLength` and
+// `FeCopyStringBytes` keep their exact meaning and were already binary-safe,
+// neither having ever handed out an interior pointer. `FeWriteFn`'s
+// allocation contract is stated for the first time -- a write callback MAY
+// allocate, and the printer re-derives its payload addresses after every
+// callback so that it can. And `FeOpenContext` now carves the payload region
+// it used to leave at zero, because a symbol's name is a string and a context
+// without a region cannot finish opening: `FePayloadPercentNone` is REMOVED
+// rather than kept as a partition no program can run in, which is the ABI
+// break in this version.
+#define FE_API_VERSION 15
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -349,7 +367,21 @@
 // condition symbol.  `FE_API_VERSION` moves to 14 in the same slice for the
 // C quartet and the `FeType` enumerator, and the two land under one
 // `FeVersion` "20.0".
-#define FE_LANGUAGE_VERSION 16
+//
+// Version 17 (Phase 25 of the same program) is what a length-bearing string
+// makes reachable from Lisp.  `"a\0b"` is a three-byte string where that
+// escape used to be the named read error `unsupported read syntax: NUL
+// character in string`, and it prints as `"a\000b"` -- three octal digits, so
+// that a digit after it stays a digit -- which reads back to the same three
+// bytes.  `(aset STRING INDEX BYTE)` writes the byte in place and answers it,
+// where every `aset` on a string was `unsupported: aset on a string`; a value
+// above 255 is refused with Emacs' own sentence, since Emacs will not widen a
+// string either, and `aset` therefore never changes a string's length in
+// either dialect.  `length`, `aref` and `elt` still answer BYTES for a string
+// -- fe's strings are byte strings and that contract is unchanged.
+// `FE_API_VERSION` moves to 15 in the same slice, and the two land under one
+// `FeVersion` "21.0".
+#define FE_LANGUAGE_VERSION 17
 
 extern const char* FeVersion;
 
@@ -364,6 +396,13 @@ typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
 // must not raise, must not call back into the evaluator, and must not create
 // Fe objects -- see `FeProtectWithCleanup`'s comment for the full contract.
 typedef void FeCleanupFn(FeContext* ctx, void* data);
+// The writer's byte sink, one byte per call. Unlike a mark callback
+// (`FeSetMarkFn`), it MAY allocate Fe objects and it MAY raise: the printer
+// holds no address into object storage across it, deriving a string's bytes
+// or a vector's elements again after every call, precisely because a host's
+// sink is where a host does host things -- kg's grows a buffer with
+// `realloc` and can run out of memory. A raise from inside it leaves the
+// printer by `longjmp`, which is an exit and not a half-written object.
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
 // The two halves of the dynamic-binding location seam (FE_API_VERSION 11),
@@ -554,10 +593,11 @@ typedef struct FeArenaStats {
 
   // The payload region (FE_API_VERSION 13), the pool the cells are priced
   // against: `FeOpenOptions.payload_percent` is what divides them, and the
-  // frame capacity above is funded before either. All five read zero in a
-  // context opened by `FeOpenContext`, or with `FePayloadPercentNone`, which
-  // carve no region at all -- and, until a Fe release type owns a payload,
-  // all but the first read zero in a carved context too.
+  // frame capacity above is funded before either. Every context has a region
+  // and every context has blocks in it, because a symbol's name is a string
+  // and a string's bytes live there (FE_API_VERSION 15); the numbers below
+  // are never all zero the way they were when only a vector could reach the
+  // region.
   size_t payload_capacity_bytes;    // bytes carved for the region; the
                                     // denominator the other four are read
                                     // against.
@@ -586,8 +626,8 @@ typedef struct FeArenaStats {
 // `MakeObject`-triggered collection would). It allocates nothing itself.
 void FeCollectGarbage(FeContext* ctx);
 
-// The two named values `FeOpenOptions.payload_percent` takes besides an
-// ordinary percentage (FE_API_VERSION 13).
+// What `FeOpenOptions.payload_percent` means when it is not an ordinary
+// percentage (FE_API_VERSION 13).
 enum {
   // What a zero-initialized `FeOpenOptions` asks for, and what a null
   // `options` selects: Fe's own split of the arena, which is the Phase 22
@@ -595,14 +635,14 @@ enum {
   // means "Fe decides" here for the same reason it does in `FeEvalOptions` --
   // a host that has an opinion about one knob writes that one field and
   // leaves the rest alone.
+  //
+  // There is no "none" any more (FE_API_VERSION 15). It was a real partition
+  // while only a vector could own a payload; now a symbol's name is a string
+  // and a string's bytes are payload, so a context with no region cannot
+  // finish opening, let alone run a program. The floor the core names need is
+  // funded out of `FeMinimumArenaSize` and is not this percentage's to
+  // withhold; what this divides is the surplus above that floor.
   FeDefaultPayloadPercent = 25,
-  // An explicit request for NO payload region: a context whose payload
-  // capacity is zero and whose partition is therefore byte for byte what
-  // `FeOpenContext` produces. It needs a name of its own because zero is
-  // already spoken for by the default above, and a host that has decided to
-  // carve nothing is saying something different from a host that has not
-  // decided anything.
-  FePayloadPercentNone = -1,
 };
 
 // The knobs `FeOpenContextWithOptions` takes (FE_API_VERSION 13). Zero-
@@ -617,15 +657,13 @@ typedef struct FeOpenOptions {
   // frame capacity is identical at every value here.
   //
   // `FeDefaultPayloadPercent` (0, the zero-initialized value) selects Fe's
-  // own split; `FePayloadPercentNone` asks for no region; 1 to 100 ask for
-  // exactly that percentage.
+  // own split; 1 to 100 ask for exactly that percentage of the surplus.
   //
-  // OUT OF RANGE IS REFUSED, NOT CLAMPED: anything below
-  // `FePayloadPercentNone` or above 100 makes `FeOpenContextWithOptions`
-  // return null, exactly as a null arena or one below `FeMinimumArenaSize`
-  // does. A clamp would hand back a context partitioned to a number the host
-  // never asked for and no way to find out, which is a lie about the one
-  // budget Fe's product contract is built on.
+  // OUT OF RANGE IS REFUSED, NOT CLAMPED: anything negative or above 100
+  // makes `FeOpenContextWithOptions` return null, exactly as a null arena or
+  // one below `FeMinimumArenaSize` does. A clamp would hand back a context
+  // partitioned to a number the host never asked for and no way to find out,
+  // which is a lie about the one budget Fe's product contract is built on.
   int payload_percent;
 } FeOpenOptions;
 
@@ -633,19 +671,16 @@ typedef struct FeOpenOptions {
 // `FeOpenContext`'s arena, with the same requirements; `options` may be null,
 // which selects every default.
 //
-// This is NOT a renamed `FeOpenContext`, and the difference is deliberate:
-// the default here is `FeDefaultPayloadPercent`, while `FeOpenContext` --
-// which cannot express an opinion and must not acquire one -- carves nothing
-// and keeps the partition it has always produced. A host that calls this
-// with default options is asking Fe to divide its arena Fe's way; a host
-// that calls `FeOpenContext` is asking for the arena it already had.
+// A host that calls this with default options is asking Fe to divide its
+// arena Fe's way, which is what `FeOpenContext` below now asks for too: the
+// two differ only in that this one can say a number.
 [[nodiscard]] FeContext* FeOpenContextWithOptions(void* ptr,
                                                   size_t size,
                                                   const FeOpenOptions* options);
-// The whole arena to cells and frames, with no payload region:
-// `FeOpenContextWithOptions` with `payload_percent` of
-// `FePayloadPercentNone`, and the entry point every host that has no opinion
-// about the split should keep calling.
+// `FeOpenContextWithOptions` with default options, and the entry point every
+// host with no opinion about the split should keep calling. Until
+// FE_API_VERSION 15 it carved no payload region at all; strings ended that,
+// since a context whose region cannot hold the name `car` cannot open.
 [[nodiscard]] FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);
 void FeSetUserData(FeContext* ctx, void* userdata);
@@ -804,6 +839,14 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 // program yet. `FeToDouble` accepts it, so a host-made integer already flows
 // through every double-taking host read; `FeToInteger` is its mirror.
 [[nodiscard]] FeObject* FeMakeInteger(FeContext* ctx, int64_t n);
+// A string of exactly LENGTH bytes, copied from a buffer the caller owns and
+// keeps (FE_API_VERSION 15). The bytes may contain NUL and are not
+// terminated: a fe string carries its length, so it is whatever bytes it was
+// given. `FeMakeString` is this with `strlen`, and remains the spelling for
+// the ordinary case of a C string.
+[[nodiscard]] FeObject* FeMakeStringBytes(FeContext* ctx,
+                                          const char* bytes,
+                                          size_t length);
 [[nodiscard]] FeObject* FeMakeString(FeContext* ctx, const char* str);
 [[nodiscard]] FeObject* FeMakeSymbol(FeContext* ctx, const char* name);
 [[nodiscard]] FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn);
@@ -985,6 +1028,23 @@ void FeLeaveInputUnit(FeContext* ctx, const FeInputUnit* enclosing);
                                           FeObject* error,
                                           char* dst,
                                           size_t size);
+// The three ways to read a string's (or a symbol's name's) bytes out. None
+// of them hands back a pointer into object storage and none ever will: the
+// bytes live in the payload region and MOVE when the collector compacts, so
+// the only address that survives that is the `FeObject*` these all take.
+//
+// `FeStringBytes` (FE_API_VERSION 15) is the one-call form, `snprintf`'s
+// contract without the terminator: it answers the string's full byte length,
+// and it copies the bytes into DST when they fit in SIZE. A caller compares
+// the answer against SIZE to learn whether the copy happened; a caller that
+// only wants the length passes `(nullptr, 0)`. DST may be null only when SIZE
+// is zero. The older pair below says the same thing in two calls -- a length
+// pass, then a copy that refuses rather than truncates -- and is what a
+// caller sizing a heap buffer wants, since it has to ask twice anyway.
+[[nodiscard]] size_t FeStringBytes(FeContext* ctx,
+                                   const FeObject* obj,
+                                   char* dst,
+                                   size_t size);
 [[nodiscard]] size_t FeStringByteLength(FeContext* ctx, const FeObject* obj);
 [[nodiscard]] bool FeCopyStringBytes(FeContext* ctx,
                                      const FeObject* obj,

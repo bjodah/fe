@@ -45,7 +45,7 @@ static FeObject* BindValue(FeContext* ctx,
                            FeObject* env,
                            FeObject* name,
                            FeObject* value) {
-  if (FeIsNil(name) || IsConstantSymbol(name)) {
+  if (FeIsNil(name) || IsConstantSymbol(ctx, name)) {
     RaiseSettingConstant(ctx, name);
   }
   CheckType(ctx, name, FeTSymbol);
@@ -57,7 +57,8 @@ static FeObject* BindLambda(FeContext* ctx,
                             FeObject* name,
                             FeObject* value) {
   // Lexical Emacs lambdas permit `t` to shadow the global constant.
-  if ((FeIsNil(name) || IsConstantSymbol(name)) && !IsNamedSymbol(name, "t")) {
+  if ((FeIsNil(name) || IsConstantSymbol(ctx, name)) &&
+      !IsNamedSymbol(ctx, name, "t")) {
     RaiseSettingConstant(ctx, name);
   }
   return Bind(ctx, env, name, value);
@@ -80,8 +81,8 @@ static void ValidateSetqTarget(FeContext* ctx,
                                FeObject* env,
                                FeObject* target) {
   if (FeIsNil(target) ||
-      (IsConstantSymbol(target) &&
-       !(IsNamedSymbol(target, "t") && HasLexicalBinding(env, target)))) {
+      (IsConstantSymbol(ctx, target) &&
+       !(IsNamedSymbol(ctx, target, "t") && HasLexicalBinding(env, target)))) {
     RaiseSettingConstant(ctx, target);
   }
   if (FeGetType(target) != FeTSymbol) {
@@ -92,7 +93,7 @@ static void ValidateSetqTarget(FeContext* ctx,
 static FeObject* SetEvaluatedValue(FeContext* ctx,
                                    FeObject* symbol,
                                    FeObject* value) {
-  if (FeIsNil(symbol) || IsConstantSymbol(symbol)) {
+  if (FeIsNil(symbol) || IsConstantSymbol(ctx, symbol)) {
     RaiseSettingConstant(ctx, symbol);
   }
   if (FeGetType(symbol) != FeTSymbol) {
@@ -103,14 +104,14 @@ static FeObject* SetEvaluatedValue(FeContext* ctx,
 }
 
 static void ValidateValueTarget(FeContext* ctx, FeObject* target) {
-  if (FeIsNil(target) || IsConstantSymbol(target)) {
+  if (FeIsNil(target) || IsConstantSymbol(ctx, target)) {
     RaiseSettingConstant(ctx, target);
   }
   CheckType(ctx, target, FeTSymbol);
 }
 
 static void RejectConstantTarget(FeContext* ctx, FeObject* target) {
-  if (FeIsNil(target) || IsConstantSymbol(target)) {
+  if (FeIsNil(target) || IsConstantSymbol(ctx, target)) {
     RaiseSettingConstant(ctx, target);
   }
 }
@@ -158,7 +159,8 @@ static FeObject* ReverseList(FeObject* list) {
 // so instead of quietly meaning something else. Only the two names the
 // decoder acts on are refused; `(let ((&foo 1)) &foo)` is 1 in both.
 static void ValidateLetBindingTarget(FeContext* ctx, FeObject* target) {
-  if (IsNamedSymbol(target, "&optional") || IsNamedSymbol(target, "&rest")) {
+  if (IsNamedSymbol(ctx, target, "&optional") ||
+      IsNamedSymbol(ctx, target, "&rest")) {
     FeHandleError(ctx, "lambda-list keyword in let binding");
   }
   ValidateValueTarget(ctx, target);
@@ -366,7 +368,7 @@ static void ValidateParameterName(FeContext* ctx,
                                   const FeObject* name,
                                   bool optional) {
   if (!IsParameterName(name) ||
-      (optional && IsNamedSymbol(name, "&optional"))) {
+      (optional && IsNamedSymbol(ctx, name, "&optional"))) {
     RaiseNamedError(ctx, "invalid-function", "invalid-function");
   }
 }
@@ -377,11 +379,11 @@ static void ValidateParameters(FeContext* ctx, FeObject* prm) {
     const FeObject* name = CAR(prm);
     prm = CDR(prm);
     ValidateParameterName(ctx, name, optional);
-    if (IsNamedSymbol(name, "&optional")) {
+    if (IsNamedSymbol(ctx, name, "&optional")) {
       optional = true;
       continue;
     }
-    if (IsNamedSymbol(name, "&rest")) {
+    if (IsNamedSymbol(ctx, name, "&rest")) {
       if (FeGetType(prm) != FeTPair || FeGetType(CAR(prm)) != FeTSymbol ||
           !FeIsNil(CDR(prm))) {
         RaiseNamedError(ctx, "invalid-function", "invalid-function");
@@ -421,11 +423,11 @@ static FeObject* ArgsToEnv(FeContext* ctx,
     }
     FeObject* name = CAR(prm);
     prm = CDR(prm);
-    if (IsNamedSymbol(name, "&optional")) {
+    if (IsNamedSymbol(ctx, name, "&optional")) {
       optional = true;
       continue;
     }
-    if (IsNamedSymbol(name, "&rest")) {
+    if (IsNamedSymbol(ctx, name, "&rest")) {
       if (FeGetType(prm) != FeTPair) {
         RaiseNamedError(ctx, "invalid-function", "invalid-function");
       }
@@ -1092,8 +1094,9 @@ static bool DispatchPrimitive(FeContext* ctx,
         *result = form;
         return true;
       }
-      if (FeGetType(form) == FeTPair && (IsNamedSymbol(CAR(form), "lambda") ||
-                                         IsNamedSymbol(CAR(form), "fn"))) {
+      if (FeGetType(form) == FeTPair &&
+          (IsNamedSymbol(ctx, CAR(form), "lambda") ||
+           IsNamedSymbol(ctx, CAR(form), "fn"))) {
         *result = MakeClosure(ctx, frame->env, CDR(form), FeTFn);
         return true;
       }
@@ -1924,7 +1927,7 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       break;
     case PKeywordp:
       FeRequireNoArguments(ctx, frame->rest);
-      *result = FeMakeBool(ctx, IsKeywordSymbol(value));
+      *result = FeMakeBool(ctx, IsKeywordSymbol(ctx, value));
       break;
     // `error-message-string` (Phase 19). The type check is Emacs' own: it
     // takes the ERROR object apart with `car`/`cdr`, so a non-list is
@@ -1952,7 +1955,7 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
     // `(wrong-type-argument symbolp X)`, which is Emacs' answer too.
     case PSpecialVariableP: {
       FeRequireNoArguments(ctx, frame->rest);
-      if (FeIsNil(value) || IsConstantSymbol(value)) {
+      if (FeIsNil(value) || IsConstantSymbol(ctx, value)) {
         *result = FeMakeBool(ctx, true);
         break;
       }
@@ -2055,7 +2058,7 @@ static bool ResumeBinary(FeContext* ctx,
       *result = &nil;
       break;
     case PIs:
-      *result = FeMakeBool(ctx, Equal(first, second));
+      *result = FeMakeBool(ctx, Equal(ctx, first, second));
       break;
     case PEq:
       *result = FeMakeBool(ctx, IdentityObjects(first, second, false));
@@ -3034,7 +3037,7 @@ static bool ResumeEvalList(FeContext* ctx,
       }
       (void)FeCopyStringBytes(ctx, SymbolName(name), symbol, symbol_length);
       symbol[symbol_length] = '\0';
-      if (!IsConditionSymbol(name)) {
+      if (!IsConditionSymbol(ctx, name)) {
         FeObject* data = FeMakeList(
             ctx, (FeObject*[]){FeMakeString(ctx, "Invalid error symbol"), name},
             2);
@@ -3042,10 +3045,10 @@ static bool ResumeEvalList(FeContext* ctx,
                        "Invalid error symbol");
       }
       FeObject* const data = FeIsNil(CDR(list)) ? &nil : CAR(CDR(list));
-      RaiseCondition(
-          ctx,
-          IsNamedSymbol(name, "quit") ? FeCompletionQuit : FeCompletionError,
-          symbol, data, symbol);
+      RaiseCondition(ctx,
+                     IsNamedSymbol(ctx, name, "quit") ? FeCompletionQuit
+                                                      : FeCompletionError,
+                     symbol, data, symbol);
     }
     case PError: {
       // `(error)` with no format string at all is

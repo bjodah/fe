@@ -260,12 +260,15 @@ enum {
   // completion (`ctx->completion != FeCompletionNormal`) may use these
   // slots; see `FePushGC`.
   GcStackReserve = 64,
-  StringBufferSize = (sizeof(FeObject*) - 1),
+  // The bytes of a non-pair cell's `car` word that are not its type tag.
+  // Phase 25 gives them to a string's byte LENGTH, where the cell chain they
+  // replaced kept that many bytes of text; see "Strings" in fe.c.
+  StringLengthBytes = (sizeof(FeObject*) - 1),
   // The longest symbol name fe builds, in bytes. It has been the reader's
   // token buffer since long before Phase 14; that phase made `intern`,
   // `make-symbol` and `gensym` share it, so a name a program constructs is
   // bounded exactly where a name a program writes is. A symbol's name is a
-  // cons chain and has no structural limit -- this is a policy, and the
+  // string object and has no structural limit -- this is a policy, and the
   // reason it is one is that a 64-byte stack buffer is also what the
   // printer's number-lookalike test and `signal`'s condition-name copy use.
   SymbolNameLimit = 63,
@@ -663,7 +666,6 @@ extern FeObject unbound;
 #define INTEGER(x) ((x)->cdr.i)
 #define PRIM(x) ((x)->cdr.c)
 #define NATIVE_FN(x) ((x)->cdr.f)
-#define STRING_BUFFER(x) (&(x)->car.c + 1)
 // Phase 23.1: where an object names its payload block. Only a type the
 // substrate knows about keeps a handle here; see `PayloadSlot` in fe.c.
 #define PAYLOAD(x) ((x)->cdr.p)
@@ -685,11 +687,10 @@ extern FeObject unbound;
 // bytes after them, so one region serves an aggregate (all children) and a
 // string (all bytes) without either knowing about the other.
 //
-// `STRING_BUFFER` above is fe's only interior pointer today: an address into
-// the cell that holds the bytes. From Phase 25 stored bytes live in the
-// region instead, so an interior pointer becomes a pointer into storage that
-// slides, and the whole class of bugs nelisp documented -- a raw pointer held
-// across an allocation that compacts under it -- becomes available to fe.
+// A string's bytes live in the region (Phase 25), so an interior pointer
+// into one is a pointer into storage that slides, and the whole class of
+// bugs nelisp documented -- a raw pointer held across an allocation that
+// compacts under it -- is available to fe.
 //
 // One protocol keeps it unavailable, and it has three clauses:
 //
@@ -710,18 +711,16 @@ extern FeObject unbound;
 //      written into it.
 //
 // `doc/payload-pointer-census.md` is the checklist: every site in fe and in
-// kg that will read through a payload pointer once payloads exist, each with
-// the clause that keeps it correct. Rows A3, A4 and A6-A10 are the ones that
-// straddle an allocation and therefore pay clause 2.
+// kg that reads through a payload pointer, each with the clause that keeps
+// it correct. The printer's byte loops are the ones that straddle an
+// allocation and therefore pay clause 2.
 //
-// WHAT OWNS A PAYLOAD TODAY: nothing a shipped interpreter builds. Strings
-// migrate in Phase 25 and a Lisp-visible aggregate arrives in Phase 24, so
-// in a release build the region has no owner, no block and -- by default --
-// no bytes. The substrate below is still release code: the allocator, the
-// collector's arm, the compactor and `(payload-exhaustion)` all ship, and
-// Phase 25 changes `PayloadSlot` rather than reopening the collector. It is
-// also why `FE_LANGUAGE_VERSION` does not move for this phase: no Lisp
-// program can reach any of it yet.
+// WHAT OWNS A PAYLOAD: a vector, whose elements are its block's traced
+// children (Phase 24), and a STRING, whose bytes are its block's byte tail
+// (Phase 25) -- and a symbol's name is a string, so every context that opens
+// at all has a region with blocks in it. That is why `FeOpenContext` carves
+// one and why `FeMinimumArenaSize` funds one: an interpreter with no region
+// cannot hold its own primitive names.
 
 typedef struct FePayloadBlock {
   // The header this block belongs to. Half of the liveness rule: a block
@@ -918,14 +917,18 @@ void MarkSpecialSymbol(FeContext* ctx, FeObject* sym, bool full);
 bool SymbolIsSpecial(FeContext* ctx, const FeObject* sym);
 bool SymbolIsLetDynamic(FeContext* ctx, const FeObject* sym);
 FeObject* MakeObject(FeContext* ctx);
-bool Equal(FeObject* a, FeObject* b);
+// Emacs' `equal`: structural for strings, tolerant for numbers, identity
+// otherwise. It takes a CONTEXT because a string's bytes are payload and a
+// payload address is only reachable from the context that owns the region
+// -- the shape every predicate below that reads a name shares.
+bool Equal(const FeContext* ctx, FeObject* a, FeObject* b);
 // `eq`/`eql`'s shared answer (05D): pointer identity, both-integers-equal, or
 // -- for `eql` (`compare_floats`) -- same-type floats equal by bits. Defined
 // in fe.c beside `Equal`; the evaluator's `eq`/`eql` primitives call it.
 bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats);
-bool IsNamedSymbol(const FeObject* v, const char* name);
-bool IsKeywordSymbol(const FeObject* v);
-bool IsConstantSymbol(const FeObject* v);
+bool IsNamedSymbol(const FeContext* ctx, const FeObject* v, const char* name);
+bool IsKeywordSymbol(const FeContext* ctx, const FeObject* v);
+bool IsConstantSymbol(const FeContext* ctx, const FeObject* v);
 void __attribute((format(printf, 3, 4))) Format(char* result,
                                                 size_t size,
                                                 const char* format,
@@ -1357,7 +1360,9 @@ typedef struct ConditionParent {
   const char* message;
 } ConditionParent;
 const ConditionParent* ConditionRowAt(size_t index);
-bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor);
+bool ConditionInheritsFrom(const FeContext* ctx,
+                           const FeObject* symbol,
+                           const char* ancestor);
 // Emacs' `error-message-string` rendering of the ERROR object `error`,
 // written into `dst` (always NUL-terminated) and never allocating: both its
 // callers -- the primitive, and `FeErrorMessageString` on the host's error
@@ -1460,7 +1465,7 @@ void PushCleanup(FeContext* ctx, FeCleanupEntry entry);
 void PushDynamicBinding(FeContext* ctx, FeObject* symbol, FeObject* value);
 void RunCleanupsDownTo(FeContext* ctx, size_t target);
 void ValidateConditionHandlers(FeContext* ctx, FeObject* handlers);
-bool IsConditionSymbol(const FeObject* symbol);
+bool IsConditionSymbol(const FeContext* ctx, const FeObject* symbol);
 //
 // fe_unwind.c -> fe_eval.c: one edge, the throw a cleanup re-issues.
 bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value);

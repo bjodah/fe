@@ -51,6 +51,11 @@ the letter the message names. The count is "corpus files whose *first*
 diagnostic was this arm", so it understates: a file that fails earlier for
 another reason hides whatever came after it.
 
+The census predates Phase 25, and `NUL character in string` is no longer an
+arm either: a string carries a length now, so `"\0"` reads as a one-byte
+string rather than raising. `character above 255 in string` stays -- that one
+would need a multibyte character type, not a length.
+
 The census predates Phase 24, and `vector brackets` is no longer an arm:
 `[...]` reads as a vector now, and a bracket that closes nothing or crosses a
 paren is `stray ']'`/`stray ')'` instead. Until Phase 25.0 a generated vector

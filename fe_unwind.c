@@ -189,20 +189,21 @@ const ConditionParent* ConditionRowAt(size_t index) {
              : nullptr;
 }
 
-bool IsConditionSymbol(const FeObject* symbol) {
+bool IsConditionSymbol(const FeContext* ctx, const FeObject* symbol) {
   for (size_t i = 0;
        i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (IsNamedSymbol(symbol, condition_parents[i].name)) {
+    if (IsNamedSymbol(ctx, symbol, condition_parents[i].name)) {
       return true;
     }
   }
   return false;
 }
 
-static const ConditionParent* FindConditionParent(const FeObject* symbol) {
+static const ConditionParent* FindConditionParent(const FeContext* ctx,
+                                                  const FeObject* symbol) {
   for (size_t i = 0;
        i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (IsNamedSymbol(symbol, condition_parents[i].name)) {
+    if (IsNamedSymbol(ctx, symbol, condition_parents[i].name)) {
       return &condition_parents[i];
     }
   }
@@ -224,8 +225,10 @@ static const ConditionParent* FindConditionParentByName(const char* name) {
 // "is this a `file-error`?" -- because that class alone takes its message
 // from the DATA rather than from the property, and prints its items with
 // `princ` rather than `prin1`.
-bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor) {
-  for (const ConditionParent* entry = FindConditionParent(symbol);
+bool ConditionInheritsFrom(const FeContext* ctx,
+                           const FeObject* symbol,
+                           const char* ancestor) {
+  for (const ConditionParent* entry = FindConditionParent(ctx, symbol);
        entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
     if (strcmp(entry->name, ancestor) == 0) {
       return true;
@@ -234,10 +237,11 @@ bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor) {
   return false;
 }
 
-static bool ConditionMatches(const FeObject* condition,
+static bool ConditionMatches(const FeContext* ctx,
+                             const FeObject* condition,
                              const FeObject* spec,
                              FeCompletion kind) {
-  if (IsNamedSymbol(spec, "t")) {
+  if (IsNamedSymbol(ctx, spec, "t")) {
     return true;
   }
   if (FeGetType(spec) != FeTSymbol) {
@@ -249,28 +253,29 @@ static bool ConditionMatches(const FeObject* condition,
   // ...)` catch it. Testing the object first is what made a genuine
   // interrupt catchable by `t` but not by the handler that names it.
   if (kind == FeCompletionQuit) {
-    return IsNamedSymbol(spec, "quit");
+    return IsNamedSymbol(ctx, spec, "quit");
   }
   if (FeGetType(condition) != FeTPair) {
     return false;
   }
-  for (const ConditionParent* entry = FindConditionParent(CAR(condition));
+  for (const ConditionParent* entry = FindConditionParent(ctx, CAR(condition));
        entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
-    if (IsNamedSymbol(spec, entry->name)) {
+    if (IsNamedSymbol(ctx, spec, entry->name)) {
       return true;
     }
   }
   return false;
 }
 
-static bool HandlerMatches(const FeObject* condition,
+static bool HandlerMatches(const FeContext* ctx,
+                           const FeObject* condition,
                            const FeObject* spec,
                            FeCompletion kind) {
   if (FeGetType(spec) != FeTPair) {
-    return ConditionMatches(condition, spec, kind);
+    return ConditionMatches(ctx, condition, spec, kind);
   }
   while (!FeIsNil(spec)) {
-    if (ConditionMatches(condition, CAR(spec), kind)) {
+    if (ConditionMatches(ctx, condition, CAR(spec), kind)) {
       return true;
     }
     spec = CDR(spec);
@@ -294,7 +299,7 @@ static bool FindConditionHandler(const FeContext* ctx,
          handlers = CDR(handlers)) {
       FeObject* candidate = CAR(handlers);
       if (FeGetType(candidate) == FeTPair &&
-          HandlerMatches(ctx->condition, CAR(candidate), kind)) {
+          HandlerMatches(ctx, ctx->condition, CAR(candidate), kind)) {
         *index = i;
         *clause = candidate;
         return true;

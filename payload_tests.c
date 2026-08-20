@@ -6,10 +6,15 @@
 //
 // Its own binary rather than a case inside `test_api`, for the same reason
 // `gc_stress` is: it needs a build the ordinary one is not.
-// `FE_PAYLOAD_TEST_OBJECT` gives fe a type that owns a payload, which a
-// shipped interpreter deliberately has none of -- strings migrate in Phase 25
-// and a Lisp-visible aggregate arrives in Phase 24 -- so without it there is
-// nothing to allocate a block for and every assertion below would be vacuous.
+// `FE_PAYLOAD_TEST_OBJECT` gives fe an owner whose child count and byte tail
+// a test can choose independently, which neither release owner is: a vector
+// is all children and a string is all bytes.
+//
+// Since Phase 25 a freshly opened context ALREADY holds blocks -- one per core
+// symbol name, one per seeded condition message -- so every offset a case
+// below asserts is measured from `payload_used` at open rather than from
+// zero. That floor is what `FeMinimumArenaSize` funds and what makes a
+// region-less context impossible.
 //
 // What each group proves is stated where it is asserted. The two properties
 // the whole file exists for are:
@@ -38,8 +43,8 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-static_assert(FE_API_VERSION == 14);
-static_assert(FE_LANGUAGE_VERSION == 16);
+static_assert(FE_API_VERSION == 15);
+static_assert(FE_LANGUAGE_VERSION == 17);
 
 #ifndef FE_GC_STRESS
 #define FE_GC_STRESS 0
@@ -133,36 +138,45 @@ static FePayloadHandle ExpectedHandle(size_t block_offset) {
 // The region and the allocator
 // ---------------------------------------------------------------------------
 
-// `FeOpenContext` carves nothing, which is the behaviour the Phase 22 ADR
-// requires it to keep; a percentage carve takes its bytes out of the cells and
-// out of nothing else, so the two pools are priced against each other and the
-// frame region -- Phase 21's measured scarcity -- is untouched by the split.
+// A zero percentage is the FLOOR and not "no region": the core names' blocks
+// are funded out of the minimum arena, so the region at 0% holds exactly them
+// and has no spare byte at all. A percentage carve adds its share on top and
+// takes those bytes out of the cells and out of nothing else, so the two pools
+// stay priced against each other and the frame region -- Phase 21's measured
+// scarcity -- is untouched by the split.
 static bool TestRegionCarve(void) {
   FeContext* plain = OpenPayloadContext(0);
   CHECK(plain != nullptr);
   const FeArenaStats plain_stats = FeGetArenaStats(plain);
   const size_t plain_cells = plain_stats.total_slots;
   const size_t plain_frames = plain_stats.frame_capacity;
-  CHECK(plain->payload_capacity == 0);
+  const size_t floor_bytes = plain->payload_capacity;
   CHECK(plain->payload_base != nullptr);
+  CHECK(floor_bytes > 0);
+  // Exact, the way the exact-fit arena in test_api.c is exact for cells: what
+  // the floor funds is what opening spent, to the byte.
+  CHECK(plain->payload_used == floor_bytes);
   FeCloseContext(plain);
 
   FeContext* carved = OpenPayloadContext(PayloadArenaPercent);
   CHECK(carved != nullptr);
   const FeArenaStats carved_stats = FeGetArenaStats(carved);
-  CHECK(carved->payload_capacity > 0);
+  CHECK(carved->payload_capacity > floor_bytes);
   CHECK(carved->payload_capacity % FePayloadAlignment == 0);
   CHECK(carved_stats.frame_capacity == plain_frames);
-  // The cells the region cost are the region's own bytes, to within the one
-  // cell the floor division drops.
+  CHECK(carved->payload_used == floor_bytes);
+  // The cells the region cost are the region's DISCRETIONARY bytes, to within
+  // the one cell the floor division drops; the floor itself was never the
+  // cells' to lose.
+  const size_t share = carved->payload_capacity - floor_bytes;
   const size_t lost_cells = plain_cells - carved_stats.total_slots;
-  CHECK(lost_cells >= carved->payload_capacity / sizeof(FeObject));
-  CHECK(lost_cells <= carved->payload_capacity / sizeof(FeObject) + 1);
+  CHECK(lost_cells >= share / sizeof(FeObject));
+  CHECK(lost_cells <= share / sizeof(FeObject) + 1);
   (void)printf(
       "payload_tests: carve %d%%: %zu cells beside %zu payload bytes, against "
-      "%zu cells with no region; frames %zu either way\n",
+      "%zu cells at the %zu-byte floor; frames %zu either way\n",
       (int)PayloadArenaPercent, carved_stats.total_slots,
-      carved->payload_capacity, plain_cells, plain_frames);
+      carved->payload_capacity, plain_cells, floor_bytes, plain_frames);
   FeCloseContext(carved);
   return true;
 }
@@ -176,20 +190,23 @@ static bool TestBumpAllocationOrder(void) {
   if (setjmp(host.jump) != 0) {
     return false;
   }
+  const size_t floor_bytes = context->payload_used;
   FeObject* const first = MakeAggregate(context, 0, 1);
   FeObject* const second = MakeAggregate(context, 0, 7);
   FeObject* const third = MakeAggregate(context, 0, 8);
   FeObject* const fourth = MakeAggregate(context, 0, 9);
   const size_t block = sizeof(FePayloadBlock);
-  CHECK(AggregateHandle(first) == ExpectedHandle(0));
-  CHECK(AggregateHandle(second) == ExpectedHandle(block + 8));
-  CHECK(AggregateHandle(third) == ExpectedHandle(2 * (block + 8)));
-  CHECK(AggregateHandle(fourth) == ExpectedHandle(3 * (block + 8)));
+  CHECK(AggregateHandle(first) == ExpectedHandle(floor_bytes));
+  CHECK(AggregateHandle(second) == ExpectedHandle(floor_bytes + block + 8));
+  CHECK(AggregateHandle(third) ==
+        ExpectedHandle(floor_bytes + 2 * (block + 8)));
+  CHECK(AggregateHandle(fourth) ==
+        ExpectedHandle(floor_bytes + 3 * (block + 8)));
   // Every payload starts on an alignment unit, which is what lets one block
   // hold `FeObject*` children without a second alignment rule.
   const unsigned char* const tail = AggregateBytes(context, fourth);
   CHECK((uintptr_t)tail % FePayloadAlignment == 0);
-  CHECK(context->payload_used == 3 * (block + 8) + block + 16);
+  CHECK(context->payload_used == floor_bytes + 3 * (block + 8) + block + 16);
   CHECK(context->payload_peak_used == context->payload_used);
   FeCloseContext(context);
   return true;
@@ -202,12 +219,14 @@ static bool TestBumpAllocationOrder(void) {
 static bool TestExactFitAndOneByteOver(void) {
   FeContext* context = OpenPayloadContext(PayloadArenaPercent);
   CHECK(context != nullptr);
-  const size_t room = context->payload_capacity - sizeof(FePayloadBlock);
+  const size_t floor_bytes = context->payload_used;
+  const size_t room =
+      context->payload_capacity - floor_bytes - sizeof(FePayloadBlock);
   if (setjmp(host.jump) != 0) {
     return false;
   }
   FeObject* const exact = MakeAggregate(context, 0, room);
-  CHECK(AggregateHandle(exact) == ExpectedHandle(0));
+  CHECK(AggregateHandle(exact) == ExpectedHandle(floor_bytes));
   CHECK(context->payload_used == context->payload_capacity);
   CHECK(context->payload_allocation_failures == 0);
   FeCloseContext(context);
@@ -221,8 +240,9 @@ static bool TestExactFitAndOneByteOver(void) {
   CHECK(host.raised);
   CHECK(ConditionIs(context, "(payload-exhaustion)"));
   CHECK(context->payload_allocation_failures == 1);
-  // Refused, not half-done: nothing at all was taken from the region.
-  CHECK(context->payload_used == 0);
+  // Refused, not half-done: nothing beyond the floor was taken from the
+  // region. The condition object the raise built is cells, not payload.
+  CHECK(context->payload_used == floor_bytes);
   FeCloseContext(context);
   return true;
 }
@@ -257,38 +277,28 @@ static bool PartitionsAreEqual(Partition a, Partition b) {
 // arena size so the numbers are the ones the kg side of this phase is read
 // against.
 //
-// Two contracts, and they are deliberately different. Default options -- a
-// null record or a zero-initialized one -- ask Fe for Fe's split, which is
-// `FeDefaultPayloadPercent`. `FeOpenContext` and `FePayloadPercentNone` ask
-// for no region at all, which is byte for byte the partition every host had
-// before this phase.
+// ONE contract since Phase 25, where there were two. Every entry point carves
+// a region, because a symbol's name is a string and a string's bytes live in
+// one: `FeOpenContext`, a null options record and a zero-initialized one are
+// all the same request -- Fe's own split, `FeDefaultPayloadPercent` -- and the
+// only thing a host can say instead is a different percentage of the surplus.
 static bool TestOpenOptionsPartition(void) {
   unsigned char* const storage = malloc(HostArenaSize);
   CHECK(storage != nullptr);
 
   FeContext* plain = FeOpenContext(storage, HostArenaSize);
   CHECK(plain != nullptr);
-  const Partition uncarved = PartitionOf(plain);
-  const void* const uncarved_objects = plain->objects;
-  CHECK(uncarved.payload_bytes == 0);
+  const Partition carved = PartitionOf(plain);
+  const size_t floor_bytes = plain->payload_used;
+  CHECK(carved.payload_bytes > floor_bytes);
   FeCloseContext(plain);
 
-  // Byte for byte, not merely "also zero": the objects start at the same
-  // address, so the cells the region would have taken were never moved.
-  const FeOpenOptions none = {.payload_percent = FePayloadPercentNone};
-  FeContext* explicit_none =
-      FeOpenContextWithOptions(storage, HostArenaSize, &none);
-  CHECK(explicit_none != nullptr);
-  CHECK(PartitionsAreEqual(PartitionOf(explicit_none), uncarved));
-  CHECK(explicit_none->objects == uncarved_objects);
-  FeCloseContext(explicit_none);
-
   // A null record and a zero-initialized one are the same request, and it is
-  // the ADR's split.
+  // what `FeOpenContext` asks for too.
   FeContext* implied =
       FeOpenContextWithOptions(storage, HostArenaSize, nullptr);
   CHECK(implied != nullptr);
-  const Partition carved = PartitionOf(implied);
+  CHECK(PartitionsAreEqual(PartitionOf(implied), carved));
   FeCloseContext(implied);
 
   const FeOpenOptions defaults = {0};
@@ -306,26 +316,38 @@ static bool TestOpenOptionsPartition(void) {
   FeCloseContext(explicit_default);
 
   // The measured split at kg's arena, asserted exactly rather than as a
-  // relationship: these two numbers are what the Phase 22 ADR predicted for a
-  // 1 MiB arena, and a change to either is a change to the budget every host
-  // sizing decision in this program was made against.
-  CHECK(uncarved.cells == 56152);
-  CHECK(carved.cells == 42358);
-  CHECK(carved.payload_bytes == 220704);
-  // Frames are funded before the split, so they do not notice it.
-  CHECK(carved.frames == uncarved.frames);
-  // The region cost cells and nothing else: what left the cell pool is what
-  // the region holds, to within the one cell the floor division drops.
-  const size_t lost = uncarved.cells - carved.cells;
-  CHECK(lost >= carved.payload_bytes / sizeof(FeObject));
-  CHECK(lost <= carved.payload_bytes / sizeof(FeObject) + 1);
+  // relationship: a change to either number is a change to the budget every
+  // host sizing decision in this program was made against.
+  CHECK(carved.cells == 42059);
+  CHECK(carved.payload_bytes == 225928);
+
+  // A smaller share moves the same bytes back the other way, and the frame
+  // region -- funded before the split -- notices neither.
+  const FeOpenOptions tenth = {.payload_percent = 10};
+  FeContext* small_context =
+      FeOpenContextWithOptions(storage, HostArenaSize, &tenth);
+  CHECK(small_context != nullptr);
+  const Partition small = PartitionOf(small_context);
+  FeCloseContext(small_context);
+  CHECK(small.payload_bytes < carved.payload_bytes);
+  CHECK(small.cells > carved.cells);
+  CHECK(small.frames == carved.frames);
+  // ...but never below the floor, which is not this percentage's to withhold.
+  CHECK(small.payload_bytes > floor_bytes);
+  // The region cost cells and nothing else: what left the cell pool is the
+  // share the two partitions differ by, to within the one cell the floor
+  // division drops.
+  const size_t lost = small.cells - carved.cells;
+  const size_t share = carved.payload_bytes - small.payload_bytes;
+  CHECK(lost >= share / sizeof(FeObject));
+  CHECK(lost <= share / sizeof(FeObject) + 1);
 
   // Out of range is REFUSED, never clamped: a host that asks for a partition
   // that does not exist gets a null context and finds out, rather than a
   // context divided by a number it did not choose.
   const FeOpenOptions over = {.payload_percent = 101};
   CHECK(FeOpenContextWithOptions(storage, HostArenaSize, &over) == nullptr);
-  const FeOpenOptions under = {.payload_percent = FePayloadPercentNone - 1};
+  const FeOpenOptions under = {.payload_percent = -1};
   CHECK(FeOpenContextWithOptions(storage, HostArenaSize, &under) == nullptr);
   // The edge inside the range opens, and is honest about what it leaves: a
   // whole-arena carve is a context with the core objects and nothing spare,
@@ -336,7 +358,7 @@ static bool TestOpenOptionsPartition(void) {
   const Partition all_payload = PartitionOf(full);
   CHECK(all_payload.payload_bytes > carved.payload_bytes);
   CHECK(all_payload.cells < carved.cells);
-  CHECK(all_payload.frames == uncarved.frames);
+  CHECK(all_payload.frames == carved.frames);
   FeCloseContext(full);
 
   // The arena's own requirements are unchanged by the new entry point.
@@ -345,10 +367,10 @@ static bool TestOpenOptionsPartition(void) {
         nullptr);
 
   (void)printf(
-      "payload_tests: %d KiB arena: %zu cells with no region, %zu cells "
-      "beside %zu payload bytes at the default %d%%; frames %zu either way\n",
-      (int)(HostArenaSize / 1024), uncarved.cells, carved.cells,
-      carved.payload_bytes, (int)FeDefaultPayloadPercent, uncarved.frames);
+      "payload_tests: %d KiB arena: %zu cells beside %zu payload bytes at the "
+      "default %d%%, of which %zu are the core names' floor; frames %zu\n",
+      (int)(HostArenaSize / 1024), carved.cells, carved.payload_bytes,
+      (int)FeDefaultPayloadPercent, floor_bytes, carved.frames);
   free(storage);
   return true;
 }
@@ -364,10 +386,12 @@ static bool TestArenaStatsReportsPayload(void) {
     return false;
   }
   FeArenaStats stats = FeGetArenaStats(context);
+  const size_t floor_bytes = context->payload_used;
   CHECK(stats.payload_capacity_bytes == context->payload_capacity);
   CHECK(stats.payload_capacity_bytes > 0);
-  CHECK(stats.payload_live_bytes == 0);
-  CHECK(stats.payload_peak_bytes == 0);
+  // The core names, and nothing this case allocated yet.
+  CHECK(stats.payload_live_bytes == floor_bytes);
+  CHECK(stats.payload_peak_bytes == floor_bytes);
   CHECK(stats.payload_compaction_count == 0);
   CHECK(stats.payload_allocation_failures == 0);
 
@@ -382,8 +406,8 @@ static bool TestArenaStatsReportsPayload(void) {
     survivor = i == 0 ? owner : survivor;
   }
   stats = FeGetArenaStats(context);
-  CHECK(stats.payload_live_bytes == Blocks * each);
-  CHECK(stats.payload_peak_bytes == Blocks * each);
+  CHECK(stats.payload_live_bytes == floor_bytes + Blocks * each);
+  CHECK(stats.payload_peak_bytes == floor_bytes + Blocks * each);
   CHECK(stats.payload_compaction_count == 0);
 
   // Three of them die. The high-water mark does not follow the live bytes
@@ -393,8 +417,8 @@ static bool TestArenaStatsReportsPayload(void) {
   FePushGC(context, survivor);
   FeCollectGarbage(context);
   stats = FeGetArenaStats(context);
-  CHECK(stats.payload_live_bytes == each);
-  CHECK(stats.payload_peak_bytes == Blocks * each);
+  CHECK(stats.payload_live_bytes == floor_bytes + each);
+  CHECK(stats.payload_peak_bytes == floor_bytes + Blocks * each);
   CHECK(stats.payload_compaction_count == 1);
   CHECK(stats.payload_allocation_failures == 0);
 
@@ -411,17 +435,18 @@ static bool TestArenaStatsReportsPayload(void) {
   CHECK(stats.payload_capacity_bytes == capacity);
   FeCloseContext(context);
 
-  // Every one of them is zero in a context with no region, which is the
-  // reading kg's prelude census pins until Phase 25 gives it an owner.
-  FeContext* uncarved = OpenPayloadContext(0);
-  CHECK(uncarved != nullptr);
-  stats = FeGetArenaStats(uncarved);
-  CHECK(stats.payload_capacity_bytes == 0);
-  CHECK(stats.payload_live_bytes == 0);
-  CHECK(stats.payload_peak_bytes == 0);
+  // At the floor the same five read the floor and nothing else: a full
+  // region that has never had to compact and has never refused anything,
+  // which is the reading kg's prelude census pins.
+  FeContext* floor_only = OpenPayloadContext(0);
+  CHECK(floor_only != nullptr);
+  stats = FeGetArenaStats(floor_only);
+  CHECK(stats.payload_capacity_bytes == floor_only->payload_used);
+  CHECK(stats.payload_live_bytes == stats.payload_capacity_bytes);
+  CHECK(stats.payload_peak_bytes == stats.payload_capacity_bytes);
   CHECK(stats.payload_compaction_count == 0);
   CHECK(stats.payload_allocation_failures == 0);
-  FeCloseContext(uncarved);
+  FeCloseContext(floor_only);
   return true;
 }
 
@@ -471,10 +496,15 @@ static bool TestReplacedBlockIsReclaimed(void) {
     return false;
   }
   const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
   FeObject* const owner = MakeAggregate(context, 0, 64);
-  const size_t one_block = context->payload_used;
+  const size_t one_block = context->payload_used - floor_bytes;
+  memcpy(AggregateBytes(context, owner), "first", 6);
   PublishPayload(context, owner, 0, 64);
-  CHECK(context->payload_used == 2 * one_block);
+  CHECK(context->payload_used == floor_bytes + 2 * one_block);
+  // The replacement starts as a copy of what it replaces, which is what makes
+  // a growing string a growing string rather than a new empty one.
+  CHECK(strcmp((const char*)AggregateBytes(context, owner), "first") == 0);
   memcpy(AggregateBytes(context, owner), "second", 7);
 
   FeRestoreGC(context, base);
@@ -483,8 +513,8 @@ static bool TestReplacedBlockIsReclaimed(void) {
   // One block's worth left, and the owner names the survivor -- which now sits
   // at the region's base, because compaction preserves order and the block
   // before it died.
-  CHECK(context->payload_used == one_block);
-  CHECK(AggregateHandle(owner) == ExpectedHandle(0));
+  CHECK(context->payload_used == floor_bytes + one_block);
+  CHECK(AggregateHandle(owner) == ExpectedHandle(floor_bytes));
   CHECK(strcmp((const char*)AggregateBytes(context, owner), "second") == 0);
   CHECK(context->payload_compaction_count == 1);
   FeCloseContext(context);
@@ -506,7 +536,8 @@ static bool TestCompactionAddressesAreDeterministic(void) {
   FeObject* blocks[5] = {nullptr};
   const size_t block = sizeof(FePayloadBlock);
   const size_t base = FeSaveGC(context);
-  size_t offset = 0;
+  size_t offset = context->payload_used;
+  const size_t floor_bytes = offset;
   for (size_t i = 0; i < 5; i++) {
     blocks[i] = MakeAggregate(context, 0, sizes[i]);
     CHECK(AggregateHandle(blocks[i]) == ExpectedHandle(offset));
@@ -523,11 +554,13 @@ static bool TestCompactionAddressesAreDeterministic(void) {
   FePushGC(context, blocks[4]);
   FeCollectGarbage(context);
 
-  CHECK(context->payload_used == 3 * block + sizes[0] + sizes[2] + sizes[4]);
-  CHECK(AggregateHandle(blocks[0]) == ExpectedHandle(0));
-  CHECK(AggregateHandle(blocks[2]) == ExpectedHandle(block + sizes[0]));
+  CHECK(context->payload_used ==
+        floor_bytes + 3 * block + sizes[0] + sizes[2] + sizes[4]);
+  CHECK(AggregateHandle(blocks[0]) == ExpectedHandle(floor_bytes));
+  CHECK(AggregateHandle(blocks[2]) ==
+        ExpectedHandle(floor_bytes + block + sizes[0]));
   CHECK(AggregateHandle(blocks[4]) ==
-        ExpectedHandle(2 * block + sizes[0] + sizes[2]));
+        ExpectedHandle(floor_bytes + 2 * block + sizes[0] + sizes[2]));
   // ...and their bytes came with them.
   for (size_t i = 0; i < sizes[2]; i++) {
     CHECK(AggregateBytes(context, blocks[2])[i] == 'c');
@@ -550,6 +583,7 @@ static bool TestSlidingOverlap(void) {
   }
   enum { Length = 128 };
   const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
   (void)MakeAggregate(context, 0, 8);
   FeObject* const survivor = MakeAggregate(context, 0, Length);
   for (size_t i = 0; i < Length; i++) {
@@ -565,7 +599,7 @@ static bool TestSlidingOverlap(void) {
   FePushGC(context, survivor);
   FeCollectGarbage(context);
 
-  CHECK(AggregateHandle(survivor) == ExpectedHandle(0));
+  CHECK(AggregateHandle(survivor) == ExpectedHandle(floor_bytes));
   for (size_t i = 0; i < Length; i++) {
     CHECK(AggregateBytes(context, survivor)[i] == (unsigned char)(i + 1));
   }
@@ -587,6 +621,7 @@ static bool TestLiveDeadMixture(void) {
   enum { Count = 300, Middle = Count / 2 };
   FeObject* survivors[3] = {nullptr, nullptr, nullptr};
   const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
   size_t first_index = 0;
   size_t last_index = 0;
   for (size_t i = 0; i < Count; i++) {
@@ -610,9 +645,10 @@ static bool TestLiveDeadMixture(void) {
   FeCollectGarbage(context);
 
   const size_t each = sizeof(FePayloadBlock) + 16 + sizeof(FeObject*);
-  CHECK(context->payload_used == 3 * each);
+  CHECK(context->payload_used == floor_bytes + 3 * each);
   for (size_t i = 0; i < 3; i++) {
-    CHECK(AggregateHandle(survivors[i]) == ExpectedHandle(i * each));
+    CHECK(AggregateHandle(survivors[i]) ==
+          ExpectedHandle(floor_bytes + i * each));
   }
   CHECK(FeToInteger(context, AggregateChild(context, survivors[0], 0)) == 0);
   CHECK(FeToInteger(context, AggregateChild(context, survivors[1], 0)) ==
@@ -672,9 +708,7 @@ static bool ExpectCaught(FeContext* context,
 
 // `(payload-exhaustion)` is a condition in its own right: catchable by its own
 // name, catchable by `error` because that is its parent, and readable as an
-// object. It is release code that no release program can reach -- nothing owns
-// a payload before Phase 25 -- which is exactly why it is proved here and not
-// by a script.
+// object.
 static bool TestPayloadExhaustionIsCatchable(void) {
   FeContext* context = OpenPayloadContext(PayloadArenaPercent);
   CHECK(context != nullptr);
@@ -701,7 +735,14 @@ static bool TestPayloadExhaustionIsCatchable(void) {
                      "(t (quote outer)))",
                      "outer"));
   CHECK(context->payload_allocation_failures == 4);
-  CHECK(context->payload_used == 0);
+  // A refused request takes NOTHING: asked a fifth time, with a source whose
+  // every symbol is already interned so that reading it publishes no block of
+  // its own, the region is exactly where it was.
+  const size_t before = context->payload_used;
+  CHECK(ExpectCaught(context, "(condition-case e (overflow-payload) (t e))",
+                     "(payload-exhaustion)"));
+  CHECK(context->payload_allocation_failures == 5);
+  CHECK(context->payload_used == before);
   FeCloseContext(context);
   return true;
 }
@@ -717,6 +758,7 @@ static bool TestPayloadExhaustionDegrades(void) {
   if (setjmp(host.jump) != 0) {
     return false;
   }
+  const size_t floor_bytes = context->payload_used;
   FeObject* const owner = MakeAggregate(context, 0, 8);
   // Fill the cell pool with a list nothing can reclaim, so the collection
   // inside the raise path frees nothing and `ArenaCanAllocate` answers false.
@@ -738,7 +780,7 @@ static bool TestPayloadExhaustionDegrades(void) {
   CHECK(strcmp(host.message, "payload region exhausted") == 0);
   CHECK(ConditionIs(context, "(arena-exhaustion)"));
   // A refused publish changes nothing: the owner still names the block it had.
-  CHECK(AggregateHandle(owner) == ExpectedHandle(0));
+  CHECK(AggregateHandle(owner) == ExpectedHandle(floor_bytes));
   FeCloseContext(context);
   return true;
 }
@@ -756,6 +798,7 @@ static bool TestFailureInjectionAtEveryAllocation(void) {
     return false;
   }
   const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
   FeObject* list = FeNil(context);
   while (FeGetArenaStats(context).free_slots > 0) {
     FeRestoreGC(context, base);
@@ -769,7 +812,7 @@ static bool TestFailureInjectionAtEveryAllocation(void) {
   CHECK(host.raised);
   CHECK(strcmp(host.message, "out of memory") == 0);
   CHECK(ConditionIs(context, "(arena-exhaustion)"));
-  CHECK(context->payload_used == 0);
+  CHECK(context->payload_used == floor_bytes);
   FeCloseContext(context);
 
   // Site 2: THE BLOCK. The cell was taken and the retype ran, so the raise
@@ -785,6 +828,7 @@ static bool TestFailureInjectionAtEveryAllocation(void) {
     return false;
   }
   const size_t checkpoint = FeSaveGC(context);
+  const size_t block_floor = context->payload_used;
   size_t free_after[2] = {0, 0};
   for (size_t attempt = 0; attempt < 2; attempt++) {
     if (setjmp(host.jump) == 0) {
@@ -793,7 +837,7 @@ static bool TestFailureInjectionAtEveryAllocation(void) {
     }
     CHECK(host.raised);
     CHECK(ConditionIs(context, "(payload-exhaustion)"));
-    CHECK(context->payload_used == 0);
+    CHECK(context->payload_used == block_floor);
     FeRestoreGC(context, checkpoint);
     FeCollectGarbage(context);
     free_after[attempt] = FeGetArenaStats(context).free_slots;
@@ -945,6 +989,13 @@ static size_t VectorBlockBytes(size_t length) {
   return sizeof(FePayloadBlock) + length * sizeof(FeObject*);
 }
 
+// The same for a STRING of LENGTH bytes (Phase 25), whose block is all bytes
+// where a vector's is all children.
+static size_t StringBlockBytes(size_t length) {
+  return sizeof(FePayloadBlock) + (length + FePayloadAlignment - 1) /
+                                      FePayloadAlignment * FePayloadAlignment;
+}
+
 // Vectors and byte-bearing aggregates in one region, compacted together. This
 // is 23.1's determinism case with a real Lisp type among the blocks: the
 // survivors slide down in ALLOCATION ORDER, so their handles are the offsets
@@ -961,6 +1012,7 @@ static bool TestVectorCompactionIsDeterministic(void) {
     return false;
   }
   const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
   // Interleaved on purpose: a compactor that handled one owner type and not
   // the other would still pass a test whose region held only one of them.
   FeObject* const first = FeMakeVector(context, 2);
@@ -978,13 +1030,18 @@ static bool TestVectorCompactionIsDeterministic(void) {
   const size_t aggregate24 = sizeof(FePayloadBlock) + 24;
   const size_t vector5 = VectorBlockBytes(5);
   const size_t aggregate1 = sizeof(FePayloadBlock) + 16;
-  CHECK(PAYLOAD(first) == ExpectedHandle(0));
-  CHECK(AggregateHandle(spacer) == ExpectedHandle(vector2));
-  CHECK(PAYLOAD(second) == ExpectedHandle(vector2 + aggregate24));
+  // The two strings this case interleaves without meaning to: `kept`'s symbol
+  // name and the string `tail`, both published after the five owners above
+  // and both alive at the end. Phase 25 is why they are blocks at all.
+  const size_t kept_name = StringBlockBytes(strlen("kept"));
+  const size_t tail_text = StringBlockBytes(strlen("tail"));
+  CHECK(PAYLOAD(first) == ExpectedHandle(floor_bytes));
+  CHECK(AggregateHandle(spacer) == ExpectedHandle(floor_bytes + vector2));
+  CHECK(PAYLOAD(second) == ExpectedHandle(floor_bytes + vector2 + aggregate24));
   CHECK(AggregateHandle(doomed) ==
-        ExpectedHandle(vector2 + aggregate24 + vector5));
-  CHECK(PAYLOAD(third) ==
-        ExpectedHandle(vector2 + aggregate24 + vector5 + aggregate1));
+        ExpectedHandle(floor_bytes + vector2 + aggregate24 + vector5));
+  CHECK(PAYLOAD(third) == ExpectedHandle(floor_bytes + vector2 + aggregate24 +
+                                         vector5 + aggregate1));
 
   // Drop `spacer` and `doomed`; the three vectors survive, and `second`
   // survives only through `third`'s element, which is the payload arm
@@ -994,10 +1051,12 @@ static bool TestVectorCompactionIsDeterministic(void) {
   FePushGC(context, third);
   FeCollectGarbage(context);
 
-  CHECK(PAYLOAD(first) == ExpectedHandle(0));
-  CHECK(PAYLOAD(second) == ExpectedHandle(vector2));
-  CHECK(PAYLOAD(third) == ExpectedHandle(vector2 + vector5));
-  CHECK(context->payload_used == vector2 + vector5 + VectorBlockBytes(1));
+  CHECK(PAYLOAD(first) == ExpectedHandle(floor_bytes));
+  CHECK(PAYLOAD(second) == ExpectedHandle(floor_bytes + vector2));
+  CHECK(PAYLOAD(third) == ExpectedHandle(floor_bytes + vector2 + vector5));
+  CHECK(context->payload_used == floor_bytes + vector2 + vector5 +
+                                     VectorBlockBytes(1) + kept_name +
+                                     tail_text);
   // The contents came with the move.
   CHECK(FeVectorRef(context, first, 0) == FeMakeSymbol(context, "kept"));
   CHECK(FeToInteger(context, FeVectorRef(context, first, 1)) == 7);
@@ -1029,10 +1088,13 @@ static bool TestVectorExhaustionLeavesNothingBehind(void) {
     return false;
   }
   const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
   FeObject* const survivor = FeMakeVector(context, 3);
   FeVectorSet(context, survivor, 1, FeMakeSymbol(context, "alive"));
+  // The vector, and the name block interning `alive` published beside it.
+  const size_t live = VectorBlockBytes(3) + StringBlockBytes(strlen("alive"));
   const FeArenaStats before = FeGetArenaStats(context);
-  CHECK(before.payload_live_bytes == VectorBlockBytes(3));
+  CHECK(before.payload_live_bytes == floor_bytes + live);
   CHECK(before.payload_allocation_failures == 0);
 
   // One element more than the whole region could hold even if it were empty.
@@ -1056,7 +1118,7 @@ static bool TestVectorExhaustionLeavesNothingBehind(void) {
   FeRestoreGC(context, base);
   FePushGC(context, survivor);
   FeCollectGarbage(context);
-  CHECK(FeGetArenaStats(context).payload_live_bytes == VectorBlockBytes(3));
+  CHECK(FeGetArenaStats(context).payload_live_bytes == floor_bytes + live);
   CHECK(FeVectorRef(context, survivor, 1) == FeMakeSymbol(context, "alive"));
   FeCloseContext(context);
   free(storage);
@@ -1083,6 +1145,9 @@ static bool TestVectorCostTable(void) {
     }
     const FeArenaStats opened = FeGetArenaStats(context);
     const size_t cells_before = opened.total_slots - opened.free_slots;
+    // What the core names already hold, so the numbers below are the
+    // vector's own and not the interpreter's.
+    const size_t floor_bytes = opened.payload_live_bytes;
 
     // Route 1: the storage layer alone.
     FeObject* const direct = FeMakeVector(context, n);
@@ -1090,8 +1155,8 @@ static bool TestVectorCostTable(void) {
     const size_t direct_cells =
         (made.total_slots - made.free_slots) - cells_before;
     CHECK(direct_cells == 1);
-    CHECK(made.payload_live_bytes == VectorBlockBytes(n));
-    CHECK(made.payload_peak_bytes == VectorBlockBytes(n));
+    CHECK(made.payload_live_bytes == floor_bytes + VectorBlockBytes(n));
+    CHECK(made.payload_peak_bytes == floor_bytes + VectorBlockBytes(n));
     CHECK(FeVectorLength(context, direct) == n);
     FeCloseContext(context);
 
@@ -1124,10 +1189,11 @@ static bool TestVectorCostTable(void) {
         "%zu\n",
         n, direct_cells, VectorBlockBytes(n),
         (after.total_slots - after.free_slots) - fresh_cells,
-        after.peak_live_objects - fresh_cells, after.payload_peak_bytes);
+        after.peak_live_objects - fresh_cells,
+        after.payload_peak_bytes - floor_bytes);
     // The payload cost is the block and nothing else, whichever route built
     // it: a literal's transient garbage is CELLS, never region bytes.
-    CHECK(after.payload_peak_bytes == VectorBlockBytes(n));
+    CHECK(after.payload_peak_bytes == floor_bytes + VectorBlockBytes(n));
     FeCloseContext(context);
     free(storage);
   }

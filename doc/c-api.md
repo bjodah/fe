@@ -14,7 +14,15 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 14 is the
+types, and callback signatures declared in `fe.h`; API version 15 is the
+string cut: a string is a stable header with a byte length over payload bytes
+that may contain NUL, so `FeMakeStringBytes` builds one from a buffer and a
+length, `FeStringBytes` reads the length and the bytes back in one call,
+`FeWriteFn`'s allocation contract is stated for the first time (a write
+callback MAY allocate), and `FeOpenContext` now carves the payload region it
+used to leave at zero -- `FePayloadPercentNone` is REMOVED, which is the ABI
+break in this version, because a symbol's name is a string and a context with
+no region cannot finish opening; API version 14 is the
 vector cut, and unlike every version since 6 it is a real ABI break --
 `FeTVector` is inserted into the `FeType` enumeration immediately after
 `FeTString`, renumbering `FeTPtr` and the three `FeTFex*` extension slots --
@@ -36,6 +44,12 @@ input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
 API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+language version 17 is the string cut: `"a\0b"` is a three-byte string where
+the escape was a read error and it prints as `"a\000b"`, which reads back to
+the same three bytes; `(aset STRING INDEX BYTE)` writes a byte in place and
+answers it, where every `aset` on a string was refused by name, and a value
+above 255 is refused with Emacs' own sentence; `length`, `aref` and `elt`
+still answer BYTES for a string, which is unchanged;
 language version 16 is the vector cut: `[...]` reader and writer syntax,
 `vector`/`make-vector`/`vectorp`/`aref`/`aset`/`vconcat`, `length` and `elt`
 generic over lists, strings and vectors, and `end-of-file` in the condition
@@ -76,9 +90,18 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 13);
-static_assert(FE_LANGUAGE_VERSION == 15);
+static_assert(FE_API_VERSION == 15);
+static_assert(FE_LANGUAGE_VERSION == 17);
 ```
+
+Fe 21.0 moves `FE_API_VERSION` 14 -> 15 and `FE_LANGUAGE_VERSION` 16 -> 17
+together: the string cut is both a C break and a language one. What changed
+underneath is the representation -- a string was a cdr chain of cells holding
+seven bytes each and terminated by a NUL, and is now one object carrying a
+byte length over bytes in the payload region -- and everything above follows
+from a string having a length instead of a terminator. The C removals are
+`FePayloadPercentNone` and, with it, `FeOpenContext`'s no-region partition;
+nothing else is removed and no other declaration changes meaning.
 
 Fe 19.0 moves `FE_API_VERSION` 12 -> 13 and leaves `FE_LANGUAGE_VERSION` at
 15: the payload region's host surface is a C contract with no language
@@ -442,35 +465,39 @@ host that does not want it. A null `options` selects every default.
 
 For `payload_percent` the values are: `FeDefaultPayloadPercent` (0, and
 therefore what a zero-initialized record asks for) for Fe's own split of the
-arena, which is 25% of the bytes left once the frame region is funded;
-`FePayloadPercentNone` for no payload region at all; and 1 to 100 for exactly
-that percentage. Anything else -- above 100, or below `FePayloadPercentNone`
--- IS REFUSED, and `FeOpenContextWithOptions` returns null exactly as it does
-for a null arena or one below `FeMinimumArenaSize()`. It is never clamped: a
-clamp would hand back a context partitioned to a number the host did not
-choose, with no way to find out.
+arena, which is 25% of the bytes left once the frame region is funded; and 1
+to 100 for exactly that percentage. Anything else -- negative, or above 100 --
+IS REFUSED, and `FeOpenContextWithOptions` returns null exactly as it does for
+a null arena or one below `FeMinimumArenaSize()`. It is never clamped: a clamp
+would hand back a context partitioned to a number the host did not choose,
+with no way to find out.
 
-`FeOpenContext(ptr, size)` is `FeOpenContextWithOptions` with
-`FePayloadPercentNone`, and that is deliberate rather than incidental: the
-entry point that cannot express an opinion must not acquire one, so it opens
-byte for byte the partition it always has. A host that wants Fe's split asks
-for it.
+`FeOpenContext(ptr, size)` is `FeOpenContextWithOptions` with default options.
+It carved NO region until FE_API_VERSION 15 and `FePayloadPercentNone` was the
+way to ask for that; both went with the string cut, because a symbol's name is
+a string and a string's bytes live in the region -- a context without one
+cannot finish opening, let alone run a program.
+
+What the percentage divides is the SURPLUS. The region has a floor that is not
+the percentage's to withhold: the blocks the interpreter's own names and
+seeded messages occupy, which `FeMinimumArenaSize()` funds beside the core
+cells. A context opened at exactly the minimum has that floor and no spare
+byte, in either pool.
 
 The carve is priced against the CELLS and never against the frames: frame
 capacity is identical at every percentage, because the frame region is funded
-first. At a 1 MiB arena the two ends are 56145 cells with no region, and
-42335 cells beside 220952 payload bytes at the default 25%, with a 1086-frame
-capacity either way.
+first. At a 1 MiB arena the default 25% gives 42059 cells beside a
+225928-byte region, of which 6232 bytes are the floor, with a 1081-frame
+capacity at every percentage.
 
 `FeArenaStats` reports the region in five fields: `payload_capacity_bytes`
 (what the carve produced -- the denominator the rest are read against),
 `payload_live_bytes`, `payload_peak_bytes` (the high-water mark, which does
 not follow the live bytes back down), `payload_compaction_count` and
 `payload_allocation_failures` (requests the region could not meet even after
-a collection, i.e. `(payload-exhaustion)` raises). All five are zero in a
-context opened by `FeOpenContext`, and all but the first are zero even in a
-carved one until a Fe type owns a payload, which none does yet: the storage
-exists and the language cannot reach it.
+a collection, i.e. `(payload-exhaustion)` raises). None of them is ever all
+zero any more: every context has a region and every context has blocks in it,
+because a symbol's name is a string.
 
 ### Forcing a collection (FE_API_VERSION 12)
 
@@ -1462,8 +1489,18 @@ and is now load-bearing, since the frame wall assigns `FeCompletionBudget`.
 
 `FeWrite()` renders an object as Fe syntax one character at a time through a
 caller-supplied `FeWriteFn`; `FeWriteFile()` is the `FILE*` wrapper. `qt`
-selects quoted rendering, in which strings are surrounded by `"` and embedded
-`"` characters are escaped.
+selects quoted rendering, in which strings are surrounded by `"` and three
+bytes inside one are escaped: `"`, `\` and NUL (as `\000`, in three digits so
+that a digit after it stays a digit).
+
+A WRITE CALLBACK MAY ALLOCATE Fe objects, and may raise. That is a promise
+rather than an absence of one, and it is the opposite of the mark callback's
+contract (`FeSetMarkFn`, which forbids both): the printer holds no address
+into object storage across a callback, deriving a string's bytes or a
+vector's elements again after every call, precisely because a host's sink is
+where a host does host things -- kg's grows a buffer with `realloc` and can
+run out of memory. A raise from inside a callback leaves the printer by
+`longjmp`, which is an exit and not a half-written object.
 
 Rendering is bounded, and always terminates:
 
@@ -1509,6 +1546,12 @@ polls its interrupt callback, so printing a large object answers a host's
 cancellation the way evaluating one does. `FeWriteFn` returns `void`, so a
 failing write callback cannot report itself; `FeWriteFile()` correspondingly
 does not detect `fputc` failures.
+
+The writer's NUL escape is a printed-form divergence from Emacs, which emits
+the byte raw, and it is deliberate: `FeReadFn` answers one `char` and spells
+end of input as 0, so a raw NUL in the input is where the reader stops.
+Escaping it on the way out is what makes print-then-read-back give the same
+string, embedded NULs included.
 
 `FeToString()` renders into a caller-supplied buffer:
 
@@ -1601,33 +1644,43 @@ therefore takes the header, derives the storage address immediately before
 using it, and lets it die there. A host that held such an address across any
 Fe allocation would be reading whatever slid into its place.
 
-A vector needs a payload region, and `FeOpenContext()` deliberately carves
-none (see "The payload region" above). A context opened through it raises
-`(payload-exhaustion)` for `FeMakeVector` at any length, zero included, since
-even an empty vector publishes a block header; open with
-`FeOpenContextWithOptions()` -- a null `options` selects Fe's own split -- to
-get one. The standalone interpreter in `main.c` does exactly that, and is the
-worked example.
+Every context has a payload region (see "The payload region" above), so
+`FeMakeVector` needs nothing arranged first. What it can still meet is the
+region's edge: a vector the region cannot hold raises `(payload-exhaustion)`,
+which is a catchable condition and not a crash, and a host that wants more
+room for one asks for a larger `payload_percent`.
 
-### Extracting String And Symbol Bytes
+### Building And Extracting String Bytes
 
-`FeStringByteLength()` accepts a string or symbol and returns the exact number
-of stored text bytes. `FeCopyStringBytes()` accepts the same types and copies
-those bytes without quoting, escaping, serialization, or a trailing NUL. A
-buffer whose size is exactly the reported length succeeds. If the buffer is
-short, or is null for a non-empty value, the function returns `false` without
-writing anything. Other object types raise an `expected string or symbol`
-type error.
+A string is a stable `FeObject *` header carrying a byte LENGTH, over payload
+bytes that may contain NUL and are not terminated (FE_API_VERSION 15). The
+bytes live in the region the collector compacts, so no function below hands
+one back: every one of them copies into a buffer the CALLER owns, which is
+the same rule the vector accessors follow and for the same reason.
 
-The extraction APIs are byte-counted and walk every chained string cell; they
-do not have `FeToString()`'s fixed-buffer serialization semantics.
-`FeToString()` renders any object as Fe syntax, including string quoting and
-escaping, and its destination may truncate; it is for display, not extracting
-host data. Fe source still rejects embedded NUL bytes, and `FeMakeString()`
-accepts a NUL-terminated C string, so the current public construction paths
-cannot create a string containing an embedded NUL. Extraction nevertheless
-reports and copies the exact stored payload rather than treating its
-destination as a C string.
+`FeMakeStringBytes(ctx, bytes, length)` builds a string of exactly `length`
+bytes from a buffer the caller owns and keeps. `FeMakeString(ctx, str)` is
+that function called with `strlen(str)`, and remains the spelling for the
+ordinary case of a C string -- it is also the only difference between the two:
+one stops at a NUL and the other does not.
+
+`FeStringBytes(ctx, obj, dst, size)` is the one-call read: it answers the
+string's full byte length, and copies the bytes into `dst` when they fit in
+`size`. A caller compares the answer against `size` to learn whether the copy
+happened; a caller that wants only the length passes `(nullptr, 0)`, and `dst`
+may be null only when `size` is zero.
+
+`FeStringByteLength()` and `FeCopyStringBytes()` are the same thing in two
+calls, and are what a caller sizing a heap buffer wants, since it has to ask
+twice anyway: a length pass, then a copy that REFUSES rather than truncating
+(`false`, with nothing written, when the buffer is short or is null for a
+non-empty value). All three accept a string or a symbol -- a symbol's name is
+a string -- and raise an `expected string or symbol` type error for anything
+else.
+
+None of the three has `FeToString()`'s semantics. `FeToString()` renders any
+object as Fe syntax, including string quoting and escaping, and its
+destination may truncate; it is for display, not for extracting host data.
 
 ### Legacy Fex Custom Types
 

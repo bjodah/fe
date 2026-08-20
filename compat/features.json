@@ -1556,14 +1556,14 @@
   {
    "id": "primitive-aset-string",
    "category": "values-and-equality",
-   "status": "divergent",
+   "status": "supported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "vector-aset-on-string"
    ],
-   "kg_test": null,
-   "rationale": "Emacs writes a byte into a string in place and answers the character; a fe string is a chain of seven-byte cells whose shape a byte write has to preserve, so fe refuses by name rather than writing something it cannot promise. Phase 25 moves a string's bytes onto the payload region, which is where this becomes implementable. The non-array answer is Emacs' `(wrong-type-argument arrayp X)' on both sides; only the string arm diverges. source_name is null: `aset' is claimed by primitive-aset.",
+   "kg_test": "fe/test_api.c:TestStringMutation",
+   "rationale": "Closed by Phase 25. A string's bytes live in the payload region now instead of in a chain of seven-byte cells, so a byte write has no chain shape to preserve: `(aset \"ab\" 0 120)' stores the byte and answers 120, which is Emacs' answer. Emacs' unibyte rule is implemented both halves -- a value from 0 to 255 goes in, and a value above 255 is refused with Emacs' own sentence, \"Attempt to store non-byte value into unibyte string\", because storing it would have to WIDEN the string and Emacs will not either. Emacs' other refusal, \"Attempt to replace non-ASCII char in multibyte string\", has no analogue: a fe string is a sequence of bytes, so writing over one byte of a multibyte character is allowed here -- the sequence-length-string-bytes divergence showing through a third name. source_name is null: `aset' is claimed by primitive-aset.",
    "source_name": null
   },
   {
@@ -2380,13 +2380,12 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "reader-string-nul-escape",
     "reader-string-octal-above-byte",
     "reader-string-hex-above-byte"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "A Fe string is a byte string, built by appending at strlen, so a string escape has to land in one byte. Emacs holds a NUL like any other character and reads `\"\\400\"` as U+0100 and `\"\\x41f\"` as U+041F. Before 08C's repair Fe wrote (char)value into that buffer: a decoded NUL was a silent no-op that shifted the rest of the string down -- `(list \"\\0a\" \"a\\0b\")` answered `(\"a\" \"ab\")` -- and anything above 255 was truncated into the same hole. All three are named read errors now, which is the rule the reader already applied to a literal NUL byte in the source text. Matching Emacs instead would need a length-carrying string representation and a multibyte character type, neither of which is funded here. The character-literal forms of the same escapes agree with Emacs exactly (reader-char-hex-greedy, reader-char-octal-nul); it is only a string body that is byte-limited."
+   "rationale": "A fe string is a byte string, so a string escape has to land in one byte: Emacs reads `\"\\400\"` as U+0100 and `\"\\x41f\"` as U+041F, and fe refuses both by name. Matching Emacs would need a multibyte character type, not merely a length. The NUL half of this row closed in Phase 25 and its case moved to reader-string-raw-byte-printing: a length-bearing string holds a stored NUL like any other byte, so `\"a\\0b\"` is three bytes on both sides and only the printed form still differs. The character-literal forms of the same escapes agree with Emacs exactly (reader-char-hex-greedy, reader-char-octal-nul); it is only a string body that is byte-limited."
   },
   {
    "id": "reader-string-escapes",
@@ -2425,11 +2424,12 @@
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "reader-string-raw-byte"
+    "reader-string-raw-byte",
+    "reader-string-nul-escape"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Both sides read `\"\\377\"` to the same thing -- the byte 0377 -- and disagree only in the printed record: Emacs' prin1 re-escapes it as \\377 for a unibyte string, Fe's writer emits the raw byte. A printer divergence, the same class as writer-bounded-output, recorded here because the octal escape family is otherwise compared as supported."
+   "rationale": "Two bytes both dialects READ the same way and PRINT differently, one in each direction. `\"\\377\"` is the byte 0377 on both sides; Emacs' prin1 re-escapes it as \\377 for a unibyte string and fe's writer emits it raw. `\"\\0a\"` is the two bytes NUL and `a` on both sides since Phase 25; Emacs emits the NUL raw between the quotes and fe escapes it as \\000, in three digits so that a digit after it stays a digit. fe escapes that one deliberately and cannot do otherwise: a `FeReadFn` answers one `char` and spells end of input as 0, so a raw NUL is where fe's reader stops -- escaping it is what makes print-then-read-back round-trip a string with a NUL in it, which is Phase 25's first required gate. A printer divergence in both rows, the same class as writer-bounded-output."
   },
   {
    "id": "reader-string-strict-escapes",
@@ -2498,7 +2498,7 @@
     "sequence-length-string-bytes"
    ],
    "kg_test": null,
-   "rationale": "A fe string is a BYTE string -- the reader-string-byte-limit family's rule -- so `length', `aref' and `elt' answer bytes where Emacs' character strings answer characters. ASCII agrees; anything above it does not. Phase 24 is the first time a fe program could ask the question; the representation that would change the answer is Phase 25's. source_name is null: `length' is claimed by primitive-length.",
+   "rationale": "A fe string is a BYTE string -- the reader-string-byte-limit family's rule -- so `length', `aref' and `elt' answer bytes where Emacs' character strings answer characters. ASCII agrees; anything above it does not. Phase 24 is the first time a fe program could ask the question, and Phase 25 -- which moved a string's bytes onto the payload region and gave it an explicit length -- deliberately did NOT change the answer: byte indexing is fe's contract and the character view is kg's prelude wrapper's. What Phase 25 changed is why it is cheap: `length' is a field read now and not a walk. source_name is null: `length' is claimed by primitive-length.",
    "source_name": null
   },
   {

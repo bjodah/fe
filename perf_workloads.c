@@ -61,25 +61,35 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-static_assert(FE_API_VERSION == 14);
-static_assert(FE_LANGUAGE_VERSION == 16);
+static_assert(FE_API_VERSION == 15);
+static_assert(FE_LANGUAGE_VERSION == 17);
 
 // The arena sizes, named rather than spelled at each use so that a record's
 // `arena_bytes` can be read against the reason its workload picked it.
+// Every cell figure below fell by about a quarter in Phase 25 and every byte
+// figure stayed: `FeOpenContext` carves the payload region now, because a
+// symbol's name is a string and a context without one cannot open. `ArenaSmall`
+// is the one size that MOVED, 256 KiB -> 320 KiB, so that the dense-live shape
+// keeps the cell budget it was designed around (11 646 against the 11 910 it
+// had) rather than running out of memory two thirds of the way through its
+// 4000 retained conses. The rest keep their byte sizes: what a byte size buys
+// is exactly what this phase changed, and compensating every one of them would
+// hide it.
 enum {
-  // Collects several times over a few thousand allocations: 2694 cells, of
-  // which a bare context open already holds 892.
+  // Collects several times over a few thousand allocations: 1970 cells, of
+  // which a bare context open already holds 866.
   ArenaTight = 96 * 1024,
   // Still collects under the dense-live shape, but with room for a live set
-  // worth marking: 11910 cells.
-  ArenaSmall = 256 * 1024,
+  // worth marking: 11646 cells.
+  ArenaSmall = 320 * 1024,
   // kg's own configuration, and the one its bench cases are read against:
-  // 56147 cells.
+  // 42059 cells beside a 225 928-byte region.
   ArenaHost = 1024 * 1024,
-  // 233094 cells. 8192 interned symbols do not fit in kg's arena -- a symbol
+  // 174770 cells. 8192 interned symbols do not fit in kg's arena -- a symbol
   // costs its own object, two cells of the name/function/value spine, its
-  // `symbol_list` link and its name chain -- and all three intern tiers use
-  // this one size so that a cross-tier subtraction is apples to apples.
+  // `symbol_list` link and the one string object its name is -- and all three
+  // intern tiers use this one size so that a cross-tier subtraction is apples
+  // to apples.
   ArenaLarge = 4 * 1024 * 1024,
   ArenaMax = ArenaLarge,
 };
@@ -158,6 +168,10 @@ typedef struct WorkloadRun {
   // Symbols interned before the measured region began, for the same reason:
   // the obarray a miss scans contains them too.
   unsigned long long baseline_symbols;
+  // Region bytes held before the measured region began, for the same reason
+  // again. Never zero since Phase 25: a symbol's name is a string, so the
+  // open leaves one block per core name behind.
+  unsigned long long baseline_payload_bytes;
   double seconds;
   // What the workload computed, rendered from C values only -- never through
   // `FeToString`, which would allocate inside the measured region.
@@ -179,13 +193,6 @@ struct Workload {
   // harness does not reset the counters after it. Every other workload,
   // `context-open-close` included, measures its body.
   bool measure_open;
-  // Open through `FeOpenContextWithOptions` with default options -- Fe's own
-  // split, the one kg runs with -- rather than through `FeOpenContext`, which
-  // carves no payload region at all. A workload that needs a payload owner
-  // says so here; everything else keeps the partition the battery was
-  // baselined on, and a false here is a `payload_capacity_bytes` of zero in
-  // the record.
-  bool payload_carve;
   // Runs after the open and before the counters are reset: whatever a
   // workload needs in place but does not want to measure.
   bool (*setup)(const Workload* workload, WorkloadRun* run);
@@ -743,8 +750,11 @@ static bool CheckEnv(const Workload* workload, const WorkloadRun* run) {
 }
 
 // ---------------------------------------------------------------------------
-// 21.2 item 7: strings at 0, 7, 8, 256 and 8192 bytes. 7 and 8 straddle the
-// `StringBufferSize` cell boundary, which is the point of both.
+// 21.2 item 7: strings at 0, 7, 8, 256 and 8192 bytes. 7 and 8 straddled the
+// seven-byte cell boundary of the representation Phase 25 replaced, which was
+// the point of both; they are kept at exactly those lengths because the
+// before/after this phase is read from these five records, and a length that
+// moved would make the comparison a different measurement.
 // ---------------------------------------------------------------------------
 
 static bool BodyString(const Workload* workload, WorkloadRun* run) {
@@ -754,8 +764,8 @@ static bool BodyString(const Workload* workload, WorkloadRun* run) {
   const FeObject* const string = FeMakeString(context, string_source);
   CHECK(FeGetType(string) == FeTString);
   // The answer: the bytes come back, all of them, in order. A string whose
-  // chain stopped being walked correctly would allocate exactly the same
-  // cells and read exactly as plausible.
+  // length or payload address were read wrongly would cost exactly the same
+  // and read exactly as plausible.
   CHECK(FeStringByteLength(context, string) == length);
   CHECK(FeCopyStringBytes(context, string, string_copy, sizeof(string_copy)));
   CHECK(memcmp(string_copy, string_source, length) == 0);
@@ -765,34 +775,35 @@ static bool BodyString(const Workload* workload, WorkloadRun* run) {
   return true;
 }
 
+// The region bytes one string of `length` bytes occupies: the block header
+// plus its bytes rounded to the allocator's alignment. Spelled from the block
+// header rather than from a 32, exactly as `VectorBlockBytes` below is, so
+// that it is the representation being asserted.
+static unsigned long long StringBlockBytes(size_t length) {
+  return (unsigned long long)(sizeof(FePayloadBlock) +
+                              (length + FePayloadAlignment - 1) /
+                                  FePayloadAlignment * FePayloadAlignment);
+}
+
 static bool CheckString(const Workload* workload, const WorkloadRun* run) {
   const size_t length = workload->param;
-  // The seven-byte cell chain, spelled from `StringBufferSize` rather than
-  // from a 7 so that the representation is what is being asserted. Phase 25
-  // replaces this with a length-bearing payload, and every line below is
-  // meant to fail loudly when it does.
-  const unsigned long long cells =
-      length == 0 ? 1
-                  : (unsigned long long)((length + StringBufferSize - 1) /
-                                         StringBufferSize);
   CHECK(AllocationIsPartitioned(run));
-  // One string was made, at every length: the object count is what the
-  // Phase 22 ADR could only bracket between `bytes / StringBufferSize` and
-  // the cell count, and it is a different measurement from either.
+  // ONE CELL, at every length. That is the phase's headline in a single
+  // assertion: the cell cost of a string stopped depending on how long it is,
+  // and the length went to the region instead. The five lengths span three
+  // orders of magnitude and every one of them charges the same 1.
   CHECK(CounterOf(run, FePerfStringObject) == 1);
-  CHECK(CounterOf(run, FePerfStringCell) == cells);
-  CHECK(AllocOf(run, FeTString) == cells);
-  // Every string cell is a pair the constructor retyped, and the string is
-  // the only thing this workload allocates at all.
-  CHECK(CounterOf(run, FePerfAllocRetyped) == cells);
-  CHECK(CounterOf(run, FePerfAllocObject) == cells);
+  CHECK(AllocOf(run, FeTString) == 1);
+  CHECK(CounterOf(run, FePerfAllocObject) == 1);
   CHECK(CounterOf(run, FePerfStringByte) == (unsigned long long)length);
-  // A string has no stored length, so a caller that needs one walks the chain
-  // to find it and then walks it again to copy: three walks here, one for
-  // `FeStringByteLength` and two inside `FeCopyStringBytes`.
-  CHECK(CounterOf(run, FePerfStringWalk) == 3);
-  CHECK(CounterOf(run, FePerfStringWalkCell) == 3 * cells);
-  CHECK(CounterOf(run, FePerfStringWalkByte) == 3 * (unsigned long long)length);
+  // ...and the region cost is one block, sized by the length.
+  CHECK(CounterOf(run, FePerfPayloadAlloc) == 1);
+  CHECK(CounterOf(run, FePerfPayloadByte) == StringBlockBytes(length));
+  // Three copy-out calls -- one for `FeStringByteLength` and two inside
+  // `FeCopyStringBytes` -- of which exactly ONE reads a byte. The other two
+  // ask for the length, which is a field read now rather than a walk of the
+  // whole string; that difference is what the two counters together say.
+  CHECK(CounterOf(run, FePerfStringCopy) == 3);
   CHECK(CounterOf(run, FePerfStringByteCopied) == (unsigned long long)length);
   CHECK(run->stats.allocation_failures == 0);
   return true;
@@ -800,10 +811,10 @@ static bool CheckString(const Workload* workload, const WorkloadRun* run) {
 
 // ---------------------------------------------------------------------------
 // Phase 24.1's deferred item: a vector shape, so that the battery exercises
-// the payload region at all. Every workload above opens with `FeOpenContext`,
-// which carves nothing, so before this family every payload counter in every
-// record was zero by construction -- and Phase 25's before/after is read
-// against exactly those counters.
+// the payload region with something whose size is the workload's own
+// parameter. Since Phase 25 every workload touches the region -- a symbol's
+// name is a string -- so what this family adds is a payload cost that is
+// large, chosen, and made of children rather than bytes.
 //
 // Two sizes, bracketing the same boundary `payload_tests`' O(1) gate uses:
 // eight elements is one small block, 8192 is a block that dominates the
@@ -881,16 +892,16 @@ static bool BodyVector(const Workload* workload, WorkloadRun* run) {
 static bool CheckVector(const Workload* workload, const WorkloadRun* run) {
   const unsigned long long n = (unsigned long long)workload->param;
   CHECK(AllocationIsPartitioned(run));
-  // The payload region, which no other workload in this battery touches: one
-  // block, of exactly the size the representation implies, and no compaction,
-  // because nothing collected.
+  // The payload region: one block over the baseline the open left, of exactly
+  // the size the representation implies, and no compaction, because nothing
+  // collected.
   CHECK(CounterOf(run, FePerfPayloadAlloc) == 1);
   CHECK(CounterOf(run, FePerfPayloadByte) == VectorBlockBytes(workload->param));
   CHECK(CounterOf(run, FePerfGcCollection) == 0);
   CHECK(CounterOf(run, FePerfPayloadCompact) == 0);
   CHECK(CounterOf(run, FePerfPayloadCompactMoved) == 0);
   CHECK(run->stats.payload_live_bytes ==
-        sizeof(FePayloadBlock) + workload->param * sizeof(FeObject*));
+        run->baseline_payload_bytes + VectorBlockBytes(workload->param));
   CHECK(run->stats.payload_allocation_failures == 0);
   CHECK(run->stats.allocation_failures == 0);
   // Elements published: the constructor's, once. Reads: the access loop's two
@@ -1025,7 +1036,6 @@ static const Workload workloads[] = {
      .arena = ArenaTight,
      .param = 0,
      .measure_open = true,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyContextOpen,
      .check = CheckContextOpen},
@@ -1035,7 +1045,6 @@ static const Workload workloads[] = {
      .arena = ArenaTight,
      .param = 0,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyContextOpenClose,
      .check = CheckContextOpenClose},
@@ -1046,7 +1055,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 150,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyListWalk,
      .check = CheckListWalk},
@@ -1056,7 +1064,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 20000,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyArithmetic,
      .check = CheckArithmetic},
@@ -1066,7 +1073,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 2000,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyMacroHeavy,
      .check = CheckMacroHeavy},
@@ -1076,7 +1082,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 300,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyDeepCall,
      .check = CheckDeepCall},
@@ -1087,7 +1092,6 @@ static const Workload workloads[] = {
      .arena = ArenaLarge,
      .param = 128,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyIntern,
      .check = CheckIntern},
@@ -1097,7 +1101,6 @@ static const Workload workloads[] = {
      .arena = ArenaLarge,
      .param = 1024,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyIntern,
      .check = CheckIntern},
@@ -1107,7 +1110,6 @@ static const Workload workloads[] = {
      .arena = ArenaLarge,
      .param = 8192,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyIntern,
      .check = CheckIntern},
@@ -1118,7 +1120,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
-     .payload_carve = false,
      .setup = SetupEnvWidth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1128,7 +1129,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 64,
      .measure_open = false,
-     .payload_carve = false,
      .setup = SetupEnvWidth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1138,7 +1138,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
-     .payload_carve = false,
      .setup = SetupEnvDepth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1148,7 +1147,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 64,
      .measure_open = false,
-     .payload_carve = false,
      .setup = SetupEnvDepth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1159,7 +1157,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 0,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1169,7 +1166,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 7,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1179,7 +1175,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1189,7 +1184,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 256,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1199,7 +1193,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8192,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1210,7 +1203,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
-     .payload_carve = true,
      .setup = nullptr,
      .body = BodyVector,
      .check = CheckVector},
@@ -1220,7 +1212,6 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8192,
      .measure_open = false,
-     .payload_carve = true,
      .setup = nullptr,
      .body = BodyVector,
      .check = CheckVector},
@@ -1231,7 +1222,6 @@ static const Workload workloads[] = {
      .arena = ArenaTight,
      .param = 20000,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodySparse,
      .check = CheckSparse},
@@ -1241,7 +1231,6 @@ static const Workload workloads[] = {
      .arena = ArenaSmall,
      .param = 4000,
      .measure_open = false,
-     .payload_carve = false,
      .setup = nullptr,
      .body = BodyDense,
      .check = CheckDense},
@@ -1268,10 +1257,11 @@ static bool RunOne(const Workload* workload, WorkloadRun* run) {
 
   FePerfReset();
   const double started = Now();
-  FeContext* const context =
-      workload->payload_carve
-          ? FeOpenContextWithOptions(arena_bytes, workload->arena, nullptr)
-          : FeOpenContext(arena_bytes, workload->arena);
+  // One entry point for every workload: since Phase 25 `FeOpenContext` and
+  // `FeOpenContextWithOptions` with default options are the same partition,
+  // because a symbol's name is a string and a context with no payload region
+  // cannot finish opening.
+  FeContext* const context = FeOpenContext(arena_bytes, workload->arena);
   CHECK(context != nullptr);
   run->context = context;
   host_state.raised = false;
@@ -1290,6 +1280,7 @@ static bool RunOne(const Workload* workload, WorkloadRun* run) {
   if (!workload->measure_open) {
     run->baseline_cells = FePerfRead(FePerfAllocObject);
     run->baseline_symbols = LiveAllocOf(FeTSymbol);
+    run->baseline_payload_bytes = FeGetArenaStats(context).payload_live_bytes;
     FePerfReset();
   }
   const double body_started = Now();
@@ -1381,23 +1372,27 @@ static bool CheckStringBoundary(void) {
   const WorkloadRun* const huge = Find("string-8192");
   CHECK(empty != nullptr && seven != nullptr && eight != nullptr &&
         huge != nullptr);
-  // The cell boundary, stated as the thing it is: one byte more than a cell
-  // holds costs a whole extra cell, and an empty string still costs one.
-  CHECK(CounterOf(empty, FePerfStringCell) == 1);
-  CHECK(CounterOf(seven, FePerfStringCell) == 1);
-  CHECK(CounterOf(eight, FePerfStringCell) == 2);
-  // And the cell count is NOT a proxy for the object count, which is the
-  // whole reason the second counter exists: one string at 0 bytes and one at
-  // 8192 differ by 1170 cells and not at all in objects.
-  CHECK(CounterOf(empty, FePerfStringObject) ==
-        CounterOf(huge, FePerfStringObject));
-  CHECK(CounterOf(huge, FePerfStringCell) >
-        CounterOf(huge, FePerfStringObject));
-  // A 1171-cell chain costs no root-stack slots at all: `BuildString` does not
-  // leave one entry per cell behind, so a string longer than the 4032-slot
-  // practical ceiling is not by itself a GC-root problem. Worth pinning
-  // because it is the opposite of what the trap in this file's header would
-  // lead one to expect, and because Phase 25 changes the construction.
+  // THE BOUNDARY THAT IS NOT THERE ANY MORE. Seven bytes filled a cell and
+  // eight needed a second one; the three records now charge the same single
+  // cell, and 8192 bytes charges it too. This is the assertion the phase's
+  // before/after is argued from, and it is the one that would have been a
+  // contradiction in every earlier run of this battery.
+  CHECK(CounterOf(empty, FePerfAllocObject) == 1);
+  CHECK(CounterOf(seven, FePerfAllocObject) == 1);
+  CHECK(CounterOf(eight, FePerfAllocObject) == 1);
+  CHECK(CounterOf(huge, FePerfAllocObject) == 1);
+  // What DOES scale is the region, and only in whole alignment units: seven
+  // bytes and eight take the same eight-byte tail, and the empty string still
+  // takes a block header of its own.
+  CHECK(CounterOf(empty, FePerfPayloadByte) == sizeof(FePayloadBlock));
+  CHECK(CounterOf(seven, FePerfPayloadByte) ==
+        CounterOf(eight, FePerfPayloadByte));
+  CHECK(CounterOf(huge, FePerfPayloadByte) >
+        100 * CounterOf(eight, FePerfPayloadByte));
+  // An 8192-byte string costs no root-stack slots at all -- one object is one
+  // push -- which the cell chain also managed, by not leaving an entry per
+  // cell behind. Worth keeping pinned across the change: it is the property
+  // the trap in this file's header would lead one to doubt.
   CHECK(huge->stats.peak_gc_stack_depth == empty->stats.peak_gc_stack_depth);
   return true;
 }
@@ -1576,9 +1571,14 @@ static bool WriteJson(const char* path) {
     (void)fprintf(stderr, "perf_workloads: cannot write %s\n", path);
     return false;
   }
-  (void)fprintf(out, "{\n  \"schema\": \"fe-perf-workloads/3\",\n");
+  (void)fprintf(out, "{\n  \"schema\": \"fe-perf-workloads/4\",\n");
   WriteArtifactJson(out);
-  (void)fprintf(out, "  \"string_buffer_size\": %d,\n", (int)StringBufferSize);
+  // The representation constant a reader of these records needs, which since
+  // Phase 25 is the payload block's header rather than the seven bytes a
+  // string cell used to carry: every string and every vector in a record
+  // costs one of these before it costs a byte of its own.
+  (void)fprintf(out, "  \"payload_block_bytes\": %d,\n",
+                (int)sizeof(FePayloadBlock));
   (void)fprintf(out, "  \"workloads\": [\n");
   for (size_t i = 0; i < ran_count; i++) {
     WriteRunJson(out, ran[i], &runs[i], i + 1 == ran_count);

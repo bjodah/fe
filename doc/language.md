@@ -30,13 +30,22 @@ errors, which is stricter than Emacs -- `"\q"` is `"q"` there and an error
 here -- and so are `\ `, backslash-newline continuation, `\N{...}`, and the
 character modifiers inside a string body.
 
-A Fe string is a byte string, so a string escape must land in one byte:
-`"\0"`, `"\x00"`, `"\400"` and `"\x41f"` are read errors. Emacs stores a
-NUL and reads the last two as U+0100 and U+041F; the divergence is deliberate
-and recorded, because writing those values into a NUL-terminated buffer
-silently truncated the string instead (`(list "\0a" "a\0b")` answered
-`("a" "ab")`). The same escapes in a character literal, which produces an
-integer, agree with Emacs exactly.
+A Fe string is a byte string that carries its own LENGTH, so a NUL is an
+ordinary byte in it: `"\0"` and `"\x00"` are one-byte strings and `"a\0b"`
+is three bytes long, exactly as in Emacs. A string escape must still land in
+ONE byte, so `"\400"` and `"\x41f"` are read errors where Emacs reads U+0100
+and U+041F; matching that would need a multibyte character type rather than a
+length, and the divergence is recorded. The same escapes in a character
+literal, which produces an integer, agree with Emacs exactly.
+
+An embedded NUL PRINTS as `\000`, in three octal digits so that a digit after
+it stays a digit, where Emacs prints the raw byte. That one is Fe's writer
+being deliberate rather than approximate: reading is driven by a callback that
+answers one byte at a time and spells end of input as 0, so a raw NUL in the
+source is where the reader stops -- escaping it on the way out is what makes
+`(read (prin1-to-string S))` give back the same S. A NUL that reaches the
+output through `print` (which does not quote a top-level string) is written
+raw, since nothing is going to read that back.
 
 Symbol escapes are Emacs': a backslash takes the next byte into the symbol's
 name literally, so `a\ b` is the one symbol whose name is `a b`, `\1` is the
@@ -1554,13 +1563,23 @@ first, then the index.
 
 #### `(aset vector index value)`
 
-Stores `value` at `index` and answers `value`, not the vector. The bounds and
-index conditions are `aref`'s, exactly. A STRING is an array Emacs can write
-in place and Fe cannot -- a Fe string is a chain of seven-byte cells whose
-shape a byte write has to preserve -- so `(aset "ab" 0 120)` is a named error
-here where Emacs answers `120`. That is a recorded divergence
-(`compat/features.json`'s `primitive-aset-string`), and the representation
-that would close it is a later phase's.
+Stores `value` at `index` and answers `value`, not the array. The bounds and
+index conditions are `aref`'s, exactly.
+
+A STRING is writable, byte-wise, which is Emacs' unibyte rule: `(aset "ab" 0
+120)` stores the byte and answers `120`. A value above 255 is refused with
+Emacs' own sentence, `Attempt to store non-byte value into unibyte string`,
+because storing it would have to WIDEN the string and Emacs will not do that
+either -- so `aset` never changes a string's length in either dialect. A value
+that is not a character at all is `(wrong-type-argument characterp VALUE)`,
+and so is a negative one.
+
+Emacs has a second refusal Fe does not: `Attempt to replace non-ASCII char in
+multibyte string`. A Fe string is a sequence of BYTES, so there is no
+multibyte character for a write to land in the middle of, and `(aset "é" 0
+97)` changes the first of that character's two bytes rather than raising. That
+is the byte-string divergence (`sequence-length-string-bytes`) showing through
+a third name.
 
 #### `(vconcat ...)`
 
@@ -1575,7 +1594,10 @@ The number of elements. `(length nil)` is `0`, a list's is its element count,
 a vector's is its slot count, and a string's is its BYTE count -- Fe strings
 are byte strings (the same rule that makes `"\400"` a read error), so
 `(length "é")` is `2` where Emacs, whose strings are sequences of characters,
-answers `1`. That divergence is recorded as `sequence-length-string-bytes`.
+answers `1`. That divergence is recorded as `sequence-length-string-bytes`. A
+string's length is stored rather than derived, so it is a constant-time answer
+whatever the string, and a stored NUL does not shorten it: `(length "a\0b")`
+is `3`.
 
 Anything that is not a sequence is `(wrong-type-argument sequencep X)`; a list
 whose tail is not nil is `(wrong-type-argument listp TAIL)`, naming the

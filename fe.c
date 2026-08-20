@@ -23,7 +23,7 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-const char* FeVersion = "20.0";
+const char* FeVersion = "21.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -183,9 +183,11 @@ FeNativeFn* GetNativeFn(const FeObject* o) {
 }
 
 void SetType(FeObject* o, FeType type) {
-  // The by-type allocation charge, before the write: `FePerfCountRetype`
-  // reads the type the cell is leaving. See its comment in fe_perf.c.
-  FE_PERF_RETYPE(o, type);
+  // The by-type allocation charge. Every cell that gets a type gets it here,
+  // once, from the constructor that made it -- until Phase 25 a string cell
+  // arrived here as a PAIR, because `BuildString` took it through `FeCons`,
+  // and the charge had to be moved rather than made.
+  FE_PERF_TYPED(type);
   o->car.c = (char)((type) << GcMarkBit | OtherCell);
 }
 
@@ -384,12 +386,11 @@ static FeObject* TakeMarkLink(FeObject* obj) {
 // fe_internal.h beside the block layout they share.
 // ---------------------------------------------------------------------------
 
-// The types whose objects keep a payload handle. Phase 24's vector is the
-// first release one -- its elements ARE its block's traced children -- and
-// Phase 25 adds `FeTString` beside it. `FE_PAYLOAD_TEST_OBJECT`'s aggregate
-// is still here because the substrate's own harness needs a *bytes*-bearing
-// owner, which a vector is not, and because it is the one owner whose width
-// and byte tail a test can choose independently.
+// The types whose objects keep a payload handle: a vector, whose elements ARE
+// its block's traced children (Phase 24), and a string, whose bytes are its
+// block's byte tail (Phase 25). `FE_PAYLOAD_TEST_OBJECT`'s aggregate is still
+// here because the substrate's own harness needs an owner whose width and
+// byte tail it can choose independently, which neither release type is.
 static bool OwnsPayload(const FeObject* obj) {
   const FeType type = FeGetType(obj);
 #if FE_PAYLOAD_TEST_OBJECT
@@ -397,12 +398,12 @@ static bool OwnsPayload(const FeObject* obj) {
     return true;
   }
 #endif
-  return type == FeTVector;
+  return type == FeTVector || type == FeTString;
 }
 
 // Where an object of a payload-owning type keeps its handle. ONE function, so
-// that Phase 25 adds a type here rather than teaching the collector a second
-// place to look.
+// that a new owning type lands here rather than teaching the collector a
+// second place to look.
 static FePayloadHandle* PayloadSlot(FeObject* obj) {
   assert(OwnsPayload(obj));
   return &PAYLOAD(obj);
@@ -431,9 +432,21 @@ static FePayloadHandle HandleOfBlockAt(size_t offset) {
   return offset + sizeof(FePayloadBlock) + 1;
 }
 
+// `<=`, not `<`: a block with no payload at all -- the empty string's -- has
+// its bytes one past its own header, which is the end of the live extent
+// when it is the last block published. That address is never dereferenced,
+// and answering it rather than asserting is what keeps the empty string an
+// ordinary string instead of a case every reader has to test for.
 unsigned char* PayloadBytes(const FeContext* ctx, FePayloadHandle handle) {
-  assert(handle != FePayloadNone && handle - 1 < ctx->payload_used);
+  assert(handle != FePayloadNone && handle - 1 <= ctx->payload_used);
   return PayloadAt(ctx, handle - 1);
+}
+
+// The block a handle names. The handle is one past the block's own header, so
+// this is the arithmetic that undoes `HandleOfBlockAt`.
+static FePayloadBlock* BlockAtHandle(const FeContext* ctx,
+                                     FePayloadHandle handle) {
+  return PayloadBlockAt(ctx, handle - 1 - sizeof(FePayloadBlock));
 }
 
 // The owner's block, or null when it has not published one yet: a constructor
@@ -441,9 +454,7 @@ unsigned char* PayloadBytes(const FeContext* ctx, FePayloadHandle handle) {
 // can land in that window.
 static FePayloadBlock* OwnedBlock(const FeContext* ctx, FeObject* owner) {
   const FePayloadHandle handle = *PayloadSlot(owner);
-  return handle == FePayloadNone
-             ? nullptr
-             : PayloadBlockAt(ctx, handle - 1 - sizeof(FePayloadBlock));
+  return handle == FePayloadNone ? nullptr : BlockAtHandle(ctx, handle);
 }
 
 // The block's `index`th traced word. Clause 1 of the protocol applies to the
@@ -453,6 +464,68 @@ static FeObject** PayloadChildSlot(FePayloadBlock* block, size_t index) {
   void* const at = (unsigned char*)block + sizeof(FePayloadBlock) +
                    index * sizeof(FeObject*);
   return at;
+}
+
+// ---------------------------------------------------------------------------
+// A STRING's length and bytes (Phase 25). A string is a header plus a payload
+// block of bytes: the header keeps the byte LENGTH in the bytes of its `car`
+// word that are not the type tag -- where the seven-byte cell chain this
+// replaced kept text -- and the block keeps the bytes, which may contain NUL
+// and are not terminated. The constructors are further down, beside the other
+// constructors; these three are the whole read surface, and every string
+// reader in fe and behind `fe.h` goes through them.
+//
+// Which half holds what is the point. A LENGTH read is a field read: it needs
+// no context, costs no walk, and cannot go stale. A BYTE address is payload:
+// it is derived immediately before the read or write that spends it (clause 1
+// of the publish protocol) and re-derived after anything that can allocate
+// (clause 2). The block is CAPACITY rather than length -- the allocator
+// rounds up to `FePayloadAlignment` and the reader grows a literal
+// geometrically -- so the length in the header is the only thing that knows
+// how much of the block is text.
+// ---------------------------------------------------------------------------
+
+// Endian-neutral, and deliberately not an integer aliased onto the word:
+// `car.c` is byte 0 of that word on a little-endian host and byte 7 on a
+// big-endian one, so the bytes after the tag are written and read as
+// base-256 digits, least significant first.
+static size_t StringLength(const FeObject* string) {
+  const unsigned char* const digits = (const unsigned char*)&string->car.c + 1;
+  size_t length = 0;
+  for (size_t i = StringLengthBytes; i-- > 0;) {
+    length = (length << 8) | digits[i];
+  }
+  return length;
+}
+
+static void SetStringLength(FeObject* string, size_t length) {
+  unsigned char* const digits = (unsigned char*)&string->car.c + 1;
+  for (size_t i = 0; i < StringLengthBytes; i++) {
+    digits[i] = (unsigned char)(length >> (8 * i));
+  }
+}
+
+// The bytes, live for exactly as long as the statement that derives them.
+// Never null: every string publishes a block, the empty string included.
+static unsigned char* StringBytes(const FeContext* ctx,
+                                  const FeObject* string) {
+  return PayloadBytes(ctx, PAYLOAD(string));
+}
+
+// How many bytes the block holds, which is at least the length. Only the
+// constructors ask; every other caller wants `StringLength`.
+static size_t StringCapacity(const FeContext* ctx, FeObject* string) {
+  return OwnedBlock(ctx, string)->bytes;
+}
+
+// The block size a request of BYTES really takes, since the allocator rounds
+// up to `FePayloadAlignment`. Two callers need that without allocating: the
+// reader's trim, which asks whether a smaller block would be a different
+// block at all, and the arena census, which has to agree with the allocator
+// exactly because `FeMinimumArenaSize` is exact rather than an upper bound.
+static size_t RoundUpToAlignment(size_t bytes) {
+  return (bytes + FePayloadAlignment - 1) / FePayloadAlignment *
+         FePayloadAlignment;
 }
 
 // Bump-allocate one block, or answer `FePayloadNone` when the region cannot
@@ -645,10 +718,9 @@ static FeObject* DescendIntoPayload(const FeContext* ctx,
 //   cdr half   car = own car  | mark | cdr bit  cdr = parent
 //   finished   car = own car  | mark            cdr = the pair's cdr
 //
-// An object with exactly one pointer child -- `fn`, `macro`, `symbol`,
-// `string`, whose `car` word is a type tag plus, for a string, seven bytes of
-// text, and never a pointer -- needs no state bit: its link is always in
-// `cdr`, and the ascent tells it from a pair by its type.
+// An object with exactly one pointer child -- `fn`, `macro`, `symbol`, whose
+// `car` word is a type tag and never a pointer -- needs no state bit: its
+// link is always in `cdr`, and the ascent tells it from a pair by its type.
 //
 // Two invariants make this safe. Every intermediate state keeps `GcMarkBit`
 // set and bit 0 clear, so `FeGetType` never lies about a cell and a cycle that
@@ -705,8 +777,7 @@ descend:
 
       case FeTFn:
       case FeTMacro:
-      case FeTSymbol:
-      case FeTString: {
+      case FeTSymbol: {
         FeObject* const child = CDR(current);
         CDR(current) = parent;
         parent = current;
@@ -729,11 +800,13 @@ descend:
       case FeTInteger:
       case FeTPrimitive:
       case FeTNativeFn:
-      // A vector never reaches this switch: `OwnsPayload` took it above,
-      // because its children are in its payload block and not in `car`/`cdr`.
-      // Named here so `-Wswitch-enum` keeps this switch exhaustive and a
-      // future type that stops owning a payload cannot fall through it
-      // silently.
+      // Neither a vector nor a string reaches this switch: `OwnsPayload` took
+      // both above, because what they hold is in their payload block and not
+      // in `car`/`cdr` -- and a string's block holds no traced child at all,
+      // so the payload arm finds it a leaf. Named here so `-Wswitch-enum`
+      // keeps this switch exhaustive and a future type that stops owning a
+      // payload cannot fall through it silently.
+      case FeTString:
       case FeTVector:
         // Do nothing.
         break;
@@ -969,7 +1042,7 @@ static bool IntegerAndDoubleEqual(int64_t i, double d) {
   return IsNearlyEqual((FeDouble)i, d, DBL_EPSILON);
 }
 
-bool Equal(FeObject* a, FeObject* b) {
+bool Equal(const FeContext* ctx, FeObject* a, FeObject* b) {
   if (a == b) {
     return true;
   }
@@ -991,24 +1064,26 @@ bool Equal(FeObject* a, FeObject* b) {
   if (a_type == FeTDouble) {
     return IsNearlyEqual(GetDouble(a), GetDouble(b), DBL_EPSILON);
   } else if (a_type == FeTString) {
-    for (; !FeIsNil(a); a = CDR(a), b = CDR(b)) {
-      if (CAR(a) != CAR(b)) {
-        return false;
-      }
-    }
-    return a == b;
+    // Length, then bytes. Both addresses are derived inside the expression
+    // that spends them and nothing here allocates, so neither can go stale
+    // (clause 1). A length test first is not an optimisation but the whole
+    // comparison for the common case: two strings of different lengths are
+    // unequal without either one's bytes being touched.
+    const size_t length = StringLength(a);
+    return length == StringLength(b) &&
+           memcmp(StringBytes(ctx, a), StringBytes(ctx, b), length) == 0;
   }
   return false;
 }
 
-// The stored byte chain a `string<`/`string>` operand designates. Emacs takes
+// The string a `string<`/`string>` operand designates. Emacs takes
 // a string or a SYMBOL on either side, measured on 31.0.90: `(string< 'abc
 // "abd")` and `(string< "abc" 'abd)` are both t, and `(string< "n" nil)` is t
 // because nil's name is "nil" -- fe's nil owns no name chain, so it is the
 // one operand that has to be built. Anything else is `(wrong-type-argument
 // stringp X)` naming the operand, which is Emacs' own answer for `(string<
 // "a" 1)` and for `(string< 1 "a")` alike.
-static FeObject* StringOperandChain(FeContext* ctx, FeObject* obj) {
+static FeObject* StringOperand(FeContext* ctx, FeObject* obj) {
   if (FeIsNil(obj)) {
     return FeMakeString(ctx, "nil");
   }
@@ -1028,32 +1103,30 @@ static FeObject* StringOperandChain(FeContext* ctx, FeObject* obj) {
 // under byte-lexicographic comparison -- measured against the oracle at the
 // boundary that would show it, `(string< "é" "z")` being nil in both.
 //
-// A cell at a time rather than a byte at a time, which `Equal` above already
-// does for string equality and for the same reason: every cell but the last
-// carries a full `StringBufferSize` bytes, so two chains' cell boundaries
-// always line up, and the unused tail of the last cell is `'\0'` -- which
-// `memcmp` already orders before every real byte, so a prefix sorts first
-// with no length test. The chain that runs out first is the shorter one only
-// when the other has not; equal chains end together and are not less.
+// One `memcmp` over the bytes the two share, then the lengths: a prefix is
+// less than what extends it, and equal lengths that compare equal are not
+// less. That is exactly Emacs' rule, and it is also why the comparison could
+// not be written this way before Phase 25 -- a string had no length to stop
+// at, so the old chain walk leaned on the NUL padding of a short last cell to
+// order a prefix first. An embedded NUL is byte 0 here and sorts before every
+// other byte, which is what Emacs' character comparison says too.
 //
 // `left` is rooted across the second coercion because that one can allocate
 // (the nil operand above): the operands themselves are frame fields and
-// rooted by the caller, but a freshly built "nil" is not.
+// rooted by the caller, but a freshly built "nil" is not. Both byte addresses
+// are derived after the last allocation and spent in the same statement.
 bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b) {
   const size_t gc = FeSaveGC(ctx);
-  FeObject* left = StringOperandChain(ctx, a);
+  FeObject* left = StringOperand(ctx, a);
   FePushGC(ctx, left);
-  FeObject* right = StringOperandChain(ctx, b);
+  FeObject* right = StringOperand(ctx, b);
   FeRestoreGC(ctx, gc);
-  for (; !FeIsNil(left) && !FeIsNil(right);
-       left = CDR(left), right = CDR(right)) {
-    const int order =
-        memcmp(STRING_BUFFER(left), STRING_BUFFER(right), StringBufferSize);
-    if (order != 0) {
-      return order < 0;
-    }
-  }
-  return FeIsNil(left) && !FeIsNil(right);
+  const size_t left_length = StringLength(left);
+  const size_t right_length = StringLength(right);
+  const size_t shared = left_length < right_length ? left_length : right_length;
+  const int order =
+      memcmp(StringBytes(ctx, left), StringBytes(ctx, right), shared);
+  return order != 0 ? order < 0 : left_length < right_length;
 }
 
 // Same-type doubles equal by their exact bits (05A Decision 2, rows E4-E5,
@@ -1088,21 +1161,21 @@ bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats) {
   return false;
 }
 
-static int IsStringEqual(FeObject* obj, const char* str) {
+// Does this string hold exactly the bytes of the C string STR? The length
+// decides most calls on its own -- the obarray scan asks this once per
+// interned symbol -- and only a length match reaches the bytes, which is why
+// `FePerfNameByte` is charged there and not before. A string with an embedded
+// NUL is never equal to a C string, because its length says so.
+static bool IsStringEqual(const FeContext* ctx,
+                          const FeObject* obj,
+                          const char* str) {
   FE_PERF_INC(FePerfNameCompare);
-  while (!FeIsNil(obj)) {
-    for (size_t i = 0; i < StringBufferSize; i++) {
-      FE_PERF_INC(FePerfNameByte);
-      if (STRING_BUFFER(obj)[i] != *str) {
-        return 0;
-      }
-      if (*str) {
-        str++;
-      }
-    }
-    obj = CDR(obj);
+  const size_t length = StringLength(obj);
+  if (strlen(str) != length) {
+    return false;
   }
-  return *str == '\0';
+  FE_PERF_ADD(FePerfNameByte, length);
+  return memcmp(StringBytes(ctx, obj), str, length) == 0;
 }
 
 // Measured, GNU Emacs 31.0.90: `(keywordp :)` is t, `:` self-evaluates to
@@ -1125,7 +1198,7 @@ static FeObject* FindInternedSymbol(FeContext* ctx, const char* name) {
   FE_PERF_INC(FePerfInternLookup);
   for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
     FE_PERF_INC(FePerfInternCandidate);
-    if (IsStringEqual(SymbolName(CAR(rest)), name)) {
+    if (IsStringEqual(ctx, SymbolName(CAR(rest)), name)) {
       return CAR(rest);
     }
   }
@@ -1137,6 +1210,28 @@ static void InitializeKeywordValue(FeObject* symbol, const char* name) {
   if (IsKeywordName(name)) {
     CDR(SymbolBindingCell(symbol)) = symbol;
   }
+}
+
+// A REPLACEMENT block starts with the contents the old one held, up to what
+// it can take. This is how a string grows -- the region is a bump allocator,
+// so a block cannot be extended in place -- and it is what makes the growth
+// invisible from outside: the header is the same object and the handle inside
+// it is the only thing that changed. Both addresses are derived HERE, after
+// the allocation that may have compacted the old block, and spent before the
+// store that makes the old block dead (clause 2). A replacement keeps its
+// owner's child count, so the copy cannot land a traced word in byte
+// territory or the reverse.
+static void CopyReplacedPayload(const FeContext* ctx,
+                                FePayloadHandle previous,
+                                FePayloadHandle handle) {
+  if (previous == FePayloadNone) {
+    return;
+  }
+  const FePayloadBlock* const from = BlockAtHandle(ctx, previous);
+  const FePayloadBlock* const to = BlockAtHandle(ctx, handle);
+  assert(from->children == to->children);
+  memcpy(PayloadBytes(ctx, handle), PayloadBytes(ctx, previous),
+         from->bytes < to->bytes ? from->bytes : to->bytes);
 }
 
 // Clause 3 of the publish protocol: the ONE way a block reaches its owner.
@@ -1170,7 +1265,8 @@ void PublishPayload(FeContext* ctx,
     FeRestoreGC(ctx, gc);
     RaisePayloadExhaustion(ctx);
   }
-  PayloadBlockAt(ctx, handle - 1 - sizeof(FePayloadBlock))->owner = owner;
+  BlockAtHandle(ctx, handle)->owner = owner;
+  CopyReplacedPayload(ctx, *slot, handle);
   // Last, and only now: any block this owner named before this line is dead
   // from here on, though the owner itself is very much alive. That is the
   // replacement half of the liveness rule.
@@ -1416,8 +1512,7 @@ FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr) {
   FeObject* obj = MakeObject(ctx);
   // A pair is the one cell whose type is never spelled: writing `car` with
   // an aligned pointer is what makes it one, so this is the by-type charge's
-  // only site outside `SetType`. `BuildString` retypes such a cell, and
-  // `FePerfCountRetype` moves the charge when it does.
+  // only site outside `SetType`.
   FE_PERF_ALLOC(FeTPair);
   CAR(obj) = car;
   CDR(obj) = cdr;
@@ -1442,38 +1537,87 @@ FeObject* FeMakeInteger(FeContext* ctx, int64_t n) {
   return obj;
 }
 
-static FeObject* BuildString(FeContext* ctx, FeObject* tail, char chr) {
-  // A null tail opens a new string; every other call extends the chain it is
-  // handed. Counted here rather than at the two call sites so the object
-  // count is a property of the constructor, which a third way to build a
-  // string cannot forget, and charged as a predicate the way the byte count
-  // below is, so an instrumented build adds no branch of its own.
-  FE_PERF_ADD(FePerfStringObject, !tail);
-  if (!tail || STRING_BUFFER(tail)[StringBufferSize - 1] != '\0') {
-    FeObject* obj = FeCons(ctx, NULL, &nil);
-    SetType(obj, FeTString);
-    FE_PERF_INC(FePerfStringCell);
-    if (tail) {
-      CDR(tail) = obj;
-      ctx->gc_stack_index--;
-    }
-    tail = obj;
+// ---------------------------------------------------------------------------
+// Making a string (Phase 25). `StringLength`/`StringBytes` above are the read
+// surface; these four are how bytes get in. Two are constructors, and the
+// other two are the reader's, which is the only place a string's length
+// changes after it is built.
+// ---------------------------------------------------------------------------
+
+// A string owning CAPACITY bytes and holding none of them yet. The order is
+// `MakeVector`'s and `MakeAggregate`'s -- retype, clear the handle, publish --
+// because `PublishPayload` allocates and a collection landing in that window
+// must find an owner that coherently owns nothing. The LENGTH is zeroed in
+// the same window, for the reason a fresh block is zero-filled: a recycled
+// cell's `car` bytes are the previous object's, and a string whose length word
+// said 4000 would be a string the printer reads 4000 bytes of.
+static FeObject* MakeStringObject(FeContext* ctx, size_t capacity) {
+  // The length word is `StringLengthBytes` bytes wide, so a string longer than
+  // it can name is refused rather than truncated. Unreachable on any machine
+  // whose arena fits in memory -- a region of 2^56 bytes would have to exist
+  // first -- and cheaper than the argument that says so.
+  if (capacity >> (StringLengthBytes * 8) != 0) {
+    RaisePayloadExhaustion(ctx);
   }
-  // The opening `BuildString(ctx, NULL, '\0')` stores no byte; every other
-  // call stores exactly one, so this is the string's byte length and not its
-  // call count.
-  FE_PERF_ADD(FePerfStringByte, chr != '\0');
-  STRING_BUFFER(tail)[strlen(STRING_BUFFER(tail))] = chr;
-  return tail;
+  FeObject* const obj = MakeObject(ctx);
+  SetType(obj, FeTString);
+  SetStringLength(obj, 0);
+  PAYLOAD(obj) = FePayloadNone;
+  FE_PERF_INC(FePerfStringObject);
+  PublishPayload(ctx, obj, 0, capacity);
+  return obj;
+}
+
+FeObject* FeMakeStringBytes(FeContext* ctx, const char* bytes, size_t length) {
+  FeObject* const obj = MakeStringObject(ctx, length);
+  SetStringLength(obj, length);
+  FE_PERF_ADD(FePerfStringByte, length);
+  if (length != 0) {
+    // Derived after the last allocation this constructor makes -- the publish
+    // inside `MakeStringObject` -- and spent in the same statement.
+    memcpy(StringBytes(ctx, obj), bytes, length);
+  }
+  return obj;
 }
 
 FeObject* FeMakeString(FeContext* ctx, const char* str) {
-  FeObject* obj = BuildString(ctx, NULL, '\0');
-  FeObject* tail = obj;
-  while (*str) {
-    tail = BuildString(ctx, tail, *str++);
+  return FeMakeStringBytes(ctx, str, strlen(str));
+}
+
+// The reader's literal builder, and the only place a string's length changes
+// after construction. Growth is geometric because the reader learns a
+// literal's length one byte at a time and a block cannot be extended in place
+// -- the region is a bump allocator, so the next block begins where this one
+// ends. Republishing per byte would copy the whole literal per byte; doubling
+// copies it a bounded number of times.
+//
+// What a replacement does NOT change is the object: the string handed back to
+// the reader is the same `FeObject*` before and after, because a new block
+// reaches its owner through `PublishPayload` and the owner is a header the
+// compactor never moves. That is the property Phase 25's mutation gate names,
+// and the reader is where a release build exercises it.
+static void AppendStringByte(FeContext* ctx, FeObject* string, char chr) {
+  const size_t length = StringLength(string);
+  if (length == StringCapacity(ctx, string)) {
+    PublishPayload(ctx, string, 0,
+                   length == 0 ? FePayloadAlignment : length * 2);
   }
-  return obj;
+  SetStringLength(string, length + 1);
+  FE_PERF_INC(FePerfStringByte);
+  // Derived after the publish above, which is the allocation this statement
+  // must not be hoisted over.
+  StringBytes(ctx, string)[length] = (unsigned char)chr;
+}
+
+// ...and the literal is finished: give back whatever the doubling overshot, so
+// that every string in the tree has the capacity `FeMakeStringBytes` would
+// have given it and the reader's growth policy is nothing the rest of fe has
+// to know about.
+static void FinishString(FeContext* ctx, FeObject* string) {
+  const size_t length = StringLength(string);
+  if (StringCapacity(ctx, string) != RoundUpToAlignment(length)) {
+    PublishPayload(ctx, string, 0, length);
+  }
 }
 
 // A symbol object with nothing bound and nothing interned. A symbol's cdr is
@@ -1640,7 +1784,9 @@ static void EmitString(Writer* w, const char* s) {
   }
 }
 
-static size_t CopyStoredStringBytes(const FeObject* string, char* dst);
+static size_t CopyStringBytes(const FeContext* ctx,
+                              const FeObject* string,
+                              char* dst);
 static NumberKind ClassifyNumber(const char* buf);
 
 // The bytes Emacs escapes wherever they occur in a symbol name, measured
@@ -1676,65 +1822,77 @@ static bool IsConfusingSymbolName(const char* name) {
 
 // A symbol's name, escaped so that reading the output back gives this symbol
 // again (Phase 14). The empty name is `##`, which is how Emacs both writes
-// and reads it. Never recurses: the cells are a cdr chain.
+// and reads it. Never recurses.
 //
 // The whole-name test needs the name in one buffer, and `SymbolNameLimit` is
 // the longest name fe itself ever builds; a longer one can only come from an
 // embedder's `FeMakeSymbol`, and it gets the per-byte escapes without the
 // number-lookalike test, which no name that long can pass here anyway.
+//
+// The byte address is derived inside the loop, once per byte, and never
+// hoisted: `Emit` reaches the host's `FeWriteFn`, which fe.h says may
+// allocate, and an allocation may compact this name's bytes out from under an
+// address taken before it. That is clause 2 of the publish protocol, and this
+// loop plus `EmitStoredString`'s are the two places in fe that pay it.
 static void EmitSymbolName(Writer* w, FeObject* name) {
-  const size_t length = CopyStoredStringBytes(name, nullptr);
+  const size_t length = StringLength(name);
   if (length == 0) {
     EmitString(w, "##");
     return;
   }
   bool escape_first = false;
   if (length <= SymbolNameLimit) {
-    // Zero-initialized so the first-byte tests below read a defined byte
-    // even to an analyzer that cannot see `CopyStoredStringBytes` filling
-    // it: `length` is nonzero here, so it always does.
+    // Zero-initialized so the first-byte tests below read a defined byte even
+    // to an analyzer that cannot see `CopyStringBytes` filling it: `length` is
+    // nonzero here, so it always does.
     char buf[SymbolNameLimit + 1] = "";
-    (void)CopyStoredStringBytes(name, buf);
+    (void)CopyStringBytes(w->ctx, name, buf);
     buf[length] = '\0';
     escape_first = IsConfusingSymbolName(buf);
   }
-  bool first = true;
-  while (!FeIsNil(name)) {
-    for (size_t i = 0; i < StringBufferSize && STRING_BUFFER(name)[i]; i++) {
-      const char chr = STRING_BUFFER(name)[i];
-      if ((first && escape_first) || IsAlwaysEscapedSymbolByte(chr)) {
-        Emit(w, '\\');
-      }
-      Emit(w, chr);
-      first = false;
+  for (size_t i = 0; i < length; i++) {
+    const char chr = (char)StringBytes(w->ctx, name)[i];
+    if ((i == 0 && escape_first) || IsAlwaysEscapedSymbolByte(chr)) {
+      Emit(w, '\\');
     }
-    name = CDR(name);
+    Emit(w, chr);
   }
 }
 
-// A string or a symbol's name. Never recurses: the cells are a cdr chain.
+// A string or a symbol's name. Never recurses, and derives the byte address
+// once per byte for the reason `EmitSymbolName` above states.
 //
-// The two bytes `prin1` escapes inside a string are the two the reader would
-// otherwise take for itself: the closing quote, and the backslash that
-// introduces an escape. Escaping only the quote (which is what this did
-// until Phase 19) left `(prin1 "x\\y")` printing `"x\y"`, which reads back
-// as `"xy"` -- the one printed form in fe that was not re-readable once
-// Phase 14 made backslashes ordinary bytes rather than a read error.
-// Nothing else is escaped, Emacs included: a newline inside a string prints
-// as a newline there too.
+// THREE bytes `prin1` escapes inside a string. Two are the ones the reader
+// would otherwise take for itself: the closing quote, and the backslash that
+// introduces an escape. Escaping only the quote (which is what this did until
+// Phase 19) left `(prin1 "x\\y")` printing `"x\y"`, which reads back as
+// `"xy"` -- the one printed form in fe that was not re-readable once Phase 14
+// made backslashes ordinary bytes rather than a read error.
+//
+// The third is NUL, and it is Phase 25's, in three octal digits so that a
+// digit after it stays a digit. Emacs prints an embedded NUL raw and fe
+// cannot: a `FeReadFn` answers one `char` and spells end of input as 0, so a
+// raw NUL in a literal is where the reader stops. Escaping it is what makes
+// the round trip the phase's first gate names -- print, read back, `equal` --
+// hold for a string with a NUL in it, and it is a printed-form divergence of
+// exactly the class `reader-string-raw-byte-printing` already records in the
+// other direction. Nothing else is escaped, Emacs included: a newline inside
+// a string prints as a newline there too.
 static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
   if (qt) {
     Emit(w, '"');
   }
-  while (!FeIsNil(obj)) {
-    for (size_t i = 0; i < StringBufferSize && STRING_BUFFER(obj)[i]; i++) {
-      if (qt &&
-          (STRING_BUFFER(obj)[i] == '"' || STRING_BUFFER(obj)[i] == '\\')) {
-        Emit(w, '\\');
-      }
-      Emit(w, STRING_BUFFER(obj)[i]);
+  const size_t length = StringLength(obj);
+  for (size_t i = 0; i < length; i++) {
+    const char chr = (char)StringBytes(w->ctx, obj)[i];
+    if (qt && chr == '\0') {
+      EmitString(w, "\\000");
+      continue;
     }
-    obj = CDR(obj);
+    if (qt && (chr == '"' || chr == '\\')) {
+      Emit(w, '\\');
+    }
+    Emit(w, chr);
   }
   if (qt) {
     Emit(w, '"');
@@ -1904,9 +2062,9 @@ static void WriteClosure(Writer* w, FeObject* obj, size_t depth) {
 // divergence.
 static bool EmitAbbreviation(Writer* w, FeObject* obj, size_t depth) {
   const char* prefix;
-  if (IsNamedSymbol(CAR(obj), "function")) {
+  if (IsNamedSymbol(w->ctx, CAR(obj), "function")) {
     prefix = "#'";
-  } else if (IsNamedSymbol(CAR(obj), "quote")) {
+  } else if (IsNamedSymbol(w->ctx, CAR(obj), "quote")) {
     prefix = "'";
   } else {
     return false;
@@ -2112,29 +2270,24 @@ static const FeObject* GetStringObject(FeContext* ctx, const FeObject* obj) {
   return obj;
 }
 
-static size_t CopyStoredStringBytes(const FeObject* string, char* dst) {
-  size_t length = 0;
-  FE_PERF_INC(FePerfStringWalk);
-  while (!FeIsNil(string)) {
-    FE_PERF_INC(FePerfStringWalkCell);
-    const char* buffer = STRING_BUFFER(string);
-    const char* end = memchr(buffer, '\0', StringBufferSize);
-    const size_t count =
-        end == nullptr ? StringBufferSize : (size_t)(end - buffer);
-    if (dst != nullptr) {
-      FE_PERF_ADD(FePerfStringByteCopied, count);
-      memcpy(dst, buffer, count);
-      dst += count;
-    }
-    FE_PERF_ADD(FePerfStringWalkByte, count);
-    length += count;
-    string = CDR(string);
+// The bytes into DST, and the length either way -- a null DST asks for the
+// length alone, which is a field read now rather than a walk. Every byte copy
+// in fe and behind `fe.h` funnels through here, which is what keeps the number
+// of places that derive a payload address countable.
+static size_t CopyStringBytes(const FeContext* ctx,
+                              const FeObject* string,
+                              char* dst) {
+  const size_t length = StringLength(string);
+  FE_PERF_INC(FePerfStringCopy);
+  if (dst != nullptr && length != 0) {
+    FE_PERF_ADD(FePerfStringByteCopied, length);
+    memcpy(dst, StringBytes(ctx, string), length);
   }
   return length;
 }
 
 size_t FeStringByteLength(FeContext* ctx, const FeObject* obj) {
-  return CopyStoredStringBytes(GetStringObject(ctx, obj), nullptr);
+  return CopyStringBytes(ctx, GetStringObject(ctx, obj), nullptr);
 }
 
 bool FeCopyStringBytes(FeContext* ctx,
@@ -2142,12 +2295,21 @@ bool FeCopyStringBytes(FeContext* ctx,
                        char* dst,
                        size_t size) {
   const FeObject* string = GetStringObject(ctx, obj);
-  const size_t length = CopyStoredStringBytes(string, nullptr);
+  const size_t length = CopyStringBytes(ctx, string, nullptr);
   if (size < length || (dst == nullptr && length != 0)) {
     return false;
   }
-  (void)CopyStoredStringBytes(string, dst);
+  (void)CopyStringBytes(ctx, string, dst);
   return true;
+}
+
+size_t FeStringBytes(FeContext* ctx,
+                     const FeObject* obj,
+                     char* dst,
+                     size_t size) {
+  const FeObject* const string = GetStringObject(ctx, obj);
+  return CopyStringBytes(ctx, string,
+                         StringLength(string) <= size ? dst : nullptr);
 }
 
 FeDouble FeToDouble(FeContext* ctx, FeObject* obj) {
@@ -2185,7 +2347,7 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env) {
 }
 
 static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym) {
-  if (FeIsNil(sym) || IsConstantSymbol(sym)) {
+  if (FeIsNil(sym) || IsConstantSymbol(ctx, sym)) {
     RaiseCondition(ctx, FeCompletionError, "setting-constant",
                    FeMakeList(ctx, (FeObject*[]){sym}, 1), "setting-constant");
   }
@@ -2867,8 +3029,8 @@ static FeObject* ReadRadix(FeContext* ctx, FeReadFn fn, void* udata, int base) {
 
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata);
 
-bool IsNamedSymbol(const FeObject* v, const char* name) {
-  return FeGetType(v) == FeTSymbol && IsStringEqual(SymbolName(v), name);
+bool IsNamedSymbol(const FeContext* ctx, const FeObject* v, const char* name) {
+  return FeGetType(v) == FeTSymbol && IsStringEqual(ctx, SymbolName(v), name);
 }
 
 // A keyword is an INTERNED symbol whose name starts with a colon (08B). The
@@ -2879,17 +3041,21 @@ bool IsNamedSymbol(const FeObject* v, const char* name) {
 // `(symbol-value (make-symbol ":a"))` is `(void-variable :a)`. Nothing can
 // clear an interned keyword's self-binding: `setq`, `set`, `makunbound` and
 // `let` all refuse a constant, and a keyword is one.
-bool IsKeywordSymbol(const FeObject* v) {
-  return FeGetType(v) == FeTSymbol && SymbolName(v) != NULL &&
-         STRING_BUFFER(SymbolName(v))[0] == ':' && CDR(CDR(v)) == v;
+bool IsKeywordSymbol(const FeContext* ctx, const FeObject* v) {
+  if (FeGetType(v) != FeTSymbol) {
+    return false;
+  }
+  const FeObject* const name = SymbolName(v);
+  return StringLength(name) != 0 && StringBytes(ctx, name)[0] == ':' &&
+         CDR(CDR(v)) == v;
 }
 
-bool IsConstantSymbol(const FeObject* v) {
-  return IsNamedSymbol(v, "t") || IsKeywordSymbol(v);
+bool IsConstantSymbol(const FeContext* ctx, const FeObject* v) {
+  return IsNamedSymbol(ctx, v, "t") || IsKeywordSymbol(ctx, v);
 }
 
-static bool IsDot(const FeObject* v) {
-  return IsNamedSymbol(v, ".");
+static bool IsDot(const FeContext* ctx, const FeObject* v) {
+  return IsNamedSymbol(ctx, v, ".");
 }
 
 static FeObject* ReadHash(FeContext* ctx, FeReadFn fn, void* udata) {
@@ -2911,19 +3077,15 @@ static FeObject* ReadHash(FeContext* ctx, FeReadFn fn, void* udata) {
   FeHandleError(ctx, "unsupported read syntax: #");
 }
 
-// A Fe string is a byte string, so a string escape has to land in one byte.
-// `BuildString` writes at `strlen`, which made a decoded NUL a silent no-op
-// that shifted every later character down -- `"\0a"` read as `"a"` and
-// `"a\0b"` as `"ab"` -- and a value above 255 was truncated the same way,
-// which is what `"\400"` did. Both are named errors now. Emacs stores a NUL
-// (and reads `"\400"` as the character U+0100); that divergence is recorded
-// in `compat/features.json` and `doc/language.md`, and it is the same rule
-// the reader already applied to a literal NUL byte in the source text.
+// A fe string is a byte string, so a string escape has to land in one byte.
+// A decoded NUL is now one of them -- Phase 25's strings carry a length, so a
+// stored NUL is a byte like any other and `"a\0b"` is three bytes long, which
+// is Emacs' answer too. A value ABOVE 255 is still a named error: `"\400"` is
+// the character U+0100 in Emacs, and holding it would mean a multibyte string
+// type rather than a length. That half of the divergence is recorded in
+// `compat/features.json` and `doc/language.md`.
 static int ReadStringEscape(FeContext* ctx, FeReadFn fn, void* udata) {
   const int value = ReadEscape(ctx, fn, udata);
-  if (value == 0) {
-    FeHandleError(ctx, "unsupported read syntax: NUL character in string");
-  }
   if (value > 0xff) {
     FeHandleError(ctx,
                   "unsupported read syntax: character above 255 in string");
@@ -2931,9 +3093,20 @@ static int ReadStringEscape(FeContext* ctx, FeReadFn fn, void* udata) {
   return value;
 }
 
+// The literal is built into one string object that grows, rather than
+// accumulated anywhere first: a `FeReadFn` answers one byte at a time and
+// cannot be rewound, so the length is not known until the closing quote.
+// `res` is on the GC stack from `MakeStringObject` onwards, which is what
+// keeps it alive across the host read callback and across its own growth --
+// both of which allocate. No payload address survives either.
+//
+// It opens at one alignment unit because that is the smallest block the
+// allocator hands out anyway, so a literal that fits in it costs one publish
+// rather than two. A raw NUL byte in the SOURCE is still the end of input:
+// `FeReadFn` answers a `char` and spells exhaustion as 0, which is why `\0`
+// (or `\000`) is the way to write one, and why the writer escapes it.
 static FeObject* ReadStringLiteral(FeContext* ctx, FeReadFn fn, void* udata) {
-  FeObject* res = BuildString(ctx, NULL, '\0');
-  FeObject* value = res;
+  FeObject* const res = MakeStringObject(ctx, FePayloadAlignment);
   char chr = fn(ctx, udata);
   while (chr != '"') {
     if (chr == '\0')
@@ -2941,10 +3114,11 @@ static FeObject* ReadStringLiteral(FeContext* ctx, FeReadFn fn, void* udata) {
     if (chr == '\\') {
       chr = (char)ReadStringEscape(ctx, fn, udata);
     }
-    value = BuildString(ctx, value, chr);
+    AppendStringByte(ctx, res, chr);
     chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
     ctx->nextchr = '\0';
   }
+  FinishString(ctx, res);
   return res;
 }
 
@@ -2988,7 +3162,7 @@ static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
     // list where `(a . b)` is a pair (Phase 14). The two read to the same
     // interned symbol -- `\.` is not a different object -- so the object
     // alone cannot answer this and the reader's own flag has to.
-    if (IsDot(v) && !ctx->reader_atom_escaped) {
+    if (IsDot(ctx, v) && !ctx->reader_atom_escaped) {
       if (FeIsNil(res)) {
         FeHandleError(ctx, "'.' at start of list");
       }
@@ -3049,7 +3223,7 @@ static FeObject* ReadVector(FeContext* ctx, FeReadFn fn, void* udata) {
     if (v == &rparen) {
       FeHandleError(ctx, "stray ')'");
     }
-    if (IsDot(v) && !ctx->reader_atom_escaped) {
+    if (IsDot(ctx, v) && !ctx->reader_atom_escaped) {
       FeHandleError(ctx, "'.' inside a vector");
     }
     *tail = FeCons(ctx, v, &nil);
@@ -3460,11 +3634,11 @@ bool IsSymbolPrimitive(Primitive primitive) {
 // program writes is; a longer one is a named error rather than a truncation.
 static void CopyNameArgument(FeContext* ctx, FeObject* obj, char* buf) {
   const FeObject* const string = CheckType(ctx, obj, FeTString);
-  const size_t length = CopyStoredStringBytes(string, nullptr);
+  const size_t length = CopyStringBytes(ctx, string, nullptr);
   if (length > SymbolNameLimit) {
     FeHandleError(ctx, "symbol name too long (63-byte limit)");
   }
-  (void)CopyStoredStringBytes(string, buf);
+  (void)CopyStringBytes(ctx, string, buf);
   buf[length] = '\0';
 }
 
@@ -3483,11 +3657,11 @@ static FeObject* InternName(FeContext* ctx, const char* name) {
 static FeObject* InternSoft(FeContext* ctx, FeObject* argument) {
   char name[SymbolNameLimit + 1];
   if (FeGetType(argument) == FeTSymbol) {
-    const size_t length = CopyStoredStringBytes(SymbolName(argument), nullptr);
+    const size_t length = CopyStringBytes(ctx, SymbolName(argument), nullptr);
     if (length > SymbolNameLimit) {
       return &nil;
     }
-    (void)CopyStoredStringBytes(SymbolName(argument), name);
+    (void)CopyStringBytes(ctx, SymbolName(argument), name);
     name[length] = '\0';
   } else if (FeIsNil(argument)) {
     return &nil;  // Emacs' `(intern-soft "nil")` is nil either way.
@@ -3525,13 +3699,12 @@ static FeObject* SymbolNameString(FeContext* ctx, FeObject* argument) {
   char name[SymbolNameLimit + 1];
   const FeObject* const stored =
       SymbolName(CheckType(ctx, argument, FeTSymbol));
-  const size_t length = CopyStoredStringBytes(stored, nullptr);
+  const size_t length = CopyStringBytes(ctx, stored, nullptr);
   if (length > SymbolNameLimit) {
     FeHandleError(ctx, "symbol name too long (63-byte limit)");
   }
-  (void)CopyStoredStringBytes(stored, name);
-  name[length] = '\0';
-  return FeMakeString(ctx, name);
+  (void)CopyStringBytes(ctx, stored, name);
+  return FeMakeStringBytes(ctx, name, length);
 }
 
 // The property list is `(PROP VALUE PROP VALUE ...)` and properties compare
@@ -3670,26 +3843,13 @@ static int64_t IndexArgument(FeContext* ctx, FeObject* obj) {
   return INTEGER(obj);
 }
 
-// The `index`th stored byte of a string chain. A WALK, because a fe string is
-// a chain of `StringBufferSize`-byte cells and has no index of its own; the
-// caller has already bounds-checked, so the trailing return is unreachable
-// and is there for the compiler. Phase 25 is where a string's bytes move onto
-// the payload region and this becomes the same arithmetic a vector's element
-// already is.
-static unsigned char StringByteAt(const FeObject* string, size_t index) {
-  size_t seen = 0;
-  while (!FeIsNil(string)) {
-    const char* buffer = STRING_BUFFER(string);
-    const char* end = memchr(buffer, '\0', StringBufferSize);
-    const size_t count =
-        end == nullptr ? StringBufferSize : (size_t)(end - buffer);
-    if (index < seen + count) {
-      return (unsigned char)buffer[index - seen];
-    }
-    seen += count;
-    string = CDR(string);
-  }
-  return 0;
+// The `index`th stored byte, which since Phase 25 is the same arithmetic a
+// vector's element is: one derivation of the block, one read, no walk. The
+// caller has already bounds-checked against `StringLength`.
+static unsigned char StringByteAt(const FeContext* ctx,
+                                  const FeObject* string,
+                                  size_t index) {
+  return StringBytes(ctx, string)[index];
 }
 
 // How many elements a SEQUENCE has, which is `length`'s answer and the sum
@@ -3709,7 +3869,7 @@ static size_t SequenceCount(FeContext* ctx, FeObject* sequence) {
     return VectorLength(ctx, sequence);
   }
   if (type == FeTString) {
-    return CopyStoredStringBytes(sequence, nullptr);
+    return StringLength(sequence);
   }
   if (type != FeTNil && type != FeTPair) {
     RaiseWrongType(ctx, "sequencep", sequence);
@@ -3735,39 +3895,67 @@ static FeObject* Aref(FeContext* ctx, FeObject* array, FeObject* index_obj) {
   if (type != FeTVector && type != FeTString) {
     RaiseWrongType(ctx, "arrayp", array);
   }
-  const size_t length = type == FeTVector
-                            ? VectorLength(ctx, array)
-                            : CopyStoredStringBytes(array, nullptr);
+  const size_t length =
+      type == FeTVector ? VectorLength(ctx, array) : StringLength(array);
   if (index < 0 || (uint64_t)index >= length) {
     RaiseOutOfRange(ctx, array, index_obj);
   }
   return type == FeTVector
              ? VectorElement(ctx, array, (size_t)index)
-             : FeMakeInteger(ctx, StringByteAt(array, (size_t)index));
+             : FeMakeInteger(ctx, StringByteAt(ctx, array, (size_t)index));
 }
 
-// `(aset ARRAY INDEX VALUE)`, answering VALUE as Emacs does. A STRING is an
-// array Emacs can write and fe cannot: its bytes live in a chain of cells
-// whose last one is NUL-terminated and whose width is fixed, so a write is
-// only meaningful for a byte that keeps the chain's shape. Refusing it by
-// name is the recorded divergence; Phase 25, which moves those bytes onto the
-// payload region, is where it becomes implementable rather than awkward. The
-// non-array answer stays Emacs' `(wrong-type-argument arrayp X)`.
+// `aset` on a STRING, which Phase 25 made possible and 25.0 measured against
+// Emacs first (`string25-aset-*`). Emacs' unibyte rule, both halves: a value
+// that is a byte is stored in place and the string keeps its length, and a
+// value above 255 is refused -- with Emacs' own sentence, because the refusal
+// is the contract and a caller reading the message should find the one it
+// would find there. Emacs refuses for the same reason fe does: storing it
+// would have to WIDEN the string, and `aset` never changes a string's width
+// in either dialect. So a string's length is fixed here, and the phase's
+// "mutation preserves the stable header even when the size changes" gate is
+// about the reader's growth rather than about this.
+//
+// Emacs' other refusal -- "Attempt to replace non-ASCII char in multibyte
+// string" -- has no analogue here: a fe string is a sequence of BYTES, so
+// there is no multibyte character for a write to land in the middle of.
+// Writing over one byte of a two-byte UTF-8 character is a recorded
+// divergence rather than an error.
+static void SetStringByte(FeContext* ctx,
+                          FeObject* string,
+                          size_t index,
+                          FeObject* value) {
+  if (FeGetType(value) != FeTInteger || INTEGER(value) < 0) {
+    RaiseWrongType(ctx, "characterp", value);
+  }
+  if (INTEGER(value) > 0xff) {
+    FeHandleError(ctx, "Attempt to store non-byte value into unibyte string");
+  }
+  StringBytes(ctx, string)[index] = (unsigned char)INTEGER(value);
+}
+
+// `(aset ARRAY INDEX VALUE)`, answering VALUE as Emacs does. An ARRAY is a
+// vector or a string, exactly as it is for `aref` above, and the bounds and
+// wrong-type answers are the same two conditions for both.
 static FeObject* Aset(FeContext* ctx,
                       FeObject* array,
                       FeObject* index_obj,
                       FeObject* value) {
   const int64_t index = IndexArgument(ctx, index_obj);
-  if (FeGetType(array) == FeTString) {
-    FeHandleError(ctx, "unsupported: aset on a string");
-  }
-  if (FeGetType(array) != FeTVector) {
+  const FeType type = FeGetType(array);
+  if (type != FeTVector && type != FeTString) {
     RaiseWrongType(ctx, "arrayp", array);
   }
-  if (index < 0 || (uint64_t)index >= VectorLength(ctx, array)) {
+  const size_t length =
+      type == FeTVector ? VectorLength(ctx, array) : StringLength(array);
+  if (index < 0 || (uint64_t)index >= length) {
     RaiseOutOfRange(ctx, array, index_obj);
   }
-  SetVectorElement(ctx, array, (size_t)index, value);
+  if (type == FeTVector) {
+    SetVectorElement(ctx, array, (size_t)index, value);
+  } else {
+    SetStringByte(ctx, array, (size_t)index, value);
+  }
   return value;
 }
 
@@ -3818,7 +4006,7 @@ static size_t AppendSequence(FeContext* ctx,
     if (type == FeTVector) {
       element = VectorElement(ctx, sequence, i);
     } else if (type == FeTString) {
-      element = FeMakeInteger(ctx, StringByteAt(sequence, i));
+      element = FeMakeInteger(ctx, StringByteAt(ctx, sequence, i));
     } else {
       element = CAR(sequence);
       sequence = CDR(sequence);
@@ -3983,7 +4171,7 @@ static FeObject* SelectErrorMessage(FeContext* ctx,
                                     FeObject* symbol,
                                     FeObject** data,
                                     bool file_error) {
-  const bool from_data = IsNamedSymbol(symbol, "error") || file_error;
+  const bool from_data = IsNamedSymbol(ctx, symbol, "error") || file_error;
   if (from_data && FeGetType(*data) == FeTPair) {
     FeObject* const message = CAR(*data);
     *data = CDR(*data);
@@ -3995,7 +4183,7 @@ static FeObject* SelectErrorMessage(FeContext* ctx,
   // `error` itself never falls back to its property: Emacs reads its
   // message out of the data or reports `peculiar error`, and `(get 'error
   // 'error-message)` -- the string "error" -- is not what it prints.
-  return property == nullptr || IsNamedSymbol(symbol, "error")
+  return property == nullptr || IsNamedSymbol(ctx, symbol, "error")
              ? &nil
              : PlistGet(SymbolPlist(symbol), property);
 }
@@ -4012,12 +4200,12 @@ size_t RenderErrorMessage(FeContext* ctx,
   const bool structured = FeGetType(error) == FeTPair;
   FeObject* const symbol = structured ? CAR(error) : &nil;
   FeObject* data = structured ? CDR(error) : &nil;
-  const bool file_error = ConditionInheritsFrom(symbol, "file-error");
+  const bool file_error = ConditionInheritsFrom(ctx, symbol, "file-error");
   FeObject* const message = SelectErrorMessage(ctx, symbol, &data, file_error);
   const char* separator = ": ";
   if (FeGetType(message) != FeTString) {
     AppendMessageText(dst, size, &used, "peculiar error");
-  } else if (CopyStoredStringBytes(message, nullptr) != 0) {
+  } else if (CopyStringBytes(ctx, message, nullptr) != 0) {
     AppendMessageObject(ctx, message, dst, size, &used, 0);
   } else {
     separator = nullptr;
@@ -4079,36 +4267,48 @@ void SeedConditionMessages(FeContext* ctx) {
   }
 }
 
-static size_t GetSymbolObjectCount(const char* name) {
-  // A symbol object plus its one `((name . plist) . function) . value` cons
-  // chain: the symbol, the name string cells, the extra pair the 04B
-  // function cell added and the extra pair Phase 14's plist added.
-  // `StringBufferSize` name characters fit in one string cell.
-  const size_t length = strlen(name);
-  assert(length > 0);
-  return 6 + (length - 1) / StringBufferSize;
-}
+// What one object of each kind costs in CELLS, which since Phase 25 does not
+// depend on how long the name is: a string is one object whatever its length,
+// and a symbol is six -- the symbol itself, the three pairs of its
+// `((name . plist) . function) . value` chain, the `symbol_list` cell that
+// interns it, and the one string object its name is. The length went into the
+// region instead, which is what `GetStringPayloadBytes` below counts.
+enum { SymbolObjectCount = 6, StringObjectCount = 1 };
 
-// A string's cells: `StringBufferSize` bytes each, and one cell even for the
-// empty string.
-static size_t GetStringObjectCount(const char* text) {
-  const size_t length = strlen(text);
-  return 1 + (length == 0 ? 0 : (length - 1) / StringBufferSize);
+// ...and in REGION BYTES: one block per string, its header plus its bytes
+// rounded the way `AllocatePayloadBlock` rounds them. Exactly, not
+// approximately: `FeMinimumArenaSize` is the size at which the exact-fit
+// context in `test_api.c` finds no free cell and no free region byte.
+static size_t GetStringPayloadBytes(const char* text) {
+  return sizeof(FePayloadBlock) + RoundUpToAlignment(strlen(text));
 }
 
 // What `SeedConditionMessages` allocates: the shared property symbol, and
 // per row a message string, the two pairs of the plist, and the condition
 // symbol unless one of the tables above already interned it.
 static size_t GetConditionMessageObjectCount(void) {
-  size_t count = GetSymbolObjectCount(ErrorMessageProperty);
+  size_t count = SymbolObjectCount;
   for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
     const ConditionParent* const row = ConditionRowAt(i);
-    count += GetStringObjectCount(row->message) + 2;
+    count += StringObjectCount + 2;
     if (!IsCoreSymbolName(row->name)) {
-      count += GetSymbolObjectCount(row->name);
+      count += SymbolObjectCount;
     }
   }
   return count;
+}
+
+// The same seeding, in region bytes: one block per name and one per message.
+static size_t GetConditionMessagePayloadBytes(void) {
+  size_t bytes = GetStringPayloadBytes(ErrorMessageProperty);
+  for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
+    const ConditionParent* const row = ConditionRowAt(i);
+    bytes += GetStringPayloadBytes(row->message);
+    if (!IsCoreSymbolName(row->name)) {
+      bytes += GetStringPayloadBytes(row->name);
+    }
+  }
+  return bytes;
 }
 
 static FeObject* native_sin(FeContext* ctx, FeObject* arg) {
@@ -4308,25 +4508,46 @@ static FeObject* native_truncate(FeContext* ctx, FeObject* arg) {
 // `(condition-case e BIG (error ...))` catch them.
 
 static size_t GetCoreObjectCount(void) {
-  size_t count = GetSymbolObjectCount("t");
+  size_t count = SymbolObjectCount;
   for (Primitive i = PAssert; i < PSentinel; i++) {
-    count += 1 + GetSymbolObjectCount(primitive_names[i]);
+    count += 1 + SymbolObjectCount;
   }
   for (size_t i = 0; i < COUNT(primitive_aliases); i++) {
-    count += GetSymbolObjectCount(primitive_aliases[i].name);
+    count += SymbolObjectCount;
   }
   for (size_t i = 0; i < COUNT(math_names); i++) {
-    count += 1 + GetSymbolObjectCount(math_names[i]);
+    count += 1 + SymbolObjectCount;
   }
   // The two pre-built exhaustion conditions: each is an interned symbol plus
   // the one pair that makes it a condition object (09B). Counting them here
   // is what keeps `FeMinimumArenaSize()` honest -- a context opened at the
   // minimum must still be able to build them.
-  count += 1 + GetSymbolObjectCount(ArenaExhaustionName);
-  count += 1 + GetSymbolObjectCount(EvaluationStackExhaustionName);
+  count += 1 + SymbolObjectCount;
+  count += 1 + SymbolObjectCount;
   // Phase 19's seeded `error-message` properties, for the same reason.
   count += GetConditionMessageObjectCount();
   return count;
+}
+
+// The region bytes those same objects need: every name and every seeded
+// message is a string, and a string is a block. This is why an fe context
+// cannot open without a region and why the minimum arena funds one -- an
+// interpreter that cannot hold the name `car` cannot hold anything.
+static size_t GetCorePayloadBytes(void) {
+  size_t bytes = GetStringPayloadBytes("t");
+  for (Primitive i = PAssert; i < PSentinel; i++) {
+    bytes += GetStringPayloadBytes(primitive_names[i]);
+  }
+  for (size_t i = 0; i < COUNT(primitive_aliases); i++) {
+    bytes += GetStringPayloadBytes(primitive_aliases[i].name);
+  }
+  for (size_t i = 0; i < COUNT(math_names); i++) {
+    bytes += GetStringPayloadBytes(math_names[i]);
+  }
+  bytes += GetStringPayloadBytes(ArenaExhaustionName);
+  bytes += GetStringPayloadBytes(EvaluationStackExhaustionName);
+  bytes += GetConditionMessagePayloadBytes();
+  return bytes;
 }
 
 static size_t GetMinimumArenaSize(void) {
@@ -4338,7 +4559,8 @@ static size_t GetMinimumArenaSize(void) {
       ckd_mul(&frames, frames, sizeof(FeEvalFrame)) ||
       ckd_mul(&objects, GetCoreObjectCount(), sizeof(FeObject)) ||
       ckd_add(&minimum, sizeof(FeArena), frames) ||
-      ckd_add(&minimum, minimum, objects);
+      ckd_add(&minimum, minimum, objects) ||
+      ckd_add(&minimum, minimum, GetCorePayloadBytes());
   assert(!overflow);
   return minimum;
 }
@@ -4376,10 +4598,12 @@ FeArenaStats FeGetArenaStats(const FeContext* ctx) {
   };
 }
 
-// The payload region's share of what is left once the frame region is funded,
-// rounded DOWN to a whole alignment unit so that the cells laid out after it
-// keep their own alignment. Zero percent is zero bytes and therefore today's
-// partition byte for byte, which is what `FeOpenContext` asks for.
+// The payload region's DISCRETIONARY share of what is left once the frame
+// region is funded, rounded DOWN to a whole alignment unit so that the cells
+// laid out after it keep their own alignment. It is a share of the surplus
+// only: the region's floor -- the blocks the core names occupy -- is funded
+// out of `FeMinimumArenaSize` beside the core cells, so this number is what a
+// host's own strings get to use.
 static size_t PayloadCarveBytes(size_t bytes, size_t percent) {
   const size_t share = (bytes / 100) * percent + (bytes % 100) * percent / 100;
   return share - share % FePayloadAlignment;
@@ -4398,7 +4622,11 @@ static bool InitializeArenaLayout(FeContext* ctx,
   // it, which is the Phase 22 ADR's "no unpriced split" rule: frames are the
   // pool Phase 21 measured as kg's real scarcity.
   const size_t cell_bytes = remainder - frame_bonus_bytes;
-  const size_t payload_bytes = PayloadCarveBytes(cell_bytes, payload_percent);
+  const size_t payload_share = PayloadCarveBytes(cell_bytes, payload_percent);
+  // Both floors plus both shares: the core names' blocks and the core cells
+  // come out of the minimum, and what is left over is split. Every term is a
+  // multiple of the shared alignment, so no region seam needs padding.
+  const size_t payload_bytes = GetCorePayloadBytes() + payload_share;
   size_t frame_capacity = 0;
   size_t frame_storage_capacity = 0;
   size_t frame_bytes = 0;
@@ -4409,7 +4637,7 @@ static bool InitializeArenaLayout(FeContext* ctx,
       ckd_add(&frame_storage_capacity, frame_capacity, CleanupFrameReserve) ||
       ckd_mul(&frame_bytes, frame_storage_capacity, sizeof(FeEvalFrame)) ||
       ckd_add(&object_count, GetCoreObjectCount(),
-              (cell_bytes - payload_bytes) / sizeof(FeObject));
+              (cell_bytes - payload_share) / sizeof(FeObject));
   if (layout_overflow) {
     return false;
   }
@@ -4554,15 +4782,11 @@ FeContext* OpenContextWithPayload(void* arena,
 static bool SelectedPayloadPercent(const FeOpenOptions* options,
                                    size_t* percent) {
   const int asked = options == nullptr ? 0 : options->payload_percent;
-  if (asked == FePayloadPercentNone) {
-    *percent = 0;
-    return true;
-  }
   if (asked < 0 || asked > 100) {
     return false;
   }
   // Zero is "Fe decides", which is what makes a zero-initialized record mean
-  // the default; an explicit none is the case above.
+  // the default.
   *percent = asked == 0 ? (size_t)FeDefaultPayloadPercent : (size_t)asked;
   return true;
 }
@@ -4577,15 +4801,14 @@ FeContext* FeOpenContextWithOptions(void* arena,
   return OpenContextWithPayload(arena, size, percent);
 }
 
-// No payload carve, expressed the one way the options record can say so. The
-// Phase 22 ADR requires this entry point to keep today's behaviour -- the
-// split it recorded is the spike's, "not a shipped constant" -- and a host
-// that has not asked for a region should not lose a quarter of its cells to
-// one nothing can allocate from until Phase 25. A host that wants the ADR's
-// split asks for it, through `FeOpenContextWithOptions` and its default.
+// Fe's own split, which is the only thing this entry point can mean now.
+// Until Phase 25 it carved nothing, because nothing a Lisp program could
+// build lived in the region and a host that had not asked for one should not
+// lose a quarter of its cells to it. Strings ended that: a symbol's name is a
+// string, so a context with no region cannot even finish opening, and "no
+// carve" stopped being a partition a host can be given.
 FeContext* FeOpenContext(void* arena, size_t size) {
-  const FeOpenOptions options = {.payload_percent = FePayloadPercentNone};
-  return FeOpenContextWithOptions(arena, size, &options);
+  return FeOpenContextWithOptions(arena, size, nullptr);
 }
 
 void FeCloseContext(FeContext* ctx) {

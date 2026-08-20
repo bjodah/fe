@@ -4,7 +4,7 @@
  "emacs_version": "GNU Emacs 31.0.91 (build 1, x86_64-pc-linux-gnu, GTK+ Version 3.24.49, cairo version 1.18.4)\n of 2026-08-09",
  "record": {
   "kind": "value",
-  "type": "string",
-  "printed": "\"\u0000a\""
+  "type": "cons",
+  "printed": "(\"\u0000a\")"
  }
 }

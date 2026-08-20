@@ -52,13 +52,6 @@ typedef enum FePerfCounter {
   // The invariant a test can assert is that this equals the sum of the
   // by-type block below.
   FePerfAllocObject,
-  // Cells charged to one type and then given another: `BuildString` takes
-  // its cell through `FeCons`, so the cell is a pair for the two statements
-  // between the allocation and its `SetType`. `FePerfCountRetype` moves the
-  // charge, and this counts the corrections so the move is visible rather
-  // than silent.
-  FePerfAllocRetyped,
-
   // Allocations by final type. One slot per `FeType`, contiguous and in
   // `FeType` order, so the counter for a type is `FE_PERF_ALLOC_SLOT(type)`
   // -- arithmetic rather than a switch a new type could silently miss. The
@@ -107,23 +100,24 @@ typedef enum FePerfCounter {
   FePerfVectorSet,
   FePerfVectorElement,
 
-  // Strings, whose representation is a chain of `StringBufferSize`-byte
-  // cells. OBJECT is how many strings were made and CELL and BYTE what they
-  // cost: cells `BuildString` allocated and payload bytes it stored. OBJECT
-  // is the one the Phase 22 ADR had to bound rather than read -- a string of
-  // L bytes takes ceil(L/7) cells, so cells and bytes together only bracket
-  // the object count between `bytes/7` and `cells`, and the payload pool a
-  // string representation would need is `bytes + header * OBJECT`. The WALK
-  // trio is traversal -- `CopyStoredStringBytes` calls, the cells they
-  // visited and the bytes they measured -- and BYTE_COPIED is the subset
-  // actually memcpy'd out, which is smaller than WALK_BYTE because a caller
-  // that needs a length first walks the chain twice.
+  // Strings, which since Phase 25 are a header with a byte length plus a
+  // payload block of bytes. OBJECT is how many were made and BYTE how many
+  // bytes went into them, whether by a constructor or by the reader's
+  // one-byte-at-a-time growth. What those cost the region is the PAYLOAD
+  // block above, which counts a string's block beside a vector's.
+  //
+  // COPY and BYTE_COPIED are the copy-out surface: calls to fe's one
+  // byte-copy helper, and the bytes it actually memcpy'd. The gap between
+  // them is now a measurement rather than an overhead -- a caller that asks
+  // for a length first makes a COPY call that touches no byte at all, where
+  // the cell chain made it walk the whole string to count.
+  //
+  // Three counters retired with the chain in Phase 25: CELL and WALK_CELL
+  // named cells no string has any more, and WALK_BYTE named bytes a length
+  // pass no longer reads.
   FePerfStringObject,
-  FePerfStringCell,
   FePerfStringByte,
-  FePerfStringWalk,
-  FePerfStringWalkCell,
-  FePerfStringWalkByte,
+  FePerfStringCopy,
   FePerfStringByteCopied,
 
   // Interning. LOOKUP counts `FindInternedSymbol` calls (`FeMakeSymbol` and
@@ -134,11 +128,13 @@ typedef enum FePerfCounter {
   FePerfInternMiss,
   FePerfInternCandidate,
 
-  // Symbol-name comparisons, by cell chain: COMPARE counts `IsStringEqual`
-  // calls and BYTE the name bytes they examined (padding included -- the
-  // comparison is per cell, not per meaningful byte). Interning is one
-  // caller, one comparison per candidate, so COMPARE minus
-  // FePerfInternCandidate is `IsNamedSymbol`'s share.
+  // Symbol-name comparisons: COMPARE counts `IsStringEqual` calls and BYTE
+  // the name bytes they examined. Since Phase 25 a comparison starts with the
+  // two lengths, so BYTE counts only the calls that got past that -- which is
+  // why it is far smaller than COMPARE over an obarray scan, and why it fell
+  // by two orders of magnitude when the chain went. Interning is one caller,
+  // one comparison per candidate, so COMPARE minus FePerfInternCandidate is
+  // `IsNamedSymbol`'s share.
   FePerfNameCompare,
   FePerfNameByte,
 
@@ -190,10 +186,10 @@ extern const char* const fe_perf_counter_name[FePerfCounterCount];
 // The by-type allocation charge.
 #define FE_PERF_ALLOC(type) \
   ((void)(fe_perf_counter[FE_PERF_ALLOC_SLOT(type)]++))
-// Move a cell's charge from the type it was provisionally counted as to the
-// type it is being given. A statement, not an expression, so the off build's
-// expansion needs the same trailing semicolon at the call site.
-#define FE_PERF_RETYPE(object, type) FePerfCountRetype((object), (type))
+// The by-type charge at the one place a cell is given a type. A statement,
+// not an expression, so the off build's expansion needs the same trailing
+// semicolon at the call site.
+#define FE_PERF_TYPED(type) FePerfCountTyped(type)
 
 // Zero every counter. The counting build starts zeroed; this is for a
 // measurement that wants one workload rather than a whole process.
@@ -203,10 +199,12 @@ void FePerfReset(void);
 // workload runner).
 [[nodiscard]] unsigned long long FePerfRead(FePerfCounter counter);
 
-// Move a cell's allocation charge, per `FePerfAllocRetyped`. Not called
-// directly: `FE_PERF_RETYPE` is the spelling that disappears in a
-// non-counting build.
-void FePerfCountRetype(const FeObject* object, FeType type);
+// The by-type allocation charge, which `SetType` makes for every cell that
+// gets a type and `FeCons` makes for itself. Not called directly:
+// `FE_PERF_TYPED` is the spelling that disappears in a non-counting build.
+// `FeTFree` is not an allocation -- the sweep and the free-list build spell
+// themselves with it -- so it is charged to nothing.
+void FePerfCountTyped(FeType type);
 
 // Write every counter, and the arena gauges beside them, as one JSON object.
 // `stats` is `FeGetArenaStats` of the context being described and must not be
@@ -219,7 +217,7 @@ void FePerfWriteJson(FILE* out, const FeArenaStats* stats);
 #define FE_PERF_INC(counter) ((void)0)
 #define FE_PERF_ADD(counter, n) ((void)0)
 #define FE_PERF_ALLOC(type) ((void)0)
-#define FE_PERF_RETYPE(object, type) ((void)0)
+#define FE_PERF_TYPED(type) ((void)0)
 
 #endif  // FE_PERF_COUNTERS
 

@@ -22,7 +22,6 @@ unsigned long long fe_perf_counter[FePerfCounterCount];
 // every counter after it.
 const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FePerfAllocObject] = "alloc_object",
-    [FePerfAllocRetyped] = "alloc_retyped",
 
     [FE_PERF_ALLOC_SLOT(FeTPair)] = "alloc_pair",
     [FE_PERF_ALLOC_SLOT(FeTFree)] = "alloc_free",
@@ -58,11 +57,8 @@ const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FePerfVectorElement] = "vector_element",
 
     [FePerfStringObject] = "string_object",
-    [FePerfStringCell] = "string_cell",
     [FePerfStringByte] = "string_byte",
-    [FePerfStringWalk] = "string_walk",
-    [FePerfStringWalkCell] = "string_walk_cell",
-    [FePerfStringWalkByte] = "string_walk_byte",
+    [FePerfStringCopy] = "string_copy",
     [FePerfStringByteCopied] = "string_byte_copied",
 
     [FePerfInternLookup] = "intern_lookup",
@@ -109,15 +105,11 @@ unsigned long long FePerfRead(FePerfCounter counter) {
 //     `FeCons`. Only `BuildString` does this -- it takes its cell through
 //     `FeCons` and then retypes it -- and the charge moves here so
 //     `alloc_object` still equals the sum of the by-type slots.
-void FePerfCountRetype(const FeObject* object, FeType type) {
+void FePerfCountTyped(FeType type) {
   if (type == FeTFree) {
     return;
   }
   fe_perf_counter[FE_PERF_ALLOC_SLOT(type)]++;
-  if (FeGetType(object) == FeTPair) {
-    fe_perf_counter[FE_PERF_ALLOC_SLOT(FeTPair)]--;
-    fe_perf_counter[FePerfAllocRetyped]++;
-  }
 }
 
 void FePerfWriteJson(FILE* out, const FeArenaStats* stats) {
