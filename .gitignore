@@ -22,3 +22,4 @@ fuzz/artifacts/
 repomix-output.*
 .cache
 perfobj/
+.ci/.run/
