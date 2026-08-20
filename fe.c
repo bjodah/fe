@@ -1753,7 +1753,7 @@ static size_t SymbolIndexNext(size_t slot, size_t capacity) {
 //
 // The comparison is `IsStringEqual`, unchanged: length first, then bytes,
 // embedded NUL included. Phase 26 moved it, it did not rewrite it.
-static FeObject* FindInternedSymbol(FeContext* ctx, const char* name) {
+static FeObject* FindInternedSymbol(const FeContext* ctx, const char* name) {
   const size_t capacity = SymbolIndexCapacity(ctx);
   size_t slot = SymbolIndexHome(HashCName(name), capacity);
   FE_PERF_INC(FePerfInternLookup);
@@ -1849,7 +1849,8 @@ static void OpenSymbolIndex(FeContext* ctx) {
 // lets this ask "found at its name" without building a NUL-terminated key to
 // look the symbol up with, and a name may contain a NUL that such a key
 // could not carry.
-static bool SymbolIsIndexedAtItsName(const FeContext* ctx, FeObject* symbol) {
+static bool SymbolIsIndexedAtItsName(const FeContext* ctx,
+                                     const FeObject* symbol) {
   if (FeGetType(symbol) != FeTSymbol) {
     return false;
   }
@@ -1891,7 +1892,8 @@ static bool SymbolIsIndexedAtItsName(const FeContext* ctx, FeObject* symbol) {
 // the poison lane between any two allocations.
 bool SymbolIndexMatchesSymbolList(const FeContext* ctx) {
   size_t listed = 0;
-  for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
+  for (const FeObject* rest = ctx->symbol_list; !FeIsNil(rest);
+       rest = CDR(rest)) {
     if (!SymbolIsIndexedAtItsName(ctx, CAR(rest))) {
       return false;
     }
@@ -4469,7 +4471,7 @@ static void AppendMessageObject(FeContext* ctx,
 // The message half of the rule above: which object the sentence starts
 // from, with `*data` left at the items that follow it. Split out of the
 // renderer so that neither half is over `PMCCABE_NEW_FUNCTION_MAX`.
-static FeObject* SelectErrorMessage(FeContext* ctx,
+static FeObject* SelectErrorMessage(const FeContext* ctx,
                                     FeObject* symbol,
                                     FeObject** data,
                                     bool file_error) {

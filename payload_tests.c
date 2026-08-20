@@ -1596,7 +1596,7 @@ static void SymbolIndexName(char* buffer, size_t size, size_t i) {
 static bool SymbolListHasName(FeContext* context, const char* name) {
   char buffer[SymbolNameLimit + 1];
   const size_t length = strlen(name);
-  for (FeObject* rest = context->symbol_list; !FeIsNil(rest);
+  for (const FeObject* rest = context->symbol_list; !FeIsNil(rest);
        rest = CDR(rest)) {
     const size_t held =
         FeStringBytes(context, SymbolName(CAR(rest)), buffer, sizeof(buffer));
@@ -1632,7 +1632,7 @@ static bool CheckDoubleProbe(FeContext* context, const char* name) {
   // Neither probe interned anything, in either structure.
   CHECK(context->symbol_index_count == before);
   CHECK(!SymbolListHasName(context, name));
-  FeObject* const interned = FeMakeSymbol(context, name);
+  const FeObject* const interned = FeMakeSymbol(context, name);
   CHECK(FeGetType(interned) == FeTSymbol);
   CHECK(context->symbol_index_count == before + 1);
   CHECK(SymbolListHasName(context, name));
@@ -1877,7 +1877,7 @@ static bool TestSymbolPublishFailsCleanlyOnCells(void) {
       CHECK(ConditionIs(context, "(arena-exhaustion)"));
       CHECK(PublishLeftNothingBehind(context, name, before));
     } else {
-      FeObject* const symbol = FeMakeSymbol(context, name);
+      const FeObject* const symbol = FeMakeSymbol(context, name);
       CHECK(FeGetType(symbol) == FeTSymbol);
       CHECK(SymbolListHasName(context, name));
       CHECK(context->symbol_index_count == before + 1);
