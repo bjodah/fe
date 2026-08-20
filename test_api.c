@@ -10121,6 +10121,11 @@ static bool TestVectors(void) {
     CHECK(state.called);
     CHECK(ConditionRenders(ctx, "(args-out-of-range [nil nil] 2)"));
     state.called = false;
+    // Read between the two assignments by `HandleError`, which cppcheck
+    // cannot see because it runs from inside fe through a callback -- the
+    // same blind spot the `constParameterCallback` suppressions elsewhere in
+    // this file cover.
+    // cppcheck-suppress redundantAssignment
     state.expected_message = "expected vector, got integer";
     if (setjmp(state.jump) == 0) {
       (void)FeVectorLength(ctx, FeMakeInteger(ctx, 5));
