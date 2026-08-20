@@ -167,6 +167,21 @@
    "source_name": null
   },
   {
+   "id": "condition-hierarchy-search-failed",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "condition-search-failed-signal",
+    "condition-search-failed-handlers",
+    "condition-search-failed-message"
+   ],
+   "kg_test": "fe/test_api.c:TestErrorMessageString",
+   "rationale": "The frontier demand phase of kg's Elisp campaign: `search-failed` joins the hierarchy as a child of `error` -- Emacs' own chain, measured on 31.0.91, `(get 'search-failed 'error-conditions)` being `(search-failed error)` -- with Emacs' own `error-message` text. One data line and no code, like the two buffer edges before it: the three consumers of `condition_parents` are sizeof-driven loops. What the line buys is that `(signal 'search-failed '(\"z\"))` is legal at all -- `IsConditionSymbol` gates `signal` on this table and answered `Invalid error symbol` before -- and that a handler can name the failure rather than catching everything. Nothing in fe raises it; kg's four search names do, once their NOERROR argument means what Emacs' does, and the DATA they carry is the pattern that was not found.",
+   "source_name": null
+  },
+  {
    "id": "condition-object",
    "category": "errors-and-non-local-exits",
    "status": "supported",

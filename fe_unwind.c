@@ -146,6 +146,18 @@ static const ConditionParent condition_parents[] = {
     // since `IsConditionSymbol` gates `signal` on this table.
     {"end-of-buffer", "error", "End of buffer"},
     {"beginning-of-buffer", "error", "Beginning of buffer"},
+    // Emacs' own chain and text, measured on 31.0.91: `(get 'search-failed
+    // 'error-conditions)` is `(search-failed error)` and its `error-message`
+    // is "Search failed". It is the condition Emacs' search family raises
+    // when NOERROR is nil, carrying the pattern as its data, and it is here
+    // for the same reason the two buffer edges above are: a host that
+    // searches text has to be able to raise a failure a handler can name,
+    // and `IsConditionSymbol` gates `signal` on this table, so without the
+    // row `(signal 'search-failed '("z"))` is not merely unraised but
+    // illegal. One data line and no code -- the three consumers of the table
+    // are sizeof-driven loops. Fe raises it nowhere; kg's four search names
+    // do.
+    {"search-failed", "error", "Search failed"},
     {"arith-error", "error", "Arithmetic error"},
     {"file-error", "error", "File error"},
     // Sub-plan 12C Part 1. Emacs' own chain, measured on 31.0.90: `(get

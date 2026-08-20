@@ -1,0 +1,5 @@
+{
+ "id": "condition-search-failed-message",
+ "expr": "(list (get 'search-failed 'error-message) (error-message-string '(search-failed)) (error-message-string '(search-failed \"z\")))",
+ "note": "The frontier demand phase: the new row carries Emacs' own `error-message' text, seeded onto the symbol when the context opens like every other row of the hierarchy, and its data renders the way any non-`file-error' condition's does -- prin1'd, so the pattern comes back quoted."
+}

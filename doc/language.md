@@ -1807,6 +1807,15 @@ handler catches either and neither catches the other. As with the file
 classes, nothing in Fe raises them; they are here for a host that edits
 text, and a host that does not can ignore them.
 
+`search-failed` is the third of that kind and arrived for the same reason:
+Emacs' search family raises it when its NOERROR argument is nil, carrying the
+pattern that was not found as its data, and `(get 'search-failed
+'error-conditions)` is `(search-failed error)` there, so an `error` handler
+catches it. Fe raises it nowhere. Its message text is Emacs' own, and its
+data renders the way any non-`file-error` condition's does --
+`(error-message-string '(search-failed "z"))` is `Search failed: "z"`, the
+quotes being what `prin1` writes.
+
 `quit` is separate and requires a `quit` or
 `t` handler -- and that is true of a real host interrupt (a C-g) as well as
 of `(signal 'quit nil)`; both carry the condition object `(quit)`. Fe's own

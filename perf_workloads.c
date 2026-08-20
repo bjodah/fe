@@ -62,7 +62,7 @@
 #include "fe_internal.h"
 
 static_assert(FE_API_VERSION == 15);
-static_assert(FE_LANGUAGE_VERSION == 17);
+static_assert(FE_LANGUAGE_VERSION == 18);
 
 // The arena sizes, named rather than spelled at each use so that a record's
 // `arena_bytes` can be read against the reason its workload picked it.
@@ -660,7 +660,20 @@ static bool CheckIntern(const Workload* workload, const WorkloadRun* run) {
   // Nothing collected, so no symbol this workload made was ever reclaimed and
   // the obarray length below is exact -- and the index's own resizes, which
   // publish a bigger block and orphan the old one, did not need one either.
+  //
+  // NOT ASSERTED UNDER `FE_DEBUG_PAYLOAD_MOVE`, which is gc_stress.c's own
+  // exemption and for its reason: that knob slides the live payload extent
+  // one alignment unit per allocation and leaves the bytes behind it
+  // unreachable until a collection returns the extent to the region's base,
+  // so a workload that publishes one block per interned name drifts by its
+  // own length and eventually collects to reclaim the drift. Under the knob
+  // a collection here is the knob working, not the workload allocating, and
+  // the length this comment protects is protected anyway: an interned symbol
+  // is on `symbol_list` and therefore permanently reachable, which is what
+  // `SymbolIndexMatchesSymbolList` above checks directly.
+#if !FE_DEBUG_PAYLOAD_MOVE
   CHECK(CounterOf(run, FePerfGcCollection) == 0);
+#endif
   // n populating misses plus the probe's own, then two hits after it.
   CHECK(CounterOf(run, FePerfInternMiss) == n + 1);
   CHECK(CounterOf(run, FePerfInternLookup) == n + 3);

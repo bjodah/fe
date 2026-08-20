@@ -1,0 +1,5 @@
+{
+ "id": "condition-search-failed-handlers",
+ "expr": "(list (condition-case nil (signal 'search-failed '(\"z\")) (end-of-buffer 'EOB) (search-failed 'SF)) (condition-case e (signal 'end-of-buffer nil) (search-failed 'SF) (error (list 'E (car e)))))",
+ "note": "The frontier demand phase: `search-failed' and the buffer edges do not catch each other, and the clause naming the condition actually raised is the one that runs -- the same shape condition-buffer-edge-handlers pins for the pair beside it."
+}

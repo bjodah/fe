@@ -142,8 +142,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 15);
-  static_assert(FE_LANGUAGE_VERSION == 17);
-  CHECK(strcmp(FeVersion, "21.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 18);
+  CHECK(strcmp(FeVersion, "22.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -4731,6 +4731,8 @@ static bool TestErrorMessageString(void) {
   // Phase 20's two buffer-edge conditions, seeded the same way.
   CHK("(get 'end-of-buffer 'error-message)", "End of buffer");
   CHK("(get 'beginning-of-buffer 'error-message)", "Beginning of buffer");
+  // The search family's failure, seeded the same way again.
+  CHK("(get 'search-failed 'error-message)", "Search failed");
 
   // The rendering itself, measured against Emacs 31.0.90 in every case.
   CHK("(error-message-string '(wrong-type-argument listp 6))",
@@ -4743,6 +4745,13 @@ static bool TestErrorMessageString(void) {
   CHK("(error-message-string '(arith-error))", "Arithmetic error");
   CHK("(error-message-string '(end-of-buffer))", "End of buffer");
   CHK("(error-message-string '(beginning-of-buffer))", "Beginning of buffer");
+  // A `search-failed` carries the pattern as its data, and the data is
+  // prin1'd because the condition is not a `file-error` subtype: measured on
+  // 31.0.91, `(error-message-string '(search-failed "z"))` is `Search
+  // failed: "z"` there, quotes included, and the bare condition is the
+  // message alone.
+  CHK("(error-message-string '(search-failed \"z\"))", "Search failed: \"z\"");
+  CHK("(error-message-string '(search-failed))", "Search failed");
   CHK("(error-message-string '(quit))", "Quit");
   // `error` takes its message from the DATA, not from the property: this is
   // the case the bare-symbol reporting got most visibly wrong.
@@ -8269,11 +8278,23 @@ static bool TestCaughtExhaustionSession(void) {
 // unchanged for the ninth time. The index itself is invisible here for the
 // reason it is invisible everywhere: nothing in the corpus interns enough
 // names to grow it.
+// Re-measured at the frontier demand phase for the eleventh time, and this
+// one moves by NINE, in the two figures a condition row moves: the
+// `search-failed` row, seeded before any program runs like every other row.
+// `GetConditionMessageObjectCount` says what nine is -- `SymbolObjectCount`
+// (6) for a name no core table already interned, `StringObjectCount` (1) for
+// its message, and the usual 2 for the plist pair -- and
+// `FeMinimumArenaSize` grows by 240 bytes: those nine cells at 16 bytes
+// each, plus 96 region bytes for the two payload blocks the name and the
+// message own. TOTAL 11926 -> 11935 and LIVE AFTER COLLECTION 1437 -> 1446,
+// everything the seeding builds being reachable from the symbol list
+// forever; PEAK follows TOTAL as it always does, and the collection count is
+// unchanged for the tenth time, which is the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 11926,
+  PinnedTotalSlots = 11935,
   PinnedCollectionCount = 4,
-  PinnedPeakLive = 11926,
-  PinnedLiveAfterCollection = 1437,
+  PinnedPeakLive = 11935,
+  PinnedLiveAfterCollection = 1446,
 };
 
 // ---------------------------------------------------------------------------

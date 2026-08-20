@@ -91,8 +91,15 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 15);
-static_assert(FE_LANGUAGE_VERSION == 17);
+static_assert(FE_LANGUAGE_VERSION == 18);
 ```
+
+Fe 22.0 moves `FE_LANGUAGE_VERSION` 17 -> 18 and leaves `FE_API_VERSION` at
+15: one row joins the condition hierarchy (`search-failed`, a child of
+`error`), which a Lisp program can observe -- `signal` accepts the symbol,
+`get` answers its `error-message`, an `error` handler catches it -- while no
+declaration in `fe.h` changes. Nothing is removed and nothing that ran under
+21.0 answers differently under 22.0.
 
 Fe 21.0 moves `FE_API_VERSION` 14 -> 15 and `FE_LANGUAGE_VERSION` 16 -> 17
 together: the string cut is both a C break and a language one. What changed

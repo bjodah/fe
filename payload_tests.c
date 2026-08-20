@@ -44,7 +44,7 @@
 #include "fe_perf.h"
 
 static_assert(FE_API_VERSION == 15);
-static_assert(FE_LANGUAGE_VERSION == 17);
+static_assert(FE_LANGUAGE_VERSION == 18);
 
 #ifndef FE_GC_STRESS
 #define FE_GC_STRESS 0
@@ -325,8 +325,15 @@ static bool TestOpenOptionsPartition(void) {
   // -- so the surplus the three pools split shrank by that much: cells 42059
   // -> 41971, and payload bytes 225928 -> 227536, the region's floor rising
   // by the whole block while its discretionary share falls with the surplus.
-  CHECK(carved.cells == 41971);
-  CHECK(carved.payload_bytes == 227536);
+  //
+  // Re-measured again at the frontier demand phase, which adds the
+  // `search-failed` condition row: `FeMinimumArenaSize` grows by 240 bytes
+  // (nine cells at 16, plus 96 region bytes for the name's and the message's
+  // payload blocks), so this fixed arena moves the same way for the same
+  // reason -- cells 41971 -> 41970, payload bytes 227536 -> 227576, the
+  // region's floor rising by both blocks while the surplus it shares falls.
+  CHECK(carved.cells == 41970);
+  CHECK(carved.payload_bytes == 227576);
 
   // A smaller share moves the same bytes back the other way, and the frame
   // region -- funded before the split -- notices neither.

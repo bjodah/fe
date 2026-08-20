@@ -1,0 +1,5 @@
+{
+ "id": "condition-search-failed-signal",
+ "expr": "(list (condition-case e (signal 'search-failed '(\"z\")) (error e)) (condition-case e (signal 'search-failed '(\"z\")) (search-failed (car (cdr e)))))",
+ "note": "The frontier demand phase of kg's Elisp campaign: `search-failed' is a child of `error' in Emacs -- `(get 'search-failed 'error-conditions)' is `(search-failed error)' -- so `signal' accepts it and an `error' handler catches it, and its DATA is the pattern that was not found, which is what a handler reads it for. Fe raises it nowhere; a host whose search family answers Emacs' NOERROR contract does."
+}

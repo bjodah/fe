@@ -381,7 +381,19 @@
 // -- fe's strings are byte strings and that contract is unchanged.
 // `FE_API_VERSION` moves to 15 in the same slice, and the two land under one
 // `FeVersion` "21.0".
-#define FE_LANGUAGE_VERSION 17
+//
+// Version 18 (the frontier demand phase of kg's Elisp campaign) is one row
+// in the condition hierarchy: `search-failed`, a child of `error` with
+// Emacs' own message text.  `(signal 'search-failed '("z"))` is legal where
+// it was `Invalid error symbol`, `(get 'search-failed 'error-message)`
+// answers "Search failed" where it answered nil, and an `error` handler
+// catches it.  It is not a break -- no program that ran under 17 answers
+// differently under 18 -- and it bumps the macro for Phase 10's recorded
+// reason: kg's compile-time `static_assert` is the only consumer, and a
+// macro that does not move cannot tell kg whether the fe it links against
+// has the condition its search family raises.  `FE_API_VERSION` stays at
+// 15: no declaration in this header changed.
+#define FE_LANGUAGE_VERSION 18
 
 extern const char* FeVersion;
 
