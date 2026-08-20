@@ -46,7 +46,8 @@ The sources intentionally live in the repository root; do not introduce a
 
 - Build: `make`
 - Run the interpreter: `./fe`, `./fe script.fe`, or `./fe -e '(print 42)'`
-- Run the regression suite: `make check`
+- Run the regression suite: `make check`, or `make -j8 check` to use more
+  than one core
 - Remove build products: `make clean`
 - Apply formatting: `make format`
 - Check formatting without changing files: `make format-check`
@@ -57,6 +58,48 @@ The sources intentionally live in the repository root; do not introduce a
 `CC`, `CPPFLAGS`, `CFLAGS`, `LDFLAGS`, and `LDLIBS` are overridable. The default
 build uses Clang with strict warnings as errors. Use `JOBS=8` (or another
 reasonable value) to limit CI parallelism.
+
+`make check` is a DAG, not a script. Every test *run* under it -- the C API
+suite, the example host, the GC-stress pair, the payload pair, the script
+suite -- is its own phony target rather than a line in one recipe, because
+make may overlap prerequisites and may not reorder recipe lines. What it
+costs under `-j` is therefore its slowest single run: `payload_tests_stress`
+is 23 s of a 24 s `make -j8 check` here, against 31 s for the same suite
+serially. `make perf-check` (the counting build) is built the same way.
+
+`test.sh` runs the scripts `FE_TEST_JOBS` at a time, default `nproc`, each
+in a directory of its own -- the `out`/`err` it compares are no longer two
+shared files in the working directory. The report stays in script order
+whatever order the cases finish in. `.ci/ci-env.sh` sizes `FE_TEST_JOBS` to
+`JOBS` rather than to `nproc`: the suite is a single job as far as `-j` is
+concerned, so a CI lane that already builds with `JOBS` would otherwise
+start a whole box worth of interpreters inside it. The suite builds nothing
+when make is its caller (`run-scripts` names the interpreter as a
+prerequisite); a standalone `./test.sh` still builds for itself.
+
+`.ci/run-ci-steps.sh` runs the numbered steps CONCURRENTLY by default. Each
+one gets a throwaway copy of the working tree -- uncommitted changes
+included, build products not -- so no two of them fight over the same object
+files, and writes its own log under `.ci/.run/logs/`; the terminal gets a
+PASS/FAIL line per step and a replay of every failing log. A passing step's
+tree is deleted as soon as it passes and a failing one's is kept and named,
+and ci-02's `coverage/` is moved back into this tree, where a serial run
+would have left it. `--serial` runs them one after another in this tree,
+streaming, stopping at the first failure, which is what you want when a
+step's own output is. `--lanes N`
+sets how many run at once (default `nproc/4` clamped to 2..5, never more
+than there are steps); each lane then builds with `JOBS/lanes`, so the lanes
+together ask for the box once. A run takes a lock in `.ci/.run`, since two
+runs in one tree would fight over its objects; a lock whose process is gone
+is reported as stale and taken over.
+
+That mode assumes each step is self-contained, and each one is: ci-03, ci-04
+and ci-05 export their own `CC`/`CFLAGS` and rebuild with `-B`, ci-02 cleans
+and rebuilds through `make coverage`, ci-06 and ci-09 and ci-10 build their
+own binaries (fuzzers, the interpreter, the counting build) into names
+nothing else links, ci-07 builds its own compilation database, and ci-01 and
+ci-08 read source text and build nothing. No step reads an artifact another
+one leaves behind, which is what makes one tree copy per step enough.
 
 The full pipeline runs these independent gates:
 
@@ -104,9 +147,9 @@ For a behavior change:
 
 `FE_RUNNER` and `FE_SKIP_SCRIPTS` are test-harness controls used by CI. Do not
 set them for the normal regression suite, and do not use exclusions to hide a
-correctness failure. The ordinary and RELEASE passes are both unconditional
-strict-arity runs; `scripts/arity.fe` records accepted optional/rest forms and
-the deliberate errors.
+correctness failure. The suite is one unconditional strict-arity pass;
+`scripts/arity.fe` records accepted optional/rest forms and the deliberate
+errors.
 
 ## Engineering expectations
 
