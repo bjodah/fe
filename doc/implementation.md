@@ -470,6 +470,44 @@ freelist. If there are no more objects on the freelist, the garbage collector
 does a full mark-and-sweep run, pushing unreachable objects back to the
 freelist. Thus, garbage collection may occur whenever a new object is created.
 
+`CollectGarbage()` is FOUR phases, in this order, and the order is a
+correctness argument rather than a layout:
+
+1. **Mark.** Every root, then the host's `mark_fn` per pointer-carrying
+   object. The walk reverses pointers and puts them all back.
+2. **Finalize.** `FinalizeDoomedObjects()` hands every unmarked object to the
+   host's `gc_fn`, one pass over the arena, and does nothing else. Nothing has
+   been destroyed yet: every header still has its own type and fields and
+   every payload block still holds its own bytes at its own handle, so a
+   callback may read what it is handed and follow it into children that are
+   themselves doomed. The pass does not run at all when no `gc_fn` is
+   installed, which is every host that never called `FeSetGCFn`.
+3. **Compact.** `CompactPayloads()` reclaims dead blocks and slides the
+   survivors down, reading the mark bits phase 4 is about to clear.
+4. **Sweep.** Dead headers become `FeTFree` cells on the free list; live ones
+   lose their mark bit. This phase only destroys -- it calls nothing.
+
+Phases 2 and 4 were ONE phase until repair R1 of the Phases 23--26 review:
+the callback was made inline in the sweep, as each object became a free cell.
+That was already order-dependent -- a dead pair reached late referred to
+children the sweep had already retyped -- and Phase 25 turned it into a hard
+failure by giving strings a movable, reclaimable payload, so the compaction in
+phase 3 destroyed the very bytes a callback was about to read.
+`./fe -d -e '"payload"'`, fe's own documented tracer, aborted in
+`PayloadBytes()`. Splitting the pass out fixed both halves at once, and
+`FE_GC_FINALIZE_ORDER_BUG` (0 in every configuration, set by no target) puts
+it back after the compaction so that `test_api.c`'s four finalization cases
+can be watched to fail -- the same argument, and the same shape, as
+`FE_PAYLOAD_COMPACT_ORDER_BUG` beside it.
+
+The live/doomed partition is FROZEN across phase 2: `FeContext::finalizing` is
+true for its duration and `FeMark()` returns immediately while it is set. A
+mark from a finalizer would make phase 3 retain a block whose owner phase 4
+frees, which is a stale block in the region rather than a resurrection --
+resurrection was never on offer, since under the old inline callback a mark
+kept an object the sweep had not yet reached and did nothing for one it had
+already passed. `fe.h` and `doc/c-api.md` state the no-op as the contract.
+
 `FE_GC_STRESS`, a build-time knob in `fe.c` that defaults to 0 and compiles
 to nothing there, makes `MakeObject()` collect before *every* allocation
 instead of only when the freelist is empty. It exists because "collection may
@@ -531,6 +569,7 @@ with none can signal. Both are catchable, and `error` catches either.
 
 Allocation is a bump. Reclamation is a compaction that runs inside
 `CollectGarbage()`, AFTER the mark phase has restored the graph it reversed
+and after the finalization pass has shown every doomed object to the host,
 and BEFORE the sweep clears the mark bits: a block is live only when its
 owner survived the mark AND the owner still names that block, which is what
 makes a REPLACED block dead though its owner lives, and both halves of that
@@ -1453,9 +1492,10 @@ immediately -- but must not read `car`/`cdr` of anything but the object it was
 handed; `doc/c-api.md` says so.
 
 It also must not leave non-locally. A `longjmp` or a raise out of `mark_fn`
-(or out of `gc_fn`, during the sweep) jumps past the ascent that would put the
-graph back, and the walk has no state anywhere else to restore it from -- the
-reversed graph *is* the state. The recursive walk had no such rule because it
+(or out of `gc_fn`, in the finalization pass after it) jumps past the ascent
+that would put the graph back, or past the compaction and sweep that still
+have to run, and the collector has no state anywhere else to restore itself
+from -- the reversed graph *is* the state. The recursive walk had no such rule because it
 only set mark bits. `FeContext::collecting` is true for exactly the duration of
 `CollectGarbage()`, and `RaiseCompletionCore()` treats a raise while it is set
 as fatal: it prints the contract and aborts, without calling `error_fn` (whose

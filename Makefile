@@ -622,8 +622,8 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # WHAT THESE TWO NUMBERS ARE TODAY, which is all a comment beside a knob
 # should say -- the derivation of any one raise is in `git log`, and the
 # blocks above are the record of the ones that predate that rule. The total
-# is the measured actual with no slack: 1058 across the thirteen sources and
-# ten headers `SCC_COMPLEXITY_PATHS` names, of which fe.c is 380 and
+# is the measured actual with no slack: 1063 across the thirteen sources and
+# ten headers `SCC_COMPLEXITY_PATHS` names, of which fe.c is 385 and
 # fe_eval.c 402. The per-file cap is 520 and the most complex file is
 # fe_eval.c at 402, so it binds at 118 above the tree and has not moved since
 # it was set.
@@ -634,7 +634,7 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # on where its quotes fall. `pmccabe` reads every function either way and is
 # the authoritative aggregate; a large move in this number with a small one
 # in `PMCCABE_TOTAL_MAX` is that boundary shifting, not complexity arriving.
-SCC_COMPLEXITY_MAX ?= 1058
+SCC_COMPLEXITY_MAX ?= 1063
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -1080,11 +1080,11 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # one, and is named above rather than absorbed silently.
 #
 # WHAT THIS NUMBER IS TODAY, the rule the scc knobs above now carry too: the
-# measured actual with no slack, 1461 across 481 symbols, the worst single
+# measured actual with no slack, 1468 across 482 symbols, the worst single
 # function being `ResumeEvalList` at 16 against the 22 cap. Any one raise is
 # derived in `git log`, with its per-symbol deltas; the blocks above are the
 # record of the raises that predate that rule.
-PMCCABE_TOTAL_MAX ?= 1461
+PMCCABE_TOTAL_MAX ?= 1468
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -1120,14 +1120,40 @@ check: test
 # by a single case -- the payload harness's GC-stress build is 23 s of a
 # 24 s `make check` here -- so what the other runs cost is whether they
 # overlap it or queue behind it.
-test: core test-header run-test-api run-example-host run-scripts \
-	check-gc-stress check-payload
+test: core test-header run-test-api run-example-host run-debug-host \
+	run-scripts check-gc-stress check-payload
 
 run-test-api: $(TEST_API)
 	./$(TEST_API)
 
 run-example-host: $(EXAMPLE_HOST)
 	$(EXAMPLE_RUNNER) ./$(EXAMPLE_HOST)
+
+# The repository's own documented example, as a test (repair R1 of the Phases
+# 23--26 review).  `-d` installs `main.c`'s bundled `mark`/`gc` tracers, which
+# print the object they are handed -- exactly what `fe.h` promises a callback
+# may do, and what `doc/c-api.md` names as THE example -- and every object a
+# context reclaims goes through them: strings, vectors, and a dying symbol's
+# internal cells.  It aborted for a whole phase while every other run here
+# passed, because nothing here ran the binary the documentation tells a reader
+# to run.  Both halves are asserted, because an exit status on its own would
+# still pass if `-d` quietly stopped installing anything.  It takes
+# `EXAMPLE_RUNNER` for the same reason the example host does: under valgrind
+# this is the case that walks a whole arena of doomed objects.
+run-debug-host: $(TARGET)
+	@output=$$($(EXAMPLE_RUNNER) ./$(TARGET) -d -e '"payload"' 2>&1); \
+	status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		printf '%s\n' "$$output" | tail -n 20; \
+		echo "FAIL: fe -d -e '\"payload\"' exited $$status"; \
+		exit 1; \
+	fi; \
+	if ! printf '%s\n' "$$output" | grep -q '^gc: payload$$'; then \
+		echo "FAIL: fe -d traced no collection of the string"; \
+		exit 1; \
+	fi; \
+	echo "debug host: fe -d traced $$(printf '%s\n' "$$output" | \
+		grep -c '^gc: ') collected objects"
 
 run-scripts: $(TARGET)
 	./test.sh
@@ -1576,7 +1602,8 @@ iwyu:
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
 .PHONY: all check test core test-header check-gc-stress check-payload \
-	run-test-api run-example-host run-scripts run-gc-stress run-gc-stress-on \
+	run-test-api run-example-host run-debug-host run-scripts \
+	run-gc-stress run-gc-stress-on \
 	run-payload-tests run-payload-tests-stress \
 	run-perf-test-api run-perf-payload run-perf-example-host run-perf-scripts \
 	perf perf-check \

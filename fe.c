@@ -164,13 +164,20 @@ FeObject nil = {.car = {.c = FeTNil << GcMarkBit | OtherCell},
 
 // The value of a symbol that has never been assigned. Like `nil` it is a
 // static object outside the arena, so the collector neither sweeps it nor has
-// to mark it, and `FeMark` treats it as a leaf. It is never returned to Lisp or
-// to a host: the only place it lives is a fresh symbol's value cell and
-// function cell (`CDR(sym)` is `((name . function) . value)`, sub-plan 04B),
-// which Lisp cannot reach (`(cdr sym)` is a type error) and which every
-// reader of either cell turns into `void-variable`/`void-function`. It is
-// tagged `FeTFree` so that an escape aborts in the writer instead of
-// impersonating a value.
+// to mark it, and `FeMark` treats it as a leaf. It is never returned to Lisp:
+// the only place it lives is a fresh symbol's value cell and function cell
+// (`CDR(sym)` is `((name . function) . value)`, sub-plan 04B), which Lisp
+// cannot reach (`(cdr sym)` is a type error) and which every reader of either
+// cell turns into `void-variable`/`void-function`. It is tagged `FeTFree` so
+// that an escape into the writer cannot impersonate a value.
+//
+// A HOST CAN SEE IT, through exactly one route, and this comment used to deny
+// it. Those cells are ordinary arena pairs; when a symbol dies they die with
+// it, and the collector hands every doomed object to `gc_fn` in its own
+// right. A tracer that prints what it is handed therefore prints an
+// unassigned cell for every symbol a context reclaims -- which is every
+// interned symbol at `FeCloseContext`. `WriteObject` names it `#<unbound>`
+// for that one reader, and aborts on any other `FeTFree` cell as before.
 FeObject unbound = {.car = {.c = FeTFree << GcMarkBit | OtherCell},
                     .cdr = {.o = NULL}};
 
@@ -744,6 +751,19 @@ static FeObject* DescendIntoPayload(const FeContext* ctx,
 // not read `car`/`cdr` of anything but the object it was handed. `doc/c-api.md`
 // says so.
 void FeMark(FeContext* ctx, FeObject* obj) {
+  // A NO-OP from inside `gc_fn`, and documented as one in `fe.h`. The
+  // finalization pass runs on a decided graph: its whole value is that every
+  // doomed object is still readable, which is only true while nothing about
+  // who is doomed can still change. A mark taken here would make
+  // `CompactPayloads` retain a block whose owner the sweep then frees, which
+  // is a stale handle in the region rather than a resurrection. Resurrection
+  // was never available: before this pass existed the callback ran inside the
+  // sweep, where marking an object the loop had not reached yet kept it and
+  // marking one it had passed did nothing -- an accident of arena order that
+  // was never a contract.
+  if (ctx->finalizing) {
+    return;
+  }
   FeObject* parent = nullptr;
   FeObject* current = obj;
 
@@ -899,6 +919,43 @@ static void MarkCleanupRoots(FeContext* ctx) {
   }
 }
 
+// Hand every doomed object to the host's `gc_fn`, in one pass of its own,
+// AFTER the mark phase has restored the graph it reversed and BEFORE anything
+// is reclaimed or moved. That position is the whole of the callback's
+// contract: at this point every header still carries its own type and fields,
+// every payload block still holds its own bytes at its own handle, and
+// nothing has slid down over anything -- so a callback may read the object it
+// was handed, print it, and follow it into children that are themselves
+// doomed.
+//
+// A pass of its own, rather than a call inline in the sweep, because the
+// sweep destroys as it goes: a dead pair reached late would already have dead
+// children retyped to `FeTFree` and threaded onto the free list, so what the
+// callback printed would depend on arena order. That was true before the
+// payload substrate too and merely invisible; Phase 25 made it visible by
+// adding storage that compaction also destroys, which is what
+// `./fe -d -e '"x"'` aborted on.
+//
+// The doomed/live decision is FROZEN for the whole pass: `ctx->finalizing`
+// makes `FeMark()` a no-op, so a callback cannot make compaction retain a
+// block whose owner the sweep below is about to free. Nothing is skipped when
+// no callback is installed -- the pass does not run at all, which is every
+// shipped fe and every host that never called `FeSetGCFn`.
+static void FinalizeDoomedObjects(FeContext* ctx) {
+  if (ctx->gc_fn == nullptr) {
+    return;
+  }
+  ctx->finalizing = true;
+  for (size_t i = 0; i < ctx->object_count; i++) {
+    FeObject* const obj = &ctx->objects[i];
+    if (FeGetType(obj) == FeTFree || (TAG(obj) & GcMarkBit)) {
+      continue;
+    }
+    ctx->gc_fn(ctx, obj);
+  }
+  ctx->finalizing = false;
+}
+
 static void CollectGarbage(FeContext* ctx) {
   // Re-entering here means a `mark_fn` or `gc_fn` allocated, which the
   // contract forbids. It is not survivable: this call's sweep would clear the
@@ -950,15 +1007,30 @@ static void CollectGarbage(FeContext* ctx) {
   FeMarkEvaluatorRoots(ctx);
   MarkCleanupRoots(ctx);
 
+  // Finalize: the host sees every doomed object here, and nowhere else. It
+  // runs after the mark phase has put the graph back and before either of the
+  // two phases below destroys anything, which is what `fe.h` promises a
+  // `gc_fn` about what it may read; `FinalizeDoomedObjects` states the whole
+  // argument. `FE_GC_FINALIZE_ORDER_BUG` puts it back after the compaction,
+  // where it was until the ordering was repaired.
+#if !FE_GC_FINALIZE_ORDER_BUG
+  FinalizeDoomedObjects(ctx);
+#endif
+
   // Compact: AFTER the mark phase has restored the graph it reversed, and
   // BEFORE the sweep clears the mark bits. That order is the payload
   // substrate's correctness argument, not an accident of layout -- the
   // liveness rule reads a mark bit the sweep is about to clear -- so
   // `FE_PAYLOAD_COMPACT_ORDER_BUG` exists to break it on purpose and watch
-  // the substrate's tests fail. It is 0 in every configuration and no target
-  // sets it; an ordering that is merely currently right is not evidence.
+  // the substrate's tests fail. Both knobs are 0 in every configuration and
+  // no target sets either; an ordering that is merely currently right is not
+  // evidence.
 #if !FE_PAYLOAD_COMPACT_ORDER_BUG
   CompactPayloads(ctx);
+#endif
+
+#if FE_GC_FINALIZE_ORDER_BUG
+  FinalizeDoomedObjects(ctx);
 #endif
 
   // Sweep and unmark:
@@ -984,9 +1056,8 @@ static void CollectGarbage(FeContext* ctx) {
     // low bit of the type (`type << GcMarkBit | OtherCell`), not a flag.
     assert(FeGetType(obj) != FeTPair || (~TAG(obj) & GcMarkCdrBit));
     if (~TAG(obj) & GcMarkBit) {
-      if (ctx->gc_fn != nullptr) {
-        ctx->gc_fn(ctx, obj);
-      }
+      // `gc_fn` already saw this object, whole, in the finalization pass
+      // above. The sweep only destroys.
       SetType(obj, FeTFree);
       CDR(obj) = ctx->free_list;
       ctx->free_list = obj;
@@ -2402,6 +2473,21 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
   if (depth == 0) {
     EmitString(w, "#<deep>");
     w->complete = false;
+    return;
+  }
+  // The one object outside the arena that carries the `FeTFree` tag (see
+  // `unbound` near the top of this file). Lisp cannot reach it -- but a
+  // COLLECTOR CALLBACK can, and does. A dying symbol's cells are ordinary
+  // arena pairs, `CDR(sym)` being `((name . function) . value)`, so the
+  // finalization pass hands each of them to `gc_fn` in its own right and a
+  // tracer that prints what it is handed prints an unassigned cell for every
+  // symbol its context reclaims. `main.c -d` is exactly that tracer, and this
+  // is the line that lets it run to the end of a session instead of aborting
+  // on the first symbol. Named, not rendered as a value: there is no value
+  // here, and the `FeTFree` arm below still aborts, which is what a genuinely
+  // freed arena cell reaching the writer has to do.
+  if (obj == &unbound) {
+    EmitString(w, "#<unbound>");
     return;
   }
 

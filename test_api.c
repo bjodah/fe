@@ -10432,6 +10432,253 @@ static bool TestVectors(void) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// THE FINALIZATION PASS (repair R1 of the Phases 23--26 adversarial review).
+//
+// `fe.h` promises a `gc_fn` may read -- and specifically may PRINT -- the
+// object it is handed. Phase 25 gave strings a movable payload block without
+// moving the callback out of the sweep, which ran after `CompactPayloads()`
+// had already reclaimed every dead block and slid the survivors down over
+// them, so the promise became false and `./fe -d -e '"x"'` aborted on the
+// assertion in `PayloadBytes`. `CollectGarbage` now hands every doomed object
+// over in a pass of its own, between the mark phase and the compaction.
+//
+// These three cases are the review's own list, and each of them fails with
+// `FE_GC_FINALIZE_ORDER_BUG=1` -- the knob that puts the pass back where it
+// was -- which is what makes them evidence about the ORDER rather than about
+// the callback merely being called.
+
+enum { FinalizerLogSize = 8192 };
+
+// What the callback saw, rendered as it saw it. Text rather than the
+// `FeObject*`s themselves, because after the collection returns a doomed
+// header is an `FeTFree` cell on the free list and its block is gone: the
+// only honest record of what was readable is what was read.
+static char finalizer_log[FinalizerLogSize];
+static size_t finalizer_log_used;
+static size_t finalizer_calls;
+// Whether the callback re-marks what it is handed. The contract says such a
+// mark is a no-op; `TestFinalizerMarkIsNoOp` is what says so executably.
+static bool finalizer_marks;
+
+static void ResetFinalizerLog(void) {
+  // A leading newline so every entry is delimited on both sides and
+  // `FinalizerLogHas` can match whole lines rather than substrings -- `("a")`
+  // must not be found inside `(("a") . #<unbound>)`.
+  finalizer_log[0] = '\n';
+  finalizer_log[1] = '\0';
+  finalizer_log_used = 1;
+  finalizer_calls = 0;
+  finalizer_marks = false;
+}
+
+static FeObject* FinalizerRecorder(FeContext* ctx, FeObject* obj) {
+  char rendered[256];
+  (void)FeToString(ctx, obj, rendered, sizeof(rendered));
+  finalizer_calls++;
+  if (finalizer_marks) {
+    FeMark(ctx, obj);
+  }
+  const size_t length = strlen(rendered);
+  if (finalizer_log_used + length + 2 < sizeof(finalizer_log)) {
+    memcpy(finalizer_log + finalizer_log_used, rendered, length);
+    finalizer_log_used += length;
+    finalizer_log[finalizer_log_used++] = '\n';
+    finalizer_log[finalizer_log_used] = '\0';
+  }
+  return FeNil(ctx);
+}
+
+static bool FinalizerLogHas(const char* line) {
+  char wanted[256];
+  const int written = snprintf(wanted, sizeof(wanted), "\n%s\n", line);
+  return written > 0 && (size_t)written < sizeof(wanted) &&
+         strstr(finalizer_log, wanted) != nullptr;
+}
+
+// Case 1 of the review's list: a `gc_fn` that calls `FeToString()` on a dead
+// STRING and on a dead VECTOR. Both own payload blocks, and both blocks are
+// what the compaction used to have reclaimed before the callback ran.
+static bool TestFinalizerReadsDeadPayloads(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* const string = FeMakeString(ctx, "doomed-string");
+  FeObject* const vector = FeMakeVector(ctx, 3);
+  FeVectorSet(ctx, vector, 0, FeMakeInteger(ctx, 11));
+  FeVectorSet(ctx, vector, 1, FeMakeInteger(ctx, 22));
+  FeVectorSet(ctx, vector, 2, FeMakeString(ctx, "in-vector"));
+  // Both are readable while they are alive, which is the control: what the
+  // callback answers below has to be these same two renderings.
+  CHECK(IsRendered(ctx, string, "doomed-string"));
+  CHECK(IsRendered(ctx, vector, "[11 22 \"in-vector\"]"));
+
+  // The GC stack is the only thing holding either of them, so this one line
+  // is what makes them garbage.
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  CHECK(finalizer_calls >= 2);
+  CHECK(FinalizerLogHas("doomed-string"));
+  CHECK(FinalizerLogHas("[11 22 \"in-vector\"]"));
+  // The vector's own dead element string is a doomed object in its own right
+  // and is handed over separately, whatever order the two happen to sit in.
+  CHECK(FinalizerLogHas("in-vector"));
+
+  FeCloseContext(ctx);
+  return true;
+}
+
+// Case 2: a dead block published BEFORE a live one, so that the survivor is
+// PROVED to slide down over the hole -- and proved to do it after the
+// callback read what used to be there. Under the old order the callback was
+// handed a string whose handle named bytes the compaction had already given
+// to somebody else.
+static bool TestFinalizerSeesPreSlideBytes(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+
+  const size_t gc = FeSaveGC(ctx);
+  // Allocation order is publication order and the region is a bump, so the
+  // doomed block is the lower one. Different lengths, so a survivor that slid
+  // over the hole cannot accidentally render as its old self.
+  FeObject* const doomed = FeMakeString(ctx, "AAAAAAAAAAAAAAAAAAAAAAAA");
+  FeObject* const survivor = FeMakeString(ctx, "BBBB");
+  FeRoot* const root = FeCreateRoot(ctx, survivor);
+  const FePayloadHandle doomed_handle = PAYLOAD(doomed);
+  const FePayloadHandle survivor_handle = PAYLOAD(survivor);
+  CHECK(doomed_handle < survivor_handle);
+  const size_t compactions_before =
+      FeGetArenaStats(ctx).payload_compaction_count;
+
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  // The callback read the doomed string's own bytes...
+  CHECK(FinalizerLogHas("AAAAAAAAAAAAAAAAAAAAAAAA"));
+  // ... and the compaction that followed really did move the survivor down
+  // ONTO the block it had just read: same handle, different string.
+  const FeArenaStats after = FeGetArenaStats(ctx);
+  CHECK(after.payload_compaction_count == compactions_before + 1);
+  CHECK(PAYLOAD(survivor) == doomed_handle);
+  CHECK(PAYLOAD(survivor) != survivor_handle);
+  CHECK(IsRendered(ctx, FeGetRoot(root), "BBBB"));
+
+  FeReleaseRoot(ctx, root);
+  FeCloseContext(ctx);
+  return true;
+}
+
+// Case 3: a dead pair printed from its own `gc_fn`, whose child sits at a
+// LOWER arena index than the pair. The pass walks the arena in index order,
+// so the child is handed over first; when the callback ran inline in the
+// sweep, "handed over" meant "already retyped to `FeTFree` and threaded onto
+// the free list", and printing the pair walked into a free cell. Callback
+// safety must not depend on which of two doomed objects the sweep reaches
+// first.
+static bool TestFinalizerChildBeforeParent(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+
+  const size_t gc = FeSaveGC(ctx);
+  // TWO pairs, built in opposite orders, because which of the two arena
+  // indices is the lower one is not a contract: the free list is populated
+  // head-first at open, so a fresh context hands cells out in DESCENDING
+  // index order, and after any collection the order is whatever that sweep
+  // pushed. One of these two therefore has its child below it and the other
+  // above it whichever way a given build goes, and the assertion below says
+  // that exactly one does rather than assuming which.
+  //
+  // String children rather than pairs: a string is both a doomed object in
+  // its own right and a payload owner, so this covers the sweep-order half
+  // and the compaction half of the same question at once.
+  FeObject* const late_pair = FeCons(ctx, FeNil(ctx), FeNil(ctx));
+  FeObject* const late_child = FeMakeString(ctx, "late-child");
+  CAR(late_pair) = late_child;
+  FeObject* const early_child = FeMakeString(ctx, "early-child");
+  const FeObject* const early_pair = FeCons(ctx, early_child, FeNil(ctx));
+  CHECK((late_child < late_pair) != (early_child < early_pair));
+
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  // Both children were handed over -- one of them before its pair was...
+  CHECK(FinalizerLogHas("late-child"));
+  CHECK(FinalizerLogHas("early-child"));
+  // ... and both pairs still printed as the lists they are, which is the
+  // whole claim: nothing here depends on which one that was.
+  CHECK(FinalizerLogHas("(\"late-child\")"));
+  CHECK(FinalizerLogHas("(\"early-child\")"));
+
+  FeCloseContext(ctx);
+  return true;
+}
+
+// The frozen decision, from the one place that can break it. `FeMark()` from
+// a `gc_fn` is a documented no-op (`fe.h`, `doc/c-api.md`): a mark taken here
+// would make `CompactPayloads` retain a block whose owner the sweep then
+// frees. So the object is reclaimed exactly as it would have been had the
+// callback not called anything at all.
+static bool TestFinalizerMarkIsNoOp(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+  finalizer_marks = true;
+
+  const size_t gc = FeSaveGC(ctx);
+  const size_t free_before = FeGetArenaStats(ctx).free_slots;
+  // One cell and one payload block, dropped and collected while the callback
+  // marks everything it is handed.
+  (void)FeMakeString(ctx, "not-resurrected");
+  const size_t payload_bytes_before = FeGetArenaStats(ctx).payload_live_bytes;
+  CHECK(FeGetArenaStats(ctx).free_slots == free_before - 1);
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  CHECK(FinalizerLogHas("not-resurrected"));
+  const FeArenaStats after = FeGetArenaStats(ctx);
+  // The cell came back...
+  CHECK(after.free_slots == free_before);
+  // ... and so did its block, which is the half a retained mark would have
+  // broken: the region would have kept a block whose owner is on the free
+  // list.
+  CHECK(after.payload_live_bytes < payload_bytes_before);
+
+  // A second collection with the callback still marking changes nothing --
+  // there is no accumulated mark to clear and nothing came back to life.
+  const size_t calls_after_first = finalizer_calls;
+  FeCollectGarbage(ctx);
+  CHECK(finalizer_calls == calls_after_first);
+  CHECK(FeGetArenaStats(ctx).free_slots == free_before);
+
+  FeCloseContext(ctx);
+  return true;
+}
+
 // Phase 21.1's counter gate: the DETERMINISTIC RELATIONSHIPS between the
 // counters declared in fe_perf.h, which is what Phase 21.2's workload
 // battery will build its assertions on. Relationships, not magic constants:
@@ -10748,7 +10995,10 @@ int main(void) {
                  TestOneArgDefvarScope() && TestHostedInputUnit() &&
                  TestProtectedEvaluateString() && TestPublicCollectGarbage() &&
                  TestVectors() && TestStringRepresentation() &&
-                 TestStringMutation() && TestPerfCounters()
+                 TestStringMutation() && TestFinalizerReadsDeadPayloads() &&
+                 TestFinalizerSeesPreSlideBytes() &&
+                 TestFinalizerChildBeforeParent() &&
+                 TestFinalizerMarkIsNoOp() && TestPerfCounters()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

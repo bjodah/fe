@@ -552,6 +552,36 @@ it must not read `car`/`cdr` of anything else, and must not allocate. The
 collector puts every field back before it returns, so nothing outside the
 callback can observe any of it.
 
+The GC callback runs somewhere else: a **finalization pass of its own**, after
+the mark phase has restored every field it reversed and before anything at all
+is reclaimed or moved. Nothing about the arena has been destroyed yet when it
+runs, which is what the callback is allowed to rely on:
+
+- it may read the object it was handed, **and anything reachable from it**,
+  doomed or not -- a dead pair prints even though its children are dead too;
+- a dead string or vector still owns its payload bytes, at the handle it
+  names, so `FeToString()` on one answers what it held;
+- it must still not allocate, and must still return normally (below).
+
+Until FE_API_VERSION 15 this callback was made inline in the sweep, one object
+at a time as each was turned into a free cell. Both of the first two points
+were false there: a dead pair reached late in the sweep referred to children
+already retyped, and -- once Phase 25 gave strings a movable payload -- every
+dead block had already been reclaimed by the compaction and the survivors had
+slid down over it. `./fe -d -e '"payload"'`, the bundled tracer this document
+names as the example, aborted on exactly that. A host written against the old
+behaviour needs no change: everything it was permitted to do it may still do.
+
+**`FeMark()` from a GC callback is a documented no-op**, and calling it is not
+an error. The pass runs on a graph whose live/doomed partition is already
+decided, and its whole value is that every doomed object is still readable,
+which is true only for as long as nothing can change who is doomed: a mark
+taken from a finalizer would make the payload compaction retain a block whose
+owner the following sweep frees. Marking from a finalizer never resurrected
+anything anyway -- under the old inline callback it kept an object the sweep
+had not yet reached and did nothing for one it had already passed, which was
+an accident of arena order and never a contract.
+
 A mark or GC callback must also **return normally**. It may not `longjmp` out,
 and it may not raise: no `FeHandleError()`, no `FeRaiseCompletion()`, and
 nothing that raises on its behalf, `FeCar()`/`FeCdr()` on a non-pair included.
@@ -569,7 +599,16 @@ Printing from a callback is safe. `FeToString()` on the object it was handed
 does not charge the evaluation step budget and does not poll the interrupt
 while a collection is running, precisely so that the obvious diagnostic
 callback -- `main.c`'s own `mark`/`gc` tracers are this -- cannot trip the rule
-above through a step-limit or interrupt raise.
+above through a step-limit or interrupt raise. `make check` runs those tracers
+(`make run-debug-host`, which is `./fe -d -e '"payload"'` and asserts both that
+it exits cleanly and that it traced the collection), because a documented
+example nothing runs is a claim rather than a promise.
+
+One rendering exists only for that reader. A symbol's unassigned value and
+function cells hold a private sentinel that Lisp can never reach, and those
+cells are ordinary pairs which die with the symbol -- so a tracer is handed
+them and prints `#<unbound>` where the cell has never been assigned. It is not
+a value and cannot be produced by any other route.
 
 ### Where a dynamic binding is restored to (FE_API_VERSION 11)
 

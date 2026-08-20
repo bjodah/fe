@@ -11,7 +11,7 @@
 
 const char* FexVersion = "0.1";
 
-static FeObject* FexGC(FeContext* ctx, FeObject* o) {
+FeObject* FexGC(FeContext* ctx, FeObject* o) {
   switch (FeGetType(o)) {
     case FeTPair:
     case FeTFree:

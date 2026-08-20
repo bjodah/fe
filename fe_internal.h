@@ -654,7 +654,9 @@ static_assert(alignof(FeEvalFrame) == alignof(FeObject));
 // to a host: the only place it lives is a symbol's value cell, which Lisp
 // cannot reach (`(cdr sym)` is a type error) and which every reader of a value
 // cell turns into `void-variable`. It is tagged `FeTFree` so that an escape
-// aborts in the writer instead of impersonating a value. Defined in fe.c;
+// into the writer cannot impersonate a value; the writer names it
+// `#<unbound>` for the one reader that legitimately meets it, a collector
+// callback handed a dying symbol's cells. See fe.c. Defined in fe.c;
 // both fe.c (installs it in a fresh symbol's value cell) and fe_eval.c (the
 // evaluator compares value cells against it) need it, so it is not `static`.
 extern FeObject unbound;
@@ -791,6 +793,18 @@ void CompactPayloads(FeContext* ctx);
 // evidence.
 #ifndef FE_PAYLOAD_COMPACT_ORDER_BUG
 #define FE_PAYLOAD_COMPACT_ORDER_BUG 0
+#endif
+
+// The same knob for the finalization pass, and the same reason for existing.
+// At 1 the pass that hands doomed objects to `gc_fn` runs AFTER
+// `CompactPayloads` instead of before it, which is exactly where it sat until
+// the ordering was repaired: the dead string a callback is handed then names
+// a block compaction has already reclaimed, and a survivor may have slid over
+// its bytes. 0 in every configuration and set by no target -- it is how
+// `test_api.c`'s three finalization regressions are shown to be load-bearing
+// rather than merely currently passing.
+#ifndef FE_GC_FINALIZE_ORDER_BUG
+#define FE_GC_FINALIZE_ORDER_BUG 0
 #endif
 
 #ifndef FE_DEBUG_PAYLOAD_MOVE
@@ -1077,6 +1091,13 @@ struct FeContext {
   // the obvious thing for such a callback to do (`main.c` does exactly
   // that). Collection is not evaluation, so it does not charge.
   bool collecting;
+  // True for exactly as long as `FinalizeDoomedObjects` is running -- the
+  // pass, inside the window above, that hands every doomed object to the
+  // host's `gc_fn` while the graph and the payload region are still whole.
+  // `FeMark` reads it and returns immediately, which is what freezes the
+  // doomed/live decision for the whole pass: see the comment there, and the
+  // callback contract in `fe.h`. Always false when `collecting` is false.
+  bool finalizing;
   void* userdata;
   FeObject* gc_stack[GcStackSize];
   size_t gc_stack_index;

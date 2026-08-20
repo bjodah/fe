@@ -125,8 +125,19 @@ static FeObject* HandleMark(FeContext* ctx, FeObject* args) {
   return Handle(ctx, args, "mark");
 }
 
+// Whether `FexInit` installed the extension collector callback that this
+// tracer has to chain to. Set once, beside the install itself.
+static bool tracing_extensions;
+
 static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
-  return Handle(ctx, args, "gc");
+  (void)Handle(ctx, args, "gc");
+  // CHAIN, never replace. `FeSetGCFn` holds one function, so `-d` installing
+  // this tracer took the extensions' own callback out of the collector -- and
+  // with it the close of an owned `FILE*` and the free of a compiled regular
+  // expression. Invisible until the debug host joined `make check`, whose
+  // valgrind and ASan lanes then named the three `FexTFile` records `-d` was
+  // leaking on every run.
+  return tracing_extensions ? FexGC(ctx, args) : &nil;
 }
 
 [[noreturn]] static void PrintHelp(int status) {
@@ -261,6 +272,7 @@ int main(int count, char* arguments[]) {
   FeSetErrorFn(context, HandleFatalError);
   if (extensions) {
     FexInit(context);
+    tracing_extensions = true;
     FexInstallIO(context);
     FexInstallMath(context);
     FexInstallProcess(context);

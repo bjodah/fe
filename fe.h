@@ -701,29 +701,54 @@ void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
 // The two collector callbacks. `mark_fn` is called once per reachable
 // pointer-carrying object (`FeTPtr`, `FeTFex0`..`FeTFex2`) during the mark
 // phase so the host can `FeMark()` whatever that object refers to; `gc_fn`
-// is called once per object about to be freed, during the sweep.
+// is called once per object about to be freed.
 //
-// Both run *inside* collection, and collection is the one window in which
-// the object graph is not readable. The mark phase stores its return path in
-// the objects it is walking (Deutsch-Schorr-Waite pointer reversal), so
-// while it is inside a `car` chain those cells hold parent links rather than
-// their own cars. Two rules follow, and neither is advisory:
+// Both run *inside* collection, and both must RETURN NORMALLY. Neither may
+// `longjmp` out, and neither may raise -- no `FeHandleError()`, no
+// `FeRaiseCompletion()`, and nothing that raises on its behalf, including
+// `FeCar`/`FeCdr` on a non-pair. There is no stack to unwind the mark walk
+// from: its state *is* the graph it has reversed, so leaving non-locally
+// abandons the arena half-reversed. fe detects a raise from inside
+// collection and aborts with a message naming this contract rather than
+// continuing on a heap that will fault later somewhere unrelated. Neither
+// may allocate, for the same reason: an allocation can collect, and a
+// nested collection would clear the outer one's marks.
 //
-//   - A callback may call `FeMark()` and may read the object it was handed.
-//     It must not read `car`/`cdr` of anything else, and must not allocate.
-//   - A callback must return normally. It may not `longjmp` out, and it may
-//     not raise -- no `FeHandleError()`, no `FeRaiseCompletion()`, and
-//     nothing that raises on its behalf, including `FeCar`/`FeCdr` on a
-//     non-pair. There is no stack to unwind the walk from: its state *is*
-//     the reversed graph, so leaving non-locally abandons the arena
-//     half-reversed. fe detects a raise from inside collection and aborts
-//     with a message naming this contract rather than continuing on a heap
-//     that will fault later somewhere unrelated.
+// Beyond that the two run in DIFFERENT PHASES and have different rules.
 //
-// Printing is safe from a callback (`FeToString()` on the object it was
+//   - `mark_fn` runs inside the walk, which is the one window in which the
+//     object graph is not readable: the walk stores its return path in the
+//     objects it is passing (Deutsch-Schorr-Waite pointer reversal), so
+//     while it is inside a `car` chain those cells hold parent links rather
+//     than their own cars. A `mark_fn` may call `FeMark()` -- that is what
+//     it is for -- and may read the object it was handed. It must not read
+//     `car`/`cdr` of anything else.
+//
+//   - `gc_fn` runs in a FINALIZATION PASS of its own, after the walk has put
+//     every field back and before anything is reclaimed or moved. The whole
+//     graph is intact there, so a `gc_fn` may read the object it was handed
+//     AND anything reachable from it, whether or not that is doomed too: a
+//     dead pair may be printed even though its children are dead, and a dead
+//     string or vector still owns its payload bytes at the handle it names.
+//     Until FE_API_VERSION 15 this callback ran inline in the sweep, where
+//     both of those were false; a host written against that behaviour needs
+//     no change, since everything it was allowed to do it may still do.
+//
+//     `FeMark()` from a `gc_fn` IS A NO-OP, and calling it is not an error.
+//     The pass runs on a decided graph and its value is precisely that every
+//     doomed object is still readable, which holds only while nothing can
+//     still change who is doomed: a mark taken here would make the payload
+//     compaction retain a block whose owner the sweep then frees. Marking
+//     from a finalizer never resurrected anything -- under the old inline
+//     callback it kept an object the sweep had not reached yet and did
+//     nothing for one it had already passed, an accident of arena order that
+//     was never a contract.
+//
+// Printing is safe from either callback (`FeToString()` on the object it was
 // handed): the writer does not charge the evaluation step budget or poll the
 // interrupt while collecting, precisely so that the obvious diagnostic
-// callback cannot trip the rule above.
+// callback cannot trip the return-normally rule. `main.c`'s `-d` tracers are
+// that callback, and `make check` runs them.
 void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 // Where a dynamic binding's saved value came from, and where it goes back
