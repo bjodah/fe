@@ -1941,7 +1941,12 @@ static bool TestSymbolPublishFailsCleanlyOnRegion(void) {
                  free_bytes - TargetSpare - sizeof(FePayloadBlock));
   CHECK(FreePayloadBytes(context) <= TargetSpare);
 
-  size_t made = 0;
+  // `volatile` because it is written between the `setjmp` and the `longjmp`
+  // and read after it, which is the one case where an ordinary automatic has
+  // an indeterminate value. Not theoretical: without it this case passed in
+  // the ordinary build and failed in the ASan lane at -O1, naming the symbol
+  // interned one before the failing one.
+  volatile size_t made = 0;
   host.raised = false;
   if (setjmp(host.jump) == 0) {
     while (made < Attempts) {
