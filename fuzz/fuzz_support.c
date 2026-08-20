@@ -15,7 +15,11 @@ jmp_buf FuzzErrorJump;
 }
 
 FeContext* FuzzOpenContext(FuzzArena* arena) {
-  FeContext* ctx = FeOpenContext(arena->bytes, sizeof(arena->bytes));
+  // Null options is Fe's own split of the arena, payload region included, so
+  // every target reaches the vector paths a bare `FeOpenContext` locks out.
+  // `FuzzArenaSize` is derived against this call; see fuzz_support.h.
+  FeContext* ctx =
+      FeOpenContextWithOptions(arena->bytes, sizeof(arena->bytes), nullptr);
   if (ctx == nullptr) {
     abort();
   }

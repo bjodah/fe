@@ -41,7 +41,9 @@ when the grammar moves.
   removed. Needs the harness arena's small FREE portion -- a roomier one
   collects too rarely to land on that exact allocation. That portion, not the
   arena's nominal size, is what Phase 19 held constant when it raised
-  `FuzzArenaSize` 64 -> 68 KiB (see `fuzz/fuzz_support.h`).
+  `FuzzArenaSize` 64 -> 68 KiB, and what Phase 25.0 held constant again -- at
+  288 free slots, measured -- when it armed the payload carve and raised it
+  70 -> 72.75 KiB (see `fuzz/fuzz_support.h`).
 - `funcall-apply-redispatch` -- not a crash reproduction but the durable
   half of sub-plan 04C's fuzz gate: allocation-heavy forms interleaved with
   the four funcall/apply redispatch shapes (direct closure, `cons` symbol
