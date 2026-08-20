@@ -9,7 +9,7 @@ if [[ -n ${python_activate} ]]; then
 fi
 source .ci/ci-env.sh
 
-export JOBS PARALLEL VALGRIND
+export JOBS GNU_PARALLEL VALGRIND
 #export PTY_TIMEOUT PTY_STARTUP_DELAY_ADD PTY_KEY_DELAY_ADD
 
 for step in .ci/ci-[0-9][0-9]-*.sh; do
