@@ -1,11 +1,13 @@
 # The interior-pointer census
 
-Phase 23.0 of kg's Elisp data-model program, the entry gate for the payload
-substrate the Phase 22 ADR selected (Design B: stable `FeObject *` headers
-over a bump-allocated, compactable payload region).  It is the checklist the
-one publish protocol in `fe_internal.h` is enforced against, and it exists
-NOW because fe has no movable payloads yet: today every row can be settled by
-reading, and after 23.1 every row has to be settled by debugging.
+Taken at Phase 23.0 of kg's Elisp data-model program, as the entry gate for
+the payload substrate the Phase 22 ADR selected (Design B: stable
+`FeObject *` headers over a bump-allocated, compactable payload region).  It
+is the checklist the one publish protocol in `fe_internal.h` is enforced
+against.  It was written while every row could still be settled by reading;
+since Phase 24 gave the region a vector to hold and Phase 25 gave it every
+string in the language, a row is settled by reading the rule AND by the
+poison lane failing when the rule is broken.
 
 The failure class is nelisp's, documented at
 `/opt/nelisp/docs/design/147-box-layout-container-shrink.org`.  Its Phase 1.5
@@ -14,240 +16,235 @@ behind one accessor -- but the sites that hold a raw interior pointer across
 an operation that moves the storage under it, and especially the ones that
 WRITE through it.  Its summary states the lesson directly: "The hidden cost
 was the interior-pointer WRITE surface, not the 302 accessors."  This census
-is that inventory, taken before the storage can move.
+is that inventory.
 
 ## What counts as a payload here
 
-fe stores a string as a cdr chain of typed cells.  Each cell's `car` word is
-one tag byte and `StringBufferSize` = 7 bytes of text; `STRING_BUFFER(x)`
-(`fe_internal.h`) is `&(x)->car.c + 1`, the interior pointer to those 7
-bytes.  A symbol's name is such a chain.
+A payload is storage an object OWNS but does not contain.  It lives in the
+region, it MOVES when the compactor runs, and the `FeObject *` header that
+names it does not.  Two release types own one:
 
-Once Phase 25 migrates strings onto the substrate, those bytes live in the
-payload region and MOVE when the compactor runs; the `FeObject *` header
-does not.  So a payload pointer, today and after, is exactly: an address
-derived from an object that names its stored TEXT.  A pointer to an object
-(`FeObject *`), to a pair's `car`/`cdr` link, to a `FeContext` field, or to
-host memory is NOT a payload pointer and is not censused as one -- Design B's
-whole premise is that headers are stable.
+* a VECTOR's elements are its block's traced children (Phase 24);
+* a STRING's bytes are its block's byte tail (Phase 25), and a symbol's name
+  is a string, so every context that opens at all has blocks in its region.
+
+A payload pointer is exactly an address derived from an object that names its
+stored elements or its stored bytes.  A pointer to an object (`FeObject *`),
+to a pair's `car`/`cdr` link, to a `FeContext` field, or to host memory is
+NOT a payload pointer and is not censused as one -- Design B's whole premise
+is that headers are stable.  A string's LENGTH is not a payload either: it
+lives in the bytes of the header's own `car` word that the type tag does not
+use, which is why `StringLength` needs no context and cannot go stale.
 
 Nothing else in fe migrates in this program's current scope.
-
-Phase 24 added the first release payload owner: a VECTOR's elements are its
-block's traced children.  Its sites are section E below, taken the same way
-and with the same column, and they are the first rows in this file that are
-settled by reading code that really does read storage that slides.
 
 ## How to read a row
 
 Every row names a file, a function and the line the pattern is on, so a
 reader can open it and see the pattern.  Line numbers are as of the commit
-that adds this file; the function name is the durable half.
+that last rewrote this file (Phase 25.1); the function name is the durable
+half.
 
 * **holds across alloc?** -- can an fe allocation (anything reaching
-  `MakeObject`, `fe.c:872`, directly or through a callback) happen between
-  the moment this site derives a payload address and the moment it last
-  reads or writes through it?  `no` means the address is derived and spent
-  with no allocation in between.  `YES` is the row that needs the protocol.
+  `MakeObject`, `fe.c:1305`, or `PublishPayload`, `fe.c:1252`, directly or
+  through a callback) happen between the moment this site derives a payload
+  address and the moment it last reads or writes through it?  `no` means the
+  address is derived and spent with no allocation in between.  `YES` is the
+  row that needs the protocol.
 * **the rule that makes it safe** -- what a reader must not break.
 
-## A. fe core: the direct payload dereferences
+## A. fe core: the direct payload dereferences, string side
 
-These eleven sites are every occurrence of `STRING_BUFFER` in fe's four core
-translation units, plus the one place a string's stored bytes are read as a
-whole word rather than through the macro, plus the one place they are
-written by initialisation.  Every other payload access in fe -- in fe.c,
-fe_eval.c, fe_run.c and fe_unwind.c alike -- goes through one of these.
+Every read or write of a string's stored bytes in fe.c, fe_eval.c, fe_run.c
+and fe_unwind.c goes through `StringBytes` (A1), and these are its callers.
+The write surface is four rows -- A4, A5, A6, A15 -- plus the allocator's
+zero fill.
 
 | # | site | pattern | holds across alloc? | the rule that makes it safe |
 | --- | --- | --- | --- | --- |
-| A1 | `fe.c:764` `StringOperandLess` | `memcmp(STRING_BUFFER(left), STRING_BUFFER(right), StringBufferSize)` -- TWO payload pointers live in one expression | no | Both coercions that can allocate (`StringOperandChain`, which may build the string `"nil"`) happen before the loop, and the loop body allocates nothing. Both addresses are derived inside the expression that spends them. Under payloads: re-derive both per iteration; never hoist either out of the loop. |
-| A2 | `fe.c:809` `IsStringEqual` | `STRING_BUFFER(obj)[i] != *str` per byte | no | `str` is a host C string, never a payload. The walk allocates nothing. |
-| A3 | `fe.c:932` `BuildString` | `STRING_BUFFER(tail)[StringBufferSize - 1] != '\0'` -- the "is this cell full" guard | **YES** | The guard is read, then `FeCons` at `fe.c:933` allocates (and may collect), then `fe.c:946` re-derives the address. Safe today ONLY because `STRING_BUFFER` is a macro re-evaluated at each use and the address is never parked in a local. This is the constructor row the ADR's "publish protocol" condition is about. |
-| A4 | `fe.c:946` `BuildString` | `STRING_BUFFER(tail)[strlen(STRING_BUFFER(tail))] = chr` -- a payload WRITE, and the census's only one outside initialisation | **YES**, see A3 | Two derivations of the same address in one expression with no sequence point that allocates between them. Under payloads this statement is the whole publish protocol in miniature: derive, write, discard. The nelisp lesson says the write surface is the expensive one; in fe it is one line. |
-| A5 | `fe.c:933`+`fe.c:176` `BuildString` / `SetType` | `FeCons(ctx, NULL, &nil)` zero-fills the `car` word, then `SetType` writes only its tag byte -- so the 7 payload bytes are zeroed by the `NULL` car | no | The zero fill and the retype are one uninterrupted pair. Under payloads a new cell's block must be zero-filled by the allocator, since A4 finds its write offset with `strlen` and depends on the tail being NUL. |
-| A6 | `fe.c:1183` `EmitSymbolName` | `i < StringBufferSize && STRING_BUFFER(name)[i]` -- the loop condition, evaluated after the previous iteration's `Emit` | **YES** | `Emit` (`fe.c:1108`) calls the host's `FeWriteFn`, and fe's contract for that callback does not forbid allocation (contrast `FeSetMarkFn`, `fe.h:528`, which forbids it in as many words). Safe today because the address is re-derived at every use. Under payloads: no caching across `Emit`, ever. |
-| A7 | `fe.c:1184` `EmitSymbolName` | `const char chr = STRING_BUFFER(name)[i]` -- one byte copied out before it is used | **YES**, see A6 | The BYTE is copied to a local; the ADDRESS is not. Copying the byte out is the right shape and should stay. |
-| A8 | `fe.c:1210` `EmitStoredString` | loop condition, as A6 | **YES**, see A6 | As A6. |
-| A9 | `fe.c:1212` `EmitStoredString` | `STRING_BUFFER(obj)[i] == '"' \|\| STRING_BUFFER(obj)[i] == '\\'` -- the quoting test | **YES**, see A6 | Both derivations precede the `Emit` they guard. |
-| A10 | `fe.c:1215` `EmitStoredString` | `Emit(w, STRING_BUFFER(obj)[i])` -- the byte is read, then the callback runs | **YES**, see A6 | The argument is evaluated before the call, so the read happens before the allocation the callback might do. Under payloads this ordering must stay explicit, because the obvious "optimisation" (hoisting the base) breaks it silently. |
-| A11 | `fe.c:1563` `CopyStoredStringBytes` | `const char* buffer = STRING_BUFFER(string);` -- the census's ONE cached payload pointer, held across `memchr` and `memcpy` | no | Neither `memchr` nor `memcpy` allocates, and the cache dies at the end of the loop iteration. This is the one site where a reviewer must check the rule rather than see it in the syntax, and therefore the one to state the invariant beside under payloads. |
-| A12 | `fe.c:2313` `IsKeywordSymbol` | `STRING_BUFFER(SymbolName(v))[0] == ':'` | no | One derivation, one read, no allocation. |
-| A13 | `fe.c:708` `Equal` | `CAR(a) != CAR(b)` -- string equality compares the whole `car` WORD, i.e. the tag byte and all 7 stored bytes at once | no | The loop allocates nothing. Not a `STRING_BUFFER` use, and therefore the row a `STRING_BUFFER` grep misses: under payloads `car` no longer holds the text and this arm must be rewritten, not merely re-derived. |
+| A1 | `fe.c:510` `StringBytes` | `PayloadBytes(ctx, PAYLOAD(string))` -- THE accessor, one derivation per call | no | The whole function is the derivation; the result lives in its caller's statement and dies there. Never returned to a host and never stored in a struct. Never null, because every string publishes a block -- the empty string's is a header with no bytes after it, which is why `PayloadBytes` accepts a one-past-the-end offset. |
+| A2 | `fe.c:492` `StringLength`, `fe.c:501` `SetStringLength` | the bytes of the owner's own `car` word | -- | NOT a payload, and listed so that a reader stops looking for one. The header does not move, so a length read is a field read: no context, no walk, no staleness. It is also why the block can be capacity rather than length. |
+| A3 | `fe.c:517` `StringCapacity` | `OwnedBlock(ctx, string)->bytes` -- the block HEADER, not its bytes | no | Reads the block's own size word, which the compactor moves with the block. Only the two constructors ask; every other caller wants `StringLength`. |
+| A4 | `fe.c:1582` `FeMakeStringBytes` | `memcpy(StringBytes(ctx, obj), bytes, length)` -- a payload WRITE | no | Derived after the last allocation the constructor makes (the publish inside `MakeStringObject`) and spent in the same statement. `bytes` is host memory the caller owns; a zero length skips the `memcpy` entirely rather than passing a possibly-null source. |
+| A5 | `fe.c:1610` `AppendStringByte` | `StringBytes(ctx, string)[length] = chr` -- the reader's per-byte WRITE | **YES** | The `PublishPayload` above it, on the iteration where the capacity runs out, is the allocation. The address is derived after it, in the statement that spends it. A hoisted base here is the deliberately plantable bug for a string, exactly as a hoisted destination in `AppendSequence` is for a vector. |
+| A6 | `fe.c:1235` `CopyReplacedPayload` | `memcpy(PayloadBytes(handle), PayloadBytes(previous), ...)` -- TWO payload pointers in one statement, one of them a WRITE | no | Called from inside `PublishPayload` after its allocation and before the store that makes the old block dead, which is the only window in which both blocks exist and neither can move. It is what makes a replacement a copy of what it replaces -- the reason a growing string is the same string. |
+| A7 | `fe.c:1848` `EmitSymbolName` | `(char)StringBytes(w->ctx, name)[i]` inside the emit loop | **YES** | `Emit` reaches the host's `FeWriteFn`, which fe.h now says MAY allocate (finding 2, decided). The address is derived per byte and the BYTE is copied to a local before the callback runs. Never hoist the base out of this loop. |
+| A8 | `fe.c:1892` `EmitStoredString` | as A7, plus the quote/backslash/NUL tests on the copied byte | **YES**, see A7 | The byte is read into `chr` and every test is on `chr`, so the payload window is one statement wide however many branches follow it. |
+| A9 | `fe.c:1798` `CopyStringBytes` | `memcpy(dst, StringBytes(ctx, string), length)` -- the one copy OUT | no | `dst` is the caller's buffer, always host memory. Every byte copy in fe and behind `fe.h` funnels through here, which is what keeps the number of derivations countable. A length-only call (`dst` null) derives no address at all. |
+| A10 | `fe.c:1180` `IsStringEqual` | `memcmp(StringBytes(ctx, obj), str, length)` | no | `str` is a host C string. The length test above it decides most calls without deriving an address, which is what made the obarray scan cheaper as well as safer. |
+| A11 | `fe.c:1056` `Equal` | `memcmp(StringBytes(ctx, a), StringBytes(ctx, b), length)` -- TWO payload pointers in one expression | no | Both are derived inside the expression that spends them, and nothing in `Equal` allocates. This is the row Phase 23.0's finding 1 predicted would have to be REWRITTEN rather than re-derived: it used to compare whole `car` words. |
+| A12 | `fe.c:1129` `StringOperandLess` | `memcmp(StringBytes(ctx, left), StringBytes(ctx, right), shared)` -- two more | no | Both coercions that can allocate (`StringOperand`, which may build the string `"nil"`) happen above, and `left` is rooted across the second one. Both addresses are derived after the last allocation. |
+| A13 | `fe.c:3055` `IsKeywordSymbol` | `StringBytes(ctx, name)[0] == ':'` | no | One derivation, one read, no allocation, guarded by a nonzero length. |
+| A14 | `fe.c:3860` `StringByteAt` | `StringBytes(ctx, string)[index]` | no | The caller has bounds-checked against `StringLength`. Since Phase 25 this is the same arithmetic a vector's element already was, rather than a walk. |
+| A15 | `fe.c:3935` `SetStringByte` | `StringBytes(ctx, string)[index] = value` -- `aset`'s WRITE | no | Both refusals (`characterp`, and the above-a-byte one) raise before the address is derived, so the derivation and the store are one statement with nothing between them. |
 
-## B. fe core: the payload readers that reach A1-A13 through a helper
+## B. fe core: the payload readers that reach A1-A15 through a helper
 
 Exhaustive for fe.c, fe_eval.c, fe_run.c and fe_unwind.c.  None of these
-derives a payload address itself; each one's safety is the helper's, and
-each one is listed because Phase 25 changes the helper under it.
+derives a payload address itself; each one's safety is the helper's.
 
 | # | site | reaches payload via | holds across alloc? | the rule that makes it safe |
 | --- | --- | --- | --- | --- |
-| B1 | `fe.c:1558` `CopyStoredStringBytes` | A11 | no | The chain walk holds only `FeObject *` (`string = CDR(string)`); `dst` is the caller's buffer. The one function every byte-copy in fe and kg funnels through. |
-| B2 | `fe.c:1579` `FeStringByteLength`, `fe.c:1583` `FeCopyStringBytes` | B1 | no | `FeCopyStringBytes` calls B1 twice (`fe.c:1588`, `fe.c:1592`) with nothing between; the object it re-walks is a header, so the second walk is valid whatever moved. This pair is the public API's whole payload surface -- fe hands a host no interior pointer at all. |
-| B3 | `fe.c:1166`, `fe.c:1177` `EmitSymbolName` | B1 into a 64-byte stack buffer | no | The number-lookalike test runs on the COPY, not on the chain. Correct shape; keep it. |
-| B4 | `fe.c:2839`, `fe.c:2843` `CopyNameArgument` | B1 into the caller's `char[SymbolNameLimit + 1]` | no | Length pass, bound check, copy pass; the `FeHandleError` between them raises rather than allocates. |
-| B5 | `fe.c:2862`, `fe.c:2866` `InternSoft` | B1 twice, each re-deriving `SymbolName(argument)` from the header | no | The re-derivation per pass is the pattern to keep: the header is the durable name of the chain. |
-| B6 | `fe.c:2904`, `fe.c:2908` `SymbolNameString` | B1 twice off a cached `const FeObject* const stored` | no | `stored` is a HEADER, which Design B does not move; caching it is safe and caching a `STRING_BUFFER` off it would not be. |
-| B7 | `fe.c:3142` `RenderErrorMessage` | B1 for the "is the message empty" test | no | Renders into the caller's buffer through `AppendMessageObject`/`RenderObject`, which `fe.c:3095` documents as allocating nothing -- it runs on the host error path where there may be no arena left. |
-| B8 | `fe.c:841` `FindInternedSymbol` | A2 per candidate | no | The obarray scan allocates nothing, so no candidate's name can move mid-scan. `FeMakeSymbol` (`fe.c:986`) calls it BEFORE the allocations that mint a new symbol, never between them. This is the plan's "`strcmp` in interning" row: fe spells it `IsStringEqual`, byte-at-a-time over the chain, because a chain is not a C string. |
-| B9 | `fe.c:2299` `IsNamedSymbol` | A2 | no | Also `fe.c:1358`, `fe.c:1360`, `fe.c:2317`, `fe.c:2321`, `fe.c:3108`, `fe.c:3120`. |
-| B10 | `fe.c:2311` `IsKeywordSymbol`, `fe.c:1631`/`fe.c:2316` `IsConstantSymbol` | A12, B9 | no | |
-| B11 | `fe.c:1421` `WriteObject` (symbol arm), `fe.c:1425` (string arm) | A6-A10 | **YES**, inherited | The printer's payload window is exactly A6-A10. Everything below it -- `FeWrite`, `FeWriteWithOptions`, `FeWriteFile`, `RenderObject` (`fe.c:1506`), `FeToString` (`fe.c:1529`) -- inherits that window and adds nothing of its own. |
-| B12 | `fe.c:950` `FeMakeString` | A3-A5 through `BuildString` | no pointer held | Holds `obj` and `tail` as `FeObject *` across every `BuildString` call, which is why the constructor is safe even though A3/A4 straddle an allocation. The model for a Phase-25 constructor. |
-| B13 | `fe.c:2363` `ReadStringLiteral` | A3-A5 through `BuildString` | no pointer held | Holds `res` and `value` as `FeObject *` across the host `FeReadFn` (`fn(ctx, udata)`), which may allocate. Same shape as B12. |
-| B14 | `fe.c:977` `MakeSymbolObject` | B12 for the name | no pointer held | Four allocations with every intermediate on the GC stack; nothing derives a name address at all. |
-| B15 | `fe.c:1544` `GetStringObject` | -- | no | Returns a header, or raises. Named here because it is the type gate every public payload reader passes through. |
-| B16 | `fe.c:1689` `SymbolName` | -- | no | Returns the name CHAIN's header. The one function whose result looks like a payload handle and is not. |
-| B17 | `fe.c:432` `FeMark`, string/symbol arm | -- | -- | The collector walks `CDR` and never touches stored bytes. Under payloads this arm gains the payload edge, per the ADR's "a new arm of the existing Deutsch-Schorr-Waite trampoline". Censused because it is where a mark/rewrite asymmetry would live -- nelisp's recurring bug, its Phase-3 learning 4. |
-| B18 | `fe.c:545` `CollectGarbage`, sweep loop | -- | -- | Walks `ctx->objects[i]` linearly. Under payloads the compactor runs between the mark and this sweep, per the ADR's ordering argument. |
-| B19 | `fe.c:872` `MakeObject` | -- | -- | THE allocation point: every constructor reaches it, so it is where the poison step hooks and where "any allocation" is defined for this census. |
-| B20 | `fe.c:3204` `GetSymbolObjectCount`, `fe.c:3216` `GetStringObjectCount` | -- | no | Arithmetic on `StringBufferSize` alone; no object is dereferenced. Payloads change the ARITHMETIC (a string stops costing one cell per 7 bytes) and `FeMinimumArenaSize` with it. |
-| B21 | `fe_eval.c:2074`, `fe_eval.c:2077` `ResumeBinary` | A1 | no | `string<` / `string>`. |
-| B22 | `fe_eval.c:2042` `ResumeBinary` | A13 | no | `equal`. |
-| B23 | `fe_eval.c:1911` `ResumeUnary` | A12 | no | `keywordp`. |
-| B24 | `fe_eval.c:2847`, `fe_eval.c:2852`, `fe_eval.c:2883`, `fe_eval.c:2887` `FormatErrorMessage` | B2 into stack buffers | no | Length pass then copy pass, twice; nothing allocates between a pass pair. |
-| B25 | `fe_eval.c:2997`, `fe_eval.c:3001` `ResumeEvalList` | B2 over `SymbolName(name)` | no | As B24. |
-| B26 | `fe_eval.c:511`, `fe_eval.c:2806`, `fe_eval.c:2807` | B11 through `FeToString` into stack buffers | no | Rendering into a caller buffer; the payload window stays inside the printer. |
-| B27 | `fe_eval.c:2890`, `fe_eval.c:2894` | B11 through `RenderObject` | no | As B26. |
-| B28 | `fe_eval.c:1925` | B7 through `RenderErrorMessage` | no | As B26. |
-| B29 | `fe_eval.c` `IsNamedSymbol` -- lines 60, 84, 161, 369, 380, 384, 424, 428, 1079, 1080, 3013 | B9 | no | Parameter-list keywords (`&optional`, `&rest`), `lambda`/`fn` heads, `t`, `quit`. Phase 21 recorded this as a LOOKUP cost no representation change fixes; it is also eleven payload reads per shape that a payload move must keep correct. |
-| B30 | `fe_eval.c` `IsConstantSymbol` -- lines 48, 60, 83, 95, 106, 113, 1939 | B10 | no | |
-| B31 | `fe_unwind.c` `IsNamedSymbol` -- lines 179, 189, 224, 236, 243 | B9 | no | The condition hierarchy's name comparisons and `condition-case`'s spec test. fe_unwind.c has no other payload contact of any kind. |
-| B32 | `fe_run.c` | -- | -- | NO payload contact at all: `fe_run.c` touches no string bytes, directly or through a helper. Recorded so the sweep is exhaustive over all four core translation units. |
+| B1 | `fe.c:2300` `FeStringByteLength`, `fe.c:2304` `FeCopyStringBytes`, `fe.c:2317` `FeStringBytes` | A9 | no | The public API's whole string surface. `FeCopyStringBytes` calls A9 twice with nothing between; the object it re-reads is a header, so the second call is valid whatever moved. fe hands a host no interior pointer at all, and there is no plan to. |
+| B2 | `fe.c:2270` `GetStringObject` | -- | no | Returns a header, or raises. The type gate every public reader passes through; a symbol answers its name string. |
+| B3 | `fe.c:2419` `SymbolName` | -- | no | Returns the name STRING's header. The one function whose result looks like a payload handle and is not. |
+| B4 | `fe.c:1848` `EmitSymbolName` number-lookalike test | A9 into a 64-byte stack buffer | no | The test runs on the COPY, not on the payload. Correct shape; keep it. |
+| B5 | `fe.c:3646` `CopyNameArgument`, `fe.c:3668` `InternSoft`, `fe.c:3706` `SymbolNameString` | A9 into a `char[SymbolNameLimit + 1]` | no | Length pass, bound check, copy pass. `SymbolNameString` then builds a NEW string from the stack copy rather than from the payload, which is what keeps a payload address from crossing the allocation that makes the result. |
+| B6 | `fe.c:1208` `FindInternedSymbol` | A10 per candidate | no | The obarray scan allocates nothing, so no candidate's name can move mid-scan, and each candidate's address is derived inside `IsStringEqual`. `FeMakeSymbol` calls it BEFORE the allocations that mint a new symbol, never between them. Phase 25's version rejects most candidates on their LENGTH, which touches no payload at all. |
+| B7 | `fe.c:3043` `IsNamedSymbol` | A10 | no | Also `fe.c:3064` `IsConstantSymbol`, `fe.c:3068` `IsDot`, `fe.c:4185`/`fe.c:4197` `SelectErrorMessage`, `fe.c:2076`/`fe.c:2078` `EmitAbbreviation`. |
+| B8 | `fe.c:4202` `RenderErrorMessage` | A9 for the "is the message empty" test | no | Renders into the caller's buffer through `AppendMessageObject`/`RenderObject`, which allocate nothing -- they run on the host error path where there may be no arena left. |
+| B9 | `fe.c:746` `FeMark`, payload arm | -- | -- | A string's block has no traced child, so `DescendIntoPayload` finds it a leaf; a vector's children are walked by the same pointer reversal. This is where a mark/rewrite asymmetry would live -- nelisp's recurring bug, its Phase-3 learning 4. |
+| B10 | `fe.c:902` `CollectGarbage`, `fe.c:586` `CompactPayloads` | -- | -- | The compactor runs after the mark phase has restored the graph and BEFORE the sweep clears the mark bits, which is the ordering the liveness rule depends on. Its return-to-base move pattern-fills what it vacates under the poison knob; without that, a stale pointer into the TAIL of the old extent read valid data, because a backward `memmove` does not overwrite its own tail (found by the poison lane in Phase 25). |
+| B11 | `fe.c:1305` `MakeObject`, `fe.c:1252` `PublishPayload` | -- | -- | THE two allocation points: every constructor reaches one, so they are where the poison step hooks and where "any allocation" is defined for this census. |
+| B12 | `fe.c:1565` `MakeStringObject`, `fe.c:1652` `MakeSymbolObject` | A4 | no pointer held | Retype, zero the length, clear the handle, publish -- the order `MakeVector` and `MakeAggregate` established, so that a collection landing between the retype and the publish finds an owner that coherently owns nothing. `MakeSymbolObject` holds only `FeObject *` across its four allocations. |
+| B13 | `fe.c:3119` `ReadStringLiteral` | A5 through `AppendStringByte`, A3 through `FinishString` | no pointer held | Holds `res` as an `FeObject *` across the host `FeReadFn` and across its own growth, both of which allocate. The string it hands back is the object it started with. |
+| B14 | `fe.c:4293` `GetStringPayloadBytes`, `fe.c:4547` `GetCorePayloadBytes` | -- | no | Arithmetic on `sizeof(FePayloadBlock)` and a name's length; no object is dereferenced. They must agree with `AllocatePayloadBlock` exactly, because `FeMinimumArenaSize` is exact and funds the core names' blocks. |
+| B15 | `fe_eval.c:2061` `ResumeBinary` | A11 | no | `equal`. |
+| B16 | `fe_eval.c:2093`, `fe_eval.c:2096` `ResumeBinary` | A12 | no | `string<` / `string>`. |
+| B17 | `fe_eval.c:1930` `ResumeUnary` | A13 | no | `keywordp`. |
+| B18 | `fe_eval.c:2878`/`fe_eval.c:2883` and `fe_eval.c:2914`/`fe_eval.c:2918` `FormatErrorMessage`, `fe_eval.c:3034`/`fe_eval.c:3038` `ResumeEvalList` | B1 into stack buffers | no | Length pass then copy pass; nothing allocates between a pass pair. |
+| B19 | `fe_eval.c:513`, `fe_eval.c:1944`, `fe_eval.c:2837`, `fe_eval.c:2921` | the printer (A7-A8) through `FeToString`/`RenderObject`/`RenderErrorMessage` | no | Rendering into a caller buffer; the payload window stays inside the printer. |
+| B20 | `fe_eval.c` `IsNamedSymbol` -- lines 61, 85, 162, 163, 371, 382, 386, 426, 430, 1098, 1099, 3049 | B7 | no | Parameter-list keywords (`&optional`, `&rest`), `lambda`/`fn` heads, `t`, `quit`. Phase 21 recorded this as a LOOKUP cost no representation change fixes; it is also twelve payload reads per shape that a payload move must keep correct. |
+| B21 | `fe_eval.c` `IsConstantSymbol` -- lines 48, 60, 84, 96, 107, 114, 1958 -- and `IsConditionSymbol` at `fe_eval.c:3040` | B7, B22 | no | |
+| B22 | `fe_unwind.c` `IsNamedSymbol` -- lines 195, 206, 244, 256, 263 | B7 | no | The condition hierarchy's name comparisons and `condition-case`'s spec test. fe_unwind.c has no other payload contact of any kind. |
+| B23 | `fe_run.c` | -- | -- | NO payload contact at all. Recorded so the sweep is exhaustive over all four core translation units. |
+
+Every function in B7, B15-B22 takes a `const FeContext *` for exactly one
+reason: reading a name's bytes needs the context that owns the region.  That
+parameter is the census made structural -- a helper that reads a payload
+cannot be called from somewhere that has no context to read it from.
 
 ## C. fe harnesses
 
-The plan asks for "the harnesses that touch object internals".  Only two of
-them include `fe_internal.h`, and neither reads a payload.
-
 | # | site | what it touches | verdict |
 | --- | --- | --- | --- |
-| C1 | `test_api.c:8623`-`8640` (`CAR`/`CDR` writes building self-referential and ring structures), `test_api.c:3092`-`3095` (a cdr-chain walk and append) | pair LINK words | Header words, not payload. Design B does not move them. No change owed. |
-| C2 | `test_api.c` everywhere else | the public API | `FeStringByteLength`/`FeCopyStringBytes`/`FeToString` only, which is B2/B11's copy-out contract. No interior pointer crosses the API. |
-| C3 | `perf_workloads.c:62` includes `fe_internal.h` | `FE_API_VERSION`/`FE_LANGUAGE_VERSION` static asserts and the arena-size enums | Reads no object field and no `ctx->` field. No payload contact. |
-| C4 | `gc_stress.c`, `example_host.c`, `main.c`, `fex.c`, `fex_io.c`, `fex_math.c`, `fex_process.c`, `fex_re.c`, `fex_time.c`, `fuzz/*.c` | the public API only | None includes `fe_internal.h`; the only `car`/`cdr` text in them is Lisp source inside string literals. No payload contact. |
+| C1 | `test_api.c` `CAR`/`CDR` writes building self-referential and ring structures, and its cdr-chain walks | pair LINK words | Header words, not payload. Design B does not move them. No change owed. |
+| C2 | `test_api.c` everywhere else, `TestStringRepresentation` and `TestStringMutation` included | the public API | `FeMakeStringBytes`/`FeStringBytes`/`FeStringByteLength`/`FeCopyStringBytes`/`FeToString` only, which is B1's copy-out contract. No interior pointer crosses the API. |
+| C3 | `payload_tests.c` string and vector groups | `PAYLOAD(obj)` (a HANDLE), `AggregateBytes`, and the public string API | A handle is not an address: the string cases assert that a handle CHANGED across a collection and then read the bytes back through B1, which is the only shape a test of a moving payload can have. `AggregateBytes` is derived and spent inside the statement, per clause 1. |
+| C4 | `perf_workloads.c` | `sizeof(FePayloadBlock)`, `FePayloadAlignment`, the version asserts | Reads no object field and no `ctx->` field. No payload contact. |
+| C5 | `gc_stress.c`, `example_host.c`, `main.c`, `fex.c`, `fex_*.c`, `fuzz/*.c` | the public API only | None includes `fe_internal.h`. No payload contact. |
 
 ## D. kg's `src/lisp_*.c`
 
 kg reaches fe only through `fe.h`, and `fe.h` returns no pointer into object
-storage: `FeStringByteLength` + `FeCopyStringBytes` (`fe.h:821`-`822`) and
-`FeToString` (`fe.h:800`) copy bytes into a buffer the CALLER owns.  So kg
-holds no payload pointer today and cannot begin to without a new public
-symbol.  That is the finding, and the rows below are its proof rather than a
-list of hazards.
+storage: `FeStringByteLength` + `FeCopyStringBytes`, `FeStringBytes` and
+`FeToString` all copy bytes into a buffer the CALLER owns.  So kg holds no
+payload pointer and cannot begin to without a new public symbol.  That was
+the finding at Phase 23.0 and it is why Phase 25 needed NO change to kg's C
+boundary: the copy-out contract was already binary-safe, and the two-call
+pair still means exactly what it did.
 
 The pattern kg does hold across allocation is `FeObject *` -- a header, which
 Design B pins.
 
 | # | site | pattern | holds a payload pointer? | the rule that makes it safe |
 | --- | --- | --- | --- | --- |
-| D1 | `src/lisp_core.c:251` `copy_fe_string` | `FeStringByteLength` -> `malloc` -> `FeCopyStringBytes` -> NUL-terminate | no | The plan's `copy_fe_string()` row. What survives the `malloc` is `FeObject *object`, a header. The `malloc` is HOST memory and no fe allocation happens between the length pass and the copy pass, so even the length cannot go stale. Twenty call sites inherit this: `lisp_cmd.c:320`, `lisp_cmd.c:994`, `lisp_core.c:296`, `lisp_core.c:1246`, `lisp_hooks.c:449`, `lisp_hooks.c:487`, `lisp_hooks.c:527`, `lisp_io.c:519`, `lisp_io.c:557`, `lisp_io.c:642`, `lisp_io.c:959`, `lisp_io.c:1063`, `lisp_motion.c:317`, `lisp_obj.c:629`, `lisp_process.c:412`, `lisp_require.c:41`, `lisp_require.c:150`, `lisp_search.c:261`, `lisp_search.c:628`, `lisp_string.c:29`. |
+| D1 | `src/lisp_core.c:251` `copy_fe_string` | `FeStringByteLength` -> `malloc` -> `FeCopyStringBytes` -> NUL-terminate | no | What survives the `malloc` is `FeObject *object`, a header. The `malloc` is HOST memory and no fe allocation happens between the length pass and the copy pass, so even the length cannot go stale. Twenty call sites inherit this: `lisp_cmd.c:320`, `lisp_cmd.c:994`, `lisp_core.c:296`, `lisp_core.c:1246`, `lisp_hooks.c:449`, `lisp_hooks.c:487`, `lisp_hooks.c:527`, `lisp_io.c:519`, `lisp_io.c:557`, `lisp_io.c:642`, `lisp_io.c:959`, `lisp_io.c:1063`, `lisp_motion.c:317`, `lisp_obj.c:629`, `lisp_process.c:412`, `lisp_require.c:41`, `lisp_require.c:150`, `lisp_search.c:261`, `lisp_search.c:628`, `lisp_string.c:29`. The one thing that changed under them is that the bytes they copy may now contain NUL, which is a kg-side semantic question and not a lifetime one. |
 | D2 | `src/lisp_search.c:439`-`453` `lisp_pattern_and_subject` | two `FeStringByteLength`, one `malloc`, two `FeCopyStringBytes` into halves of one block | no | Both objects are held as headers across the `malloc`; the block is host memory parked in `state.scratch` so a raise between here and `release_scratch()` still frees it. |
 | D3 | `src/lisp_search.c:572`-`585` `native_regexp_quote` | length, `malloc`, copy, then a byte loop over the HOST copy | no | The quoting loop reads `block[i]`, never fe storage. |
-| D4 | `src/lisp_string.c:153` `lisp_concat_bytes` and `src/lisp_string.c:179`-`181` `native_concat` | a length pass over the argument list, then a `malloc`, then a second pass re-reading each length and copying | no | Both passes walk `FeObject *` argument chains. The second pass re-asks `FeStringByteLength` per element rather than caching the first pass's per-element numbers -- the right shape, and the one to keep when strings move. |
+| D4 | `src/lisp_string.c:153` `lisp_concat_bytes`, `src/lisp_string.c:179`-`181` `native_concat` | a length pass over the argument list, then a `malloc`, then a second pass re-reading each length and copying | no | Both passes walk `FeObject *` argument chains. The second pass re-asks `FeStringByteLength` per element rather than caching the first pass's numbers -- the right shape, and the one to keep. |
 | D5 | `src/lisp_string.c:204`-`219` `native_string_equal` | two lengths, one `malloc` for both copies, `memcmp` on the copies | no | The comparison is between two HOST copies, so it is unaffected by anything fe does to storage. |
-| D6 | `src/lisp_process.c:338`-`344` `start-process` argv build | per argument: length, bound check, copy into a fixed `LISP_PROCESS_ARGV_BYTES` block | no | `argv[argc]` points into the HOST block, not into fe. |
-| D7 | `src/lisp_prompt.c:118`-`124` `copy_string_argument` | length, bound check, copy onto the caller's frame | no | |
-| D8 | `src/lisp_cmd.c:286`, `src/lisp_core.c:650`, `src/lisp_word.c:223`, `src/lisp_prompt.c:331` | `FeToString` into a stack buffer, then `strcmp` on the buffer | no | The payload window is fe's printer (B11); kg sees only the copy. |
-| D9 | `src/lisp_io.c:368`, `src/lisp_io.c:383` `format_object` | `FeWrite` with kg's own `FeWriteFn` (`format_write_text`, `src/lisp_io.c:307`, -> `format_put`, `src/lisp_io.c:49`) | no -- and it must stay that way | THE cross-repository row. fe's printer is inside A6-A10's payload window while it calls this callback. kg's callback grows a HOST buffer with `realloc` (`format_grow`, `src/lisp_io.c:31`) and never allocates an fe object, so fe's window is never crossed by an fe allocation on kg's path. It CAN raise (out of memory), which longjmps out of the printer -- a raise, not a move, and therefore not a stale-pointer hazard. A future kg write callback that allocated an fe object would break A6-A10 from outside fe, and nothing in `fe.h` forbids it; that gap is recorded in "Findings" below. |
-| D10 | `src/lisp_core.c:195`-`214` `render_condition` | `FeToString` and `FeErrorMessageString` into host buffers, from inside kg's `FeErrorFn` | no | Runs on the error path. fe's own renderer allocates nothing there (B7). |
+| D6 | `src/lisp_process.c:338`-`344` `start-process` argv build | per argument: length, bound check, copy into a fixed block | no | `argv[argc]` points into the HOST block, not into fe. |
+| D7 | `src/lisp_prompt.c:118`-`124` `copy_string_argument` | length, bound check, copy onto the caller's frame | no | A candidate for `FeStringBytes`, which is that shape in one call. |
+| D8 | `src/lisp_cmd.c:286`, `src/lisp_core.c:650`, `src/lisp_word.c:223`, `src/lisp_prompt.c:331` | `FeToString` into a stack buffer, then `strcmp` on the buffer | no | The payload window is fe's printer (A7-A8); kg sees only the copy. |
+| D9 | `src/lisp_io.c:368`, `src/lisp_io.c:383` `format_object` | `FeWrite` with kg's own `FeWriteFn` (`format_write_text` -> `format_put`) | no -- and it is now GUARANTEED not to matter | THE cross-repository row, and finding 2's. kg's callback grows a HOST buffer with `realloc` and can raise out of memory. fe.h now states that a write callback MAY allocate and MAY raise, and the printer re-derives after every callback so that it can; the gap this row recorded is closed by a promise fe keeps rather than by a restriction kg has to. |
+| D10 | `src/lisp_core.c:195`-`214` `render_condition` | `FeToString` and `FeErrorMessageString` into host buffers, from inside kg's `FeErrorFn` | no | Runs on the error path. fe's own renderer allocates nothing there (B8). |
 | D11 | `src/lisp_hooks.c:170`, `src/lisp_process.c:132` | `FeGetCompletionMessage` interpolated into a host `snprintf` | no | Returns a pointer into a fixed `FeContext` message buffer, not into object storage; the context does not move. |
-| D12 | `src/lisp_obj.c:81`, `src/lisp_obj.c:147` | `FeToPtr` -> `struct kg_lisp_object *rec`, held across further fe calls | no | The one kg pattern that LOOKS like an interior pointer and is not: an `FeTPtr` object stores a HOST pointer, and `FeToPtr` hands that value back. kg's own generation/`wrapper` checks are what keep it honest, and payloads change none of it. |
+| D12 | `src/lisp_obj.c:81`, `src/lisp_obj.c:147` | `FeToPtr` -> `struct kg_lisp_object *rec`, held across further fe calls | no | The one kg pattern that LOOKS like an interior pointer and is not: an `FeTPtr` object stores a HOST pointer and `FeToPtr` hands that value back. |
 | D13 | everything else in `src/lisp_*.c` | `FeCons`, `FeCar`, `FeCdr`, `FeMakeString`, `FeMakeSymbol`, `FeGetNextArgument`, roots, `FePushGC`/`FeRestoreGC` | no | Header traffic. |
 
 ## E. fe core: the vector's payload sites (Phase 24)
 
-A vector's elements ARE its payload block's children.  Unlike section A's
-string sites, these are live today: the storage under them moves whenever the
-collector compacts.  Every one of them derives the block address inside the
-statement that spends it, which is clause 1 read as a rule rather than as an
-accident.
+A vector's elements ARE its payload block's children.  Every one of these
+derives the block address inside the statement that spends it, which is
+clause 1 read as a rule rather than as an accident.
 
 | # | site | pattern | holds across alloc? | the rule that makes it safe |
 | --- | --- | --- | --- | --- |
-| E1 | `fe.c` `VectorElement` | `*PayloadChildSlot(OwnedBlock(ctx, vector), index)` -- one derivation, one read | no | The whole function is the derivation and the read. Every element READ in fe and in `fe.h` goes through it, which is what makes this row the one to keep true rather than twenty. |
-| E2 | `fe.c` `SetVectorElement` | the same address, written | no | The census's second write surface, and like A4 it is one statement. Every element WRITE goes through it -- `aset`, `vconcat`'s fill, `make-vector`'s fill, the reader's fill, `FeVectorSet`. |
-| E3 | `fe.c` `VectorLength` | `OwnedBlock(ctx, vector)->children` -- the BLOCK HEADER, not its payload | no | Null when the owner has published no block yet, which a constructor between its retype and its publish really is; answering 0 there is why a collection landing in that window finds a coherent object. |
-| E4 | `fe.c` `MakeVector` fill loop | E2 per slot | no | Nothing in the loop allocates: `init` is one already-built object stored `length` times, which is also `make-vector`'s Emacs contract. `init` is rooted across `PublishPayload`, which allocates. |
-| E5 | `fe.c` `MakeVectorFromList` fill loop | E2 per slot | no | Nothing in the loop allocates; the source list is rooted across `MakeVector`, which does. |
-| E6 | `fe.c` `AppendSequence` | E1 and E2 per element | **YES** | `FeMakeInteger` runs between two writes for a STRING operand, so the destination address is re-derived per element -- a hoisted one is the deliberately planted bug the poison lane was proved to catch. The GC-stack checkpoint inside the loop is the other half: without it a string operand pushes one root per byte and overflows at 4032. |
-| E7 | `fe.c` `WriteVectorElements` | E1 per element, `VectorLength` once | **YES** | `WriteObject` reaches the host's `FeWriteFn`, whose contract does not forbid allocation -- finding 2 below, unresolved -- so this loop is inside the same window A6-A10 are, and it re-derives for the same reason. The LENGTH is read once because a vector cannot change length; the ADDRESSES are read per element because it can move. |
-| E8 | `fe.c` `Aref`, `Aset`, `SequenceElement`, `SequenceCount`, `Vconcat` | E1-E3 | no | The Lisp surface. Each validates, then spends one derivation; `Vconcat` holds only `FeObject *` across its two passes. |
-| E9 | `fe.c` `ReadVector` | -- | no | Holds `list` and the finished `vector` as `FeObject *` across `FeCons` and `MakeVectorFromList`, which is B12/B13's shape. Derives no payload address of its own. |
-| E10 | `fe.c` `MakeVector` | -- | -- | The constructor row clause 3 is about: retype the cell, clear its handle, THEN `PublishPayload`, which roots the owner across the collection it may run. `MakeAggregate` established the order and this copies it. |
-| E11 | `fe.h` `FeMakeVector`, `FeVectorLength`, `FeVectorRef`, `FeVectorSet` | E1-E3 behind the type and bounds checks | no | The public surface hands a host no interior pointer at all, which is B2's property extended to a second type. There is deliberately no borrowed-elements accessor; `doc/c-api.md` says why. |
-| E12 | `fe.c` `FeMark` payload arm, `DescendIntoPayload` | -- | -- | B17's row, now reached by a real type. A vector's WIDTH costs the mark phase no C stack, and a mark/rewrite asymmetry here is still the bug this row exists to watch for. |
-| E13 | `fe.c` `CompactPayloads` | -- | -- | B18's row. It now also returns the live extent to the region's base, which is a no-op in every build but the poison lane's -- see doc/implementation.md. |
+| E1 | `fe.c:1419` `VectorElement` | `*PayloadChildSlot(OwnedBlock(ctx, vector), index)` -- one derivation, one read | no | The whole function is the derivation and the read. Every element READ in fe and in `fe.h` goes through it, which is what makes this row the one to keep true rather than twenty. |
+| E2 | `fe.c:1424` `SetVectorElement` | the same address, written | no | Every element WRITE goes through it -- `aset`, `vconcat`'s fill, `make-vector`'s fill, the reader's fill, `FeVectorSet`. |
+| E3 | `fe.c:1414` `VectorLength` | `OwnedBlock(ctx, vector)->children` -- the BLOCK HEADER, not its payload | no | Null when the owner has published no block yet, which a constructor between its retype and its publish really is; answering 0 there is why a collection landing in that window finds a coherent object. |
+| E4 | `fe.c:1441` `MakeVector` fill loop | E2 per slot | no | Nothing in the loop allocates: `init` is one already-built object stored `length` times, which is `make-vector`'s Emacs contract. `init` is rooted across `PublishPayload`, which allocates. |
+| E5 | `fe.c:1460` `MakeVectorFromList` fill loop | E2 per slot | no | Nothing in the loop allocates; the source list is rooted across `MakeVector`, which does. |
+| E6 | `fe.c:4008` `AppendSequence` | E1 and E2 per element, A14 for a string operand | **YES** | `FeMakeInteger` runs between two writes for a STRING operand, so the destination address is re-derived per element -- a hoisted one is the deliberately planted bug the poison lane was proved to catch. The GC-stack checkpoint inside the loop is the other half: without it a string operand pushes one root per byte and overflows at 4032. |
+| E7 | `fe.c:2020` `WriteVectorElements` | E1 per element, `VectorLength` once | **YES** | `WriteObject` reaches the host's `FeWriteFn`, which fe.h now says may allocate, so this loop is inside the same window A7-A8 are and re-derives for the same reason. The LENGTH is read once because a vector cannot change length; the ADDRESSES are read per element because it can move. |
+| E8 | `fe.c:3903` `Aref`, `fe.c:3951` `Aset`, `fe.c:3978` `SequenceElement`, `fe.c:3877` `SequenceCount`, `fe.c:4035` `Vconcat` | E1-E3, A14, A15 | no | The Lisp surface, now generic over both owning types. Each validates, then spends one derivation; `Vconcat` holds only `FeObject *` across its two passes. |
+| E9 | `fe.c:3223` `ReadVector` | -- | no | Holds `list` and the finished `vector` as `FeObject *` across `FeCons` and `MakeVectorFromList`. Derives no payload address of its own. |
+| E10 | `fe.c:1441` `MakeVector` | -- | -- | The constructor row clause 3 is about: retype the cell, clear its handle, THEN `PublishPayload`, which roots the owner across the collection it may run. `MakeStringObject` copies the order. |
+| E11 | `fe.h` `FeMakeVector`, `FeVectorLength`, `FeVectorRef`, `FeVectorSet` | E1-E3 behind the type and bounds checks | no | The public surface hands a host no interior pointer at all, which is B1's property extended to a second type. There is deliberately no borrowed-elements accessor; `doc/c-api.md` says why. |
+| E12 | `fe.c:746` `FeMark` payload arm, `fe.c:671` `DescendIntoPayload` | -- | -- | B9's row, reached by both release types. A vector's WIDTH costs the mark phase no C stack, and a string is a leaf there. |
+| E13 | `fe.c:586` `CompactPayloads` | -- | -- | B10's row. |
 
 ## Findings
 
-Three things this sweep found that the ADR did not state.
+The three things the Phase 23.0 sweep found that the ADR did not state, and
+where each of them stands.
 
-1. **`Equal`'s string arm is not a `STRING_BUFFER` site (A13).**  It compares
-   whole `car` WORDS, so a grep for the accessor misses it, and it is the one
-   payload reader that a re-derive-after-allocation rule does not fix: once
-   the bytes are not in `car`, the arm has to be rewritten.  It is the row
-   most likely to be missed in Phase 25 and the reason this census is a
-   document rather than a grep.
+1. **`Equal`'s string arm was not an accessor site -- CLOSED in Phase 25.**
+   It compared whole `car` WORDS, so a grep for the accessor missed it, and it
+   was the one payload reader a re-derive-after-allocation rule would not have
+   fixed.  It is A11 now: length, then bytes, through `StringBytes`.  This
+   file existing as a document rather than a grep is what caught it.
 
-2. **fe's `FeWriteFn` contract does not forbid allocation, and the printer
-   holds a payload pointer across it (A6-A10, D9).**  `FeSetMarkFn`'s
-   contract (`fe.h:528`) forbids allocation from a mark callback in as many
-   words; the writer callback's has no such sentence, because until now
-   there was nothing for it to break.  kg's one write callback happens not to
-   allocate, so nothing is broken today.  Phase 25 must either state the
-   restriction in `fe.h` or make the printer re-derive after every `Emit`;
-   the second is what A6-A10 already do, so the cheap answer is to keep that
-   property deliberately rather than accidentally.
+2. **`FeWriteFn`'s allocation contract -- DECIDED in Phase 25, in favour of
+   allowing it.**  The choice was between forbidding allocation from a write
+   callback (`FeSetMarkFn`'s shape) and keeping the printer's re-derivation
+   deliberate.  Re-derivation won on two grounds.  The printer already pays an
+   indirect call per emitted byte, so three loads to re-derive a block address
+   is noise against a cost it already has; and the restriction would have been
+   a new promise every host has to keep, where this is a promise fe keeps.
+   `fe.h` says so at the `FeWriteFn` typedef, `doc/c-api.md` says so under
+   "Serializing Objects", and A7, A8 and E7 are the three loops that pay it.
+   D9 -- kg's one write callback, which grows a host buffer and can raise --
+   is the row that motivated the question and is now safe by contract rather
+   than by coincidence.
 
-3. **The census's whole write surface is one line (A4).**  nelisp's Phase 1.5
-   had to decouple a parse pool and a per-op scratch layer because ~257 sites
-   wrote 32-byte slots through raw interior pointers.  fe writes stored bytes
-   in exactly one statement, inside one 16-line constructor, plus the zero
-   fill in A5.  That is the measured reason Phase 25 is a small change and not
-   nelisp's Phase 1.5.
+3. **The write surface is still small.**  nelisp's Phase 1.5 had to decouple a
+   parse pool and a per-op scratch layer because ~257 sites wrote 32-byte
+   slots through raw interior pointers.  fe writes stored bytes in four
+   statements (A4, A5, A6, A15) and stores elements in one (E2), plus the
+   allocator's zero fill.  That is the measured reason Phase 25 was a small
+   change and not nelisp's Phase 1.5.
 
 ## The publish protocol
 
-Stated in `fe_internal.h` beside `STRING_BUFFER`, which is the accessor it
-will replace, and enforced by the debug assertions and the poison mode
-described there.  In one sentence: a payload pointer is obtained immediately
-before use through the one accessor, is invalid after ANY allocation, and a
-new or replacement block reaches its owning header only through the one
-publish function, which roots the owner across its own allocation.
+Stated in `fe_internal.h` beside the accessors it governs, and enforced by the
+debug assertions and the poison mode described there.  In one sentence: a
+payload pointer is obtained immediately before use through the one accessor,
+is invalid after ANY allocation, and a new or replacement block reaches its
+owning header only through the one publish function, which roots the owner
+across its own allocation and copies the old block's contents into the new
+one.
 
-Rows A3, A4, A6, A7, A8, A9, A10 and B11 are the ones that pay it.  Every
-other row is safe by holding a header instead.
+Rows A5, A7, A8, E6 and E7 are the ones that pay clause 2.  Every other row
+is safe by holding a header, a handle, or a copied byte instead.
 
-## Status after Phase 24
+## Status after Phase 25
 
-The substrate this census was taken for landed in Phase 23.1:
-`fe_internal.h` describes the block layout and the protocol, `fe.c` holds the
-region, the allocator, the compactor and the collector's payload arm, and
-`payload_tests.c` is the harness that exercises them.
+The substrate landed in Phase 23.1, got its first consumer in Phase 24 and its
+universal one in Phase 25: a string's bytes are payload, a symbol's name is a
+string, and there is therefore no such thing as an fe context whose region is
+empty.  `FeOpenContext` carves one and `FeMinimumArenaSize` funds the floor,
+which is what retired `FePayloadPercentNone`.
 
-Phase 24 gave it a consumer.  Section E is that consumer's sites, and the
-sections A-D above are unchanged, because nothing in them moved onto the
-substrate: strings are still a cdr chain of seven-byte cells and
-`STRING_BUFFER` is still fe's only interior pointer into a CELL.  Phase 25 is
-when rows A1-A13 and B1-B32 start being read through storage that slides, and
-this file is the checklist for that phase as much as a record of this one.
+Three rows have now been settled by DEBUGGING rather than by reading, which is
+what this file's introduction predicted would start happening.
 
-Two rows of section E were settled by DEBUGGING rather than by reading, which
-is what the introduction predicted would start happening now.  E6 is one: a
-hoisted destination address there passes an ordinary `make check` and fails
-`.ci/ci-04-clang-asan-ubsan.sh` with the poison knob armed, measured by
-planting exactly that bug and watching the two runs disagree (`make check`
-exit 0, the poison lane exit 2 on `vconcat`'s own case).  E7 is the other: it
-is inside finding 2's unresolved window and is the first site to be there on
-purpose rather than by inheritance.
+* **E6**, in Phase 24: a hoisted destination address there passes an ordinary
+  `make check` and fails `.ci/ci-04-clang-asan-ubsan.sh` with the poison knob
+  armed, measured by planting exactly that bug and watching the two runs
+  disagree (`make check` exit 0, the poison lane exit 2 on `vconcat`'s own
+  case).
+* **E7**, in Phase 24: the first site inside finding 2's window on purpose
+  rather than by inheritance.
+* **B10**, in Phase 25: `CompactPayloads`' return-to-base move is BACKWARD,
+  and a backward `memmove` does not overwrite its own tail, so a stale pointer
+  into the tail of the old extent read valid data.  The poison lane found it
+  the first time a context opened with blocks already in its region -- which
+  is to say, the first time strings owned payloads.  The vacated bytes are
+  pattern-filled now.
 
-Finding 2 -- fe's `FeWriteFn` contract does not forbid allocation, and the
-printer holds a payload pointer across it (A6-A10, D9) -- STILL STANDS,
-unresolved.  Phase 24 did not resolve it and did not widen it either: E7, the
-vector arm of the printer, is written to the same re-derive-per-use rule
-A6-A10 already followed, so the window has a second occupant and the same
-property.  Keeping that deliberately, rather than accidentally, is still the
-cheap answer, and the choice between it and a sentence in `fe.h` is still
-Phase 25's to make -- with one more site now depending on the answer.
+What is left for a later phase is section D's own migration, which Phase 25
+found to be nothing: kg's boundary copies through an API that never handed out
+an interior pointer, so the only kg-side question this phase raises is
+semantic (its copies may now contain NUL) rather than about lifetimes.
