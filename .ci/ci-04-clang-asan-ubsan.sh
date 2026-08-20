@@ -9,9 +9,14 @@ export CFLAGS="-Werror -Wall -Wextra -pedantic -std=c2x -fsanitize=address,undef
 # Phase 23.0's payload poison mode, the publish protocol's enforcement arm
 # (fe_internal.h).  This lane arms it rather than a lane of its own: the
 # protocol's failure is a read through storage that moved, which is what a
-# sanitizer build is for, and `test_api.c`'s TestPayloadPublishProtocol --
-# compiled only when the knob is on -- is where the deliberately stale
-# pointer is proved to read poison.  The knob rides CPPFLAGS (see the
+# sanitizer build is for, and `payload_tests.c`'s
+# TestPoisonedPointerFailsLoudly -- compiled only when the knob is on -- is
+# where a deliberately stale pointer is proved to read poison.  Since Phase 24
+# the lane also runs REAL payload traffic: vectors own payload blocks, so
+# every `aref`, `aset` and printed vector in `make check` reads through
+# storage this knob moves under it.  Measured by planting one hoisted address
+# in `AppendSequence` and running both configurations: `make check` exit 0,
+# this lane exit 2 on `vconcat`'s own case.  The knob rides CPPFLAGS (see the
 # Makefile), so the standalone header checks compile the armed header too.
 export FE_DEBUG_PAYLOAD_MOVE=1
 

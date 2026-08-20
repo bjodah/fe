@@ -14,7 +14,12 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 13 adds the
+types, and callback signatures declared in `fe.h`; API version 14 is the
+vector cut, and unlike every version since 6 it is a real ABI break --
+`FeTVector` is inserted into the `FeType` enumeration immediately after
+`FeTString`, renumbering `FeTPtr` and the three `FeTFex*` extension slots --
+beside which it adds the vector quartet `FeMakeVector`/`FeVectorLength`/
+`FeVectorRef`/`FeVectorSet`; API version 13 adds the
 payload region's host surface -- `FeOpenContextWithOptions` with the
 `FeOpenOptions` record it takes, and five payload fields on `FeArenaStats`;
 API version 12 adds
@@ -31,7 +36,11 @@ input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
 API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
-language version 15 is the reader's whitespace set: the form
+language version 16 is the vector cut: `[...]` reader and writer syntax,
+`vector`/`make-vector`/`vectorp`/`aref`/`aset`/`vconcat`, `length` and `elt`
+generic over lists, strings and vectors, and `end-of-file` in the condition
+hierarchy (which is what `[1 2` raises, and what an unclosed list raises now
+too); language version 15 is the reader's whitespace set: the form
 feed (`\f`, 0x0C) joins space, newline, tab and carriage return, so an
 Elisp page separator separates forms instead of being read into the symbol
 beside it; language version 14 added `string<` and `string>` and the
@@ -1572,6 +1581,33 @@ You can then call the `FeNativeFn` from Fe like any other function:
 ```clojure
 (print (pow 2 10))
 ```
+
+### Vectors (FE_API_VERSION 14)
+
+Four functions, and there is no fifth. `FeMakeVector(ctx, length)` builds a
+vector whose every slot is nil; `FeVectorLength(ctx, vector)` answers its
+length; `FeVectorRef(ctx, vector, index)` and `FeVectorSet(ctx, vector, index,
+value)` read and write one slot. All four are O(1) in the vector's length --
+its elements are one payload block, so an element's address is arithmetic --
+and all four are checked: a non-vector raises `(wrong-type-argument vectorp
+OBJECT)` and an index at or past the length raises `(args-out-of-range VECTOR
+INDEX)`, which are the same conditions the Lisp `aref`/`aset` raise because
+they are the same checks.
+
+There is no borrowed-elements accessor, and there will not be one. A vector's
+elements live in the arena's payload region, which the collector COMPACTS: the
+bytes move and the `FeObject *` header does not. Every one of these functions
+therefore takes the header, derives the storage address immediately before
+using it, and lets it die there. A host that held such an address across any
+Fe allocation would be reading whatever slid into its place.
+
+A vector needs a payload region, and `FeOpenContext()` deliberately carves
+none (see "The payload region" above). A context opened through it raises
+`(payload-exhaustion)` for `FeMakeVector` at any length, zero included, since
+even an empty vector publishes a block header; open with
+`FeOpenContextWithOptions()` -- a null `options` selects Fe's own split -- to
+get one. The standalone interpreter in `main.c` does exactly that, and is the
+worked example.
 
 ### Extracting String And Symbol Bytes
 

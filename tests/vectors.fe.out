@@ -1,0 +1,28 @@
+[1 2 3]
+[]
+[[1] [2]]
+[1 (2) "x"]
+(a [1 2] b)
+[97 16 1.5]
+[]
+[1 "a" (b)]
+[a a a]
+[]
+[0 x 0]
+[1 2 3]
+[1 2 3]
+[97 98]
+[]
+(args-out-of-range [10 20] 5)
+(args-out-of-range [10 20] -1)
+(wrong-type-argument arrayp 5)
+(args-out-of-range [0 0] 2)
+(args-out-of-range [1 2] 9)
+(wrong-type-argument sequencep 5)
+(wrong-type-argument sequencep 5)
+(wrong-type-argument wholenump -1)
+(wrong-type-argument fixnump 1.0)
+(wrong-type-argument listp 2)
+[(one) (two)]
+[(three) (two)]
+vectors ok

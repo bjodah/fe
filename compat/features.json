@@ -1525,6 +1525,48 @@
    "source_name": "and"
   },
   {
+   "id": "primitive-aref",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-aref-values",
+    "vector-aref-out-of-range",
+    "vector-aref-non-array"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "aref"
+  },
+  {
+   "id": "primitive-aset",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-aset-shared-reference",
+    "vector-aset-out-of-range"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "aset"
+  },
+  {
+   "id": "primitive-aset-string",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-aset-on-string"
+   ],
+   "kg_test": null,
+   "rationale": "Emacs writes a byte into a string in place and answers the character; a fe string is a chain of seven-byte cells whose shape a byte write has to preserve, so fe refuses by name rather than writing something it cannot promise. Phase 25 moves a string's bytes onto the payload region, which is where this becomes implementable. The non-array answer is Emacs' `(wrong-type-argument arrayp X)' on both sides; only the string arm diverges. source_name is null: `aset' is claimed by primitive-aset.",
+   "source_name": null
+  },
+  {
    "id": "primitive-assert",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
@@ -1627,6 +1669,21 @@
    "kg_test": "fe/test_api.c:TestEvaluationControl",
    "rationale": null,
    "source_name": "do"
+  },
+  {
+   "id": "primitive-elt",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "sequence-elt-shapes",
+    "sequence-elt-list-past-end",
+    "sequence-elt-vector-past-end"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "elt"
   },
   {
    "id": "primitive-env",
@@ -1757,6 +1814,20 @@
    "source_name": "lambda"
   },
   {
+   "id": "primitive-length",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "sequence-length-shapes",
+    "sequence-length-non-sequence"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "length"
+  },
+  {
    "id": "primitive-less",
    "category": "values-and-equality",
    "status": "supported",
@@ -1820,6 +1891,20 @@
    "kg_test": "fe/test_api.c:TestMacroExpansion",
    "rationale": null,
    "source_name": "macro"
+  },
+  {
+   "id": "primitive-make-vector",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-make-vector-shapes",
+    "vector-make-vector-init-identity"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "make-vector"
   },
   {
    "id": "primitive-makunbound",
@@ -2025,6 +2110,45 @@
    "source_name": "unwind-protect"
   },
   {
+   "id": "primitive-vconcat",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-vconcat-shapes"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "vconcat"
+  },
+  {
+   "id": "primitive-vector",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-function-arities"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "vector"
+  },
+  {
+   "id": "primitive-vectorp",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-predicate-values"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "vectorp"
+  },
+  {
    "id": "primitive-while",
    "category": "control-flow",
    "status": "supported",
@@ -2185,12 +2309,11 @@
    "comparison": "emacs",
    "cases": [
     "reader-uninterned-symbol",
-    "reader-vector-literal",
     "reader-record-literal"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Emacs reads `#:sym` as an uninterned symbol, `[1 2 3]` as a vector and `#s(a 1)` as a record. Fe has none of those types, so each is a named read error. Before 08C they were silent misreads: `#:sym` read as the symbol `#:sym`, which is eq to nothing Emacs would produce, and `[1 2 3]` read as bracket-bearing symbols. This is also where the release's one reader break lives: a bare `#` and `#`-initial symbols are no longer readable, which forced Fe's own scripts/concatenate.fe to stop naming a function `#`. `##` left this row at Phase 14, which implements it -- see reader-empty-symbol; it is the one `#` spelling that phase opened, and `#:` is deliberately not among them, fe having no `print-gensym` half to match it with."
+   "rationale": "Emacs reads `#:sym' as an uninterned symbol and `#s(a 1)' as a record. Fe has neither type, so each is a named read error. Before 08C they were silent misreads: `#:sym' read as the symbol `sym' and `#s(a 1)' as `(a 1)', which is worse than refusing. PHASE 24 TOOK THE THIRD MEMBER OF THIS ROW AWAY: `[1 2 3]' was the vector-brackets rejection and is now a vector, recorded by vector-read-brackets below. What is left here is the two `#'-initial spellings, which Phase 24 does not close."
   },
   {
    "id": "reader-no-integers",
@@ -2363,6 +2486,19 @@
    ],
    "kg_test": null,
    "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "sequence-length-string-bytes",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "sequence-length-string-bytes"
+   ],
+   "kg_test": null,
+   "rationale": "A fe string is a BYTE string -- the reader-string-byte-limit family's rule -- so `length', `aref' and `elt' answer bytes where Emacs' character strings answer characters. ASCII agrees; anything above it does not. Phase 24 is the first time a fe program could ask the question; the representation that would change the answer is Phase 25's. source_name is null: `length' is claimed by primitive-length.",
    "source_name": null
   },
   {
@@ -2683,6 +2819,47 @@
    "source_name": null
   },
   {
+   "id": "vector-read-brackets",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-vector-literal",
+    "vector-nested-literal",
+    "vector-empty-literal"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 24: `[...]' is vector read syntax and the writer emits the same syntax back, so a vector round-trips through print and read. This row is the flip of the vector third of reader-hash-syntax-unsupported, which recorded the rejection it replaces.",
+   "source_name": null
+  },
+  {
+   "id": "vector-read-dot",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-dot-in-literal"
+   ],
+   "kg_test": null,
+   "rationale": "Both sides reject `[1 . 2]' and only the condition symbol differs: Emacs raises `invalid-read-syntax' and fe raises its own named read error, the same shape of disagreement reader-character-delimiter already records. Phase 8's rule for this reader is reject rather than misread, and accepting the dot would silently produce the three-element vector [1 \\. 2].",
+   "source_name": null
+  },
+  {
+   "id": "vector-read-unclosed",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-unclosed-literal"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 24: input that stops inside a vector raises `end-of-file' with nil data, which is Emacs' generic incomplete-input condition and was measured before fe had one. The same condition now names an unclosed LIST, whose message text is unchanged.",
+   "source_name": null
+  },
+  {
    "id": "void-function-error",
    "category": "errors-and-non-local-exits",
    "status": "supported",
@@ -2705,7 +2882,7 @@
     "writer-bounded-output"
    ],
    "kg_test": "fe/test_api.c:TestWriter",
-   "rationale": "This is kg/fe's own deliberate policy, not an Emacs contract: the parent kg repository's CLAUDE.md already states the precedent for exactly this shape of decision (kg_regex_match_backward's backward-matching policy is kg's own, not Emacs', so an oracle for it would have to encode kg's policy rather than read Emacs'), and 00b-oracle-and-differential-corpus.md's own 'What this does not do' names cyclic-structure printing explicitly. Pinned by fe/test_api.c's TestWriter, which already asserts all three bounded forms (#<cycle>, #<deep>, #<truncated>).",
+   "rationale": "This is kg/fe's own deliberate policy, not an Emacs contract: the parent kg repository's CLAUDE.md already states the precedent for exactly this shape of decision (kg_regex_match_backward's backward-matching policy is kg's own, not Emacs', so an oracle for it would have to encode kg's policy rather than read Emacs'), and 00b-oracle-and-differential-corpus.md's own 'What this does not do' names cyclic-structure printing explicitly. Pinned by fe/test_api.c's TestWriter, which already asserts all three bounded forms (#<cycle>, #<deep>, #<truncated>). PHASE 24: a vector inherits this policy unchanged rather than acquiring one of its own. A vector that contains itself terminates in the writer's existing depth bound and prints nested brackets ending in `#<deep>', exactly as a list whose car is itself already did; Emacs prints the lossy back-reference `[0 #0]' at its `print-circle' default and the re-readable `#1=[0 #1#]' with `print-circle' bound to t. Adopting `#N' would need an ancestor stack in every `Writer' -- including the one `RenderErrorMessage' runs on the error path -- and would buy a spelling that still does not read back. doc/language.md states the decision; fe/test_api.c's TestVectors asserts the bounded shape.",
    "source_name": null
   },
   {

@@ -1,0 +1,6 @@
+{
+ "id": "sequence-elt-shapes",
+ "setup": [],
+ "expr": "(list (elt '(a b c) 1) (elt \"abc\" 1) (elt [a b c] 1))",
+ "note": "`elt' over all three sequence types: a string's element is its character code, a vector's and a list's are whatever they hold, so the three answers are deliberately not the same shape."
+}

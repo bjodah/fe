@@ -151,7 +151,22 @@
 // the fields at all, the same reasoning versions 7, 8, 11 and 12 used.
 // `FE_LANGUAGE_VERSION` does not move: no Lisp program can reach any of
 // this, since no release type owns a payload until Phase 25.
-#define FE_API_VERSION 13
+//
+// Version 14 (Phase 24 of the same program) is the vector cut, and it is a
+// real ABI break rather than an addition: `FeTVector` is inserted into the
+// `FeType` enumeration immediately after `FeTString`, renumbering every later
+// constant including `FeTPtr` and the three `FeTFex*` extension slots, so a
+// host that stored an `FeType` value across the boundary, or that spells one
+// of those slots in a `switch`, must recompile. It is 05A's placement
+// Decision again and for the same reason: the vector sits beside the string,
+// the other sequence and the other type whose contents live outside its own
+// cell. What the version adds beside the enumerator is the vector's own
+// surface -- `FeMakeVector`, `FeVectorLength`, `FeVectorRef` and
+// `FeVectorSet`, the construction / length / checked-ref / checked-set
+// quartet -- and, for the first time, an `FeArenaStats` whose payload fields
+// move in an ordinary run: a vector's elements ARE its payload block, so a
+// host that carves no region cannot make one.
+#define FE_API_VERSION 14
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -316,7 +331,25 @@
 // version 12's printer escapes.  A form feed inside a string body is
 // unaffected -- it never was reader syntax there.  `FE_API_VERSION` stays at
 // 12: no declaration in this header changed.
-#define FE_LANGUAGE_VERSION 15
+// Version 16 (Phase 24 of kg's Elisp data-model program) is the VECTOR cut:
+// the first Lisp-visible aggregate fe has ever had, its reader and writer
+// syntax, and the sequence contract that comes with it.  `[1 2 3]` reads as
+// a vector where it was the named read error `unsupported read syntax:
+// vector brackets`, and prints back in the same syntax; `vector`,
+// `make-vector`, `vectorp`, `aref`, `aset`, `vconcat`, `length` and `elt`
+// are eight names that answered `void-function`.  `length` and `elt` are
+// generic over lists, strings and vectors -- Emacs' own contract, including
+// its asymmetry, where `(elt LIST 9)` past the end is nil (it routes to
+// `nth`) and `(elt VECTOR 9)` is `args-out-of-range` (it routes to `aref`).
+// `end-of-file` joins the condition hierarchy, which is what `[1 2` raises,
+// measured on the pinned Emacs rather than invented; the same condition now
+// names an unclosed LIST, whose message text is unchanged but which used to
+// be a bare `error`.  A program that never writes a bracket and never calls
+// one of the eight names cannot tell the difference, except for that one
+// condition symbol.  `FE_API_VERSION` moves to 14 in the same slice for the
+// C quartet and the `FeType` enumerator, and the two land under one
+// `FeVersion` "20.0".
+#define FE_LANGUAGE_VERSION 16
 
 extern const char* FeVersion;
 
@@ -440,6 +473,14 @@ typedef enum FeType {
   FeTInteger,
   FeTSymbol,
   FeTString,
+  // Phase 24 of kg's Elisp data-model program: the vector, placed beside the
+  // string it shares a shape with -- both are sequences, and both keep their
+  // contents somewhere other than their own cell -- and renumbering every
+  // later constant exactly as 05A's `FeTInteger` did. The ABI break rides
+  // FE_API_VERSION 14 above. A vector's elements live in the payload region
+  // (Phase 23's substrate), which is why a host that opens a context with no
+  // payload carve cannot build one.
+  FeTVector,
   FeTFn,
   FeTMacro,
   FeTPrimitive,
@@ -771,6 +812,35 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 
 [[nodiscard]] FeObject* FeCar(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeCdr(FeContext* ctx, FeObject* obj);
+
+// The vector surface (FE_API_VERSION 14): construction, length, checked ref,
+// checked set. Four functions and no fifth, because everything else a host
+// might want -- copying, concatenating, converting a list -- is those four in
+// a loop, and a vector's elements live in the payload region, which no host
+// may hold a pointer into. There is no borrowed-elements accessor and there
+// will not be one: the storage MOVES when the collector compacts, and the
+// only address that survives that is the `FeObject*` header these all take.
+//
+// `FeMakeVector` fills every slot with nil and needs a context whose arena
+// was opened with a payload carve (`FeOpenContextWithOptions`); a context
+// without one raises `(payload-exhaustion)` for any length, zero included.
+// `FeVectorLength` is O(1) -- a vector's length is its payload block's child
+// count, not a walk -- and so are the two accessors.
+//
+// All four raise rather than return an error code, which is fe's convention
+// for a checked accessor (`FeCar`, `FeToInteger`): a non-vector is
+// `(wrong-type-argument vectorp OBJ)` and an index at or past the length is
+// `(args-out-of-range VECTOR INDEX)`, the same two conditions the Lisp
+// `aref`/`aset` raise, because they are the same checks.
+[[nodiscard]] FeObject* FeMakeVector(FeContext* ctx, size_t length);
+[[nodiscard]] size_t FeVectorLength(FeContext* ctx, FeObject* vector);
+[[nodiscard]] FeObject* FeVectorRef(FeContext* ctx,
+                                    FeObject* vector,
+                                    size_t index);
+void FeVectorSet(FeContext* ctx,
+                 FeObject* vector,
+                 size_t index,
+                 FeObject* value);
 
 // The writer's default `car`-nesting bound: how deep `FeWrite()` and
 // `FeToString()` descend into one object before emitting `#<truncated>`. It

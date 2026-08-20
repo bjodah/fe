@@ -141,9 +141,9 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 13);
-  static_assert(FE_LANGUAGE_VERSION == 15);
-  CHECK(strcmp(FeVersion, "19.0") == 0);
+  static_assert(FE_API_VERSION == 14);
+  static_assert(FE_LANGUAGE_VERSION == 16);
+  CHECK(strcmp(FeVersion, "20.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -822,7 +822,8 @@ static bool TestStringInput(void) {
   CHECK(FeReadString(context, sequential, sizeof(sequential) - 1, &offset) ==
         nullptr);
 
-  CHECK(ExpectReadError(context, &state, "(", 1, "byte 1: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(", 1,
+                        "byte 1: end-of-file: unclosed list"));
   const char truncated_string[] = {'"', '\\'};
   CHECK(ExpectReadError(context, &state, truncated_string,
                         sizeof(truncated_string), "byte 2: unclosed string"));
@@ -831,7 +832,7 @@ static bool TestStringInput(void) {
   CHECK(ExpectEvaluationError(context, &state, "nul.fe", with_nul,
                               sizeof(with_nul), "nul.fe:1: embedded NUL byte"));
   CHECK(ExpectEvaluationError(context, &state, "syntax.fe", "1 (+ 2 3", 8,
-                              "syntax.fe:1: unclosed list"));
+                              "syntax.fe:1: end-of-file: unclosed list"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-syntax.fe", "6", 1), "6"));
   CHECK(ExpectEvaluationError(context, &state, "runtime.fe", "1 (car 2) 3", 11,
@@ -874,17 +875,16 @@ static bool TestStringInput(void) {
                    "AA\x1b\x7f "));
   CHECK(ExpectReadError(context, &state, "#q", 2,
                         "byte 1: unsupported read syntax: #"));
-  CHECK(ExpectReadError(context, &state, "[1 2]", 5,
-                        "byte 0: unsupported read syntax: vector brackets"));
+  CHECK(ExpectReadError(context, &state, "[1 2", 4,
+                        "byte 4: end-of-file: unclosed vector"));
   CHECK(ExpectReadError(context, &state, "\"\\q\"", 4,
                         "byte 2: unsupported read syntax: unknown escape"));
   CHECK(ExpectReadError(context, &state, "?\\q", 3,
                         "byte 2: unsupported read syntax: unknown escape"));
   CHECK(ExpectEvaluationError(context, &state, "lines.fe", "\n(car 2)", 8,
                               "lines.fe:2: expected pair, got integer"));
-  CHECK(ExpectEvaluationError(
-      context, &state, "lines.fe", "\n[", 2,
-      "lines.fe:2: unsupported read syntax: vector brackets"));
+  CHECK(ExpectEvaluationError(context, &state, "lines.fe", "\n[", 2,
+                              "lines.fe:2: end-of-file: unclosed vector"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-runtime.fe", "7", 1), "7"));
 
@@ -1024,8 +1024,14 @@ static bool TestReaderLiterals(void) {
 
   // The remaining named reject arms, each asserted to name its syntax.
   REJECTS("#q", "unsupported read syntax: #");
-  REJECTS("[1 2]", "unsupported read syntax: vector brackets");
-  REJECTS("]", "unsupported read syntax: vector brackets");
+  // Phase 24 turned `[1 2 3]` from a named rejection into a vector
+  // (`TestVectors` below has the positive assertions). What is left to reject
+  // is a bracket that closes nothing, a bracket crossed with a paren, and the
+  // dotted-tail marker inside a vector, which `[1 . 2]` is on Emacs too.
+  REJECTS("]", "stray ']'");
+  REJECTS("(1 2]", "stray ']'");
+  REJECTS("[1 2)", "stray ')'");
+  REJECTS("[1 . 2]", "'.' inside a vector");
   REJECTS("#xg", "unsupported read syntax: malformed radix integer");
   REJECTS("#x", "unsupported read syntax: malformed radix integer");
   REJECTS("#x0g", "unsupported read syntax: malformed radix integer");
@@ -1082,7 +1088,7 @@ static bool TestReaderLiterals(void) {
       {";1\n;2\n;3\n;4\n;5\n;6\n;7\n;8\n;9\n;10\n(car 2)",
        "lines.fe:11: expected pair, got integer"},
       // A *read* error after a comment block, not a runtime one.
-      {"; a\n; b\n[", "lines.fe:3: unsupported read syntax: vector brackets"},
+      {"; a\n; b\n[", "lines.fe:3: end-of-file: unclosed vector"},
   };
   for (size_t i = 0; i < sizeof(line_cases) / sizeof(line_cases[0]); i++) {
     CHECK(ExpectEvaluationError(
@@ -3986,8 +3992,10 @@ static bool TestDottedLists(void) {
                         "byte 8: extra value after dotted tail"));
   CHECK(ExpectReadError(context, &state, "(a . b . c)", 11,
                         "byte 8: extra value after dotted tail"));
-  CHECK(ExpectReadError(context, &state, "(a .", 4, "byte 4: unclosed list"));
-  CHECK(ExpectReadError(context, &state, "(a . b", 6, "byte 6: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(a .", 4,
+                        "byte 4: end-of-file: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(a . b", 6,
+                        "byte 6: end-of-file: unclosed list"));
   CHECK(ExpectReadError(context, &state, "(a . b c", 8,
                         "byte 8: extra value after dotted tail"));
 
@@ -8186,11 +8194,26 @@ static bool TestCaughtExhaustionSession(void) {
 // `FeOpenContext` carves no payload bytes, so the cell partition is what it
 // was. The collection count and the peak are unchanged for the seventh time,
 // which is the invariance 09C pinned.
+// Re-measured at Phase 24 for the eighth time, and it moves by 70, all of it
+// built before any program runs. Fifty-seven is the vector family: eight
+// primitives, each one primitive object plus its symbol, which is 7 slots for
+// the seven names of seven characters or fewer (`vector`, `vectorp`, `aref`,
+// `aset`, `vconcat`, `length`, `elt`) and 8 for `make-vector`, whose
+// 11-character name needs a second name cell. Thirteen is the `end-of-file`
+// condition row: its symbol (7), its message string "End of file during
+// parsing" (4), and the usual two plist pairs. The arena grows with
+// `FeMinimumArenaSize()` and holds 70 more slots (15651 -> 15721), of which
+// the same 70 are live after a collection (1480 -> 1550), everything here
+// being reachable from the symbol list forever. No vector exists in this test
+// -- the corpus builds none -- so the payload region is still zero bytes
+// under `FeOpenContext` and the cell partition is what it was. The collection
+// count and the peak are unchanged for the eighth time, which is the
+// invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 15651,
+  PinnedTotalSlots = 15721,
   PinnedCollectionCount = 3,
-  PinnedPeakLive = 15651,
-  PinnedLiveAfterCollection = 1480,
+  PinnedPeakLive = 15721,
+  PinnedLiveAfterCollection = 1550,
 };
 
 // ---------------------------------------------------------------------------
@@ -9081,7 +9104,8 @@ static bool TestHostedInputUnit(void) {
   // A reader error inside the unit reports the unit too.
   static const char unread[] = "(hosted-load \"bad.el\" \"(setq q 1)\n(a b\")";
   CHECK(ExpectEvaluationError(context, &state, "unit.fe", unread,
-                              sizeof(unread) - 1, "bad.el:2: unclosed list"));
+                              sizeof(unread) - 1,
+                              "bad.el:2: end-of-file: unclosed list"));
 
   // NO NEW RUN -- the whole point. A condition, a throw and a quit raised
   // by a hosted form all reach handlers and catches established OUTSIDE the
@@ -9826,6 +9850,314 @@ static bool TestPublicCollectGarbage(void) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 24: vectors, the payload substrate's first release consumer.
+//
+// The Lisp surface is asserted from Lisp, where a reader is available and an
+// expression says what it means; what is here is everything that cannot be
+// said that way -- the C quartet, the raises a host sees, a collection landing
+// in the middle of a construction, and the sizes a script would take too long
+// to build. The oracle contract these answers were frozen against is kg's
+// `test/lisp-compat/cases/vector-*.json`, recorded before any of this existed.
+// ---------------------------------------------------------------------------
+
+// The condition object a raise left behind, rendered AFTER the unwind: the
+// data list is the half of a condition that a native implementation gets
+// wrong silently, and the half Phase 24.0 froze.
+static bool ConditionRenders(FeContext* context, const char* expected) {
+  char rendered[128];
+  (void)FeToString(context, FeGetCondition(context), rendered,
+                   sizeof(rendered));
+  if (strcmp(rendered, expected) != 0) {
+    fprintf(stderr, "unexpected condition\n  expected: %s\n  actual:   %s\n",
+            expected, rendered);
+    return false;
+  }
+  return true;
+}
+
+static bool VectorErrorIs(FeContext* context,
+                          ErrorState* state,
+                          const char* source,
+                          const char* message,
+                          const char* condition) {
+  CHECK(ExpectEvaluationError(context, state, "vectors.fe", source,
+                              strlen(source), message));
+  CHECK(ConditionRenders(context, condition));
+  return true;
+}
+
+static bool EvaluatesTo(FeContext* context,
+                        const char* source,
+                        const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  const bool ok = IsRendered(
+      context, FeEvaluateString(context, "vectors.fe", source, strlen(source)),
+      expected);
+  FeRestoreGC(context, gc);
+  if (!ok) {
+    fprintf(stderr, "unexpected value for %s\n", source);
+  }
+  return ok;
+}
+
+// A `FeWriteFn` that appends into a caller-owned buffer, for the one
+// assertion below that needs `FeWriteWithOptions`'s completeness answer as
+// well as its bytes.
+typedef struct WriteBufferState {
+  char* at;
+  size_t left;
+} WriteBufferState;
+
+static void CollectRendered(FeContext* context, void* udata, char chr) {
+  (void)context;
+  WriteBufferState* const state = udata;
+  if (state->left > 1) {
+    *state->at++ = chr;
+    state->left--;
+    *state->at = '\0';
+  }
+}
+
+static bool TestVectors(void) {
+  static TestArena storage;
+  const size_t size = FeMinimumArenaSize() + 512 * 1024;
+  CHECK(size <= sizeof(storage.bytes));
+  // The first context in this file that ASKS for a payload region, because
+  // it is the first thing in this file whose contents live in one. The last
+  // group below is the other half of that sentence.
+  FeContext* const ctx = FeOpenContextWithOptions(storage.bytes, size, nullptr);
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx, .expected_message = "unused"};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+
+  // Reader and writer, the same syntax in both directions.
+  CHECK(EvaluatesTo(ctx, "[1 2 3]", "[1 2 3]"));
+  CHECK(EvaluatesTo(ctx, "[]", "[]"));
+  CHECK(EvaluatesTo(ctx, "[[1] [2]]", "[[1] [2]]"));
+  CHECK(EvaluatesTo(ctx, "'(a [1 2] b)", "(a [1 2] b)"));
+  CHECK(EvaluatesTo(ctx, "[1 (2) \"x\"]", "[1 (2) \"x\"]"));
+  // `[` and `]` end a token as well as opening and closing a vector, which
+  // is what keeps `[1 2 3]` from reading as `1 2 3]`.
+  CHECK(EvaluatesTo(ctx, "[?a #x10 1.5]", "[97 16 1.5]"));
+
+  // The eight names, at the arities and on the argument types the frozen
+  // contract pins.
+  CHECK(EvaluatesTo(ctx, "(list (vector) (vector 1) (vector 1 \"a\" '(b)))",
+                    "([] [1] [1 \"a\" (b)])"));
+  CHECK(EvaluatesTo(ctx, "(list (make-vector 3 'a) (make-vector 0 'a))",
+                    "([a a a] [])"));
+  CHECK(EvaluatesTo(ctx, "(list (vectorp [1]) (vectorp []))", "(t t)"));
+  CHECK(EvaluatesTo(
+      ctx, "(list (vectorp '(1 2)) (vectorp \"ab\") (vectorp 1) (vectorp nil))",
+      "(nil nil nil nil)"));
+  CHECK(EvaluatesTo(ctx, "(list (aref [10 20 30] 0) (aref [10 20 30] 2))",
+                    "(10 30)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(list (length '(1 2 3)) (length \"abc\") "
+                    "(length [1 2 3]) (length []))",
+                    "(3 3 3 0)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(list (elt '(a b c) 1) (elt \"abc\" 1) (elt [a b c] 1))",
+                    "(b 98 b)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(list (vconcat [1 2] [3]) (vconcat [1] '(2 3)) "
+                    "(vconcat \"ab\") (vconcat))",
+                    "([1 2 3] [1 2 3] [97 98] [])"));
+  // `aref` is an ARRAY operation, so a string answers its byte.
+  CHECK(EvaluatesTo(ctx, "(aref \"abc\" 1)", "98"));
+  // The INIT argument is stored, not copied: every slot is the same object.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 2 (list 1)))) "
+                    "(list (eq (aref v 0) (aref v 1)) v))",
+                    "(t [(1) (1)])"));
+  // Identity, not structure: two reads of `[1]` are two objects.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((a [1]) (b [1])) "
+                    "(list (eq a b) (eq a a) (eql a a) (eql a b)))",
+                    "(nil t t nil)"));
+  // Mutation through two references to ONE vector, and `aset`'s answer.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((a (make-vector 3 0))) (let ((b a)) "
+                    "(list (aset a 1 'x) (aref b 1) (eq a b) b)))",
+                    "(x x t [0 x 0])"));
+
+  // The frozen condition data, symbol and data list both. `args-out-of-range`
+  // carries the OFFENDING SEQUENCE first and then the index; `aref` on a
+  // non-array names `arrayp`, not `vectorp`, because strings are arrays too.
+  CHECK(VectorErrorIs(ctx, &state, "(aref [10 20] 5)",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [10 20] 5)"));
+  CHECK(VectorErrorIs(ctx, &state, "(aref [10 20] -1)",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [10 20] -1)"));
+  CHECK(VectorErrorIs(ctx, &state, "(aref 5 0)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument arrayp 5)"));
+  CHECK(VectorErrorIs(ctx, &state, "(let ((v (make-vector 2 0))) (aset v 2 1))",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [0 0] 2)"));
+  CHECK(VectorErrorIs(ctx, &state, "(elt [1 2] 9)",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [1 2] 9)"));
+  CHECK(VectorErrorIs(ctx, &state, "(length 5)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument sequencep 5)"));
+  CHECK(VectorErrorIs(ctx, &state, "(make-vector -1 0)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument wholenump -1)"));
+  CHECK(VectorErrorIs(ctx, &state, "(aref [1 2] 1.0)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument fixnump 1.0)"));
+  // `elt` past the end of a LIST is nil -- it routes to `nth` -- where the
+  // same index into a vector raises. The asymmetry is Emacs', measured.
+  CHECK(EvaluatesTo(ctx, "(elt '(1 2) 9)", "nil"));
+
+  // A collection landing INSIDE a construction, and one immediately after a
+  // mutation. `internal--collect` is this file's own native; what matters is
+  // that the elements a vector holds are reachable through the payload arm
+  // and nothing else, so a collection that did not trace them would leave
+  // the vector holding swept cells.
+  FeSetFunction(ctx, FeMakeSymbol(ctx, "internal--collect"),
+                FeMakeNativeFn(ctx, CollectNow));
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (vector (list 1) (internal--collect) (list 3)))) "
+                    "(internal--collect) v)",
+                    "[(1) t (3)]"));
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 2 nil))) "
+                    "(aset v 0 (list 'kept)) (internal--collect) "
+                    "(aset v 1 (list 'later)) (internal--collect) v)",
+                    "[(kept) (later)]"));
+  // A vector reached only through another vector: the mark phase's payload
+  // arm has to descend twice, which is what `[[...]]` is for.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (vector (vector 'inner)))) "
+                    "(internal--collect) (aref (aref v 0) 0))",
+                    "inner"));
+
+  // MORE THAN 4032 ELEMENTS, the master plan's required size, by each of the
+  // three routes that build a vector. 4032 is `GcStackSize - GcStackReserve`,
+  // the root stack's ordinary ceiling, and it is the number to test at
+  // because every one of these routes would hit it if it held one root per
+  // element instead of one per construction. None does: the reader restores
+  // its checkpoint per element (`ReadVector`), the evaluator's operand frame
+  // restores its own (`ResumeEvalList`), and `vconcat`'s string arm restores
+  // after each byte it boxes. The vector itself has no such ceiling at all --
+  // its elements are payload bytes, not roots.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 5000 7))) "
+                    "(list (length v) (aref v 4999) (vectorp v)))",
+                    "(5000 7 t)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 5000 0))) (aset v 4999 'last) "
+                    "(list (length (vconcat v)) (aref (vconcat v) 4999)))",
+                    "(5000 last)"));
+  {
+    // A 5000-element READ literal and a 5000-byte string through `vconcat`,
+    // both built as source text rather than spelled out.
+    static char source[64 * 1024];
+    size_t at = 0;
+    at += (size_t)snprintf(source + at, sizeof(source) - at, "(length [");
+    for (size_t i = 0; i < 5000; i++) {
+      at += (size_t)snprintf(source + at, sizeof(source) - at, "1 ");
+    }
+    at += (size_t)snprintf(source + at, sizeof(source) - at, "])");
+    CHECK(at < sizeof(source));
+    CHECK(EvaluatesTo(ctx, source, "5000"));
+  }
+
+  // THE SELF-REFERENTIAL PRINTING DECISION (Phase 24.1), pinned so that it is
+  // a decision and not an accident. Emacs prints the lossy back-reference
+  // `[0 #0]` at its `print-circle` default; fe keeps its own deliberately
+  // bounded writer -- the recorded `writer-bounded-output` policy -- and a
+  // vector that contains itself terminates in the depth bound exactly as a
+  // list whose `car` is itself already did. doc/language.md states the
+  // reason. Asserted at a small `max_depth` rather than the default 256, so
+  // the expectation is a string a reader can check by eye; the property is
+  // that it TERMINATES, says so, and reports itself incomplete.
+  {
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const cyclic = FeMakeVector(ctx, 2);
+    FePushGC(ctx, cyclic);
+    FeVectorSet(ctx, cyclic, 0, FeMakeInteger(ctx, 0));
+    FeVectorSet(ctx, cyclic, 1, cyclic);
+    char rendered[64] = {0};
+    WriteBufferState state_buffer = {rendered, sizeof(rendered)};
+    const FeWriteOptions bounded = {.max_depth = 3};
+    CHECK(!FeWriteWithOptions(ctx, cyclic, CollectRendered, &state_buffer, 1,
+                              &bounded));
+    CHECK(strcmp(rendered, "[0 [0 [#<deep> #<deep>]]]") == 0);
+    FeRestoreGC(ctx, gc);
+  }
+
+  // The C quartet. `FeMakeVector` fills with nil; the two accessors are
+  // checked, and a host that ignores the check gets a raise and not a wild
+  // write.
+  {
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const vector = FeMakeVector(ctx, 3);
+    CHECK(FeGetType(vector) == FeTVector);
+    CHECK(FeVectorLength(ctx, vector) == 3);
+    CHECK(FeIsNil(FeVectorRef(ctx, vector, 0)));
+    FeVectorSet(ctx, vector, 1, FeMakeInteger(ctx, 42));
+    CHECK(FeToInteger(ctx, FeVectorRef(ctx, vector, 1)) == 42);
+    CHECK(IsRendered(ctx, vector, "[nil 42 nil]"));
+    // Zero length is a vector, not nil, and its length is readable.
+    CHECK(FeVectorLength(ctx, FeMakeVector(ctx, 0)) == 0);
+    FeRestoreGC(ctx, gc);
+  }
+  {
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const vector = FeMakeVector(ctx, 2);
+    FePushGC(ctx, vector);
+    state.called = false;
+    state.expected_message = "args-out-of-range";
+    if (setjmp(state.jump) == 0) {
+      (void)FeVectorRef(ctx, vector, 2);
+      CHECK(false);
+    }
+    CHECK(state.called);
+    CHECK(ConditionRenders(ctx, "(args-out-of-range [nil nil] 2)"));
+    state.called = false;
+    state.expected_message = "expected vector, got integer";
+    if (setjmp(state.jump) == 0) {
+      (void)FeVectorLength(ctx, FeMakeInteger(ctx, 5));
+      CHECK(false);
+    }
+    CHECK(state.called);
+    CHECK(ConditionRenders(ctx, "(wrong-type-argument vectorp 5)"));
+    FeRestoreGC(ctx, gc);
+  }
+  FeCloseContext(ctx);
+
+  // The other half of "a vector's elements live in the payload region": a
+  // context opened through `FeOpenContext`, which carves none, cannot build
+  // one -- not even an empty one, since a zero-length vector still publishes
+  // a block header. The refusal is a catchable condition and not a crash,
+  // which is what makes it a host-visible contract rather than a trap.
+  {
+    FeContext* const bare = FeOpenContext(storage.bytes, size);
+    CHECK(bare != nullptr);
+    ErrorState bare_state = {.context = bare, .expected_message = nullptr};
+    FeSetUserData(bare, &bare_state);
+    FeSetErrorFn(bare, HandleError);
+    CHECK(FeGetArenaStats(bare).payload_capacity_bytes == 0);
+    bare_state.called = false;
+    bare_state.expected_message = "payload region exhausted";
+    if (setjmp(bare_state.jump) == 0) {
+      (void)FeMakeVector(bare, 0);
+      CHECK(false);
+    }
+    CHECK(bare_state.called);
+    CHECK(ConditionRenders(bare, "(payload-exhaustion)"));
+    CHECK(FeGetArenaStats(bare).payload_allocation_failures == 1);
+    FeCloseContext(bare);
+  }
+  return true;
+}
+
 // Phase 21.1's counter gate: the DETERMINISTIC RELATIONSHIPS between the
 // counters declared in fe_perf.h, which is what Phase 21.2's workload
 // battery will build its assertions on. Relationships, not magic constants:
@@ -10116,7 +10448,7 @@ int main(void) {
                  TestDynamicBinding() && TestBindingLocationSeam() &&
                  TestOneArgDefvarScope() && TestHostedInputUnit() &&
                  TestProtectedEvaluateString() && TestPublicCollectGarbage() &&
-                 TestPerfCounters()
+                 TestVectors() && TestPerfCounters()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

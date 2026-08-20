@@ -1,0 +1,6 @@
+{
+ "id": "vector-aref-out-of-range",
+ "setup": [],
+ "expr": "(aref [10 20] 5)",
+ "note": "The bounds condition NAME AND DATA, which is the part a native implementation gets wrong silently: `args-out-of-range' with data (VECTOR INDEX) -- the offending vector FIRST. A negative index takes the same route with the same data shape."
+}

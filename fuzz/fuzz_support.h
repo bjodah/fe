@@ -15,13 +15,22 @@
 // was 60344 bytes when this was a flat 64 KiB (~324 free slots); Phase 19's
 // seeded `error-message` properties took it to 63592, and API version 11's
 // per-binding host tag took it to 66264 (256 cleanup entries, one pointer
-// each). Each of those would have left the free portion shorter and
+// each), and Phase 24's vector family plus the `end-of-file` condition row
+// took it to 67664 -- 70 more interned slots, 1120 bytes. Each of those
+// would have left the free portion shorter and
 // silently re-steered every tracked seed by making forms raise sooner, so
 // the size here restores the free portion (~340 slots) rather than the
 // total, which is what keeps `fuzz/seeds/reachability.json` measuring the
 // grammar instead of the arena. Re-measure it when `FeMinimumArenaSize()`
-// moves: `strict-arity-rest` is the seed that fails first.
-enum { FuzzArenaSize = 70 * 1024 };
+// moves: `strict-arity-rest` is the seed that fails first, and it did.
+//
+// The harness opens with `FeOpenContext`, which carves NO payload region, so
+// a generated `[...]` reads its elements and then raises
+// `(payload-exhaustion)` where a carved context would build a vector. That is
+// deliberate for this phase: a carve takes a quarter of the cells, which is
+// the free portion this constant exists to hold steady, so arming one is a
+// re-derivation of every tracked seed and not a one-line change.
+enum { FuzzArenaSize = 70 * 1024 + 1120 };
 
 typedef union {
   max_align_t alignment;

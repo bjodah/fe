@@ -31,8 +31,12 @@ derived from an object that names its stored TEXT.  A pointer to an object
 host memory is NOT a payload pointer and is not censused as one -- Design B's
 whole premise is that headers are stable.
 
-Nothing else in fe migrates in this program's current scope.  Vectors
-(Phase 24) do not exist yet, so they have no sites.
+Nothing else in fe migrates in this program's current scope.
+
+Phase 24 added the first release payload owner: a VECTOR's elements are its
+block's traced children.  Its sites are section E below, taken the same way
+and with the same column, and they are the first rows in this file that are
+settled by reading code that really does read storage that slides.
 
 ## How to read a row
 
@@ -152,6 +156,30 @@ Design B pins.
 | D12 | `src/lisp_obj.c:81`, `src/lisp_obj.c:147` | `FeToPtr` -> `struct kg_lisp_object *rec`, held across further fe calls | no | The one kg pattern that LOOKS like an interior pointer and is not: an `FeTPtr` object stores a HOST pointer, and `FeToPtr` hands that value back. kg's own generation/`wrapper` checks are what keep it honest, and payloads change none of it. |
 | D13 | everything else in `src/lisp_*.c` | `FeCons`, `FeCar`, `FeCdr`, `FeMakeString`, `FeMakeSymbol`, `FeGetNextArgument`, roots, `FePushGC`/`FeRestoreGC` | no | Header traffic. |
 
+## E. fe core: the vector's payload sites (Phase 24)
+
+A vector's elements ARE its payload block's children.  Unlike section A's
+string sites, these are live today: the storage under them moves whenever the
+collector compacts.  Every one of them derives the block address inside the
+statement that spends it, which is clause 1 read as a rule rather than as an
+accident.
+
+| # | site | pattern | holds across alloc? | the rule that makes it safe |
+| --- | --- | --- | --- | --- |
+| E1 | `fe.c` `VectorElement` | `*PayloadChildSlot(OwnedBlock(ctx, vector), index)` -- one derivation, one read | no | The whole function is the derivation and the read. Every element READ in fe and in `fe.h` goes through it, which is what makes this row the one to keep true rather than twenty. |
+| E2 | `fe.c` `SetVectorElement` | the same address, written | no | The census's second write surface, and like A4 it is one statement. Every element WRITE goes through it -- `aset`, `vconcat`'s fill, `make-vector`'s fill, the reader's fill, `FeVectorSet`. |
+| E3 | `fe.c` `VectorLength` | `OwnedBlock(ctx, vector)->children` -- the BLOCK HEADER, not its payload | no | Null when the owner has published no block yet, which a constructor between its retype and its publish really is; answering 0 there is why a collection landing in that window finds a coherent object. |
+| E4 | `fe.c` `MakeVector` fill loop | E2 per slot | no | Nothing in the loop allocates: `init` is one already-built object stored `length` times, which is also `make-vector`'s Emacs contract. `init` is rooted across `PublishPayload`, which allocates. |
+| E5 | `fe.c` `MakeVectorFromList` fill loop | E2 per slot | no | Nothing in the loop allocates; the source list is rooted across `MakeVector`, which does. |
+| E6 | `fe.c` `AppendSequence` | E1 and E2 per element | **YES** | `FeMakeInteger` runs between two writes for a STRING operand, so the destination address is re-derived per element -- a hoisted one is the deliberately planted bug the poison lane was proved to catch. The GC-stack checkpoint inside the loop is the other half: without it a string operand pushes one root per byte and overflows at 4032. |
+| E7 | `fe.c` `WriteVectorElements` | E1 per element, `VectorLength` once | **YES** | `WriteObject` reaches the host's `FeWriteFn`, whose contract does not forbid allocation -- finding 2 below, unresolved -- so this loop is inside the same window A6-A10 are, and it re-derives for the same reason. The LENGTH is read once because a vector cannot change length; the ADDRESSES are read per element because it can move. |
+| E8 | `fe.c` `Aref`, `Aset`, `SequenceElement`, `SequenceCount`, `Vconcat` | E1-E3 | no | The Lisp surface. Each validates, then spends one derivation; `Vconcat` holds only `FeObject *` across its two passes. |
+| E9 | `fe.c` `ReadVector` | -- | no | Holds `list` and the finished `vector` as `FeObject *` across `FeCons` and `MakeVectorFromList`, which is B12/B13's shape. Derives no payload address of its own. |
+| E10 | `fe.c` `MakeVector` | -- | -- | The constructor row clause 3 is about: retype the cell, clear its handle, THEN `PublishPayload`, which roots the owner across the collection it may run. `MakeAggregate` established the order and this copies it. |
+| E11 | `fe.h` `FeMakeVector`, `FeVectorLength`, `FeVectorRef`, `FeVectorSet` | E1-E3 behind the type and bounds checks | no | The public surface hands a host no interior pointer at all, which is B2's property extended to a second type. There is deliberately no borrowed-elements accessor; `doc/c-api.md` says why. |
+| E12 | `fe.c` `FeMark` payload arm, `DescendIntoPayload` | -- | -- | B17's row, now reached by a real type. A vector's WIDTH costs the mark phase no C stack, and a mark/rewrite asymmetry here is still the bug this row exists to watch for. |
+| E13 | `fe.c` `CompactPayloads` | -- | -- | B18's row. It now also returns the live extent to the region's base, which is a no-op in every build but the poison lane's -- see doc/implementation.md. |
+
 ## Findings
 
 Three things this sweep found that the ADR did not state.
@@ -192,22 +220,34 @@ publish function, which roots the owner across its own allocation.
 Rows A3, A4, A6, A7, A8, A9, A10 and B11 are the ones that pay it.  Every
 other row is safe by holding a header instead.
 
-## Status after Phase 23.1
+## Status after Phase 24
 
-The substrate this census was taken for landed: `fe_internal.h` describes the
-block layout and the protocol, `fe.c` holds the region, the allocator, the
-compactor and the collector's payload arm, and `payload_tests.c` is the
-harness that exercises them.  Nothing in the table above changed, because
-nothing in it moved onto the substrate: strings are still a cdr chain of
-seven-byte cells and `STRING_BUFFER` is still fe's only interior pointer.
-Phase 25 is when rows A1-A13 and B1-B32 start being read through storage that
-slides, and this file is the checklist for that phase rather than a record of
-this one.
+The substrate this census was taken for landed in Phase 23.1:
+`fe_internal.h` describes the block layout and the protocol, `fe.c` holds the
+region, the allocator, the compactor and the collector's payload arm, and
+`payload_tests.c` is the harness that exercises them.
+
+Phase 24 gave it a consumer.  Section E is that consumer's sites, and the
+sections A-D above are unchanged, because nothing in them moved onto the
+substrate: strings are still a cdr chain of seven-byte cells and
+`STRING_BUFFER` is still fe's only interior pointer into a CELL.  Phase 25 is
+when rows A1-A13 and B1-B32 start being read through storage that slides, and
+this file is the checklist for that phase as much as a record of this one.
+
+Two rows of section E were settled by DEBUGGING rather than by reading, which
+is what the introduction predicted would start happening now.  E6 is one: a
+hoisted destination address there passes an ordinary `make check` and fails
+`.ci/ci-04-clang-asan-ubsan.sh` with the poison knob armed, measured by
+planting exactly that bug and watching the two runs disagree (`make check`
+exit 0, the poison lane exit 2 on `vconcat`'s own case).  E7 is the other: it
+is inside finding 2's unresolved window and is the first site to be there on
+purpose rather than by inheritance.
 
 Finding 2 -- fe's `FeWriteFn` contract does not forbid allocation, and the
 printer holds a payload pointer across it (A6-A10, D9) -- STILL STANDS,
-unresolved and unchanged.  Phase 23.1 touched no printer path, so A6-A10's
-re-derive-per-use property is exactly as the sweep found it: the address is
-derived at every use and never cached across an `Emit`.  Keeping that
-deliberately, rather than accidentally, is still the cheap answer, and the
-choice between it and a sentence in `fe.h` is still Phase 25's to make.
+unresolved.  Phase 24 did not resolve it and did not widen it either: E7, the
+vector arm of the printer, is written to the same re-derive-per-use rule
+A6-A10 already followed, so the window has a second occupant and the same
+property.  Keeping that deliberately, rather than accidentally, is still the
+cheap answer, and the choice between it and a sentence in `fe.h` is still
+Phase 25's to make -- with one more site now depending on the answer.

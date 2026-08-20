@@ -1,0 +1,6 @@
+{
+ "id": "sequence-elt-list-past-end",
+ "setup": [],
+ "expr": "(elt '(1 2) 9)",
+ "note": "MEASURED ASYMMETRY, and the reason this is its own case: `elt' past the end of a LIST answers nil rather than raising, because it routes to `nth'. An implementation that generalised `elt' by making it raise everywhere would pass the vector case below and fail this one."
+}

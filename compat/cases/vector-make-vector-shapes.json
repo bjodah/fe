@@ -1,0 +1,6 @@
+{
+ "id": "vector-make-vector-shapes",
+ "setup": [],
+ "expr": "(list (make-vector 3 'a) (make-vector 0 'a))",
+ "note": "`make-vector' at a positive and a zero length. The zero case is what decides whether a length-0 payload allocation is legal or a special case; under the Phase 22 ADR's Design B it is legal and costs one block header."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "sequence-length-shapes",
+ "setup": [],
+ "expr": "(list (length '(1 2 3)) (length \"abc\") (length [1 2 3]) (length []) (length nil))",
+ "note": "`length' over every sequence type in one expression. It is generic in Emacs and generic here, at fe's own layer rather than in a host's prelude, which is what keeps a vector from being a type half the language knows about."
+}

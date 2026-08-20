@@ -31,6 +31,7 @@ const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FE_PERF_ALLOC_SLOT(FeTInteger)] = "alloc_integer",
     [FE_PERF_ALLOC_SLOT(FeTSymbol)] = "alloc_symbol",
     [FE_PERF_ALLOC_SLOT(FeTString)] = "alloc_string",
+    [FE_PERF_ALLOC_SLOT(FeTVector)] = "alloc_vector",
     [FE_PERF_ALLOC_SLOT(FeTFn)] = "alloc_fn",
     [FE_PERF_ALLOC_SLOT(FeTMacro)] = "alloc_macro",
     [FE_PERF_ALLOC_SLOT(FeTPrimitive)] = "alloc_primitive",
@@ -51,6 +52,10 @@ const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FePerfPayloadByte] = "payload_byte",
     [FePerfPayloadCompact] = "payload_compact",
     [FePerfPayloadCompactMoved] = "payload_compact_moved",
+
+    [FePerfVectorRef] = "vector_ref",
+    [FePerfVectorSet] = "vector_set",
+    [FePerfVectorElement] = "vector_element",
 
     [FePerfStringCell] = "string_cell",
     [FePerfStringByte] = "string_byte",

@@ -980,6 +980,20 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     // `(string< "a" "b" "c")` are all `wrong-number-of-arguments`.
     [PStringLess] = {2, 2},
     [PStringGreater] = {2, 2},
+    // Phase 24's vector family, every row Emacs' own arity measured on the
+    // pinned 31.0.91. `vector` and `vconcat` take any number, zero included
+    // (`(vector)` is `[]` and `(vconcat)` is `[]`); `make-vector` takes
+    // LENGTH and INIT, both required, so `(make-vector 3)` is
+    // `wrong-number-of-arguments` rather than a vector of nils; `aset` is
+    // the only ternary primitive in this table.
+    [PVector] = {0, SIZE_MAX},
+    [PMakeVector] = {2, 2},
+    [PVectorp] = {1, 1},
+    [PAref] = {2, 2},
+    [PAset] = {3, 3},
+    [PVconcat] = {0, SIZE_MAX},
+    [PLength] = {1, 1},
+    [PElt] = {2, 2},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -1035,12 +1049,14 @@ static bool DispatchPrimitive(FeContext* ctx,
   // about 4% of `scripts/mandelbrot.fe` -- for an answer that cannot have
   // changed in between.
   FeObject* arguments = CDR(frame->expr);
-  // Phase 14's symbol family, routed as one: eight ordinary functions that
-  // share the whole setup below and finish in fe.c's
-  // `EvaluateSymbolPrimitive`. A range test rather than eight `case` labels
-  // here and eight more in `ResumeEvalList` -- see the `PIntern` block in
-  // fe_internal.h.
-  if (IsSymbolPrimitive((Primitive)PRIM(fn))) {
+  // Phase 14's symbol family and Phase 24's vector family, routed as one
+  // each: sixteen ordinary functions that share the whole setup below and
+  // finish in fe.c's `EvaluateSymbolPrimitive`/`EvaluateVectorPrimitive`,
+  // beside the storage each family reads. Two range tests rather than
+  // sixteen `case` labels here and sixteen more in `ResumeEvalList` -- see
+  // the `PIntern` and `PVector` blocks in fe_internal.h.
+  if (IsSymbolPrimitive((Primitive)PRIM(fn)) ||
+      IsVectorPrimitive((Primitive)PRIM(fn))) {
     frame->kind = FeFrameEvalList;
     frame->fn = fn;
     frame->rest = arguments;
@@ -2406,6 +2422,18 @@ static const bool primitive_is_function[PSentinel] = {
     // t there -- and both operands evaluate here on the binary frame.
     [PStringLess] = true,
     [PStringGreater] = true,
+    // Phase 24: every one of the vector family is an ordinary function in
+    // Emacs -- `(special-form-p 'aref)` is nil, `(mapcar 'vectorp '([1] 1))`
+    // works -- and every one of them evaluates all of its operands here,
+    // routed as one family into the eval-list frame.
+    [PVector] = true,
+    [PMakeVector] = true,
+    [PVectorp] = true,
+    [PAref] = true,
+    [PAset] = true,
+    [PVconcat] = true,
+    [PLength] = true,
+    [PElt] = true,
     // Phase 13: all three are ordinary functions in Emacs -- `(special-form-p
     // 'signal)`, `'error` and `'keywordp` are all nil there, and
     // `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and
@@ -2946,11 +2974,17 @@ static bool ResumeEvalList(FeContext* ctx,
     list = frame->accumulator;
     frame->accumulator = next;
   }
-  // Phase 14's symbol family: the other half of `DispatchPrimitive`'s range
-  // test. Its answer is computed in fe.c, beside the symbol accessors and the
-  // obarray, so the whole family costs this evaluator one decision point.
+  // Phase 14's symbol family and Phase 24's vector family: the other half of
+  // `DispatchPrimitive`'s two range tests. Each family's answer is computed
+  // in fe.c, beside the storage it reads -- the obarray for one, the payload
+  // region for the other -- so a family of eight costs this evaluator one
+  // decision point.
   if (IsSymbolPrimitive((Primitive)PRIM(frame->fn))) {
     *result = EvaluateSymbolPrimitive(ctx, (Primitive)PRIM(frame->fn), list);
+    return true;
+  }
+  if (IsVectorPrimitive((Primitive)PRIM(frame->fn))) {
+    *result = EvaluateVectorPrimitive(ctx, (Primitive)PRIM(frame->fn), list);
     return true;
   }
   switch (PRIM(frame->fn)) {

@@ -51,6 +51,14 @@ the letter the message names. The count is "corpus files whose *first*
 diagnostic was this arm", so it understates: a file that fails earlier for
 another reason hides whatever came after it.
 
+The census predates Phase 24, and `vector brackets` is no longer an arm:
+`[...]` reads as a vector now, and a bracket that closes nothing or crosses a
+paren is `stray ']'`/`stray ')'` instead. The harness's context carves no
+payload region, so a generated vector reads its elements and then raises
+`(payload-exhaustion)` rather than building one -- see `fuzz_support.h` for
+why arming a carve is a re-derivation of every tracked seed rather than a
+one-line change.
+
 The harness uses a fresh 70 KiB arena for each input -- 64 KiB until Phase 19,
 raised twice since to hold the FREE portion at the ~290 object slots it had
 always been, because `FeMinimumArenaSize()` grew by 3248 bytes when the

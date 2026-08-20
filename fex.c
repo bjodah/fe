@@ -20,6 +20,7 @@ static FeObject* FexGC(FeContext* ctx, FeObject* o) {
     case FeTInteger:
     case FeTSymbol:
     case FeTString:
+    case FeTVector:
     case FeTFn:
     case FeTMacro:
     case FeTPrimitive:

@@ -94,6 +94,19 @@ typedef enum FePerfCounter {
   FePerfPayloadCompact,
   FePerfPayloadCompactMoved,
 
+  // Vectors (Phase 24), the payload region's first release consumer. REF and
+  // SET are element reads and writes through the two accessors every path
+  // goes through -- `aref`, `aset`, `elt`, the printer's element loop, and
+  // every constructor's fill -- and ELEMENT is the slots construction
+  // published, i.e. how wide the vectors a workload built were. The three
+  // are what the O(1) gate reads: a fixed number of random accesses must
+  // charge the same REF count, and every other counter the same number, at
+  // n = 8 and at n = 8192, because a vector's element address is arithmetic
+  // on its block and not a walk.
+  FePerfVectorRef,
+  FePerfVectorSet,
+  FePerfVectorElement,
+
   // Strings, whose representation is a chain of `StringBufferSize`-byte
   // cells. CELL and BYTE are creation: cells `BuildString` allocated and
   // payload bytes it stored. The WALK trio is traversal --

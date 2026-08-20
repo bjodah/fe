@@ -619,12 +619,15 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # `SCC_FILE_COMPLEXITY_MAX` does NOT move and stays at 520; the most complex
 # file is still fe_eval.c at 404.
 #
-# Proved live at this head by temporarily lowering each cap and watching the
-# gate fire, exit status checked: at 902 `make complexity-check` reports
-# "FAIL: total complexity 903 exceeds limit 902" and exits 2, and at 903 it
-# passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
-# exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 903
+# WHAT THESE TWO NUMBERS ARE TODAY, which is all a comment beside a knob
+# should say -- the derivation of any one raise is in `git log`, and the
+# blocks above are the record of the ones that predate that rule. The total
+# is the measured actual with no slack: 919 across the thirteen sources and
+# ten headers `SCC_COMPLEXITY_PATHS` names, of which fe.c is 236 and
+# fe_eval.c 405. The per-file cap is 520 and the most complex file is
+# fe_eval.c at 405, so it binds at 115 above the tree and has not moved since
+# it was set.
+SCC_COMPLEXITY_MAX ?= 919
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -1069,13 +1072,12 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # `PMCCABE_BASELINE_ARGS=--allow-regressions`, which is the only way to bank
 # one, and is named above rather than absorbed silently.
 #
-# Proved live at this head by temporarily lowering each gate and watching it
-# fire, exit status checked: at 1332 `make pmccabe-check` reports "FAIL:
-# total complexity 1333 exceeds funded budget 1332 (+1)" and exits 2, and at
-# 1333 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
-# function(s) exceed complexity limit 14" and exits 2, those two being
-# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1341
+# WHAT THIS NUMBER IS TODAY, the rule the scc knobs above now carry too: the
+# measured actual with no slack, 1418 across 455 symbols, the worst single
+# function being `ResumeEvalList` at 16 against the 22 cap. Any one raise is
+# derived in `git log`, with its per-symbol deltas; the blocks above are the
+# record of the raises that predate that rule.
+PMCCABE_TOTAL_MAX ?= 1418
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

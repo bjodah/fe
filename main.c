@@ -240,9 +240,14 @@ int main(int count, char* arguments[]) {
   arguments += optind;
   interactive |= count == 0;
 
-  // Initialize the context:
+  // Initialize the context. With Fe's own payload split (Phase 24): this
+  // interpreter is a host, and a host that wants vectors has to ask for the
+  // region their elements live in -- `FeOpenContext` deliberately carves
+  // nothing and says so. Default options rather than a number spelled here,
+  // so the ADR's split stays one constant in fe.h.
   AUTO(char*, arena, malloc(arena_size), FreeChar);
-  FeContext* opened_context = FeOpenContext(arena, arena_size);
+  FeContext* opened_context =
+      FeOpenContextWithOptions(arena, arena_size, nullptr);
   if (opened_context == nullptr) {
     fprintf(stderr,
             "could not initialize Fe: arena must be aligned and at least %zu "

@@ -52,6 +52,37 @@ together — each string object stores a part of the string in the bytes of `car
 not used by the type and GC mark. The `cdr` stores the object with the next part
 of the string, or `nil` if this was the last part of the string.
 
+### Vectors
+
+A vector (Phase 24 of kg's Elisp data-model program) is an `FeObject` whose
+`cdr` holds a payload HANDLE and whose elements are that block's traced
+children. There is no length word: the block's `children` count IS the length,
+so `length`, `aref` and `aset` are a field read and one multiply-add rather
+than a walk, and an empty vector is a 32-byte block header with no words after
+it. It is the payload region's first release consumer, and the only one until
+strings migrate, so a context opened with no payload carve cannot build one --
+`FeMakeVector` raises `(payload-exhaustion)` at any length.
+
+The collector reaches a vector's elements through the payload arm described
+under "The payload region", which is the same pointer-reversal trampoline the
+rest of the mark phase uses: a vector of any width costs the mark phase no C
+stack. The compactor may move a vector's block on any collection, so every
+read and write derives the block address immediately before spending it --
+`VectorElement` and `SetVectorElement` in `fe.c` are those two derivations,
+and every other site in fe and in `fe.h` goes through them. The printer is the
+one caller that needs the rule stated: `WriteVectorElements` re-derives per
+element because the host's `FeWriteFn` may allocate between two of them.
+
+Three construction routes exist and all three hold ONE root per construction
+rather than one per element, which matters because the GC stack's ordinary
+ceiling is `GcStackSize - GcStackReserve` = 4032 slots: the reader
+(`ReadVector`) restores its checkpoint after each element it conses, the
+evaluator's operand frame (`ResumeEvalList`) restores its own after each
+operand, and `vconcat`'s string arm (`AppendSequence`) restores after each
+byte it boxes into an integer. A vector larger than 4032 is otherwise
+unremarkable -- its elements are payload bytes, not roots -- and the only
+ceilings it meets are the two pools' own.
+
 ### Symbols
 
 Symbols store a pair object in the `cdr`; the `car` of that pair is a second
@@ -479,13 +510,22 @@ nothing and changes nothing. `fe_perf.h`'s `payload_alloc`, `payload_byte`,
 the same work -- blocks handed out, region bytes they took, compactor calls,
 and survivors slid down over a reclaimed block.
 
-NO TYPE OWNS A PAYLOAD in a shipped interpreter. Strings still live as a cdr
-chain of seven-byte cells, and a Lisp-visible aggregate does not exist yet;
-`PayloadSlot()` in `fe.c` is the single place that says which types keep a
-handle, and the one type that answers today exists only under
-`FE_PAYLOAD_TEST_OBJECT`, the knob `payload_tests.c` is built with. Nothing a
-Lisp program can write reaches any of this, which is why the language version
-does not move for it.
+THE VECTOR is the region's first release owner (Phase 24; see "Vectors"
+above). `OwnsPayload()` in `fe.c` is the single place that says which types
+keep a handle: it answers for `FeTVector`, and additionally for the
+byte-bearing aggregate that exists only under `FE_PAYLOAD_TEST_OBJECT`, the
+knob `payload_tests.c` is built with and which gives the substrate's own tests
+an owner whose width and byte tail they can choose independently. Strings
+still live as a cdr chain of seven-byte cells and migrate in a later phase.
+
+Compaction ends by returning the live extent to the region's BASE, not merely
+sliding survivors down within it. `payload_start` is zero in every ordinary
+build -- only `FE_DEBUG_PAYLOAD_MOVE`'s poison step ever moves it -- so that is
+one comparison there and nothing else; in the poison lane it is what keeps the
+knob a diagnostic rather than a second, smaller region, since the extent
+otherwise drifts forward one unit per allocation until a publish the region
+could satisfy fails anyway. Handles are offsets INTO the extent, so moving the
+extent does not change one.
 
 The context maintains a `gc_stack` which protects objects that may not be
 otherwise reachable. Newly created objects are automatically pushed to this

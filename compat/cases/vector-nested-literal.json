@@ -1,0 +1,6 @@
+{
+ "id": "vector-nested-literal",
+ "setup": [],
+ "expr": "[[1] [2]]",
+ "note": "Nesting is the reader's own recursion and the collector's child tracing in one expression: the outer vector's elements are themselves payload-bearing objects, so a collection reached through the outer one has to descend into both inner ones."
+}

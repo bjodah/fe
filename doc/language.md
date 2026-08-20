@@ -64,10 +64,25 @@ it. It is the one `#` dispatch Fe implements.
 Signed radix integers use `#x`, `#o`, and `#b`, for hexadecimal, octal, and
 binary respectively. An overflowing integer follows Fe's pre-bignum policy and
 becomes a double. Unsupported reader syntax is rejected rather than becoming a
-symbol: vectors (`[...]`), `#:`, `#s(...)`, a bare `#` and every other `#`
+symbol: `#:`, `#s(...)`, a bare `#` and every other `#`
 dispatch besides `##` are not part of Fe's subset. The `#`
 rejection is a break with earlier Fe: a `#`-initial symbol used to read, and
 Fe's own `scripts/concatenate.fe` named a function `#`.
+
+A vector is written `[` element … `]`, and prints back in the same syntax
+(FE_LANGUAGE_VERSION 16). `[` and `]` both open and close a vector and end a
+token, so `[1 2 3]` is three integers and not one symbol named `3]`; a symbol
+whose name really does contain a bracket is written with the escape the writer
+already produced for it (`a\[b`). Two spellings are errors rather than
+misreads:
+
+| Written | Result |
+| --- | --- |
+| `[1 2` | condition `end-of-file`, Emacs' generic incomplete-input answer |
+| `[1 . 2]` | error: `'.' inside a vector` -- Emacs raises `invalid-read-syntax` |
+
+`end-of-file` also names an unclosed LIST now, which used to be a bare
+`error`; the message text is unchanged.
 
 The writer is the reader's inverse for symbols: a name that would otherwise
 read back as something else prints with escapes. Bytes at or below the space,
@@ -85,6 +100,22 @@ Nothing else is escaped -- a newline inside a string prints as a newline,
 which is Emacs' answer as well. Until FE_LANGUAGE_VERSION 13 only the quote
 was escaped, and a string containing a backslash was the one printed form
 here that did not read back.
+
+A vector prints as its reader syntax with each element printed as `prin1`
+prints it, so `[1 (2) "x"]` reads back as itself. It has no cycle detection of
+its own, and does not need one to terminate: a vector that contains itself --
+which `aset` can build -- costs a level of the writer's depth bound per
+element, so it prints nested brackets ending in `#<deep>`, exactly as a list
+whose `car` is itself already did. That is a DELIBERATE divergence, not an
+oversight. Emacs prints the lossy back-reference `[0 #0]` at its `print-circle`
+default and the re-readable `#1=[0 #1#]` with `print-circle` bound to `t`;
+adopting the first would need an ancestor stack in every writer -- including
+the one that renders an error message on a path where there may be no arena
+left -- and would buy a spelling that still does not read back, while the
+second needs a `print-circle` variable Fe does not have. Fe's writer is
+bounded, allocates nothing and holds no visited set on purpose
+(`compat/features.json`'s `writer-bounded-output`), and a vector inherits that
+policy rather than acquiring a second one.
 
 Every one of these is recorded in `compat/features.json`, with the measured
 Emacs answer checked in beside it under `compat/oracle/`.
@@ -1470,6 +1501,102 @@ fe > (string< 'abc "abd")
 t
 fe > (string> "abd" "abc")
 t
+```
+
+### Vectors And Sequences
+
+A vector is a fixed-length, mutable sequence of arbitrary objects, written
+`[...]` (FE_LANGUAGE_VERSION 16). Its elements are not in the object itself:
+they live in the arena's payload region -- the compactable storage the
+Phase 22 architecture decision selected -- so a vector's `FeObject *` is
+stable while its contents may move under the collector. Nothing a program can
+write observes that; it is why `aref`, `aset` and `length` are O(1) in the
+vector's size rather than a walk, and why a host has to ask for a payload
+region (`FeOpenContextWithOptions`) before it can build one.
+
+Vectors have OBJECT IDENTITY. Two reads of `[1]` are two objects, so `(eq [1]
+[1])` is nil, and `eql` adds nothing for them. Fe's own `is` compares them by
+identity as well, exactly as it compares two pairs: `is` is structural for
+strings and numbers only.
+
+Three types are **sequences**: lists (including nil), strings, and vectors.
+`length` and `elt` accept all three, which is Emacs' contract and the reason
+they are core primitives rather than a host's library functions.
+
+#### `(vector ...)`
+
+A vector of the evaluated arguments, in order. `(vector)` is the empty vector
+`[]`, which is a vector and not nil.
+
+#### `(make-vector length init)`
+
+A vector of `length` slots, every one of them holding `init` ITSELF, not a
+copy: `(let ((v (make-vector 2 (list 1)))) (eq (aref v 0) (aref v 1)))` is
+`t`. `length` must be a non-negative integer; anything else is
+`(wrong-type-argument wholenump LENGTH)`, including a float.
+
+#### `(vectorp x)`
+
+`t` for a vector, including the empty one, and nil for everything else --
+strings and lists included.
+
+#### `(aref array index)`
+
+The `index`th element of an ARRAY, which is a vector or a string; a string's
+element is its byte, and Fe strings are byte strings (see below). Zero-based,
+so the last valid index is `(- (length array) 1)`.
+
+A non-array is `(wrong-type-argument arrayp OBJECT)` -- `arrayp`, not
+`vectorp`, because strings are arrays too. A non-integer index is
+`(wrong-type-argument fixnump INDEX)`. An index outside the array, negative
+ones included, is `(args-out-of-range ARRAY INDEX)`: the offending array
+first, then the index.
+
+#### `(aset vector index value)`
+
+Stores `value` at `index` and answers `value`, not the vector. The bounds and
+index conditions are `aref`'s, exactly. A STRING is an array Emacs can write
+in place and Fe cannot -- a Fe string is a chain of seven-byte cells whose
+shape a byte write has to preserve -- so `(aset "ab" 0 120)` is a named error
+here where Emacs answers `120`. That is a recorded divergence
+(`compat/features.json`'s `primitive-aset-string`), and the representation
+that would close it is a later phase's.
+
+#### `(vconcat ...)`
+
+A NEW vector holding every element of every argument, in order. Each argument
+is a sequence; a STRING contributes its bytes as integers, so `(vconcat "ab")`
+is `[97 98]` and not `["ab"]`. `(vconcat)` is `[]`, and `(vconcat V)` is a
+fresh vector rather than `V` itself.
+
+#### `(length sequence)`
+
+The number of elements. `(length nil)` is `0`, a list's is its element count,
+a vector's is its slot count, and a string's is its BYTE count -- Fe strings
+are byte strings (the same rule that makes `"\400"` a read error), so
+`(length "é")` is `2` where Emacs, whose strings are sequences of characters,
+answers `1`. That divergence is recorded as `sequence-length-string-bytes`.
+
+Anything that is not a sequence is `(wrong-type-argument sequencep X)`; a list
+whose tail is not nil is `(wrong-type-argument listp TAIL)`, naming the
+offending tail, which is Emacs' answer too.
+
+#### `(elt sequence index)`
+
+The `index`th element, and the one place the three sequence types deliberately
+do not behave alike. On a vector or a string `elt` is `aref`, so an index past
+the end raises `args-out-of-range`. On a LIST it is `nth`, so an index past
+the end answers nil and a negative index answers the first element. Both
+halves are Emacs', measured: `(elt '(1 2) 9)` is nil and `(elt [1 2] 9)`
+raises.
+
+```clojure
+fe > [1 (2) "x"]
+[1 (2) "x"]
+fe > (vconcat [1 2] '(3) "ab")
+[1 2 3 97 98]
+fe > (list (length '(1 2 3)) (length "abc") (length [1 2 3]))
+(3 3 3)
 ```
 
 ### Numbers

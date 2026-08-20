@@ -125,6 +125,15 @@ static const ConditionParent condition_parents[] = {
     {"void-variable", "error", "Symbol's value as variable is void"},
     {"void-function", "error", "Symbol's function definition is void"},
     {"args-out-of-range", "error", "Args out of range"},
+    // Phase 24. Emacs' own chain and text, measured on 31.0.91: `(get
+    // 'end-of-file 'error-conditions)` is `(end-of-file error)` and its
+    // `error-message` is "End of file during parsing". It is the condition
+    // the READER raises when input stops inside a form -- `[1 2` and `(1 2`
+    // alike, which is what Emacs answers for both -- and it arrived with
+    // vectors because the vector contract froze the missing-bracket answer
+    // by name and the name turned out to be the generic one rather than a
+    // vector-specific invention.
+    {"end-of-file", "error", "End of file during parsing"},
     // Phase 20. Emacs' own chain and text, measured on 31.0.90: `(get
     // 'end-of-buffer 'error-conditions)` is `(end-of-buffer error)` and its
     // `error-message` is "End of buffer", the same shape for

@@ -174,6 +174,31 @@ typedef enum Primitive {
   // own `string-greaterp` is defined.
   PStringLess,
   PStringGreater,
+  // Phase 24 of kg's Elisp data-model program: the vector family, and the
+  // sequence contract that ships with it rather than a phase later. Eight
+  // ordinary functions -- every operand is evaluated, none of them touches
+  // the evaluator's state -- so the evaluator only routes them, exactly as
+  // it routes Phase 14's symbol family: one `FeFrameEvalList` set up by
+  // `DispatchPrimitive` and one arm in `ResumeEvalList`, both selected by
+  // the range test `IsVectorPrimitive`, both finishing in fe.c's
+  // `EvaluateVectorPrimitive` beside the payload storage the family reads.
+  // Two range tests cost this evaluator two decision points where sixteen
+  // `case` labels would cost sixteen.
+  //
+  // `length` and `elt` are here rather than in a family of their own
+  // because Emacs' contract for them is the SEQUENCE contract -- they answer
+  // for lists, strings and vectors alike -- and a `length` that knew about
+  // two of the three would be the deliberately broken interval the master
+  // plan's Phase 24 exists to avoid. Keep `PVector` first and `PElt` last if
+  // this block ever grows.
+  PVector,
+  PMakeVector,
+  PVectorp,
+  PAref,
+  PAset,
+  PVconcat,
+  PLength,
+  PElt,
   PSentinel
 } Primitive;
 
@@ -861,6 +886,29 @@ bool IsSymbolPrimitive(Primitive primitive);
 FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
                                   Primitive primitive,
                                   FeObject* arguments);
+// Phase 24's vector family (see the `PVector`..`PElt` block above), in the
+// same two-function shape: the range test the evaluator routes on, and the
+// one entry point that finishes all eight from their evaluated operand list.
+bool IsVectorPrimitive(Primitive primitive);
+FeObject* EvaluateVectorPrimitive(FeContext* ctx,
+                                  Primitive primitive,
+                                  FeObject* arguments);
+// A vector's length and its elements, unchecked, for fe's own code: the
+// public `FeVectorLength`/`FeVectorRef`/`FeVectorSet` are these three behind
+// the type and bounds checks. The length is the payload block's child count,
+// which is why it is O(1) and why a vector needs no length word of its own.
+//
+// `VectorElement` and `SetVectorElement` derive the block address inside
+// themselves and spend it there, which is clause 1 of the publish protocol:
+// a caller that hoisted the address out of a loop containing an allocation
+// -- the printer's element loop is exactly such a loop, because an
+// `FeWriteFn` may allocate -- would read storage the compactor had moved.
+size_t VectorLength(const FeContext* ctx, FeObject* vector);
+FeObject* VectorElement(const FeContext* ctx, FeObject* vector, size_t index);
+void SetVectorElement(const FeContext* ctx,
+                      FeObject* vector,
+                      size_t index,
+                      FeObject* value);
 // The special-variable registry (sub-plan 11B), defined in fe.c beside the
 // symbol accessors because it is symbol metadata; the evaluator's binding
 // paths and the two primitives that expose it are in fe_eval.c.

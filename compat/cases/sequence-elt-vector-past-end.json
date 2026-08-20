@@ -1,0 +1,6 @@
+{
+ "id": "sequence-elt-vector-past-end",
+ "setup": [],
+ "expr": "(elt [1 2] 9)",
+ "note": "The other half of the asymmetry: `elt' past the end of a VECTOR raises `args-out-of-range' with the same data shape `aref' raises, because it routes to `aref'."
+}

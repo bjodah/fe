@@ -1,0 +1,6 @@
+{
+ "id": "vector-aref-values",
+ "setup": [],
+ "expr": "(list (aref [10 20 30] 0) (aref [10 20 30] 2) (aref \"abc\" 1))",
+ "note": "Random access at the first and last valid index, and on a STRING -- strings are arrays in Emacs, so `aref' answers a character there. fe answers the byte, which is the same number for ASCII and the recorded byte-string divergence otherwise (sequence-length-string-bytes)."
+}

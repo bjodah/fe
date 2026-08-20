@@ -61,8 +61,8 @@
 #include "fe.h"
 #include "fe_internal.h"
 
-static_assert(FE_API_VERSION == 13);
-static_assert(FE_LANGUAGE_VERSION == 15);
+static_assert(FE_API_VERSION == 14);
+static_assert(FE_LANGUAGE_VERSION == 16);
 
 // The arena sizes, named rather than spelled at each use so that a record's
 // `arena_bytes` can be read against the reason its workload picked it.

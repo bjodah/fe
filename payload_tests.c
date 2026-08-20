@@ -38,8 +38,8 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-static_assert(FE_API_VERSION == 13);
-static_assert(FE_LANGUAGE_VERSION == 15);
+static_assert(FE_API_VERSION == 14);
+static_assert(FE_LANGUAGE_VERSION == 16);
 
 #ifndef FE_GC_STRESS
 #define FE_GC_STRESS 0
@@ -65,6 +65,11 @@ enum {
   // is asserted at the size a real host opens rather than only at this file's
   // convenient one.
   HostArenaSize = 1024 * 1024,
+  // The vector groups' own arena, malloc'd: an 8192-element vector is 65 568
+  // payload bytes on its own, which is more than a 25% carve of the 256 KiB
+  // static arena above leaves, and the cost table wants room for the
+  // transient garbage a construction makes as well as for the vector.
+  VectorArenaSize = 8u << 20,
 };
 
 typedef struct PayloadArena {
@@ -304,9 +309,9 @@ static bool TestOpenOptionsPartition(void) {
   // relationship: these two numbers are what the Phase 22 ADR predicted for a
   // 1 MiB arena, and a change to either is a change to the budget every host
   // sizing decision in this program was made against.
-  CHECK(uncarved.cells == 56145);
-  CHECK(carved.cells == 42335);
-  CHECK(carved.payload_bytes == 220952);
+  CHECK(uncarved.cells == 56152);
+  CHECK(carved.cells == 42358);
+  CHECK(carved.payload_bytes == 220704);
   // Frames are funded before the split, so they do not notice it.
   CHECK(carved.frames == uncarved.frames);
   // The region cost cells and nothing else: what left the cell pool is what
@@ -909,6 +914,309 @@ static bool TestMarkDepthIsFlat(void) {
 #endif  // !FE_GC_STRESS
 
 // ---------------------------------------------------------------------------
+// Phase 24: vectors, on the substrate above
+//
+// The Lisp-visible contract is `test_api.c`'s `TestVectors` and kg's frozen
+// oracle corpus. What is here is what only this build can say: what a vector
+// costs the two pools, that the compactor moves one without changing what it
+// holds, that a construction the region cannot satisfy publishes NOTHING, and
+// -- in the counting build -- that random access is flat in the vector's size.
+// ---------------------------------------------------------------------------
+
+// One `FeContext` on a malloc'd arena big enough for the sizes this group
+// uses, with the ordinary carve. The caller owns the storage and frees it.
+static FeContext* OpenVectorContext(unsigned char* storage, size_t size) {
+  FeContext* const context =
+      OpenContextWithPayload(storage, size, PayloadArenaPercent);
+  if (context == nullptr) {
+    return nullptr;
+  }
+  host.raised = false;
+  host.message[0] = '\0';
+  FeSetErrorFn(context, HandleError);
+  return context;
+}
+
+// What a vector of `length` elements takes out of the payload region: its
+// block header and one word per element, and nothing else. There is no length
+// field and no capacity slack, which is why this is an equality and not a
+// bound.
+static size_t VectorBlockBytes(size_t length) {
+  return sizeof(FePayloadBlock) + length * sizeof(FeObject*);
+}
+
+// Vectors and byte-bearing aggregates in one region, compacted together. This
+// is 23.1's determinism case with a real Lisp type among the blocks: the
+// survivors slide down in ALLOCATION ORDER, so their handles are the offsets
+// the sizes before them imply, and -- the half only a vector can assert --
+// every element a moved vector holds is still the object it held, reached
+// through a handle the compactor rewrote and a header it did not.
+static bool TestVectorCompactionIsDeterministic(void) {
+  unsigned char* const storage = malloc(VectorArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = OpenVectorContext(storage, VectorArenaSize);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    free(storage);
+    return false;
+  }
+  const size_t base = FeSaveGC(context);
+  // Interleaved on purpose: a compactor that handled one owner type and not
+  // the other would still pass a test whose region held only one of them.
+  FeObject* const first = FeMakeVector(context, 2);
+  FeObject* const spacer = MakeAggregate(context, 0, 24);
+  FeObject* const second = FeMakeVector(context, 5);
+  FeObject* const doomed = MakeAggregate(context, 1, 8);  // one child + 8 bytes
+  FeObject* const third = FeMakeVector(context, 1);
+  memset(AggregateBytes(context, spacer), 'z', 24);
+  FeVectorSet(context, first, 0, FeMakeSymbol(context, "kept"));
+  FeVectorSet(context, first, 1, FeMakeInteger(context, 7));
+  FeVectorSet(context, second, 4, FeMakeString(context, "tail"));
+  FeVectorSet(context, third, 0, second);
+
+  const size_t vector2 = VectorBlockBytes(2);
+  const size_t aggregate24 = sizeof(FePayloadBlock) + 24;
+  const size_t vector5 = VectorBlockBytes(5);
+  const size_t aggregate1 = sizeof(FePayloadBlock) + 16;
+  CHECK(PAYLOAD(first) == ExpectedHandle(0));
+  CHECK(AggregateHandle(spacer) == ExpectedHandle(vector2));
+  CHECK(PAYLOAD(second) == ExpectedHandle(vector2 + aggregate24));
+  CHECK(AggregateHandle(doomed) ==
+        ExpectedHandle(vector2 + aggregate24 + vector5));
+  CHECK(PAYLOAD(third) ==
+        ExpectedHandle(vector2 + aggregate24 + vector5 + aggregate1));
+
+  // Drop `spacer` and `doomed`; the three vectors survive, and `second`
+  // survives only through `third`'s element, which is the payload arm
+  // reaching a payload owner through another one's block.
+  FeRestoreGC(context, base);
+  FePushGC(context, first);
+  FePushGC(context, third);
+  FeCollectGarbage(context);
+
+  CHECK(PAYLOAD(first) == ExpectedHandle(0));
+  CHECK(PAYLOAD(second) == ExpectedHandle(vector2));
+  CHECK(PAYLOAD(third) == ExpectedHandle(vector2 + vector5));
+  CHECK(context->payload_used == vector2 + vector5 + VectorBlockBytes(1));
+  // The contents came with the move.
+  CHECK(FeVectorRef(context, first, 0) == FeMakeSymbol(context, "kept"));
+  CHECK(FeToInteger(context, FeVectorRef(context, first, 1)) == 7);
+  CHECK(FeVectorRef(context, third, 0) == second);
+  CHECK(FeVectorLength(context, second) == 5);
+  char rendered[32];
+  (void)FeToString(context, FeVectorRef(context, second, 4), rendered,
+                   sizeof(rendered));
+  CHECK(strcmp(rendered, "tail") == 0);
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
+// A construction the region cannot satisfy raises and publishes NOTHING: the
+// cell it had already retyped names no block, every block that was there is
+// untouched, and a collection afterwards walks the half-built owner without
+// tripping over it. That last part is the one a half-published vector would
+// fail -- the collector reaches a vector through `PayloadSlot`, and a slot
+// holding a handle to a block that was never written is how a payload
+// substrate corrupts itself quietly.
+static bool TestVectorExhaustionLeavesNothingBehind(void) {
+  unsigned char* const storage = malloc(HostArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = OpenVectorContext(storage, HostArenaSize);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    free(storage);
+    return false;
+  }
+  const size_t base = FeSaveGC(context);
+  FeObject* const survivor = FeMakeVector(context, 3);
+  FeVectorSet(context, survivor, 1, FeMakeSymbol(context, "alive"));
+  const FeArenaStats before = FeGetArenaStats(context);
+  CHECK(before.payload_live_bytes == VectorBlockBytes(3));
+  CHECK(before.payload_allocation_failures == 0);
+
+  // One element more than the whole region could hold even if it were empty.
+  const size_t impossible = context->payload_capacity / sizeof(FeObject*) + 1;
+  if (setjmp(host.jump) == 0) {
+    (void)FeMakeVector(context, impossible);
+    CHECK(false);
+  }
+  CHECK(host.raised);
+  CHECK(ConditionIs(context, "(payload-exhaustion)"));
+  const FeArenaStats after = FeGetArenaStats(context);
+  CHECK(after.payload_allocation_failures == 1);
+  // Nothing was published: the region holds exactly what it held.
+  CHECK(after.payload_live_bytes == before.payload_live_bytes);
+
+  // The half-built owner is still on the root stack (`MakeObject` pushed it
+  // and the raise did not pop it), so this collection really does mark a
+  // vector with no block. It answers zero length, which is the honest answer
+  // for a vector with no elements yet, and it does not disturb the survivor.
+  FeCollectGarbage(context);
+  FeRestoreGC(context, base);
+  FePushGC(context, survivor);
+  FeCollectGarbage(context);
+  CHECK(FeGetArenaStats(context).payload_live_bytes == VectorBlockBytes(3));
+  CHECK(FeVectorRef(context, survivor, 1) == FeMakeSymbol(context, "alive"));
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
+// What a vector costs, at the four sizes the master plan named, measured in
+// both pools and reported rather than merely bounded. Two routes, because
+// they have different transient costs: `FeMakeVector` publishes one block and
+// allocates one cell, while READING `[1 1 ...]` also builds one cons per
+// element that dies immediately -- the "temporary construction high-water"
+// the plan asks for, and the number a caller sizing an arena needs.
+static bool TestVectorCostTable(void) {
+  static const size_t sizes[] = {0, 1, 1000, 8192};
+  for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+    const size_t n = sizes[i];
+    unsigned char* const storage = malloc(VectorArenaSize);
+    CHECK(storage != nullptr);
+    FeContext* context = OpenVectorContext(storage, VectorArenaSize);
+    CHECK(context != nullptr);
+    if (setjmp(host.jump) != 0) {
+      free(storage);
+      return false;
+    }
+    const FeArenaStats opened = FeGetArenaStats(context);
+    const size_t cells_before = opened.total_slots - opened.free_slots;
+
+    // Route 1: the storage layer alone.
+    FeObject* const direct = FeMakeVector(context, n);
+    const FeArenaStats made = FeGetArenaStats(context);
+    const size_t direct_cells =
+        (made.total_slots - made.free_slots) - cells_before;
+    CHECK(direct_cells == 1);
+    CHECK(made.payload_live_bytes == VectorBlockBytes(n));
+    CHECK(made.payload_peak_bytes == VectorBlockBytes(n));
+    CHECK(FeVectorLength(context, direct) == n);
+    FeCloseContext(context);
+
+    // Route 2: the reader, on a fresh context so the numbers are this size's
+    // and not the previous route's.
+    context = OpenVectorContext(storage, VectorArenaSize);
+    CHECK(context != nullptr);
+    if (setjmp(host.jump) != 0) {
+      free(storage);
+      return false;
+    }
+    const FeArenaStats fresh = FeGetArenaStats(context);
+    const size_t fresh_cells = fresh.total_slots - fresh.free_slots;
+    char* const source = malloc(2 * n + 8);
+    CHECK(source != nullptr);
+    size_t at = 0;
+    source[at++] = '[';
+    for (size_t e = 0; e < n; e++) {
+      source[at++] = '1';
+      source[at++] = ' ';
+    }
+    source[at++] = ']';
+    FeObject* const read = FeEvaluateString(context, "cost.fe", source, at);
+    free(source);
+    const FeArenaStats after = FeGetArenaStats(context);
+    CHECK(FeVectorLength(context, read) == n);
+    (void)printf(
+        "payload_tests: vector n=%5zu: retained %zu cell(s) + %zu payload "
+        "bytes; read literal leaves %zu cells live, peak %zu, payload peak "
+        "%zu\n",
+        n, direct_cells, VectorBlockBytes(n),
+        (after.total_slots - after.free_slots) - fresh_cells,
+        after.peak_live_objects - fresh_cells, after.payload_peak_bytes);
+    // The payload cost is the block and nothing else, whichever route built
+    // it: a literal's transient garbage is CELLS, never region bytes.
+    CHECK(after.payload_peak_bytes == VectorBlockBytes(n));
+    FeCloseContext(context);
+    free(storage);
+  }
+  return true;
+}
+
+#if FE_PERF_COUNTERS && !FE_GC_STRESS
+
+// THE O(1) GATE (Phase 24.3): a fixed number of random accesses charges the
+// same counters at n = 8 and at n = 8192 -- every counter, not only the
+// vector ones, because "nothing else happened either" is the claim. A counter
+// and not a clock, so a loaded box, a sanitizer lane and valgrind all agree.
+//
+// The indices are spread across the whole vector by a multiplicative hash, so
+// an implementation that walked to the index would charge work proportional
+// to the average index and the two sizes would differ by three orders of
+// magnitude. They do not differ at all: a vector's element address is its
+// block's base plus `index * sizeof(FeObject*)`.
+enum { RandomAccessCount = 4096 };
+
+static bool MeasureRandomAccess(FeContext* context,
+                                size_t n,
+                                unsigned long long* out) {
+  const size_t gc = FeSaveGC(context);
+  FeObject* const vector = FeMakeVector(context, n);
+  FePushGC(context, vector);
+  // Built and filled BEFORE the reset: what is being measured is the
+  // accesses, not the construction.
+  for (size_t i = 0; i < n; i++) {
+    FeVectorSet(context, vector, i, FeNil(context));
+  }
+  FePerfReset();
+  for (size_t i = 0; i < RandomAccessCount; i++) {
+    const size_t index = (i * 2654435761u) % n;
+    (void)FeVectorRef(context, vector, index);
+    FeVectorSet(context, vector, index, FeNil(context));
+    CHECK(FeVectorLength(context, vector) == n);
+  }
+  for (int i = 0; i < FePerfCounterCount; i++) {
+    out[i] = FePerfRead((FePerfCounter)i);
+  }
+  FeRestoreGC(context, gc);
+  return true;
+}
+
+static bool TestRandomAccessIsFlat(void) {
+  unsigned char* const storage = malloc(VectorArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = OpenVectorContext(storage, VectorArenaSize);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    free(storage);
+    return false;
+  }
+  static unsigned long long small[FePerfCounterCount];
+  static unsigned long long large[FePerfCounterCount];
+  CHECK(MeasureRandomAccess(context, 8, small));
+  CHECK(MeasureRandomAccess(context, 8192, large));
+  for (int i = 0; i < FePerfCounterCount; i++) {
+    if (small[i] != large[i]) {
+      (void)fprintf(stderr,
+                    "payload_tests: counter %s differs: n=8 gives %llu, "
+                    "n=8192 gives %llu\n",
+                    fe_perf_counter_name[i], small[i], large[i]);
+    }
+    CHECK(small[i] == large[i]);
+  }
+  // ...and the numbers are the ones the workload implies, so a gate that
+  // passed because both sides did nothing would fail here.
+  CHECK(small[FePerfVectorRef] == RandomAccessCount);
+  CHECK(small[FePerfVectorSet] == RandomAccessCount);
+  (void)printf(
+      "payload_tests: %d random accesses: vector_ref=%llu vector_set=%llu, "
+      "every counter identical at n=8 and n=8192\n",
+      (int)RandomAccessCount, small[FePerfVectorRef], small[FePerfVectorSet]);
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
+#else
+
+static bool TestRandomAccessIsFlat(void) {
+  return true;
+}
+
+#endif  // FE_PERF_COUNTERS && !FE_GC_STRESS
+
+// ---------------------------------------------------------------------------
 // The publish protocol's poison mode
 // ---------------------------------------------------------------------------
 
@@ -1038,7 +1346,10 @@ int main(void) {
       TestLiveDeadMixture() && TestCloseContextWithLivePayloads() &&
       TestPayloadExhaustionIsCatchable() && TestPayloadExhaustionDegrades() &&
       TestFailureInjectionAtEveryAllocation() && TestMarkDepthIsFlat() &&
-      TestPoisonedPointerFailsLoudly() && TestPayloadCountersCount();
+      TestVectorCompactionIsDeterministic() &&
+      TestVectorExhaustionLeavesNothingBehind() && TestVectorCostTable() &&
+      TestRandomAccessIsFlat() && TestPoisonedPointerFailsLoudly() &&
+      TestPayloadCountersCount();
   (void)printf(
       "payload_tests: FE_GC_STRESS=%d FE_DEBUG_PAYLOAD_MOVE=%d "
       "FE_PERF_COUNTERS=%d: %s\n",

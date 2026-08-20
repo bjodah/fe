@@ -23,7 +23,7 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-const char* FeVersion = "19.0";
+const char* FeVersion = "20.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -119,7 +119,15 @@ static const char* primitive_names[] = {
     [PSymbolPlist] = "symbol-plist",
     [PErrorMessageString] = "error-message-string",
     [PStringLess] = "string<",
-    [PStringGreater] = "string>"};
+    [PStringGreater] = "string>",
+    [PVector] = "vector",
+    [PMakeVector] = "make-vector",
+    [PVectorp] = "vectorp",
+    [PAref] = "aref",
+    [PAset] = "aset",
+    [PVconcat] = "vconcat",
+    [PLength] = "length",
+    [PElt] = "elt"};
 
 typedef struct PrimitiveAlias {
   const char* name;
@@ -140,6 +148,7 @@ const char* type_names[] = {
     [FeTInteger] = "integer",
     [FeTSymbol] = "symbol",
     [FeTString] = "string",
+    [FeTVector] = "vector",
     [FeTFn] = "lambda",
     [FeTMacro] = "macro",
     [FeTPrimitive] = "primitive",
@@ -273,6 +282,8 @@ static const char* TypePredicate(FeType type) {
       return "symbolp";
     case FeTString:
       return "stringp";
+    case FeTVector:
+      return "vectorp";
     case FeTFn:
     case FeTMacro:
     case FeTPrimitive:
@@ -373,18 +384,20 @@ static FeObject* TakeMarkLink(FeObject* obj) {
 // fe_internal.h beside the block layout they share.
 // ---------------------------------------------------------------------------
 
-// The one type whose objects keep a payload handle. A shipped interpreter has
-// none, so this names the type no object ever has and every payload arm below
-// is a comparison that answers false; the test build's aggregate is what makes
-// it answer, and Phase 25 replaces it with `FeTString`.
-#if FE_PAYLOAD_TEST_OBJECT
-#define PayloadOwnerType FeTFex2
-#else
-#define PayloadOwnerType FeTSentinel
-#endif
-
+// The types whose objects keep a payload handle. Phase 24's vector is the
+// first release one -- its elements ARE its block's traced children -- and
+// Phase 25 adds `FeTString` beside it. `FE_PAYLOAD_TEST_OBJECT`'s aggregate
+// is still here because the substrate's own harness needs a *bytes*-bearing
+// owner, which a vector is not, and because it is the one owner whose width
+// and byte tail a test can choose independently.
 static bool OwnsPayload(const FeObject* obj) {
-  return FeGetType(obj) == PayloadOwnerType;
+  const FeType type = FeGetType(obj);
+#if FE_PAYLOAD_TEST_OBJECT
+  if (type == FeTFex2) {
+    return true;
+  }
+#endif
+  return type == FeTVector;
 }
 
 // Where an object of a payload-owning type keeps its handle. ONE function, so
@@ -521,6 +534,19 @@ void CompactPayloads(FeContext* ctx) {
   if (target != ctx->payload_used) {
     ctx->payload_compaction_count++;
     ctx->payload_used = target;
+  }
+  // ...and the survivors slide down to the REGION's base, not merely to the
+  // extent's. `payload_start` is zero in every ordinary build -- only
+  // `MovePayloadRegion`, the poison knob, ever moves it -- so this is one
+  // comparison there and nothing else. In the poison lane it is what keeps
+  // the knob a diagnostic rather than a second, smaller region: without it
+  // the extent drifts forward one unit per allocation and the bytes behind
+  // it are unreachable, so a large publish that the region can hold fails
+  // with `(payload-exhaustion)` after a few thousand allocations. Handles
+  // are offsets INTO the extent, so moving the extent does not change one.
+  if (ctx->payload_start != 0) {
+    memmove(ctx->payload_base, PayloadAt(ctx, 0), ctx->payload_used);
+    ctx->payload_start = 0;
   }
 }
 
@@ -703,6 +729,12 @@ descend:
       case FeTInteger:
       case FeTPrimitive:
       case FeTNativeFn:
+      // A vector never reaches this switch: `OwnsPayload` took it above,
+      // because its children are in its payload block and not in `car`/`cdr`.
+      // Named here so `-Wswitch-enum` keeps this switch exhaustive and a
+      // future type that stops owning a payload cannot fall through it
+      // silently.
+      case FeTVector:
         // Do nothing.
         break;
 
@@ -1209,7 +1241,7 @@ FeObject* MakeObject(FeContext* ctx) {
 // yet.
 FeObject* MakeAggregate(FeContext* ctx, size_t children, size_t bytes) {
   FeObject* const obj = MakeObject(ctx);
-  SetType(obj, PayloadOwnerType);
+  SetType(obj, FeTFex2);
   PAYLOAD(obj) = FePayloadNone;
   PublishPayload(ctx, obj, children, bytes);
   for (size_t i = 0; i < children; i++) {
@@ -1245,6 +1277,140 @@ FePayloadHandle AggregateHandle(const FeObject* aggregate) {
 }
 
 #endif  // FE_PAYLOAD_TEST_OBJECT
+
+// ---------------------------------------------------------------------------
+// Vectors (Phase 24 of kg's Elisp data-model program): the payload
+// substrate's first release consumer.
+//
+// A vector IS a header plus a payload block whose traced children are its
+// elements. Nothing else: no length word, no capacity, no separate element
+// array. Three consequences worth stating once, because every function below
+// is one of them:
+//
+//   * `length` is the block's `children` count, so it is a field read and not
+//     a walk -- which is what makes `aref`, `aset` and `length` O(1) in the
+//     vector's size, the property Phase 24's counter gate exists to show;
+//   * the collector reaches the elements through the payload arm the ADR's
+//     Design B already built (`DescendIntoPayload`, `FeMark`), so a vector of
+//     any width costs the mark phase no C stack and needs no new arm;
+//   * the elements MOVE when the compactor runs. Every read and write below
+//     therefore derives the block address immediately before spending it,
+//     which is clause 1 of the publish protocol in fe_internal.h, and none of
+//     them hands an interior pointer to anyone -- `fe.h` has no vector
+//     accessor that could.
+// ---------------------------------------------------------------------------
+
+// The block, or null for a vector whose constructor has retyped its cell and
+// not yet published. That window is one a collection can land in, and a
+// vector inside it is a zero-length one -- which is the honest answer, since
+// it has no elements yet.
+size_t VectorLength(const FeContext* ctx, FeObject* vector) {
+  const FePayloadBlock* const block = OwnedBlock(ctx, vector);
+  return block == nullptr ? 0 : block->children;
+}
+
+FeObject* VectorElement(const FeContext* ctx, FeObject* vector, size_t index) {
+  FE_PERF_INC(FePerfVectorRef);
+  return *PayloadChildSlot(OwnedBlock(ctx, vector), index);
+}
+
+void SetVectorElement(const FeContext* ctx,
+                      FeObject* vector,
+                      size_t index,
+                      FeObject* value) {
+  FE_PERF_INC(FePerfVectorSet);
+  *PayloadChildSlot(OwnedBlock(ctx, vector), index) = value;
+}
+
+// The constructor, in the order `MakeAggregate` established and every payload
+// owner copies: retype the cell, clear its handle, THEN publish. `init` fills
+// every slot with ONE object rather than a copy per slot, which is Emacs'
+// `make-vector` contract and is why `(eq (aref v 0) (aref v 1))` is t.
+//
+// `init` survives the publish because `PublishPayload` may collect: it is
+// rooted here, and the vector is rooted by `MakeObject` having pushed it.
+// The fill loop allocates nothing, which is what lets it derive the block
+// once per write and never park it.
+static FeObject* MakeVector(FeContext* ctx, size_t length, FeObject* init) {
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, init);
+  FeObject* const vector = MakeObject(ctx);
+  SetType(vector, FeTVector);
+  PAYLOAD(vector) = FePayloadNone;
+  PublishPayload(ctx, vector, length, 0);
+  FE_PERF_ADD(FePerfVectorElement, length);
+  for (size_t i = 0; i < length; i++) {
+    SetVectorElement(ctx, vector, i, init);
+  }
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, vector);
+  return vector;
+}
+
+// A vector of the `length` elements a proper list holds, which is what the
+// reader's `[...]`, `vector` and `vconcat` all end in. The list is rooted
+// across the construction, and nothing between two element writes allocates.
+static FeObject* MakeVectorFromList(FeContext* ctx,
+                                    FeObject* list,
+                                    size_t length) {
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, list);
+  FeObject* const vector = MakeVector(ctx, length, &nil);
+  for (size_t i = 0; i < length; i++) {
+    SetVectorElement(ctx, vector, i, CAR(list));
+    list = CDR(list);
+  }
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, vector);
+  return vector;
+}
+
+// The public quartet's type gate. A non-vector is `(wrong-type-argument
+// vectorp OBJ)`, which is what `CheckType` already spells for every other
+// type through `TypePredicate`.
+static FeObject* CheckVector(FeContext* ctx, FeObject* vector) {
+  return CheckType(ctx, vector, FeTVector);
+}
+
+// The bounds gate, shared by the public accessors and by Lisp's `aref`/`aset`
+// because it is the same check: Emacs' data is `(SEQUENCE INDEX)` -- the
+// offending object FIRST -- and a negative index takes the same route, which
+// is why the Lisp side hands the index through as a signed value and this
+// side never sees one.
+[[noreturn]] static void RaiseOutOfRange(FeContext* ctx,
+                                         FeObject* sequence,
+                                         FeObject* index) {
+  FeObject* items[] = {sequence, index};
+  RaiseCondition(ctx, FeCompletionError, "args-out-of-range",
+                 FeMakeList(ctx, items, COUNT(items)), "args-out-of-range");
+}
+
+FeObject* FeMakeVector(FeContext* ctx, size_t length) {
+  return MakeVector(ctx, length, &nil);
+}
+
+size_t FeVectorLength(FeContext* ctx, FeObject* vector) {
+  return VectorLength(ctx, CheckVector(ctx, vector));
+}
+
+FeObject* FeVectorRef(FeContext* ctx, FeObject* vector, size_t index) {
+  CheckVector(ctx, vector);
+  if (index >= VectorLength(ctx, vector)) {
+    RaiseOutOfRange(ctx, vector, FeMakeInteger(ctx, (int64_t)index));
+  }
+  return VectorElement(ctx, vector, index);
+}
+
+void FeVectorSet(FeContext* ctx,
+                 FeObject* vector,
+                 size_t index,
+                 FeObject* value) {
+  CheckVector(ctx, vector);
+  if (index >= VectorLength(ctx, vector)) {
+    RaiseOutOfRange(ctx, vector, FeMakeInteger(ctx, (int64_t)index));
+  }
+  SetVectorElement(ctx, vector, index, value);
+}
 
 FeObject* FeCons(FeContext* ctx, FeObject* car, FeObject* cdr) {
   FeObject* obj = MakeObject(ctx);
@@ -1662,6 +1828,35 @@ static void WriteElements(Writer* w, FeObject* obj, size_t depth) {
   }
 }
 
+// A vector's elements, without the surrounding brackets. Deliberately shaped
+// like `WriteElements` above and deliberately unlike it in one way: there is
+// no cycle detector here, and there is nothing for one to detect on a spine,
+// because a vector has none. A vector that contains ITSELF is finite work all
+// the same -- every element costs a level of `depth`, so the recursion ends
+// in `#<deep>` exactly as a `(setcar x x)` list already does. Emacs prints
+// `[0 #0]` for that shape; fe's deliberately bounded writer is the recorded
+// `writer-bounded-output` policy and this is it, unchanged, applied to a new
+// type. doc/language.md states the decision and why it was not `#0`.
+//
+// The block address is derived per element, inside `VectorElement`, and never
+// hoisted: `WriteObject` below reaches the host's `FeWriteFn`, whose contract
+// does not forbid allocation, and an allocation compacts. That is census row
+// A6-A10's rule met by a new site rather than inherited from an old one.
+static void WriteVectorElements(Writer* w, FeObject* obj, size_t depth) {
+  const size_t length = VectorLength(w->ctx, obj);
+  for (size_t i = 0; i < length; i++) {
+    if (i != 0) {
+      Emit(w, ' ');
+    }
+    if (w->bytes == 0 || w->nodes == 0) {
+      EmitString(w, "#<truncated>");
+      w->complete = false;
+      return;
+    }
+    WriteObject(w, VectorElement(w->ctx, obj, i), w->nested_qt, depth);
+  }
+}
+
 // A closure or macro prints as `(lambda PARAMS BODY...)`. This used to cons the
 // head onto the body, which meant the writer allocated: printing could collect
 // and raise `out of memory` part way through, longjmping out of whatever C
@@ -1771,6 +1966,14 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
 
     case FeTString:
       EmitStoredString(w, obj, qt);
+      break;
+
+    // Phase 24: the reader's own syntax back out, which is what makes
+    // `[1 (2) "x"]` print as Emacs prints it.
+    case FeTVector:
+      Emit(w, '[');
+      WriteVectorElements(w, obj, depth - 1);
+      Emit(w, ']');
       break;
 
     case FeTFn:
@@ -2162,6 +2365,11 @@ bool SymbolIsLetDynamic(FeContext* ctx, const FeObject* sym) {
 }
 
 static FeObject rparen;
+// Phase 24: `]`'s own sentinel. A second one rather than reusing `rparen`,
+// because the two are not interchangeable in either direction -- `[1 2)` and
+// `(1 2]` are both errors on the pinned Emacs, and one sentinel would make
+// each of them close the other's opener silently.
+static FeObject rbracket;
 
 // Reader macros — 'x, `x, ,x, ,@x and #'x — all expand to `(NAME form)`;
 // `#'`'s NAME is `function` (sub-plan 04D).
@@ -2265,12 +2473,21 @@ static double NanWithSign(bool negative) {
 // every byte up to the closing quote and never consults this.
 #define ReaderWhitespace " \f\n\t\r"
 
+// The bytes that END a token, whitespace included: whitespace separates
+// tokens, these also terminate one that is already running. Spelled once for
+// the reason above -- the three places that ask the question must not drift
+// -- and Phase 24 is why it is a macro of its own rather than a string pasted
+// three times: `[` and `]` joined it, and a set that had gained them in two
+// places out of three would read `[1 2 3]` as `1 2 3]` and then blame the
+// closing paren of whatever form it was inside.
+#define ReaderTokenEnd ReaderWhitespace "();`,[]"
+
 // A number, `nil`, or a symbol. `chr` is the first character; a character
 // already pushed back into `ctx->nextchr` is consumed before the input.
 static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
   char buf[SymbolNameLimit + 1];
   char* p = buf;
-  const char* delimiter = ReaderWhitespace "();`,";
+  const char* delimiter = ReaderTokenEnd;
   bool escaped = false;
   do {
     // Emacs' symbol escapes (Phase 14): a backslash takes the next byte into
@@ -2556,7 +2773,7 @@ static void RequireCharacterDelimiter(FeContext* ctx,
                                       void* udata) {
   const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
   ctx->nextchr = chr;
-  if (chr != '\0' && strchr(ReaderWhitespace "();`,\"'", chr) == NULL) {
+  if (chr != '\0' && strchr(ReaderTokenEnd "\"'", chr) == NULL) {
     FeHandleError(ctx, "unsupported read syntax: ? literal without delimiter");
   }
 }
@@ -2601,7 +2818,7 @@ static RadixDigits ReadRadixDigits(FeContext* ctx,
   // overflow flag and a `double` fallback, never into a buffer, so a long
   // literal follows the recorded radix-overflow policy instead of reporting
   // the 63-byte *symbol* limit for something that is not a symbol.
-  while (chr && !strchr(ReaderWhitespace "();`,", chr)) {
+  while (chr && !strchr(ReaderTokenEnd, chr)) {
     const int digit = HexDigit(chr);
     if (digit < 0 || digit >= base) {
       FeHandleError(ctx, "unsupported read syntax: malformed radix integer");
@@ -2756,7 +2973,10 @@ static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
   FeObject* v;
   while ((v = Read(ctx, fn, udata)) != &rparen) {
     if (v == NULL) {
-      FeHandleError(ctx, "unclosed list");
+      RaiseNamedError(ctx, "end-of-file", "end-of-file: unclosed list");
+    }
+    if (v == &rbracket) {
+      FeHandleError(ctx, "stray ']'");
     }
     // An ESCAPED dot is an ordinary symbol, so `(a \. b)` is a three-element
     // list where `(a . b)` is a pair (Phase 14). The two read to the same
@@ -2770,7 +2990,7 @@ static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
       // it into the misleading `stray ')'`.
       v = Read(ctx, fn, udata);
       if (v == NULL) {
-        FeHandleError(ctx, "unclosed list");
+        RaiseNamedError(ctx, "end-of-file", "end-of-file: unclosed list");
       }
       if (v == &rparen) {
         FeHandleError(ctx, "missing value after '.'");
@@ -2780,7 +3000,7 @@ static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
       FePushGC(ctx, res);
       v = Read(ctx, fn, udata);
       if (v == NULL) {
-        FeHandleError(ctx, "unclosed list");
+        RaiseNamedError(ctx, "end-of-file", "end-of-file: unclosed list");
       }
       if (v != &rparen) {
         FeHandleError(ctx, "extra value after dotted tail");
@@ -2793,6 +3013,49 @@ static FeObject* ReadList(FeContext* ctx, FeReadFn fn, void* udata) {
     FePushGC(ctx, res);
   }
   return res;
+}
+
+// Reads the rest of a vector, the opening '[' already consumed. The elements
+// go into a list first and the list into a block of exactly that length,
+// because the length is not known until `]` arrives and the input is a
+// stream: the alternatives are re-publishing a growing block per element,
+// which is quadratic copying, or a second pass over input there is no way to
+// rewind. The transient list is n pairs of garbage, collected like any other
+// reader garbage, and the GC discipline is `ReadList`'s exactly -- one slot,
+// restored per element, so a 100 000-element literal costs the root stack
+// one entry and not 100 000.
+//
+// A '.' is a syntax error here rather than the dotted-tail marker it is
+// inside a list: `[1 . 2]` is `invalid-read-syntax` on the pinned Emacs, and
+// Phase 8's rule for this reader is reject rather than misread -- accepting
+// it would silently produce the three-element vector `[1 \. 2]`.
+static FeObject* ReadVector(FeContext* ctx, FeReadFn fn, void* udata) {
+  FeObject* list = &nil;
+  FeObject** tail = &list;
+  size_t length = 0;
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, list);  // To cause error on too-deep nesting
+  FeObject* v;
+  while ((v = Read(ctx, fn, udata)) != &rbracket) {
+    if (v == NULL) {
+      RaiseNamedError(ctx, "end-of-file", "end-of-file: unclosed vector");
+    }
+    if (v == &rparen) {
+      FeHandleError(ctx, "stray ')'");
+    }
+    if (IsDot(v) && !ctx->reader_atom_escaped) {
+      FeHandleError(ctx, "'.' inside a vector");
+    }
+    *tail = FeCons(ctx, v, &nil);
+    tail = &CDR(*tail);
+    length++;
+    FeRestoreGC(ctx, gc);
+    FePushGC(ctx, list);
+  }
+  FeObject* const vector = MakeVectorFromList(ctx, list, length);
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, vector);
+  return vector;
 }
 
 static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
@@ -2819,8 +3082,6 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
   RecordTopFormLine(ctx);
   if (chr == '?')
     return ReadCharacter(ctx, fn, udata);
-  if (chr == '[' || chr == ']')
-    FeHandleError(ctx, "unsupported read syntax: vector brackets");
 
   switch (chr) {
     case '\0':
@@ -2828,6 +3089,12 @@ static FeObject* Read(FeContext* ctx, FeReadFn fn, void* udata) {
 
     case ')':
       return &rparen;
+
+    case ']':
+      return &rbracket;
+
+    case '[':
+      return ReadVector(ctx, fn, udata);
 
     case '(':
       return ReadList(ctx, fn, udata);
@@ -2861,6 +3128,9 @@ FeObject* FeRead(FeContext* ctx, FeReadFn fn, void* udata) {
   FeObject* obj = Read(ctx, fn, udata);
   if (obj == &rparen) {
     FeHandleError(ctx, "stray ')'");
+  }
+  if (obj == &rbracket) {
+    FeHandleError(ctx, "stray ']'");
   }
   return obj;
 }
@@ -3357,6 +3627,260 @@ FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
       result = FeIsNil(CAR(arguments))
                    ? &nil
                    : SymbolPlist(CheckType(ctx, CAR(arguments), FeTSymbol));
+      break;
+    default:
+      abort();
+  }
+  FeRestoreGC(ctx, gc);
+  FePushGC(ctx, result);
+  return result;
+}
+
+bool IsVectorPrimitive(Primitive primitive) {
+  return primitive >= PVector && primitive <= PElt;
+}
+
+// A LENGTH operand. Emacs answers `(wrong-type-argument wholenump N)` for a
+// negative length and for a float -- measured, `(make-vector -1 0)` and
+// `(make-vector 2.0 0)` both -- rather than treating either as an arity or a
+// range problem.
+static size_t LengthArgument(FeContext* ctx, FeObject* obj) {
+  if (FeGetType(obj) != FeTInteger || INTEGER(obj) < 0) {
+    RaiseWrongType(ctx, "wholenump", obj);
+  }
+  return (size_t)INTEGER(obj);
+}
+
+// An INDEX operand. A non-integer is `(wrong-type-argument fixnump I)`,
+// Emacs' own predicate for the position of an array element; a NEGATIVE
+// integer is not rejected here, because Emacs reports it as out of RANGE and
+// with the index it was given -- `(aref [10 20] -1)` is `(args-out-of-range
+// [10 20] -1)` -- which is why this returns a signed value the bounds check
+// below tests rather than a `size_t` that would already have wrapped.
+static int64_t IndexArgument(FeContext* ctx, FeObject* obj) {
+  if (FeGetType(obj) != FeTInteger) {
+    RaiseWrongType(ctx, "fixnump", obj);
+  }
+  return INTEGER(obj);
+}
+
+// The `index`th stored byte of a string chain. A WALK, because a fe string is
+// a chain of `StringBufferSize`-byte cells and has no index of its own; the
+// caller has already bounds-checked, so the trailing return is unreachable
+// and is there for the compiler. Phase 25 is where a string's bytes move onto
+// the payload region and this becomes the same arithmetic a vector's element
+// already is.
+static unsigned char StringByteAt(const FeObject* string, size_t index) {
+  size_t seen = 0;
+  while (!FeIsNil(string)) {
+    const char* buffer = STRING_BUFFER(string);
+    const char* end = memchr(buffer, '\0', StringBufferSize);
+    const size_t count =
+        end == nullptr ? StringBufferSize : (size_t)(end - buffer);
+    if (index < seen + count) {
+      return (unsigned char)buffer[index - seen];
+    }
+    seen += count;
+    string = CDR(string);
+  }
+  return 0;
+}
+
+// How many elements a SEQUENCE has, which is `length`'s answer and the sum
+// `vconcat` sizes its result from. The three sequence types and nothing else:
+// anything not a list, a string or a vector is `(wrong-type-argument
+// sequencep X)`, and a list whose tail is not nil is `(wrong-type-argument
+// listp TAIL)` -- about the offending TAIL, which is Emacs' answer for
+// `(length '(1 . 2))` too.
+//
+// A string's answer is its BYTE count. fe strings are byte strings (the
+// recorded `reader-string-byte-limit` family), so `(length "é")` is 3
+// here and 2 on Emacs, whose strings are sequences of characters; that is the
+// existing divergence showing through a new name rather than a new one.
+static size_t SequenceCount(FeContext* ctx, FeObject* sequence) {
+  const FeType type = FeGetType(sequence);
+  if (type == FeTVector) {
+    return VectorLength(ctx, sequence);
+  }
+  if (type == FeTString) {
+    return CopyStoredStringBytes(sequence, nullptr);
+  }
+  if (type != FeTNil && type != FeTPair) {
+    RaiseWrongType(ctx, "sequencep", sequence);
+  }
+  size_t count = 0;
+  while (FeGetType(sequence) == FeTPair) {
+    count++;
+    sequence = CDR(sequence);
+  }
+  if (!FeIsNil(sequence)) {
+    RaiseWrongType(ctx, "listp", sequence);
+  }
+  return count;
+}
+
+// `(aref ARRAY INDEX)`. An ARRAY is a vector or a string -- strings are
+// arrays in Emacs, which is why the wrong-type predicate is `arrayp` and not
+// `vectorp`, the one detail Phase 24.0 froze against the oracle before there
+// was an implementation to get it wrong. A string element is its byte.
+static FeObject* Aref(FeContext* ctx, FeObject* array, FeObject* index_obj) {
+  const int64_t index = IndexArgument(ctx, index_obj);
+  const FeType type = FeGetType(array);
+  if (type != FeTVector && type != FeTString) {
+    RaiseWrongType(ctx, "arrayp", array);
+  }
+  const size_t length = type == FeTVector
+                            ? VectorLength(ctx, array)
+                            : CopyStoredStringBytes(array, nullptr);
+  if (index < 0 || (uint64_t)index >= length) {
+    RaiseOutOfRange(ctx, array, index_obj);
+  }
+  return type == FeTVector
+             ? VectorElement(ctx, array, (size_t)index)
+             : FeMakeInteger(ctx, StringByteAt(array, (size_t)index));
+}
+
+// `(aset ARRAY INDEX VALUE)`, answering VALUE as Emacs does. A STRING is an
+// array Emacs can write and fe cannot: its bytes live in a chain of cells
+// whose last one is NUL-terminated and whose width is fixed, so a write is
+// only meaningful for a byte that keeps the chain's shape. Refusing it by
+// name is the recorded divergence; Phase 25, which moves those bytes onto the
+// payload region, is where it becomes implementable rather than awkward. The
+// non-array answer stays Emacs' `(wrong-type-argument arrayp X)`.
+static FeObject* Aset(FeContext* ctx,
+                      FeObject* array,
+                      FeObject* index_obj,
+                      FeObject* value) {
+  const int64_t index = IndexArgument(ctx, index_obj);
+  if (FeGetType(array) == FeTString) {
+    FeHandleError(ctx, "unsupported: aset on a string");
+  }
+  if (FeGetType(array) != FeTVector) {
+    RaiseWrongType(ctx, "arrayp", array);
+  }
+  if (index < 0 || (uint64_t)index >= VectorLength(ctx, array)) {
+    RaiseOutOfRange(ctx, array, index_obj);
+  }
+  SetVectorElement(ctx, array, (size_t)index, value);
+  return value;
+}
+
+// `(elt SEQUENCE N)`, and Emacs' measured ASYMMETRY with it: on a vector or a
+// string `elt` routes to `aref` and an index past the end raises, while on a
+// list it routes to `nth` and answers nil -- `(elt '(1 2) 9)` is nil and
+// `(elt [1 2] 9)` is `args-out-of-range`. A negative index on a list is `nth`'s
+// answer too, the first element, measured: `(nth -1 '(1 2))` is 1.
+static FeObject* SequenceElement(FeContext* ctx,
+                                 FeObject* sequence,
+                                 FeObject* index_obj) {
+  const FeType type = FeGetType(sequence);
+  if (type == FeTVector || type == FeTString) {
+    return Aref(ctx, sequence, index_obj);
+  }
+  if (type != FeTNil && type != FeTPair) {
+    RaiseWrongType(ctx, "sequencep", sequence);
+  }
+  int64_t index = IndexArgument(ctx, index_obj);
+  while (index > 0 && FeGetType(sequence) == FeTPair) {
+    index--;
+    sequence = CDR(sequence);
+  }
+  return FeCar(ctx, sequence);
+}
+
+// One `vconcat` operand's elements written into VECTOR from `at`, answering
+// the next free slot. A STRING contributes its bytes as integers, which is
+// Emacs' rule and the one an implementation gets wrong by contributing the
+// string itself: `(vconcat "ab")` is `[97 98]`.
+//
+// The GC-stack checkpoint inside the loop is load-bearing rather than tidy.
+// `FeMakeInteger` pushes what it allocates, so a string operand pushed one
+// root per byte, and the root stack's ordinary ceiling is
+// `GcStackSize - GcStackReserve` = 4032 slots: without the restore,
+// `(vconcat A-4033-BYTE-STRING)` overflowed the root stack instead of
+// answering. Restoring after the store is safe because the element is
+// reachable from VECTOR, which is rooted above this checkpoint.
+static size_t AppendSequence(FeContext* ctx,
+                             FeObject* vector,
+                             size_t at,
+                             FeObject* sequence) {
+  const FeType type = FeGetType(sequence);
+  const size_t count = SequenceCount(ctx, sequence);
+  const size_t gc = FeSaveGC(ctx);
+  for (size_t i = 0; i < count; i++) {
+    FeObject* element = nullptr;
+    if (type == FeTVector) {
+      element = VectorElement(ctx, sequence, i);
+    } else if (type == FeTString) {
+      element = FeMakeInteger(ctx, StringByteAt(sequence, i));
+    } else {
+      element = CAR(sequence);
+      sequence = CDR(sequence);
+    }
+    SetVectorElement(ctx, vector, at + i, element);
+    FeRestoreGC(ctx, gc);
+  }
+  return at + count;
+}
+
+// `(vconcat &rest SEQUENCES)`. Two passes over the operands: the first sizes
+// the result, the second fills it. One pass over a growing block would mean
+// re-publishing per operand, which copies what is already there each time;
+// two passes over an argument list that cannot change between them do not.
+static FeObject* Vconcat(FeContext* ctx, FeObject* arguments) {
+  size_t total = 0;
+  for (FeObject* rest = arguments; !FeIsNil(rest); rest = CDR(rest)) {
+    total += SequenceCount(ctx, CAR(rest));
+  }
+  FeObject* const vector = MakeVector(ctx, total, &nil);
+  size_t at = 0;
+  for (FeObject* rest = arguments; !FeIsNil(rest); rest = CDR(rest)) {
+    at = AppendSequence(ctx, vector, at, CAR(rest));
+  }
+  return vector;
+}
+
+// Phase 24's vector family, finished from its evaluated operand list exactly
+// as `EvaluateSymbolPrimitive` finishes Phase 14's: `arguments` is a C local
+// in `ResumeEvalList` by now, so it is rooted here across the allocations
+// below, and the result is pushed after the restore -- the state every other
+// primitive leaves the GC stack in.
+FeObject* EvaluateVectorPrimitive(FeContext* ctx,
+                                  Primitive primitive,
+                                  FeObject* arguments) {
+  const size_t gc = FeSaveGC(ctx);
+  FePushGC(ctx, arguments);
+  FeObject* result = &nil;
+  // On an `int` for `-Wswitch-enum`'s sake, exactly as
+  // `EvaluateSymbolPrimitive` above: this switch deliberately handles the
+  // eight its caller filtered for.
+  switch ((int)primitive) {
+    case PVector:
+      result =
+          MakeVectorFromList(ctx, arguments, SequenceCount(ctx, arguments));
+      break;
+    case PMakeVector:
+      result = MakeVector(ctx, LengthArgument(ctx, CAR(arguments)),
+                          CAR(CDR(arguments)));
+      break;
+    case PVectorp:
+      result = FeMakeBool(ctx, FeGetType(CAR(arguments)) == FeTVector);
+      break;
+    case PAref:
+      result = Aref(ctx, CAR(arguments), CAR(CDR(arguments)));
+      break;
+    case PAset:
+      result = Aset(ctx, CAR(arguments), CAR(CDR(arguments)),
+                    CAR(CDR(CDR(arguments))));
+      break;
+    case PVconcat:
+      result = Vconcat(ctx, arguments);
+      break;
+    case PLength:
+      result = FeMakeInteger(ctx, (int64_t)SequenceCount(ctx, CAR(arguments)));
+      break;
+    case PElt:
+      result = SequenceElement(ctx, CAR(arguments), CAR(CDR(arguments)));
       break;
     default:
       abort();

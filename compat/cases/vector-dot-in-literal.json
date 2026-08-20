@@ -1,0 +1,6 @@
+{
+ "id": "vector-dot-in-literal",
+ "setup": [],
+ "expr": "[1 . 2]",
+ "note": "Both sides REJECT a dotted-pair marker inside a vector and the verdict is the point: Emacs raises `invalid-read-syntax', fe raises its own named read error, so the condition symbols disagree while the answer does not. Recorded like reader-character-delimiter, which is the same shape of disagreement."
+}
