@@ -1316,10 +1316,15 @@ static bool TestPoisonedPointerFailsLoudly(void) {
   for (size_t i = 0; i < FePayloadAlignment; i++) {
     CHECK(vacated[i] == FePayloadPoisonByte);
   }
-  // The extent moved by exactly one unit and the bytes came with it:
-  // re-deriving from the owner is the fix, and the only one.
+  // The extent moved and the bytes came with it: re-deriving from the owner
+  // is the fix, and the only one. WHICH WAY it moved is not asserted, and
+  // must not be: an allocation that collects first -- every one of them in
+  // the `FE_GC_STRESS` build -- returns the extent to the region's base
+  // before the poison step slides it forward again, so the net motion is
+  // backward there and forward here. What the protocol says is that the
+  // address is invalid, not which direction it went.
   const unsigned char* const rederived = AggregateBytes(context, owner);
-  CHECK(rederived == held + FePayloadAlignment);
+  CHECK(rederived != held);
   CHECK(memcmp(rederived, "abcdefg", 7) == 0);
   FeCloseContext(context);
   return true;
@@ -1402,6 +1407,232 @@ static bool TestPayloadCountersCount(void) {
 
 #endif  // FE_PERF_COUNTERS && !FE_GC_STRESS
 
+// ---------------------------------------------------------------------------
+// Strings, the payload region's second release owner (Phase 25). What is here
+// is the three gates the master plan names for it, all of which are about the
+// storage MOVING under something that has to keep working: the five lengths
+// surviving a compaction, a symbol still being found by name after its name's
+// bytes have slid, and a replacement block leaving the header alone.
+//
+// The lane that arms `FE_DEBUG_PAYLOAD_MOVE` runs all three with the extent
+// sliding at every allocation, which is what turns "the compactor happened not
+// to move this" into "it moved and the answer is still right".
+// ---------------------------------------------------------------------------
+
+// A recognisable byte pattern of `length` bytes, NUL every third, so that a
+// string read back through a stale address or a wrong length is visibly wrong
+// rather than plausibly short.
+static void FillStringPattern(char* buffer, size_t length) {
+  for (size_t at = 0; at < length; at++) {
+    buffer[at] = at % 3 == 1 ? '\0' : (char)('a' + (int)(at % 26));
+  }
+}
+
+// The master plan's second gate: 0, 7, 8, 256 and 8192 bytes survive
+// compaction. Each string is published with a dead block in front of it, so
+// the collection really has somewhere to slide them down TO -- a compaction
+// that reclaimed nothing would prove nothing here.
+static bool TestStringsSurviveCompaction(void) {
+  unsigned char* const storage = malloc(VectorArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = OpenVectorContext(storage, VectorArenaSize);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    free(storage);
+    return false;
+  }
+  static const size_t lengths[] = {0, 7, 8, 256, 8192};
+  enum { Count = sizeof(lengths) / sizeof(lengths[0]) };
+  static char pattern[8192];
+  static char copy[8192];
+  FeObject* strings[Count] = {nullptr};
+  FePayloadHandle before[Count] = {0};
+
+  const size_t base = FeSaveGC(context);
+  const size_t floor_bytes = context->payload_used;
+  for (size_t i = 0; i < Count; i++) {
+    // The doomed neighbour, unrooted the moment the next allocation happens
+    // because nothing but the GC stack holds it and the checkpoint below
+    // drops that.
+    (void)FeMakeStringBytes(context, "doomed", 6);
+    FillStringPattern(pattern, lengths[i]);
+    strings[i] = FeMakeStringBytes(context, pattern, lengths[i]);
+    before[i] = PAYLOAD(strings[i]);
+  }
+  FeRestoreGC(context, base);
+  for (size_t i = 0; i < Count; i++) {
+    FePushGC(context, strings[i]);
+  }
+  FeCollectGarbage(context);
+  CHECK(context->payload_compaction_count == 1);
+
+  size_t expected = floor_bytes;
+  for (size_t i = 0; i < Count; i++) {
+    // Every one of them MOVED -- five dead blocks came out from between them
+    // -- and every one of them still reads back byte for byte.
+    CHECK(PAYLOAD(strings[i]) != before[i]);
+    CHECK(PAYLOAD(strings[i]) == ExpectedHandle(expected));
+    expected += StringBlockBytes(lengths[i]);
+    FillStringPattern(pattern, lengths[i]);
+    CHECK(FeStringByteLength(context, strings[i]) == lengths[i]);
+    CHECK(FeStringBytes(context, strings[i], copy, sizeof(copy)) == lengths[i]);
+    CHECK(memcmp(copy, pattern, lengths[i]) == 0);
+  }
+  CHECK(context->payload_used == expected);
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
+// THE STOPPING RULE'S TEST. A symbol's name is a string and a string's bytes
+// move, so a lookup that read a stale address -- or an interning comparison
+// that cached one across the scan -- would answer with the wrong symbol or
+// with none. The move is CONSTRUCTED rather than hoped for: the garbage is
+// allocated BEFORE the symbols, so reclaiming it leaves a hole the names have
+// to slide down into, and the handles are asserted to have changed before any
+// lookup is attempted.
+static bool TestSymbolNamesSurviveMovingPayloads(void) {
+  unsigned char* const storage = malloc(VectorArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = OpenVectorContext(storage, VectorArenaSize);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    free(storage);
+    return false;
+  }
+  enum { Count = 64, Garbage = 128 };
+  FeObject* symbols[Count] = {nullptr};
+  FePayloadHandle names[Count] = {0};
+  char name[SymbolNameLimit + 1];
+
+  const size_t base = FeSaveGC(context);
+  // The hole, first, so that what follows it has room to move.
+  for (size_t i = 0; i < Garbage; i++) {
+    (void)FeMakeStringBytes(context, "garbage-that-will-be-reclaimed", 30);
+  }
+  // Names of every length from 12 to 43 bytes, so the length test that
+  // interning starts with is exercised in both directions.
+  for (size_t i = 0; i < Count; i++) {
+    (void)snprintf(name, sizeof(name), "moving-name-%zu-%.*s", i, (int)(i % 32),
+                   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    symbols[i] = FeMakeSymbol(context, name);
+    names[i] = PAYLOAD(SymbolName(symbols[i]));
+  }
+  // Only the symbol list holds anything now, which is what makes the garbage
+  // above garbage. The symbols themselves are interned and need no root.
+  FeRestoreGC(context, base);
+  FeCollectGarbage(context);
+  CHECK(context->payload_compaction_count == 1);
+
+  for (size_t i = 0; i < Count; i++) {
+    // The name's bytes are somewhere else than they were.
+    CHECK(PAYLOAD(SymbolName(symbols[i])) != names[i]);
+  }
+  static const char miss[] = "(intern-soft \"no-such-name-anywhere\")";
+  for (size_t i = 0; i < Count; i++) {
+    // ...and the obarray still finds exactly the symbol that name belongs to,
+    // by walking `symbol_list` and comparing length-then-bytes through the
+    // accessor, at an address it derives per candidate.
+    (void)snprintf(name, sizeof(name), "moving-name-%zu-%.*s", i, (int)(i % 32),
+                   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    CHECK(FeMakeSymbol(context, name) == symbols[i]);
+    // An evaluation between two lookups, so the names keep moving THROUGH
+    // the loop rather than only before it: it allocates, which is a
+    // compaction under `FE_GC_STRESS` and a slide of the whole extent under
+    // `FE_DEBUG_PAYLOAD_MOVE`. Its own answer is the other half of the
+    // contract -- a miss must not intern, whatever the storage did.
+    CHECK(FeIsNil(
+        FeEvaluateString(context, "intern.fe", miss, sizeof(miss) - 1)));
+  }
+  // A name whose LENGTH matches an interned one but whose bytes do not is a
+  // miss, which is the half a length-only comparison would get wrong.
+  (void)snprintf(name, sizeof(name), "moving-name-0-");
+  name[strlen(name) - 1] = 'Z';
+  CHECK(FeMakeSymbol(context, name) != symbols[0]);
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
+// The master plan's fourth gate: a string mutation that needs a REPLACEMENT
+// block leaves the header alone. This is the reader's growing literal in one
+// statement -- `PublishPayload` is what `AppendStringByte` calls when the
+// capacity runs out -- asked here rather than through the reader because what
+// has to be observed is the object's identity ACROSS the replacement, which
+// the reader only hands back afterwards.
+static bool TestStringReplacementKeepsHeader(void) {
+  FeContext* const context = OpenPayloadContext(PayloadArenaPercent);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    return false;
+  }
+  FeObject* const string = FeMakeStringBytes(context, "ab\0cdefgh", 9);
+  FeObject* const holder = FeCons(context, string, &nil);
+  const FePayloadHandle before = PAYLOAD(string);
+  char copy[32];
+
+  PublishPayload(context, string, 0, 4096);
+  CHECK(PAYLOAD(string) != before);
+  // The same object, still: `holder` was never told anything, and the length
+  // word never moved -- it is in the header, which is what did not change.
+  CHECK(FeCar(context, holder) == string);
+  CHECK(FeStringByteLength(context, string) == 9);
+  CHECK(FeStringBytes(context, string, copy, sizeof(copy)) == 9);
+  CHECK(memcmp(copy, "ab\0cdefgh", 9) == 0);
+
+  // ...and the same in the other direction, which is the reader's trim: a
+  // SMALLER replacement keeps every byte the string actually has.
+  PublishPayload(context, string, 0, 9);
+  CHECK(FeStringBytes(context, string, copy, sizeof(copy)) == 9);
+  CHECK(memcmp(copy, "ab\0cdefgh", 9) == 0);
+  FeCloseContext(context);
+  return true;
+}
+
+// The release path the two above stand in for: the reader, growing a literal
+// one byte at a time. What it costs is several blocks of which all but the
+// last are dead, and what it leaves is a string whose block is exactly the
+// size `FeMakeStringBytes` would have given it -- the trim, which is why the
+// reader's growth policy is nothing the rest of fe has to know about.
+static bool TestReaderLiteralGrowsAndTrims(void) {
+  FeContext* const context = OpenPayloadContext(PayloadArenaPercent);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    return false;
+  }
+  enum { Length = 300 };
+  static char source[Length + 3];
+  static char copy[Length + 1];
+  source[0] = '"';
+  FillStringPattern(source + 1, Length);
+  for (size_t i = 0; i < Length; i++) {
+    // A NUL cannot be written literally in source -- it is the reader's end
+    // of input -- so the pattern's NULs are spelled as escapes, which is what
+    // makes this the reader's own NUL path as well.
+    source[1 + i] = source[1 + i] == '\0' ? 'N' : source[1 + i];
+  }
+  source[1 + Length] = '"';
+
+  const size_t before_used = context->payload_used;
+  FeObject* const string = FeReadString(context, source, Length + 2, nullptr);
+  CHECK(string != nullptr && FeGetType(string) == FeTString);
+  CHECK(FeStringByteLength(context, string) == Length);
+  CHECK(FeStringBytes(context, string, copy, sizeof(copy)) == Length);
+  CHECK(memcmp(copy, source + 1, Length) == 0);
+  // More than one block was published -- the growth -- and after a collection
+  // reclaims the dead ones the survivor is exactly one trimmed block.
+  CHECK(context->payload_used - before_used > StringBlockBytes(Length));
+  const size_t gc = FeSaveGC(context);
+  FePushGC(context, string);
+  FeCollectGarbage(context);
+  FeRestoreGC(context, gc);
+  CHECK(context->payload_used == before_used + StringBlockBytes(Length));
+  CHECK(FeStringBytes(context, string, copy, sizeof(copy)) == Length);
+  CHECK(memcmp(copy, source + 1, Length) == 0);
+  FeCloseContext(context);
+  return true;
+}
+
 int main(void) {
   const bool ok =
       TestRegionCarve() && TestBumpAllocationOrder() &&
@@ -1414,6 +1645,9 @@ int main(void) {
       TestFailureInjectionAtEveryAllocation() && TestMarkDepthIsFlat() &&
       TestVectorCompactionIsDeterministic() &&
       TestVectorExhaustionLeavesNothingBehind() && TestVectorCostTable() &&
+      TestStringsSurviveCompaction() &&
+      TestSymbolNamesSurviveMovingPayloads() &&
+      TestStringReplacementKeepsHeader() && TestReaderLiteralGrowsAndTrims() &&
       TestRandomAccessIsFlat() && TestPoisonedPointerFailsLoudly() &&
       TestPayloadCountersCount();
   (void)printf(

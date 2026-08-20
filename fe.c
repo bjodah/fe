@@ -619,6 +619,17 @@ void CompactPayloads(FeContext* ctx) {
   // are offsets INTO the extent, so moving the extent does not change one.
   if (ctx->payload_start != 0) {
     memmove(ctx->payload_base, PayloadAt(ctx, 0), ctx->payload_used);
+#if FE_DEBUG_PAYLOAD_MOVE
+    // The bytes the extent vacated read as poison, exactly as the ones
+    // `MovePayloadRegion` vacates do. Without this a pointer into the TAIL of
+    // the old extent reads valid old data after this move: the extent slides
+    // DOWN over itself, and a backward `memmove` does not overwrite its own
+    // tail. Found by the poison lane in Phase 25 -- before strings owned
+    // payloads the region was empty at this point in the substrate's own
+    // test, so the case could not arise.
+    memset(ctx->payload_base + ctx->payload_used, FePayloadPoisonByte,
+           ctx->payload_start);
+#endif
     ctx->payload_start = 0;
   }
 }
