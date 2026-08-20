@@ -583,20 +583,28 @@ static bool BodyIntern(const Workload* workload, WorkloadRun* run) {
   // exactly rather than approximately.
   const unsigned long long before =
       run->baseline_symbols + LiveAllocOf(FeTSymbol);
+  // ...and the index's own count of the same thing, read at the same instant,
+  // so the two are comparable rather than merely close.
+  const unsigned long long indexed = context->symbol_index_count;
   unsigned long long mark = FePerfRead(FePerfInternCandidate);
+  unsigned long long probe_mark = FePerfRead(FePerfInternProbe);
   const FeObject* const fresh = FeMakeSymbol(context, "fe-perf-absent-name");
   const unsigned long long miss = FePerfRead(FePerfInternCandidate) - mark;
+  const unsigned long long miss_probes =
+      FePerfRead(FePerfInternProbe) - probe_mark;
   FeRestoreGC(context, gc);
 
-  // A hit on the name just interned: a new symbol goes on the head of
-  // `symbol_list`, so this examines exactly one candidate.
+  // A hit on the name just interned. Before Phase 26 that was the head of
+  // `symbol_list` and cost exactly one candidate; it is now wherever its name
+  // hashes, and costs whatever its own probe does.
   mark = FePerfRead(FePerfInternCandidate);
   const FeObject* const again = FeMakeSymbol(context, "fe-perf-absent-name");
   const unsigned long long head = FePerfRead(FePerfInternCandidate) - mark;
   FeRestoreGC(context, gc);
 
   // A hit on a name the context interned at open, which is therefore past
-  // every symbol this workload made.
+  // every symbol this workload made -- and which the index makes cost the
+  // same as the name interned an instant ago, that being the point.
   mark = FePerfRead(FePerfInternCandidate);
   const FeObject* const core = FeMakeSymbol(context, "car");
   const unsigned long long deep = FePerfRead(FePerfInternCandidate) - mark;
@@ -606,8 +614,14 @@ static bool BodyIntern(const Workload* workload, WorkloadRun* run) {
   CHECK(fresh == again);
   CHECK(FeGetType(fresh) == FeTSymbol);
   CHECK(FeGetType(core) == FeTSymbol);
+  // Phase 26's debug check, after the largest interning workload fe has: the
+  // index still says exactly what `symbol_list` says, N symbols and several
+  // table resizes later.
+  CHECK(SymbolIndexMatchesSymbolList(context));
   AddExtra(run, "symbols_before_miss", before);
+  AddExtra(run, "indexed_symbols", indexed);
   AddExtra(run, "miss_candidates", miss);
+  AddExtra(run, "miss_probes", miss_probes);
   AddExtra(run, "hit_head_candidates", head);
   AddExtra(run, "hit_core_candidates", deep);
   (void)snprintf(run->answer, sizeof(run->answer),
@@ -615,28 +629,82 @@ static bool BodyIntern(const Workload* workload, WorkloadRun* run) {
   return true;
 }
 
+// Phase 26's gate constant, as a literal the measurement fixed: candidates
+// examined PER LOOKUP, at every tier. Measured here at 1.55, 1.72 and 1.55
+// for the 128, 1024 and 8192 tiers, so 4 leaves the table's own variance
+// twice the room it uses without leaving room for anything shaped like a
+// scan. The execution plan accepts up to 8 without a written argument, 8
+// being about what an average probe costs at a load factor this table never
+// reaches. Before the index the same figure was 629.85 at the 1024 tier and
+// 4213.98 at 8192.
+enum { InternCandidateBound = 4 };
+
+// What ONE probe may examine, which is a different question with a different
+// answer. A per-lookup average is the cost; a single probe's cost is the
+// length of the linear-probing cluster its name happens to land in, and at a
+// load factor of two thirds a cluster of ten is ordinary rather than
+// remarkable -- the 128 tier measures exactly that, 10 candidates for the
+// miss and 11 for the hit that follows it, while the two larger tiers
+// measure 0 and 1. So this is bounded and deliberately not pinned: the exact
+// cluster is deterministic, but it is a function of the whole set of names in
+// the table, and adding one core primitive would move it for reasons that
+// have nothing to do with what the assertion is about. What it does say is
+// that a single probe is bounded by a constant the tier's size does not
+// appear in, where the entry-pin miss examined 246, 1142 and 8310.
+enum { InternProbeBound = 32 };
+
 static bool CheckIntern(const Workload* workload, const WorkloadRun* run) {
   const unsigned long long n = (unsigned long long)workload->param;
   CHECK(AllocationIsPartitioned(run));
   CHECK(run->stats.allocation_failures == 0);
   // Nothing collected, so no symbol this workload made was ever reclaimed and
-  // the obarray length below is exact.
+  // the obarray length below is exact -- and the index's own resizes, which
+  // publish a bigger block and orphan the old one, did not need one either.
   CHECK(CounterOf(run, FePerfGcCollection) == 0);
   // n populating misses plus the probe's own, then two hits after it.
   CHECK(CounterOf(run, FePerfInternMiss) == n + 1);
   CHECK(CounterOf(run, FePerfInternLookup) == n + 3);
-  // THE SHAPE PHASE 26 EXISTS TO BREAK: a miss examines every interned
-  // symbol, because the obarray is a list and the scan has to reach its end
-  // before it can conclude anything.
-  CHECK(ExtraOf(run, "miss_candidates") == ExtraOf(run, "symbols_before_miss"));
-  // A hit on the head is O(1) already; a hit on a name interned before this
-  // workload started is past everything it made.
-  CHECK(ExtraOf(run, "hit_head_candidates") == 1);
-  CHECK(ExtraOf(run, "hit_core_candidates") > n);
-  // No lambda is called anywhere in this workload, and `IsNamedSymbol` --
-  // which byte-compares "&optional"/"&rest" against every parameter of every
-  // call -- is the only other caller of the name comparison. So here the two
-  // counters are the same measurement: one comparison per candidate.
+  // Every symbol on the list is in the index and nothing else is, which is
+  // the one-recoverable-publish property counted rather than argued.
+  CHECK(ExtraOf(run, "indexed_symbols") == ExtraOf(run, "symbols_before_miss"));
+  // THE SHAPE PHASE 26 PUT IN PLACE OF THE SCAN. A miss used to examine every
+  // interned symbol -- the obarray was a list, and a scan has to reach the
+  // end before it can conclude anything -- so `miss_candidates` was
+  // `symbols_before_miss` exactly, at every tier. It is now a bounded handful
+  // that the tier's size does not appear in.
+  CHECK(ExtraOf(run, "miss_candidates") <= InternProbeBound);
+  // A miss stops at the first FREE slot, which is the one slot it looks at
+  // and does not count as a candidate. That is the whole difference between
+  // the two counters, and it is what makes a miss cost what a hit costs.
+  CHECK(ExtraOf(run, "miss_probes") == ExtraOf(run, "miss_candidates") + 1);
+  // A hit examines at least the symbol it found. Neither of these is 1 by
+  // construction any more: the head of the list was O(1) because it was the
+  // head, where both of these are O(1) because they are hashed.
+  CHECK(ExtraOf(run, "hit_head_candidates") >= 1);
+  CHECK(ExtraOf(run, "hit_head_candidates") <= InternProbeBound);
+  CHECK(ExtraOf(run, "hit_core_candidates") >= 1);
+  CHECK(ExtraOf(run, "hit_core_candidates") <= InternProbeBound);
+  // Clause 1 of the gate: candidates per lookup bounded by a literal, at this
+  // tier. Cross-multiplied rather than divided, so the bound is exact integer
+  // arithmetic on the counters themselves.
+  CHECK(CounterOf(run, FePerfInternCandidate) <=
+        InternCandidateBound * CounterOf(run, FePerfInternLookup));
+  // Probes are candidates plus exactly one free slot per miss, because a hit
+  // stops ON its candidate and a miss stops on the free slot after the last
+  // one. Nothing else can move these two apart.
+  CHECK(CounterOf(run, FePerfInternProbe) ==
+        CounterOf(run, FePerfInternCandidate) +
+            CounterOf(run, FePerfInternMiss));
+  // Clause 3 of the gate: the comparison counters follow the candidate count
+  // down. No lambda is called anywhere in this workload, and `IsNamedSymbol`
+  // -- which byte-compares "&optional"/"&rest" against every parameter of
+  // every call -- is the only other caller of the name comparison. So here
+  // the two counters are the same measurement, exactly as they were before
+  // the index: one comparison per candidate. They stay EQUAL rather than
+  // improving on it because a slot holds a symbol and no hash beside it, so
+  // there is nothing to reject a candidate with before its name is read --
+  // which is affordable only because there are now one or two of them per
+  // lookup instead of thousands.
   CHECK(CounterOf(run, FePerfNameCompare) ==
         CounterOf(run, FePerfInternCandidate));
   CHECK(CounterOf(run, FePerfNameByte) >= CounterOf(run, FePerfNameCompare));
@@ -1341,19 +1409,30 @@ static bool CheckInternTiers(void) {
   const WorkloadRun* const mid = Find("intern-1024");
   const WorkloadRun* const big = Find("intern-8192");
   CHECK(tiny != nullptr && mid != nullptr && big != nullptr);
-  // Every tier opens the same arena from the same starting state, so two
-  // misses differ by exactly the number of extra symbols interned before
-  // them: the scan is O(interned symbols), with a slope of exactly one.
-  CHECK(ExtraOf(mid, "miss_candidates") - ExtraOf(tiny, "miss_candidates") ==
-        1024 - 128);
-  CHECK(ExtraOf(big, "miss_candidates") - ExtraOf(mid, "miss_candidates") ==
-        8192 - 1024);
-  // Total interning work is quadratic in the tier size. Stated as a ratio
-  // rather than a constant, so that it stays true when the number of symbols
-  // a context open interns changes.
-  CHECK(CounterOf(mid, FePerfInternCandidate) >
-        8 * CounterOf(tiny, FePerfInternCandidate));
-  CHECK(CounterOf(big, FePerfInternCandidate) >
+  // THE TIERS STOP BEING DIFFERENT, which is Phase 26's whole claim and the
+  // clause that cannot be passed by making a scan merely faster.
+  //
+  // Every tier opens the same arena from the same starting state. Two misses
+  // used to differ by exactly the number of extra symbols interned before
+  // them -- 1024-128 and then 8192-1024, a slope of exactly one -- because
+  // the scan was O(interned symbols). All three are now under the same
+  // literal, and the differences between them are a slot or two either way.
+  CHECK(ExtraOf(tiny, "miss_candidates") <= InternProbeBound);
+  CHECK(ExtraOf(mid, "miss_candidates") <= InternProbeBound);
+  CHECK(ExtraOf(big, "miss_candidates") <= InternProbeBound);
+  // Clause 2 of the gate, stated between the two tiers the plan names: the
+  // per-lookup candidate count at 8192 is within a FACTOR OF TWO of the 1024
+  // tier's, where the measured entry-pin figure was 6.69x (4213.98 against
+  // 629.85). Cross-multiplied, since a per-lookup figure is a ratio of two
+  // counters and this has to be integer arithmetic.
+  CHECK(CounterOf(big, FePerfInternCandidate) *
+            CounterOf(mid, FePerfInternLookup) <=
+        2 * CounterOf(mid, FePerfInternCandidate) *
+            CounterOf(big, FePerfInternLookup));
+  // ...and total interning work is LINEAR in the tier size where it was
+  // quadratic: eight times the tier is at most eight times the work. The same
+  // step used to cost 53x (34 533 574 candidates against 646 854).
+  CHECK(CounterOf(big, FePerfInternCandidate) <=
         8 * CounterOf(mid, FePerfInternCandidate));
   // And the harness's own discipline, asserted rather than assumed: a C loop
   // that restores its `FeSaveGC` checkpoint every pass leaves the root stack

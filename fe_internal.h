@@ -866,6 +866,13 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
 // would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
 // the independent function cell used by call-position resolution.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
+// Phase 26's debug check: does the symbol index still say exactly what
+// `symbol_list` says? Every listed symbol reachable in the table from its own
+// name's home slot, no slot holding anything else, and the three counts --
+// listed, occupied, `symbol_index_count` -- equal. Allocates nothing and
+// changes nothing, so it can be called from anywhere a test can stand,
+// including between two allocations in the poison lane.
+bool SymbolIndexMatchesSymbolList(const FeContext* ctx);
 bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b);
 FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns
@@ -976,6 +983,16 @@ struct FeContext {
   FeObject* call_list;
   FeObject* free_list;
   FeObject* symbol_list;
+  // Phase 26's symbol index: the private owner of the open-addressed table
+  // that answers `FindInternedSymbol`, and how many of its slots are taken.
+  // `symbol_list` above is still the authority and still the enumeration
+  // order; this is a cache over it, and `SymbolIndexMatchesSymbolList` is
+  // what says so. `symbol_index_count` is the length of `symbol_list` --
+  // every interned symbol is in exactly one slot -- so a disagreement
+  // between the two numbers is the whole of "one of them has a symbol the
+  // other does not". See "THE SYMBOL INDEX" in fe.c for the table itself.
+  FeObject* symbol_index;
+  size_t symbol_index_count;
   FeObject* evaluation_result;
   FeObject* call_result;
   FeObject* root_list;

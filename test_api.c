@@ -8257,11 +8257,23 @@ static bool TestCaughtExhaustionSession(void) {
 // The interesting number is the third one being only 3 -> 4 while the pool
 // shrank by a quarter: the corpus's garbage is mostly pairs, which the string
 // change does not touch.
+// Re-measured at Phase 26 for the tenth time, and this one moves by ONE, in
+// the two figures a cell moves: the symbol index's owner. Its table is a
+// payload block and costs no cell at all, so what the arena sees is the one
+// string header that owns the block -- `FeMinimumArenaSize()` grows by that
+// cell and by the block's 2080 region bytes, this arena is that minimum plus
+// a fixed 256 KiB, and the region's floor rises inside the payload partition
+// rather than out of the cells. TOTAL 11925 -> 11926 and LIVE AFTER
+// COLLECTION 1436 -> 1437, the owner being reachable from the context
+// forever; PEAK follows TOTAL as it always does, and the collection count is
+// unchanged for the ninth time. The index itself is invisible here for the
+// reason it is invisible everywhere: nothing in the corpus interns enough
+// names to grow it.
 enum {
-  PinnedTotalSlots = 11925,
+  PinnedTotalSlots = 11926,
   PinnedCollectionCount = 4,
-  PinnedPeakLive = 11925,
-  PinnedLiveAfterCollection = 1436,
+  PinnedPeakLive = 11926,
+  PinnedLiveAfterCollection = 1437,
 };
 
 // ---------------------------------------------------------------------------
@@ -10495,18 +10507,30 @@ static bool TestPerfCounters(void) {
   // were two different measurements and are now the same one.
   CHECK(FePerfRead(FePerfStringObject) == PerfAllocOf(FeTString));
 
-  // Interning: a MISS examines every interned symbol, because the obarray is
-  // a list and the scan has to reach its end to conclude anything; a HIT on
-  // the name just interned examines exactly one, because a new symbol goes
-  // on the head. This is the relationship Phase 26's index has to change.
+  // Interning, since Phase 26's index (this block previously pinned the
+  // linear obarray scan it replaced -- a miss examined every interned symbol
+  // and a hit on the name just interned examined exactly one, that symbol
+  // being at the head of the list).
+  //
+  // A miss walks its name's probe from the home slot to the first FREE slot,
+  // examining whatever occupied slots lie between; the insertion then puts
+  // the new symbol in exactly that free slot. So a HIT on the name just
+  // interned walks the same probe and examines the same candidates plus the
+  // one now at the end of it -- which is an exact relationship rather than a
+  // measured constant, and it does not depend on where in the table the name
+  // happened to hash to.
   const unsigned long long lookups = FePerfRead(FePerfInternLookup);
   const unsigned long long misses = FePerfRead(FePerfInternMiss);
+  const unsigned long long probes = FePerfRead(FePerfInternProbe);
   unsigned long long candidates = FePerfRead(FePerfInternCandidate);
   const FeObject* const fresh = FeMakeSymbol(context, "perf-counter-probe");
   const unsigned long long miss_candidates =
       FePerfRead(FePerfInternCandidate) - candidates;
   CHECK(FePerfRead(FePerfInternLookup) == lookups + 1);
   CHECK(FePerfRead(FePerfInternMiss) == misses + 1);
+  // The free slot the miss stopped on is the one probe a candidate count
+  // cannot see.
+  CHECK(FePerfRead(FePerfInternProbe) == probes + miss_candidates + 1);
   candidates = FePerfRead(FePerfInternCandidate);
   const unsigned long long hit_bytes = FePerfRead(FePerfNameByte);
   CHECK(FeMakeSymbol(context, "perf-counter-probe") == fresh);
@@ -10514,20 +10538,19 @@ static bool TestPerfCounters(void) {
       FePerfRead(FePerfInternCandidate) - candidates;
   CHECK(FePerfRead(FePerfInternLookup) == lookups + 2);
   CHECK(FePerfRead(FePerfInternMiss) == misses + 1);
-  CHECK(hit_candidates == 1);
-  CHECK(miss_candidates > hit_candidates);
-  // A hit on the head examines one candidate and reads exactly that name's
-  // bytes -- not a padded cell's worth, and not the whole obarray's.
+  CHECK(hit_candidates == miss_candidates + 1);
+  // A hit reads exactly the bytes of the name it matched -- not a padded
+  // cell's worth, and not the whole obarray's. The candidates it passed on
+  // the way cost no byte at all: no other interned name is this length.
   CHECK(FePerfRead(FePerfNameByte) - hit_bytes == strlen("perf-counter-probe"));
-  // ...and a name no interned symbol shares a LENGTH with reads no byte at
-  // all, however many candidates the scan walks. This is the comparison
-  // Phase 25 changed: a chain had no length to test first, so every candidate
-  // cost bytes.
+  // ...and the same rule from the other side: a MISS on a name no interned
+  // symbol shares a LENGTH with reads no byte at all, whatever its probe
+  // examines. This is the comparison Phase 25 changed -- a chain had no
+  // length to test first, so every candidate cost bytes -- and Phase 26 only
+  // changed how many candidates there are to apply it to.
   const unsigned long long scan_bytes = FePerfRead(FePerfNameByte);
-  const unsigned long long scan_candidates = FePerfRead(FePerfInternCandidate);
   (void)FeMakeSymbol(context,
                      "perf-counter-probe-of-a-length-no-other-name-has");
-  CHECK(FePerfRead(FePerfInternCandidate) > scan_candidates);
   CHECK(FePerfRead(FePerfNameByte) == scan_bytes);
   // One name comparison per candidate, still.
   CHECK(FePerfRead(FePerfNameCompare) >= FePerfRead(FePerfInternCandidate));

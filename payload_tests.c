@@ -318,8 +318,15 @@ static bool TestOpenOptionsPartition(void) {
   // The measured split at kg's arena, asserted exactly rather than as a
   // relationship: a change to either number is a change to the budget every
   // host sizing decision in this program was made against.
-  CHECK(carved.cells == 42059);
-  CHECK(carved.payload_bytes == 225928);
+  //
+  // Re-measured at Phase 26, which moves both by what the symbol index costs
+  // an open. The arena here is a fixed 1 MiB while `FeMinimumArenaSize` grew
+  // by 2096 bytes -- one 2080-byte index block and the one cell of its owner
+  // -- so the surplus the three pools split shrank by that much: cells 42059
+  // -> 41971, and payload bytes 225928 -> 227536, the region's floor rising
+  // by the whole block while its discretionary share falls with the surplus.
+  CHECK(carved.cells == 41971);
+  CHECK(carved.payload_bytes == 227536);
 
   // A smaller share moves the same bytes back the other way, and the frame
   // region -- funded before the split -- notices neither.
@@ -1523,9 +1530,18 @@ static bool TestSymbolNamesSurviveMovingPayloads(void) {
   }
   // Only the symbol list holds anything now, which is what makes the garbage
   // above garbage. The symbols themselves are interned and need no root.
+  //
+  // Counted as a DIFFERENCE rather than as a total since Phase 26: interning
+  // 64 names past the 118 an open interns crosses the symbol index's growth
+  // threshold, so the loop above orphans an index block of its own, and under
+  // `FE_GC_STRESS` the next allocation's collection reclaims it. That is a
+  // real compaction and this case is not the one that measures it; what it
+  // asserts is that the collection IT forces reclaims something, which is
+  // what makes the names below move.
+  const size_t compactions_before = context->payload_compaction_count;
   FeRestoreGC(context, base);
   FeCollectGarbage(context);
-  CHECK(context->payload_compaction_count == 1);
+  CHECK(context->payload_compaction_count == compactions_before + 1);
 
   for (size_t i = 0; i < Count; i++) {
     // The name's bytes are somewhere else than they were.
@@ -1533,8 +1549,8 @@ static bool TestSymbolNamesSurviveMovingPayloads(void) {
   }
   static const char miss[] = "(intern-soft \"no-such-name-anywhere\")";
   for (size_t i = 0; i < Count; i++) {
-    // ...and the obarray still finds exactly the symbol that name belongs to,
-    // by walking `symbol_list` and comparing length-then-bytes through the
+    // ...and the index still finds exactly the symbol that name belongs to,
+    // by hashing the name bytes and comparing length-then-bytes through the
     // accessor, at an address it derives per candidate.
     (void)snprintf(name, sizeof(name), "moving-name-%zu-%.*s", i, (int)(i % 32),
                    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");

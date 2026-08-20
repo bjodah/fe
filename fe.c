@@ -922,6 +922,11 @@ static void CollectGarbage(FeContext* ctx) {
     FeMark(ctx, ctx->gc_stack[i]);
   }
   FeMark(ctx, ctx->symbol_list);
+  // The symbol index's owner (Phase 26), whose payload block holds the table.
+  // A root in its own right, for the life of the context: the block dies with
+  // the arena and needs no finaliser, but it must not die BEFORE it, and
+  // `PayloadBlockIsLive` reads the owner's mark bit to decide.
+  FeMark(ctx, ctx->symbol_index);
   FeMark(ctx, ctx->special_list);
   FeMark(ctx, ctx->evaluation_result);
   FeMark(ctx, ctx->call_result);
@@ -1198,24 +1203,6 @@ static bool IsKeywordName(const char* name) {
 }
 
 static FeObject* CheckWritableSymbol(FeContext* ctx, FeObject* sym);
-
-// The obarray lookup, shared by `FeMakeSymbol` and Phase 14's `intern-soft`.
-// `nullptr` for a miss is what makes `intern-soft` a probe: it is the ONE
-// contract this family has that a plausible implementation gets wrong, and
-// getting it wrong is unbounded allocation rather than a wrong answer --
-// `(while (setq x (intern-soft (format ...))) ...)` is a real idiom, and an
-// intern-on-miss makes it never terminate.
-static FeObject* FindInternedSymbol(FeContext* ctx, const char* name) {
-  FE_PERF_INC(FePerfInternLookup);
-  for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
-    FE_PERF_INC(FePerfInternCandidate);
-    if (IsStringEqual(ctx, SymbolName(CAR(rest)), name)) {
-      return CAR(rest);
-    }
-  }
-  FE_PERF_INC(FePerfInternMiss);
-  return nullptr;
-}
 
 static void InitializeKeywordValue(FeObject* symbol, const char* name) {
   if (IsKeywordName(name)) {
@@ -1631,6 +1618,300 @@ static void FinishString(FeContext* ctx, FeObject* string) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE SYMBOL INDEX (Phase 26 of kg's doc/plans/2026-08-18-elisp-data-model.md)
+//
+// `symbol_list` is still the obarray. It is the permanent GC root, it is the
+// enumeration order, and it is the AUTHORITY on what is interned. What
+// changed is how a name finds its symbol: the list answered that with a scan
+// -- 118 + N/2 comparisons per lookup, measured -- and the table below
+// answers it with one hash and a short probe. The table is a cache, and
+// `SymbolIndexMatchesSymbolList` is the statement that it agrees with what it
+// caches.
+//
+// It is open-addressed with linear probing: `capacity` slots of one
+// `FeObject*` each, `nullptr` for a free one. There is no tombstone and no
+// delete, because fe has no `unintern` -- a symbol reaches `symbol_list` and
+// stays there for the life of its context, so nothing can ever leave the
+// table. A deletion added later needs a tombstone state and a policy for
+// rebuilding past it; there is no vestigial support for it here.
+//
+// WHERE THE TABLE LIVES: one payload block, owned by one private header the
+// context roots (`ctx->symbol_index`). That is Phase 23's one payload
+// ownership rule with no context-only exception taught to the compactor. The
+// block is all BYTES and no traced children, which is exactly the shape a
+// string's block has, so the owner is a string header of length zero: the
+// substrate already knows how to allocate, replace, compact and reclaim this
+// shape, and a type of the index's own would renumber the public `FeType`
+// enumeration for an object no host and no Lisp program can ever reach.
+//
+// The entries are therefore not traced, and do not need to be: every symbol
+// in the table is on `symbol_list`, which is a root, so an entry can never
+// name a cell the sweep is about to take. That is an invariant and not a
+// hope, and the check at the bottom of this section is where it is asked.
+//
+// THE KEY IS THE NAME BYTES, and never a block address. The table's own
+// storage moves when the region compacts, and so do the name bytes it hashes
+// -- but a hash of the bytes is the same number wherever they are, and the
+// symbol HEADER a slot holds does not move at all (the Phase 22 ADR's Design
+// B). So no collection can invalidate an entry, and there is no
+// rehash-on-move anywhere in fe. A hash over an address would have needed one
+// after every compaction.
+// ---------------------------------------------------------------------------
+
+enum {
+  // One slot holds one symbol header and nothing else.
+  SymbolIndexEntryBytes = sizeof(FeObject*),
+  // The table a context opens with, in slots; a power of two, because a home
+  // slot is a mask and not a division. 256 holds the 118 names an open
+  // interns with 52 slots to spare under the growth threshold below, so an
+  // ordinary open never resizes -- which is what lets `GetCorePayloadBytes`
+  // fund exactly one block and stay exact. `OpenContextWithPayload` asserts
+  // that it did not resize; if a future core name trips that, raise this
+  // constant and the minimum arena follows from it.
+  SymbolIndexInitialCapacity = 256,
+  // The table doubles when two thirds of it is taken. At that load a linear
+  // probe examines under 4 occupied slots on a miss and under 2 on a hit,
+  // which is what the probe gate reads, and the storage costs between 12 and
+  // 24 bytes a symbol against the ~100 the symbol object itself costs.
+  SymbolIndexLoadNumerator = 2,
+  SymbolIndexLoadDenominator = 3,
+};
+
+// The name hash: FNV-1a over the bytes, and then an avalanche, because the
+// home slot is the LOW bits of the result and FNV-1a moves those too little
+// for a set of names that share a prefix -- which fe's own do (`string<`
+// beside `string>`, and every `fe-perf-sym-<i>` a workload generates).
+static uint64_t HashNameBytes(const unsigned char* bytes, size_t length) {
+  uint64_t hash = 0xcbf29ce484222325u;
+  for (size_t i = 0; i < length; i++) {
+    hash = (hash ^ bytes[i]) * 0x100000001b3u;
+  }
+  hash ^= hash >> 33;
+  hash *= 0xff51afd7ed558ccdu;
+  hash ^= hash >> 33;
+  return hash;
+}
+
+// The hash of the C string a caller interns by. `strlen`, so a name with an
+// embedded NUL ends there -- which is the same thing `IsStringEqual` says
+// about it, and it is the symbol-name policy rather than the index's rule.
+static uint64_t HashCName(const char* name) {
+  return HashNameBytes((const unsigned char*)name, strlen(name));
+}
+
+// The hash of an interned symbol's own name. The bytes are payload, so the
+// address is derived inside the call that spends it and nothing here
+// allocates -- clause 1, in the shape `IsStringEqual` already has.
+static uint64_t HashSymbolName(const FeContext* ctx, const FeObject* symbol) {
+  const FeObject* const name = SymbolName(symbol);
+  return HashNameBytes(StringBytes(ctx, name), StringLength(name));
+}
+
+// How many slots the table has. The block is the only place that knows, so
+// there is no second number to drift out of step with it: a slot is one
+// pointer and the block is slots and nothing else.
+static size_t SymbolIndexCapacity(const FeContext* ctx) {
+  return StringCapacity(ctx, ctx->symbol_index) / SymbolIndexEntryBytes;
+}
+
+// The table's `slot`th entry, null when it is free. Clause 1 again: derived
+// where it is spent, and every caller below spends it in that statement.
+static FeObject** SymbolIndexSlot(const FeContext* ctx, size_t slot) {
+  void* const at = PayloadBytes(ctx, PAYLOAD(ctx->symbol_index)) +
+                   slot * SymbolIndexEntryBytes;
+  return at;
+}
+
+// Where a probe starts. A mask, which is what makes the capacity a power of
+// two: it is doubled and it is never anything else.
+static size_t SymbolIndexHome(uint64_t hash, size_t capacity) {
+  return (size_t)hash & (capacity - 1);
+}
+
+// The next slot along. Linear, because a probe that walks forward one slot at
+// a time reads one cache line for the first several of them.
+static size_t SymbolIndexNext(size_t slot, size_t capacity) {
+  return (slot + 1) & (capacity - 1);
+}
+
+// The lookup, shared by `FeMakeSymbol` and Phase 14's `intern-soft`.
+//
+// `nullptr` for a miss is what makes `intern-soft` a probe: it is the ONE
+// contract this family has that a plausible implementation gets wrong, and
+// getting it wrong is unbounded allocation rather than a wrong answer --
+// `(while (setq x (intern-soft (format ...))) ...)` is a real idiom, and an
+// intern-on-miss makes it never terminate. Nothing here allocates, so a miss
+// cannot intern even by accident.
+//
+// The probe stops at the first FREE slot, and that is what makes a miss cost
+// what a hit costs instead of costing the obarray: a name that is interned
+// lies between its home slot and the first free slot after it, because that
+// is where its insertion put it and nothing has moved since. The loop
+// terminates for the same reason -- the table is never full, the growth
+// threshold above sees to that.
+//
+// The comparison is `IsStringEqual`, unchanged: length first, then bytes,
+// embedded NUL included. Phase 26 moved it, it did not rewrite it.
+static FeObject* FindInternedSymbol(FeContext* ctx, const char* name) {
+  const size_t capacity = SymbolIndexCapacity(ctx);
+  size_t slot = SymbolIndexHome(HashCName(name), capacity);
+  FE_PERF_INC(FePerfInternLookup);
+  for (;;) {
+    FE_PERF_INC(FePerfInternProbe);
+    FeObject* const symbol = *SymbolIndexSlot(ctx, slot);
+    if (symbol == nullptr) {
+      FE_PERF_INC(FePerfInternMiss);
+      return nullptr;
+    }
+    FE_PERF_INC(FePerfInternCandidate);
+    if (IsStringEqual(ctx, SymbolName(symbol), name)) {
+      return symbol;
+    }
+    slot = SymbolIndexNext(slot, capacity);
+  }
+}
+
+// Put SYMBOL in the table. Infallible and allocation-free by construction:
+// the caller reserved the room first, so a free slot exists, and finding it
+// is arithmetic over storage that is already there. That is what lets the
+// publish below be one operation instead of two that might disagree.
+static void SymbolIndexInsert(FeContext* ctx, FeObject* symbol) {
+  const size_t capacity = SymbolIndexCapacity(ctx);
+  size_t slot = SymbolIndexHome(HashSymbolName(ctx, symbol), capacity);
+  assert(ctx->symbol_index_count < capacity);
+  while (*SymbolIndexSlot(ctx, slot) != nullptr) {
+    slot = SymbolIndexNext(slot, capacity);
+  }
+  *SymbolIndexSlot(ctx, slot) = symbol;
+  ctx->symbol_index_count++;
+}
+
+// The table, rebuilt from `symbol_list` into a block of CAPACITY slots. This
+// is the resize, and it is the only step in publishing a symbol that can
+// fail.
+//
+// It REBUILDS rather than rehashes in place because the list is the
+// authority: the entries an in-place rehash would shuffle are exactly the
+// symbols the list holds, in an order the list already has, and reading them
+// from there costs nothing the shuffle would not have cost. What it buys is
+// that the failure is clean. A replacement block keeps its owner's child
+// count -- none, an entry being a raw word in the byte tail -- so this is the
+// ordinary `PublishPayload` replacement a growing string literal already
+// uses, and a region that cannot hold the bigger block raises with the OLD
+// block still owned and the old table still whole. There is no half-resized
+// state: either this returns with a bigger table holding every listed symbol,
+// or it raises with the table it started from.
+static void SymbolIndexRebuild(FeContext* ctx, size_t capacity) {
+  PublishPayload(ctx, ctx->symbol_index, 0, capacity * SymbolIndexEntryBytes);
+  // From here to the end nothing allocates, so nothing below can move the
+  // block or fail. The block arrives holding a copy of the old table's bytes
+  // -- that is what a replacement does -- and every one of them is about to
+  // be at the wrong slot for the new capacity, so it is cleared first.
+  memset(PayloadBytes(ctx, PAYLOAD(ctx->symbol_index)), 0,
+         capacity * SymbolIndexEntryBytes);
+  ctx->symbol_index_count = 0;
+  for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
+    SymbolIndexInsert(ctx, CAR(rest));
+  }
+}
+
+// Room for one more entry, which is the ONE fallible step in publishing a
+// symbol -- and it happens FIRST, before the symbol object exists and before
+// anything is linked anywhere. That is the `PublishPayload` idiom: allocate
+// everything that can fail before making anything visible.
+static void SymbolIndexReserve(FeContext* ctx) {
+  const size_t capacity = SymbolIndexCapacity(ctx);
+  if ((ctx->symbol_index_count + 1) * SymbolIndexLoadDenominator <=
+      capacity * SymbolIndexLoadNumerator) {
+    return;
+  }
+  SymbolIndexRebuild(ctx, capacity * 2);
+}
+
+// The index's own header and its first block, before the first symbol exists:
+// `FeMakeSymbol` consults the table and publishes into it, so the table has
+// to be there before the interpreter has a single name. The GC checkpoint is
+// restored because the owner is a context root from the assignment onwards
+// and does not need a second one holding a slot open forever.
+static void OpenSymbolIndex(FeContext* ctx) {
+  const size_t gc = FeSaveGC(ctx);
+  ctx->symbol_index =
+      MakeStringObject(ctx, SymbolIndexInitialCapacity * SymbolIndexEntryBytes);
+  ctx->symbol_index_count = 0;
+  FeRestoreGC(ctx, gc);
+}
+
+// Is SYMBOL where a lookup by its name would find it? The probe walks from
+// its name's home slot to the first free one, and the answer is whether the
+// symbol itself turned up on the way. Names are unique, so that is exactly
+// the condition under which `FindInternedSymbol` answers with it -- which
+// lets this ask "found at its name" without building a NUL-terminated key to
+// look the symbol up with, and a name may contain a NUL that such a key
+// could not carry.
+static bool SymbolIsIndexedAtItsName(const FeContext* ctx, FeObject* symbol) {
+  if (FeGetType(symbol) != FeTSymbol) {
+    return false;
+  }
+  const size_t capacity = SymbolIndexCapacity(ctx);
+  size_t slot = SymbolIndexHome(HashSymbolName(ctx, symbol), capacity);
+  for (size_t step = 0; step < capacity; step++) {
+    const FeObject* const entry = *SymbolIndexSlot(ctx, slot);
+    if (entry == symbol) {
+      return true;
+    }
+    if (entry == nullptr) {
+      return false;
+    }
+    slot = SymbolIndexNext(slot, capacity);
+  }
+  return false;
+}
+
+// The debug check. Three questions, and together they are "the table says
+// exactly what the list says":
+//
+//   * every symbol on `symbol_list` is where a lookup by its name would find
+//     it;
+//   * the occupied slots number what the list holds, and what
+//     `symbol_index_count` claims; and
+//   * nothing but a symbol is in a slot.
+//
+// The first two together are also "no entry points outside the list": n
+// distinct listed symbols are present and exactly n slots are taken, so the
+// entries are those symbols and nothing besides. A duplicate on the list
+// fails that count rather than passing it, two copies of a symbol occupying
+// one slot.
+//
+// What it deliberately does NOT do is build a second table and compare: the
+// substrate has no owner to hold one, building it would allocate -- inside a
+// check whose whole job is to observe without disturbing -- and the failure
+// it could see is the failure the three questions above already see. It
+// allocates nothing and writes nothing, which is what makes it callable from
+// the poison lane between any two allocations.
+bool SymbolIndexMatchesSymbolList(const FeContext* ctx) {
+  size_t listed = 0;
+  for (FeObject* rest = ctx->symbol_list; !FeIsNil(rest); rest = CDR(rest)) {
+    if (!SymbolIsIndexedAtItsName(ctx, CAR(rest))) {
+      return false;
+    }
+    listed++;
+  }
+  const size_t capacity = SymbolIndexCapacity(ctx);
+  size_t occupied = 0;
+  for (size_t slot = 0; slot < capacity; slot++) {
+    const FeObject* const entry = *SymbolIndexSlot(ctx, slot);
+    if (entry == nullptr) {
+      continue;
+    }
+    if (FeGetType(entry) != FeTSymbol) {
+      return false;
+    }
+    occupied++;
+  }
+  return listed == occupied && listed == ctx->symbol_index_count;
+}
+
 // A symbol object with nothing bound and nothing interned. A symbol's cdr is
 // one cons: `(((name . plist) . function) . value)` (sub-plan 04B, widened by
 // Phase 14). The function cell is initialized to `&unbound` and written only
@@ -1663,10 +1944,20 @@ FeObject* FeMakeSymbol(FeContext* ctx, const char* name) {
   if (obj != nullptr) {
     return obj;
   }
-  // Create new object, push to symbol_list and return.
+  // ONE RECOVERABLE PUBLISH (Phase 26). A symbol becomes visible on
+  // `symbol_list` and in the index as one operation, and the order is what
+  // makes it one: everything that can fail happens before anything is
+  // linked. The table's room for one more entry comes first -- that is the
+  // only allocation the index itself ever makes -- then the symbol object,
+  // then the list cell. A raise from any of the three leaves the symbol in
+  // NEITHER structure. The last step allocates nothing and cannot fail, so
+  // there is no moment at which the list and the table disagree, and nothing
+  // downstream needs a repair pass over a pair that got out of step.
+  SymbolIndexReserve(ctx);
   obj = MakeSymbolObject(ctx, name);
   InitializeKeywordValue(obj, name);
   ctx->symbol_list = FeCons(ctx, obj, ctx->symbol_list);
+  SymbolIndexInsert(ctx, obj);
   return obj;
 }
 
@@ -4537,6 +4828,10 @@ static size_t GetCoreObjectCount(void) {
   count += 1 + SymbolObjectCount;
   // Phase 19's seeded `error-message` properties, for the same reason.
   count += GetConditionMessageObjectCount();
+  // Phase 26's symbol index: one header, which is a string header of length
+  // zero owning the table's block. The block itself is region bytes and is
+  // counted by `GetCorePayloadBytes` below.
+  count += StringObjectCount;
   return count;
 }
 
@@ -4558,6 +4853,12 @@ static size_t GetCorePayloadBytes(void) {
   bytes += GetStringPayloadBytes(ArenaExhaustionName);
   bytes += GetStringPayloadBytes(EvaluationStackExhaustionName);
   bytes += GetConditionMessagePayloadBytes();
+  // Phase 26's symbol index: one block of `SymbolIndexInitialCapacity` slots.
+  // Exactly one, because an open interns fewer names than that table's growth
+  // threshold and therefore never resizes -- which `OpenContextWithPayload`
+  // asserts rather than assumes.
+  bytes += sizeof(FePayloadBlock) +
+           SymbolIndexInitialCapacity * SymbolIndexEntryBytes;
   return bytes;
 }
 
@@ -4701,6 +5002,10 @@ FeContext* OpenContextWithPayload(void* arena,
   ctx->pending_throw_value = &nil;
   ctx->free_list = &nil;
   ctx->symbol_list = &nil;
+  // Nil until `OpenSymbolIndex` below builds it, and not left zeroed:
+  // `CollectGarbage` marks it unconditionally, and the first allocation this
+  // open makes is the index's own owner.
+  ctx->symbol_index = &nil;
   ctx->special_list = &nil;
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;
@@ -4718,7 +5023,10 @@ FeContext* OpenContextWithPayload(void* arena,
     ctx->free_list = obj;
   }
 
-  // Initialize the objects:
+  // Initialize the objects. The symbol index first: `FeMakeSymbol` consults
+  // it and publishes into it, so it exists before the interpreter's first
+  // name does.
+  OpenSymbolIndex(ctx);
   ctx->t = FeMakeSymbol(ctx, "t");
   CDR(SymbolBindingCell(ctx->t)) = ctx->t;
 
@@ -4783,6 +5091,12 @@ FeContext* OpenContextWithPayload(void* arena,
   FeSet(ctx, FeMakeSymbol(ctx, "pi"), FeMakeDouble(ctx, M_PI));
   FeSet(ctx, FeMakeSymbol(ctx, "e"), FeMakeDouble(ctx, M_E));
   FeRestoreGC(ctx, save);
+  // `GetCorePayloadBytes` funds ONE index block, which is exact only while
+  // opening does not resize the table. If a future core name trips this,
+  // raise `SymbolIndexInitialCapacity`; the minimum arena is computed from
+  // the same constant and follows on its own.
+  assert(SymbolIndexCapacity(ctx) == SymbolIndexInitialCapacity);
+  assert(SymbolIndexMatchesSymbolList(ctx));
   return ctx;
 }
 
@@ -4826,6 +5140,12 @@ void FeCloseContext(FeContext* ctx) {
   // Clear the GC stack and symbol list: this makes all objects unreachable:
   ctx->gc_stack_index = 0;
   ctx->symbol_list = &nil;
+  // The index goes with the list it caches, and for the same reason: closing
+  // makes every object unreachable, and an index still naming symbols would
+  // keep them. Not a finaliser -- the table's storage is a payload block and
+  // dies with the arena like every other one -- just the root being dropped.
+  ctx->symbol_index = &nil;
+  ctx->symbol_index_count = 0;
   ctx->special_list = &nil;
   ctx->evaluation_result = &nil;
   ctx->call_result = &nil;

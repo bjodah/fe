@@ -64,6 +64,7 @@ const char* const fe_perf_counter_name[FePerfCounterCount] = {
     [FePerfInternLookup] = "intern_lookup",
     [FePerfInternMiss] = "intern_miss",
     [FePerfInternCandidate] = "intern_candidate",
+    [FePerfInternProbe] = "intern_probe",
 
     [FePerfNameCompare] = "name_compare",
     [FePerfNameByte] = "name_byte",

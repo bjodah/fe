@@ -122,11 +122,19 @@ typedef enum FePerfCounter {
 
   // Interning. LOOKUP counts `FindInternedSymbol` calls (`FeMakeSymbol` and
   // `intern-soft`), MISS the subset that found nothing, and CANDIDATE the
-  // interned symbols examined -- the linear `symbol_list` scan Phase 26
-  // exists to index.
+  // interned symbols examined. CANDIDATE kept its meaning across Phase 26 --
+  // it was the linear `symbol_list` scan and it is now the OCCUPIED slots an
+  // open-addressed probe looks at -- so a before and an after compare the
+  // same quantity, which is the whole of the phase's gate.
+  //
+  // PROBE is the number a probe has that a scan did not: slots looked at,
+  // the free one the probe stops on included. PROBE minus CANDIDATE is
+  // therefore the free slots, which is one per miss and zero per hit, and
+  // the pair together says whether a rising cost is collisions or load.
   FePerfInternLookup,
   FePerfInternMiss,
   FePerfInternCandidate,
+  FePerfInternProbe,
 
   // Symbol-name comparisons: COMPARE counts `IsStringEqual` calls and BYTE
   // the name bytes they examined. Since Phase 25 a comparison starts with the
