@@ -1360,7 +1360,10 @@ static bool TestPayloadCountersCount(void) {
     return false;
   }
   // After the open, which allocates: the counters are process-wide, and what
-  // is being measured is the three blocks below.
+  // is being measured is the three blocks below. The GAUGE is absolute and
+  // the open leaves one block per core symbol name in it, so its own floor
+  // is what the counter has to be read against.
+  const size_t floor_bytes = FeGetArenaStats(context).payload_live_bytes;
   FePerfReset();
   enum { Blocks = 3 };
   const size_t each = sizeof(FePayloadBlock) + sizeof(FeObject*) + 16;
@@ -1375,7 +1378,7 @@ static bool TestPayloadCountersCount(void) {
   CHECK(FePerfRead(FePerfPayloadByte) == Blocks * each);
   // The counter and the gauge are the same bytes counted two ways, which is
   // what makes either one readable on its own.
-  CHECK(FePerfRead(FePerfPayloadByte) ==
+  CHECK(FePerfRead(FePerfPayloadByte) + floor_bytes ==
         FeGetArenaStats(context).payload_live_bytes);
   CHECK(FePerfRead(FePerfPayloadCompact) == 0);
   CHECK(FePerfRead(FePerfPayloadCompactMoved) == 0);
