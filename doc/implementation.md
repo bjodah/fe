@@ -1519,14 +1519,26 @@ runs it and writes `perfobj/workloads.json`; `make perf-check` runs it too, so
 `perf_workloads.c` is in `TEST_SRCS`, not `SRCS` -- so it costs the `scc` and
 `pmccabe` ratchets nothing while `format-check` still covers it.
 
-Twenty workloads in six families: `context` (a bare open, and a bare open
-together with its close), `eval` (the four shapes kg's `utils/bench.py`
+Twenty-two workloads in seven families: `context` (a bare open, and a bare
+open together with its close), `eval` (the four shapes kg's `utils/bench.py`
 benchmarks, respelled for a Lisp-2 without kg's prelude), `intern` (128, 1024
 and 8192 distinct symbols, then a miss and two hits), `env` (lexical lookup by
 environment width and by depth, separately), `string` (0, 7, 8, 256 and 8192
-bytes -- 7 and 8 straddle the `StringBufferSize` cell boundary) and `gc`
+bytes -- 7 and 8 straddle the `StringBufferSize` cell boundary), `vector` (8
+and 8192 elements, each filled and then randomly swapped 4096 times) and `gc`
 (sparse-garbage and dense-live collections). `./perfobj/perf_workloads --list`
 prints them with the arena each one uses and why.
+
+The `vector` family is the only one that asks for a payload region. Every
+other workload opens through `FeOpenContext`, which carves nothing, so its
+`payload_capacity_bytes` is zero and every payload counter in its record is
+zero by construction; a workload sets `payload_carve` to open through
+`FeOpenContextWithOptions` with default options instead, which is Fe's own
+split and the one kg runs with. Two sizes rather than one, because the pair
+is what states the access cost: the 4096 swaps charge the same reads at 8
+elements and at 8192, so the whole difference between the two records' read
+counts is the answer walk, while payload bytes differ by exactly eight per
+element.
 
 Three properties are what make the numbers usable.
 
@@ -1547,13 +1559,16 @@ Three properties are what make the numbers usable.
   its counters. The fixed arena is exercised where it collects often as well
   as where it does not.
 
-The record schema is `fe-perf-workloads/2`: a top-level object carrying the
+The record schema is `fe-perf-workloads/3`: a top-level object carrying the
 schema name, an `artifact` header, `StringBufferSize`, then one object per
 workload with its name, family, note, `param`, `arena_bytes`,
 `cell_capacity`, `context_open_cells`, `includes_context_open`, `answer`,
 `seconds`, an `extra` object of workload-specific probes, and
 `counters`/`arena` objects whose keys are exactly the ones `FePerfWriteJson`
-writes. The counters are a delta over the workload's own measured region --
+writes. `/2` differed in one way: its `arena` object stopped at
+`allocation_failures` and omitted the five payload gauges `FePerfWriteJson`
+gained in Phase 23, which nothing in the battery had anything to describe
+until the `vector` family arrived. The counters are a delta over the workload's own measured region --
 the context open is excluded from every workload except `context-open`, whose
 measured region *is* the open, which is what `includes_context_open` reports
 -- so a consumer never has to subtract a baseline itself.
@@ -1584,10 +1599,11 @@ taken; its `counters` describe the scratch pair.
 The GC-root stack decides how a workload is written. `MakeObject` pushes every
 new object onto a fixed root stack (`GcStackSize` less `GcStackReserve`, so
 4032 in practice), so a C loop that allocates a caller-controlled number of
-times overflows it. The `intern` and `string` workloads are C loops that take
-one `FeSaveGC` checkpoint and restore it every pass -- safe for interning
-because `symbol_list` is a permanent root -- and they measure the cost of an
-*operation*. Everything whose size is the point of the workload is a Lisp loop
+times overflows it. The `intern`, `string` and `vector` workloads are C loops that
+take one `FeSaveGC` checkpoint and restore it every pass -- safe for interning
+because `symbol_list` is a permanent root, and for a vector fill because each
+element is rooted by the vector the moment it is stored -- and they measure
+the cost of an *operation*. Everything whose size is the point of the workload is a Lisp loop
 instead, whose accumulator lives in a value cell the collector marks directly
 and which therefore has no such ceiling; those measure the cost of a *shape*.
 

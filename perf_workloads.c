@@ -179,6 +179,13 @@ struct Workload {
   // harness does not reset the counters after it. Every other workload,
   // `context-open-close` included, measures its body.
   bool measure_open;
+  // Open through `FeOpenContextWithOptions` with default options -- Fe's own
+  // split, the one kg runs with -- rather than through `FeOpenContext`, which
+  // carves no payload region at all. A workload that needs a payload owner
+  // says so here; everything else keeps the partition the battery was
+  // baselined on, and a false here is a `payload_capacity_bytes` of zero in
+  // the record.
+  bool payload_carve;
   // Runs after the open and before the counters are reset: whatever a
   // workload needs in place but does not want to measure.
   bool (*setup)(const Workload* workload, WorkloadRun* run);
@@ -792,6 +799,120 @@ static bool CheckString(const Workload* workload, const WorkloadRun* run) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 24.1's deferred item: a vector shape, so that the battery exercises
+// the payload region at all. Every workload above opens with `FeOpenContext`,
+// which carves nothing, so before this family every payload counter in every
+// record was zero by construction -- and Phase 25's before/after is read
+// against exactly those counters.
+//
+// Two sizes, bracketing the same boundary `payload_tests`' O(1) gate uses:
+// eight elements is one small block, 8192 is a block that dominates the
+// region. The access loop's indices come from a multiplicative hash, so an
+// implementation that WALKED to an index would charge work proportional to
+// the average index and the two sizes would differ by three orders of
+// magnitude. The cross-workload check below is that they do not differ at all.
+// ---------------------------------------------------------------------------
+
+// Random accesses per vector workload, whatever its length. Fixed on purpose:
+// it is what makes "the access half costs the same at both sizes" a
+// subtraction rather than a ratio.
+enum { VectorAccessCount = 4096 };
+
+// The region bytes one vector of `length` elements occupies: fe's whole
+// vector cost table, spelled from the block header rather than from a 32 so
+// that it is the representation being asserted.
+static unsigned long long VectorBlockBytes(size_t length) {
+  return (unsigned long long)(sizeof(FePayloadBlock) +
+                              length * sizeof(FeObject*));
+}
+
+static bool BodyVector(const Workload* workload, WorkloadRun* run) {
+  FeContext* const context = run->context;
+  const size_t n = workload->param;
+  // Every index below is taken modulo `n`, and the answer is a sum over
+  // 0..n-1; an empty vector is a different workload and this one refuses it.
+  CHECK(n > 0);
+  const size_t gc = FeSaveGC(context);
+  FeObject* const vector = FeMakeVector(context, n);
+  FePushGC(context, vector);
+  CHECK(FeVectorLength(context, vector) == n);
+  // Slot i holds the integer i, so the multiset the access loop permutes has
+  // a sum nothing else could produce. The checkpoint is restored every pass
+  // for the reason this file's header gives: `n` may be twice the root
+  // stack's practical ceiling, and each integer is rooted by the vector the
+  // moment it is stored.
+  const size_t fill = FeSaveGC(context);
+  for (size_t i = 0; i < n; i++) {
+    FeVectorSet(context, vector, i, FeMakeInteger(context, (int64_t)i));
+    FeRestoreGC(context, fill);
+  }
+  // The access phase: two reads and two writes per pass, swapping a pair of
+  // spread-out slots. It allocates NOTHING -- which is why holding `left`
+  // across the second read is safe, and why `CheckVector` asserts the
+  // collection count is zero rather than trusting the reasoning.
+  for (size_t i = 0; i < VectorAccessCount; i++) {
+    const size_t left_index = (i * 2654435761u) % n;
+    const size_t right_index = ((i + 1) * 2654435761u) % n;
+    FeObject* const left = FeVectorRef(context, vector, left_index);
+    FeVectorSet(context, vector, left_index,
+                FeVectorRef(context, vector, right_index));
+    FeVectorSet(context, vector, right_index, left);
+  }
+  // The answer: swapping preserves the multiset, so the elements still sum to
+  // 0 + 1 + ... + (n-1). A vector that lost, duplicated or aliased an element
+  // allocates exactly the same cells and reads exactly as plausible.
+  int64_t sum = 0;
+  for (size_t i = 0; i < n; i++) {
+    sum += FeToInteger(context, FeVectorRef(context, vector, i));
+  }
+  CHECK(sum == (int64_t)(n * (n - 1) / 2));
+  FeRestoreGC(context, gc);
+  // The two payload numbers a terminal reader would otherwise never see: this
+  // battery's human tables are all cells, and the region is the thing these
+  // two workloads exist to exercise.
+  const FeArenaStats stats = FeGetArenaStats(context);
+  AddExtra(run, "payload_live_bytes", stats.payload_live_bytes);
+  AddExtra(run, "payload_capacity_bytes", stats.payload_capacity_bytes);
+  (void)snprintf(run->answer, sizeof(run->answer),
+                 "%zu elements permuted, sum %lld", n, (long long)sum);
+  return true;
+}
+
+static bool CheckVector(const Workload* workload, const WorkloadRun* run) {
+  const unsigned long long n = (unsigned long long)workload->param;
+  CHECK(AllocationIsPartitioned(run));
+  // The payload region, which no other workload in this battery touches: one
+  // block, of exactly the size the representation implies, and no compaction,
+  // because nothing collected.
+  CHECK(CounterOf(run, FePerfPayloadAlloc) == 1);
+  CHECK(CounterOf(run, FePerfPayloadByte) == VectorBlockBytes(workload->param));
+  CHECK(CounterOf(run, FePerfGcCollection) == 0);
+  CHECK(CounterOf(run, FePerfPayloadCompact) == 0);
+  CHECK(CounterOf(run, FePerfPayloadCompactMoved) == 0);
+  CHECK(run->stats.payload_live_bytes ==
+        sizeof(FePayloadBlock) + workload->param * sizeof(FeObject*));
+  CHECK(run->stats.payload_allocation_failures == 0);
+  CHECK(run->stats.allocation_failures == 0);
+  // Elements published: the constructor's, once. Reads: the access loop's two
+  // per pass plus the answer's walk of the whole vector. Writes: the
+  // constructor's nil fill, the integer fill, and the access loop's two per
+  // pass.
+  CHECK(CounterOf(run, FePerfVectorElement) == n);
+  CHECK(CounterOf(run, FePerfVectorRef) ==
+        2 * (unsigned long long)VectorAccessCount + n);
+  CHECK(CounterOf(run, FePerfVectorSet) ==
+        2 * n + 2 * (unsigned long long)VectorAccessCount);
+  // The only cells this workload allocates are the vector's own header and
+  // the `n` integers it stores: the access loop allocates nothing at all,
+  // which is what makes the `gc_collection == 0` above a property and not a
+  // coincidence of the arena size.
+  CHECK(AllocOf(run, FeTVector) == 1);
+  CHECK(AllocOf(run, FeTInteger) == n);
+  CHECK(CounterOf(run, FePerfAllocObject) == n + 1);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // 21.2 item 8: sparse-garbage and dense-live collections, both in an arena
 // small enough that they really collect.
 //
@@ -904,6 +1025,7 @@ static const Workload workloads[] = {
      .arena = ArenaTight,
      .param = 0,
      .measure_open = true,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyContextOpen,
      .check = CheckContextOpen},
@@ -913,6 +1035,7 @@ static const Workload workloads[] = {
      .arena = ArenaTight,
      .param = 0,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyContextOpenClose,
      .check = CheckContextOpenClose},
@@ -923,6 +1046,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 150,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyListWalk,
      .check = CheckListWalk},
@@ -932,6 +1056,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 20000,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyArithmetic,
      .check = CheckArithmetic},
@@ -941,6 +1066,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 2000,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyMacroHeavy,
      .check = CheckMacroHeavy},
@@ -950,6 +1076,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 300,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyDeepCall,
      .check = CheckDeepCall},
@@ -960,6 +1087,7 @@ static const Workload workloads[] = {
      .arena = ArenaLarge,
      .param = 128,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyIntern,
      .check = CheckIntern},
@@ -969,6 +1097,7 @@ static const Workload workloads[] = {
      .arena = ArenaLarge,
      .param = 1024,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyIntern,
      .check = CheckIntern},
@@ -978,6 +1107,7 @@ static const Workload workloads[] = {
      .arena = ArenaLarge,
      .param = 8192,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyIntern,
      .check = CheckIntern},
@@ -988,6 +1118,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
+     .payload_carve = false,
      .setup = SetupEnvWidth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -997,6 +1128,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 64,
      .measure_open = false,
+     .payload_carve = false,
      .setup = SetupEnvWidth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1006,6 +1138,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
+     .payload_carve = false,
      .setup = SetupEnvDepth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1015,6 +1148,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 64,
      .measure_open = false,
+     .payload_carve = false,
      .setup = SetupEnvDepth,
      .body = BodyEnv,
      .check = CheckEnv},
@@ -1025,6 +1159,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 0,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1034,6 +1169,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 7,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1043,6 +1179,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1052,6 +1189,7 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 256,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
@@ -1061,9 +1199,31 @@ static const Workload workloads[] = {
      .arena = ArenaHost,
      .param = 8192,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyString,
      .check = CheckString},
+
+    {.name = "vector-8",
+     .family = "vector",
+     .note = "24.1: 8 elements, 4096 random swaps, default payload carve",
+     .arena = ArenaHost,
+     .param = 8,
+     .measure_open = false,
+     .payload_carve = true,
+     .setup = nullptr,
+     .body = BodyVector,
+     .check = CheckVector},
+    {.name = "vector-8192",
+     .family = "vector",
+     .note = "24.1: 8192 elements, the same 4096 random swaps",
+     .arena = ArenaHost,
+     .param = 8192,
+     .measure_open = false,
+     .payload_carve = true,
+     .setup = nullptr,
+     .body = BodyVector,
+     .check = CheckVector},
 
     {.name = "gc-sparse-garbage",
      .family = "gc",
@@ -1071,6 +1231,7 @@ static const Workload workloads[] = {
      .arena = ArenaTight,
      .param = 20000,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodySparse,
      .check = CheckSparse},
@@ -1080,6 +1241,7 @@ static const Workload workloads[] = {
      .arena = ArenaSmall,
      .param = 4000,
      .measure_open = false,
+     .payload_carve = false,
      .setup = nullptr,
      .body = BodyDense,
      .check = CheckDense},
@@ -1106,7 +1268,10 @@ static bool RunOne(const Workload* workload, WorkloadRun* run) {
 
   FePerfReset();
   const double started = Now();
-  FeContext* const context = FeOpenContext(arena_bytes, workload->arena);
+  FeContext* const context =
+      workload->payload_carve
+          ? FeOpenContextWithOptions(arena_bytes, workload->arena, nullptr)
+          : FeOpenContext(arena_bytes, workload->arena);
   CHECK(context != nullptr);
   run->context = context;
   host_state.raised = false;
@@ -1237,6 +1402,31 @@ static bool CheckStringBoundary(void) {
   return true;
 }
 
+// The O(1) statement at the battery's own level, and the reason two sizes are
+// run rather than one: the access half of the workload costs the same at n = 8
+// and at n = 8192, so the whole difference between the two records' read
+// counts is the answer walk, which is n by construction. A vector whose
+// element address were a walk rather than arithmetic would blow this apart by
+// three orders of magnitude.
+static bool CheckVectorSizes(void) {
+  const WorkloadRun* const small = Find("vector-8");
+  const WorkloadRun* const large = Find("vector-8192");
+  CHECK(small != nullptr && large != nullptr);
+  CHECK(CounterOf(large, FePerfVectorRef) - CounterOf(small, FePerfVectorRef) ==
+        8192 - 8);
+  // Payload bytes, on the other hand, are exactly proportional: eight bytes
+  // per element and one block header either way.
+  CHECK(CounterOf(large, FePerfPayloadByte) -
+            CounterOf(small, FePerfPayloadByte) ==
+        (unsigned long long)((8192 - 8) * sizeof(FeObject*)));
+  // And the carve is what pays for them: these are the only two records in
+  // the battery whose region has any capacity at all.
+  CHECK(small->stats.payload_capacity_bytes > 0);
+  CHECK(large->stats.payload_capacity_bytes ==
+        small->stats.payload_capacity_bytes);
+  return true;
+}
+
 static bool CheckOpenIsArenaIndependent(void) {
   unsigned long long expected = runs[0].open_cells;
   for (size_t i = 0; i < ran_count; i++) {
@@ -1255,6 +1445,7 @@ static bool CheckAcrossWorkloads(void) {
   CHECK(CheckInternTiers());
   CHECK(CheckEnvShapes());
   CHECK(CheckStringBoundary());
+  CHECK(CheckVectorSizes());
   return true;
 }
 
@@ -1265,9 +1456,12 @@ static bool CheckAcrossWorkloads(void) {
 // ---------------------------------------------------------------------------
 
 static void WriteArenaJson(FILE* out, const FeArenaStats* stats) {
-  // The same ten keys, in the same order, that `FePerfWriteJson` writes: a
+  // The same fifteen keys, in the same order, that `FePerfWriteJson` writes: a
   // consumer that can read a counting `fe`'s `$FE_PERF_OUT` file can read
-  // this one's "arena" object without a second parser.
+  // this one's "arena" object without a second parser. The five payload
+  // gauges joined that file in Phase 23 and this one only in Phase 25.0,
+  // which is the schema `/2` -> `/3` move: until the vector workloads there
+  // was nothing in this battery for them to describe.
   (void)fprintf(out, "      \"total_slots\": %zu,\n", stats->total_slots);
   (void)fprintf(out, "      \"free_slots\": %zu,\n", stats->free_slots);
   (void)fprintf(out, "      \"peak_live_objects\": %zu,\n",
@@ -1283,8 +1477,18 @@ static void WriteArenaJson(FILE* out, const FeArenaStats* stats) {
                 stats->peak_cleanup_stack_depth);
   (void)fprintf(out, "      \"peak_native_reentry\": %zu,\n",
                 stats->peak_native_reentry);
-  (void)fprintf(out, "      \"allocation_failures\": %zu\n",
+  (void)fprintf(out, "      \"allocation_failures\": %zu,\n",
                 stats->allocation_failures);
+  (void)fprintf(out, "      \"payload_capacity_bytes\": %zu,\n",
+                stats->payload_capacity_bytes);
+  (void)fprintf(out, "      \"payload_live_bytes\": %zu,\n",
+                stats->payload_live_bytes);
+  (void)fprintf(out, "      \"payload_peak_bytes\": %zu,\n",
+                stats->payload_peak_bytes);
+  (void)fprintf(out, "      \"payload_compaction_count\": %zu,\n",
+                stats->payload_compaction_count);
+  (void)fprintf(out, "      \"payload_allocation_failures\": %zu\n",
+                stats->payload_allocation_failures);
 }
 
 // The artifact line: which fe tree, and which binary, produced these numbers.
@@ -1372,7 +1576,7 @@ static bool WriteJson(const char* path) {
     (void)fprintf(stderr, "perf_workloads: cannot write %s\n", path);
     return false;
   }
-  (void)fprintf(out, "{\n  \"schema\": \"fe-perf-workloads/2\",\n");
+  (void)fprintf(out, "{\n  \"schema\": \"fe-perf-workloads/3\",\n");
   WriteArtifactJson(out);
   (void)fprintf(out, "  \"string_buffer_size\": %d,\n", (int)StringBufferSize);
   (void)fprintf(out, "  \"workloads\": [\n");
@@ -1429,9 +1633,9 @@ static void PrintWorkTable(void) {
 // Where the cells come from: the first question. Only the types something
 // actually allocates get a column, so the table stays readable.
 static void PrintAllocationTable(void) {
-  static const FeType reported[] = {FeTPair,   FeTInteger,   FeTSymbol,
-                                    FeTString, FeTDouble,    FeTFn,
-                                    FeTMacro,  FeTPrimitive, FeTNativeFn};
+  static const FeType reported[] = {
+      FeTPair,   FeTInteger, FeTSymbol, FeTString,    FeTVector,
+      FeTDouble, FeTFn,      FeTMacro,  FeTPrimitive, FeTNativeFn};
   (void)printf("\n%-20s", "allocation by type");
   for (size_t t = 0; t < sizeof(reported) / sizeof(*reported); t++) {
     const char* const name =
