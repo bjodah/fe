@@ -1573,6 +1573,406 @@ static bool TestSymbolNamesSurviveMovingPayloads(void) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// THE SYMBOL INDEX (Phase 26). Every case here is about the PAIR --
+// `symbol_list` and the index -- rather than about either one alone, because
+// a symbol visible in one and not the other is the only way this design can
+// be wrong. `SymbolIndexMatchesSymbolList` is the question asked after each
+// of them; it allocates nothing, so it can be asked in an exhausted arena
+// and between two allocations in the poison lane alike.
+// ---------------------------------------------------------------------------
+
+// The name of the `i`th generated symbol. One spelling in one place, so that
+// a loop that interns them and a loop that looks them up cannot drift, and a
+// fixed length, so that what a name costs the region is arithmetic.
+static void SymbolIndexName(char* buffer, size_t size, size_t i) {
+  (void)snprintf(buffer, size, "fe-index-sym-%06zu", i);
+}
+
+// Is NAME on `symbol_list` at all? The AUTHORITY, asked directly, walked
+// rather than probed, and allocating nothing -- which is what a case standing
+// in an arena with no free cell needs, and what makes this an independent
+// answer rather than the index's own opinion repeated back.
+static bool SymbolListHasName(FeContext* context, const char* name) {
+  char buffer[SymbolNameLimit + 1];
+  const size_t length = strlen(name);
+  for (FeObject* rest = context->symbol_list; !FeIsNil(rest);
+       rest = CDR(rest)) {
+    const size_t held =
+        FeStringBytes(context, SymbolName(CAR(rest)), buffer, sizeof(buffer));
+    if (held == length && memcmp(buffer, name, length) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Free region bytes, which is what tells one payload failure site from
+// another: a name's own block is 48 bytes and a table's is thousands, so a
+// raise with room to spare is a raise the TABLE could not fit in.
+static size_t FreePayloadBytes(const FeContext* context) {
+  const FeArenaStats stats = FeGetArenaStats(context);
+  return stats.payload_capacity_bytes - stats.payload_live_bytes;
+}
+
+// `intern-soft`'s double-probe contract, asked through the Lisp surface that
+// has it: probe, miss, probe again, still miss -- then intern, and the probe
+// after that finds it. A miss that interned would make the idiom this
+// contract exists for (`(while (setq x (intern-soft (format ...))) ...)`)
+// never terminate, and the index must not have made it possible.
+static bool CheckDoubleProbe(FeContext* context, const char* name) {
+  char source[128];
+  const size_t before = context->symbol_index_count;
+  const int written =
+      snprintf(source, sizeof(source), "(intern-soft \"%s\")", name);
+  CHECK(written > 0 && (size_t)written < sizeof(source));
+  const size_t length = (size_t)written;
+  CHECK(FeIsNil(FeEvaluateString(context, "probe.fe", source, length)));
+  CHECK(FeIsNil(FeEvaluateString(context, "probe.fe", source, length)));
+  // Neither probe interned anything, in either structure.
+  CHECK(context->symbol_index_count == before);
+  CHECK(!SymbolListHasName(context, name));
+  FeObject* const interned = FeMakeSymbol(context, name);
+  CHECK(FeGetType(interned) == FeTSymbol);
+  CHECK(context->symbol_index_count == before + 1);
+  CHECK(SymbolListHasName(context, name));
+  CHECK(FeEvaluateString(context, "probe.fe", source, length) == interned);
+  CHECK(SymbolIndexMatchesSymbolList(context));
+  return true;
+}
+
+// The index's OWN STORAGE under compaction, which is the moving-name case
+// aimed one level down: a symbol's name moves and the table that finds it by
+// name moves too, and neither knows about the other's address. The move is
+// CONSTRUCTED rather than hoped for -- the garbage is allocated before the
+// symbols, so reclaiming it leaves a hole the table has to slide down into --
+// and the table's handle is asserted to have changed before a single lookup
+// is attempted.
+static bool TestSymbolIndexStorageSurvivesCompaction(void) {
+  FeContext* const context = OpenPayloadContext(PayloadArenaPercent);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    return false;
+  }
+  // The smallest arena and count that still take the table through several
+  // resizes with one of them AFTER the hole below. Sized rather than
+  // generous because the stress build collects at every allocation, and
+  // every collection sweeps the whole arena.
+  enum { Count = 300, Rooted = 150, Garbage = 128 };
+  static FeObject* symbols[Count];
+  char name[SymbolNameLimit + 1];
+
+  const size_t base = FeSaveGC(context);
+  const size_t opened = context->symbol_index_count;
+  const FePayloadHandle first_table = PAYLOAD(context->symbol_index);
+  for (size_t i = 0; i < Rooted; i++) {
+    SymbolIndexName(name, sizeof(name), i);
+    symbols[i] = FeMakeSymbol(context, name);
+    FeRestoreGC(context, base);
+  }
+  // The hole, and it is ROOTED until the table has been republished past it.
+  // That is what makes this case say the same thing in both builds: under
+  // `FE_GC_STRESS` every allocation collects, so garbage dropped before the
+  // next resize would be gone long before the collection this case forces,
+  // and the table would have nothing to slide down into.
+  for (size_t i = 0; i < Garbage; i++) {
+    (void)FeMakeStringBytes(context, "garbage-that-will-be-reclaimed", 30);
+  }
+  const size_t held = FeSaveGC(context);
+  bool resized = false;
+  for (size_t i = Rooted; i < Count; i++) {
+    const size_t before = FeGetArenaStats(context).payload_live_bytes;
+    SymbolIndexName(name, sizeof(name), i);
+    symbols[i] = FeMakeSymbol(context, name);
+    FeRestoreGC(context, held);
+    resized =
+        resized || FeGetArenaStats(context).payload_live_bytes > before + 1024;
+  }
+  // Far past the room the table opened with, so it has been REPLACED several
+  // times over -- a resize publishes a new block and the owner stops naming
+  // the old one, which is the substrate's ordinary replacement rule and not a
+  // rule the index taught it -- and the last of those replacements landed
+  // after the hole above. A table's block is thousands of bytes where a
+  // name's is 48, so a jump in live payload bytes is a resize and nothing
+  // else is: that is how this knows rather than assumes.
+  CHECK(context->symbol_index_count == opened + Count);
+  CHECK(PAYLOAD(context->symbol_index) != first_table);
+  CHECK(resized);
+  CHECK(SymbolIndexMatchesSymbolList(context));
+
+  // Only `symbol_list` holds anything now: the hole is garbage, and so is
+  // every table the resizes left behind.
+  const FePayloadHandle grown = PAYLOAD(context->symbol_index);
+  FeRestoreGC(context, base);
+  FeCollectGarbage(context);
+  // THE TABLE'S OWN BYTES ARE SOMEWHERE ELSE THAN THEY WERE.
+  CHECK(PAYLOAD(context->symbol_index) != grown);
+  CHECK(SymbolIndexMatchesSymbolList(context));
+
+  static const char miss[] = "(intern-soft \"no-such-name-anywhere\")";
+  for (size_t i = 0; i < Count; i++) {
+    // ...and every name still finds exactly its own symbol, by hashing bytes
+    // that moved, in a table that moved, to a header that did not.
+    SymbolIndexName(name, sizeof(name), i);
+    CHECK(FeMakeSymbol(context, name) == symbols[i]);
+    if (i % 64 == 0) {
+      // An evaluation between two lookups, so the storage keeps moving
+      // THROUGH the loop rather than only before it: it allocates, which is a
+      // compaction under `FE_GC_STRESS` and a slide of the whole extent under
+      // `FE_DEBUG_PAYLOAD_MOVE`. Its own answer is the other half of the
+      // contract -- a miss must not intern, whatever the storage did.
+      CHECK(FeIsNil(
+          FeEvaluateString(context, "intern.fe", miss, sizeof(miss) - 1)));
+      FeRestoreGC(context, base);
+    }
+  }
+  CHECK(SymbolIndexMatchesSymbolList(context));
+  FeCloseContext(context);
+  return true;
+}
+
+// The double-probe contract at the three table states that can tell it
+// apart: a table nothing but the open has touched, a run of interns that
+// straddles a growth threshold -- so one of them is the probe either side of
+// the publish that replaces the whole table -- and a table with 8192 symbols
+// in it, which is the tier the plan names.
+static bool TestInternSoftDoubleProbe(void) {
+  FeContext* const context = OpenPayloadContext(PayloadArenaPercent);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    return false;
+  }
+  enum { Straddle = 120 };
+  char name[SymbolNameLimit + 1];
+  const size_t base = FeSaveGC(context);
+
+  // An empty table, in the only sense a table of fe's can be empty: nothing
+  // but the interpreter's own names is in it.
+  CHECK(CheckDoubleProbe(context, "probe-at-an-empty-table"));
+
+  // Across a growth threshold. A resize publishes a block of thousands of
+  // bytes where a name's own is 48, so a jump in live payload bytes is a
+  // resize and nothing else is -- which is how this asserts that the span
+  // really did straddle one rather than assuming the constants it would take
+  // to work that out.
+  bool resized = false;
+  for (size_t i = 0; i < Straddle; i++) {
+    const size_t before = FeGetArenaStats(context).payload_live_bytes;
+    SymbolIndexName(name, sizeof(name), i);
+    CHECK(CheckDoubleProbe(context, name));
+    FeRestoreGC(context, base);
+    resized =
+        resized || FeGetArenaStats(context).payload_live_bytes > before + 1024;
+  }
+  CHECK(resized);
+
+  CHECK(SymbolIndexMatchesSymbolList(context));
+  FeCloseContext(context);
+  return true;
+}
+
+#if !FE_GC_STRESS
+
+// The same contract at the tier the plan names: 8192 symbols, so the probes
+// below walk a table at its full size rather than a nearly empty one.
+//
+// Not built under `FE_GC_STRESS`, for `TestMarkDepthIsFlat`'s reason: that
+// knob collects at every allocation, this case allocates about fifty thousand
+// times into a 8 MiB arena, and what a probe answers does not depend on how
+// often the collector ran while the table was filling. The case that DOES
+// depend on that is `TestSymbolIndexStorageSurvivesCompaction` above, which
+// is built both ways.
+static bool TestInternSoftDoubleProbeAtTheTier(void) {
+  enum { Tier = 8192 };
+  unsigned char* const storage = malloc(VectorArenaSize);
+  CHECK(storage != nullptr);
+  FeContext* const context = OpenVectorContext(storage, VectorArenaSize);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    free(storage);
+    return false;
+  }
+  char name[SymbolNameLimit + 1];
+  const size_t base = FeSaveGC(context);
+  for (size_t i = 0; i < Tier; i++) {
+    SymbolIndexName(name, sizeof(name), i);
+    (void)FeMakeSymbol(context, name);
+    FeRestoreGC(context, base);
+  }
+  CHECK(context->symbol_index_count > Tier);
+  CHECK(CheckDoubleProbe(context, "probe-at-the-8192-tier"));
+  CHECK(SymbolIndexMatchesSymbolList(context));
+  FeCloseContext(context);
+  free(storage);
+  return true;
+}
+
+#else
+
+static bool TestInternSoftDoubleProbeAtTheTier(void) {
+  return true;
+}
+
+#endif  // !FE_GC_STRESS
+
+// What every failure injection below asks afterwards, and the reason the
+// stopping rule this phase carries could be checked at all: the raise left
+// the name in NEITHER structure, and the two structures still agree with each
+// other. Neither question allocates, which matters -- three of the four
+// sites leave an arena with no free cell to answer them in.
+static bool PublishLeftNothingBehind(FeContext* context,
+                                     const char* name,
+                                     size_t before) {
+  CHECK(host.raised);
+  CHECK(!SymbolListHasName(context, name));
+  CHECK(context->symbol_index_count == before);
+  CHECK(SymbolIndexMatchesSymbolList(context));
+  return true;
+}
+
+// A symbol costs six cells: the symbol object, the three pairs of its
+// `((name . plist) . function) . value` chain, the one string object its name
+// is, and the `symbol_list` cell that interns it. So an arena with five free
+// cells or fewer cannot publish one -- and each of those six is a DIFFERENT
+// allocation failing, the last being `FeMakeSymbol`'s own cons, which is the
+// step after the symbol object exists and before anything names it.
+//
+// The sweep runs the whole range and then asserts that SIX succeeds, which is
+// what says the five below it were the failing region rather than five
+// arbitrary numbers.
+static bool TestSymbolPublishFailsCleanlyOnCells(void) {
+  enum { SymbolCells = 6, Surplus = 8192 };
+  // A small arena on purpose: the fill below takes one cons per free cell, and
+  // under `FE_GC_STRESS` every one of them sweeps the whole arena. What this
+  // case needs is a few hundred spare cells and a region with room for one
+  // name, which is what the minimum plus a small surplus is.
+  unsigned char* const storage = malloc(FeMinimumArenaSize() + Surplus);
+  CHECK(storage != nullptr);
+  for (size_t spare = 0; spare <= SymbolCells; spare++) {
+    FeContext* const context = OpenContextWithPayload(
+        storage, FeMinimumArenaSize() + Surplus, PayloadArenaPercent);
+    CHECK(context != nullptr);
+    host.raised = false;
+    FeSetErrorFn(context, HandleError);
+    if (setjmp(host.jump) != 0) {
+      free(storage);
+      return false;
+    }
+    static const char name[] = "a-name-no-arena-had-room-for";
+    const size_t before = context->symbol_index_count;
+    const size_t base = FeSaveGC(context);
+    FeObject* filler = FeNil(context);
+    while (FeGetArenaStats(context).free_slots > spare) {
+      FeRestoreGC(context, base);
+      FePushGC(context, filler);
+      filler = FeCons(context, FeNil(context), filler);
+    }
+    if (spare < SymbolCells) {
+      host.raised = false;
+      if (setjmp(host.jump) == 0) {
+        (void)FeMakeSymbol(context, name);
+        CHECK(false);
+      }
+      CHECK(strcmp(host.message, "out of memory") == 0);
+      CHECK(ConditionIs(context, "(arena-exhaustion)"));
+      CHECK(PublishLeftNothingBehind(context, name, before));
+    } else {
+      FeObject* const symbol = FeMakeSymbol(context, name);
+      CHECK(FeGetType(symbol) == FeTSymbol);
+      CHECK(SymbolListHasName(context, name));
+      CHECK(context->symbol_index_count == before + 1);
+      CHECK(SymbolIndexMatchesSymbolList(context));
+    }
+    FeCloseContext(context);
+  }
+  free(storage);
+  return true;
+}
+
+// The two REGION sites, which are the ones the index itself owns.
+//
+// Site 1 is the name's own block, and it is reached at a region carved at 0%:
+// that is exactly the core names' floor, with no spare byte at all, so the
+// first name a program interns fails inside `MakeStringObject` -- after the
+// symbol's cell was taken and before the index or the list was told anything.
+//
+// Site 2 is THE INDEX'S OWN RESIZE, the one allocation the index makes.
+// Reaching it needs a region with room for the names that carry the table to
+// its growth threshold and no room for the doubled table itself, which is a
+// wide window -- a name's block is 48 bytes and the table's next one is
+// thousands -- and the filler string below is sized to land in it. What
+// proves the site is the free region AFTER the raise: a name would still have
+// fitted, and the table would not.
+static bool TestSymbolPublishFailsCleanlyOnRegion(void) {
+  enum { TargetSpare = 4000, Attempts = 1000 };
+  static const char absent[] = "a-name-the-region-had-no-room-for";
+  FeContext* context = OpenPayloadContext(0);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    return false;
+  }
+  size_t before = context->symbol_index_count;
+  CHECK(FreePayloadBytes(context) == 0);
+  host.raised = false;
+  if (setjmp(host.jump) == 0) {
+    (void)FeMakeSymbol(context, absent);
+    CHECK(false);
+  }
+  CHECK(ConditionIs(context, "(payload-exhaustion)"));
+  CHECK(PublishLeftNothingBehind(context, absent, before));
+  FeCloseContext(context);
+
+  context = OpenPayloadContext(PayloadArenaPercent);
+  CHECK(context != nullptr);
+  if (setjmp(host.jump) != 0) {
+    return false;
+  }
+  static FeObject* interned[Attempts];
+  char name[SymbolNameLimit + 1];
+  const size_t base = FeSaveGC(context);
+  before = context->symbol_index_count;
+  // The filler, sized from what the region has rather than from what this
+  // arena is expected to have, and rooted for the rest of the case: a
+  // collection that could reclaim it would undo the whole construction.
+  FeObject* const filler = FeMakeStringBytes(context, "filler", 6);
+  const size_t free_bytes = FreePayloadBytes(context);
+  CHECK(free_bytes > TargetSpare + sizeof(FePayloadBlock));
+  PublishPayload(context, filler, 0,
+                 free_bytes - TargetSpare - sizeof(FePayloadBlock));
+  CHECK(FreePayloadBytes(context) <= TargetSpare);
+
+  size_t made = 0;
+  host.raised = false;
+  if (setjmp(host.jump) == 0) {
+    while (made < Attempts) {
+      SymbolIndexName(name, sizeof(name), made);
+      interned[made] = FeMakeSymbol(context, name);
+      made++;
+      FeRestoreGC(context, base);
+      FePushGC(context, filler);
+    }
+    CHECK(false);
+  }
+  SymbolIndexName(name, sizeof(name), made);
+  CHECK(ConditionIs(context, "(payload-exhaustion)"));
+  CHECK(PublishLeftNothingBehind(context, name, before + made));
+  // THE SITE, pinned by what was left: room for a name's 48-byte block many
+  // times over, and none for the table's next one. A raise here is the resize
+  // refusing, not a string.
+  CHECK(FreePayloadBytes(context) >= 256);
+  CHECK(made > 0);
+  // ...and the table the failed resize did not replace still answers for
+  // every name that was in it. This is the half a repair pass would be hiding:
+  // there is nothing to repair, because the old block was never disowned.
+  for (size_t i = 0; i < made; i++) {
+    SymbolIndexName(name, sizeof(name), i);
+    CHECK(FeMakeSymbol(context, name) == interned[i]);
+  }
+  CHECK(SymbolIndexMatchesSymbolList(context));
+  FeCloseContext(context);
+  return true;
+}
+
 // The master plan's fourth gate: a string mutation that needs a REPLACEMENT
 // block leaves the header alone. This is the reader's growing literal in one
 // statement -- `PublishPayload` is what `AppendStringByte` calls when the
@@ -1667,6 +2067,10 @@ int main(void) {
       TestVectorExhaustionLeavesNothingBehind() && TestVectorCostTable() &&
       TestStringsSurviveCompaction() &&
       TestSymbolNamesSurviveMovingPayloads() &&
+      TestSymbolIndexStorageSurvivesCompaction() &&
+      TestInternSoftDoubleProbe() && TestInternSoftDoubleProbeAtTheTier() &&
+      TestSymbolPublishFailsCleanlyOnCells() &&
+      TestSymbolPublishFailsCleanlyOnRegion() &&
       TestStringReplacementKeepsHeader() && TestReaderLiteralGrowsAndTrims() &&
       TestRandomAccessIsFlat() && TestPoisonedPointerFailsLoudly() &&
       TestPayloadCountersCount();
