@@ -1113,10 +1113,23 @@ all: $(TARGET)
 
 check: test
 
-test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET) check-gc-stress \
-	check-payload
+# Every leaf below is a *run* of one already-built binary, and they are
+# prerequisites rather than recipe lines because a recipe's lines are a
+# sequence make may not reorder or overlap: `make -j` runs prerequisites
+# concurrently and recipe lines one after another.  The suite is dominated
+# by a single case -- the payload harness's GC-stress build is 23 s of a
+# 24 s `make check` here -- so what the other runs cost is whether they
+# overlap it or queue behind it.
+test: core test-header run-test-api run-example-host run-scripts \
+	check-gc-stress check-payload
+
+run-test-api: $(TEST_API)
 	./$(TEST_API)
+
+run-example-host: $(EXAMPLE_HOST)
 	$(EXAMPLE_RUNNER) ./$(EXAMPLE_HOST)
+
+run-scripts: $(TARGET)
 	./test.sh
 
 core: $(CORE_OBJS)
@@ -1135,7 +1148,10 @@ fuzz-eval: $(FUZZ_EVAL_BIN)
 
 fuzz-write: $(FUZZ_WRITE_BIN)
 
-fuzz-smoke: fuzz-eval-seed-verify fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
+# The three smoke runs are independent and overlap under `make -j`; the seed
+# verification is not, and is a prerequisite of the eval smoke run rather than
+# a sibling of it, since siblings have no order.
+fuzz-smoke: fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
 
 # A tracked seed under fuzz/seeds/ steers the grammar by its bytes, so any
 # change to the grammar re-steers every one of them at once and nothing says
@@ -1161,7 +1177,7 @@ fuzz-reader-smoke: $(FUZZ_READER_BIN)
 		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/reader/ \
 		$(FUZZ_CORPUS_DIR)/reader scripts
 
-fuzz-eval-smoke: $(FUZZ_EVAL_BIN)
+fuzz-eval-smoke: $(FUZZ_EVAL_BIN) fuzz-eval-seed-verify
 	mkdir -p $(FUZZ_CORPUS_DIR)/eval $(FUZZ_ARTIFACT_DIR)/eval
 	./$(FUZZ_EVAL_BIN) -runs=$(FUZZ_RUNS) -max_len=$(FUZZ_MAX_LEN) \
 		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
@@ -1227,8 +1243,12 @@ fe_unwind-stress.o: fe_unwind.c $(HDRS) $(BUILD_STAMP)
 fe_perf-stress.o: fe_perf.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_perf.c -o $@
 
-check-gc-stress: $(GC_STRESS) $(GC_STRESS_ON)
+check-gc-stress: run-gc-stress run-gc-stress-on
+
+run-gc-stress: $(GC_STRESS)
 	./$(GC_STRESS)
+
+run-gc-stress-on: $(GC_STRESS_ON)
 	./$(GC_STRESS_ON)
 
 # The payload substrate's harness (Phase 23.1).  Built against core objects
@@ -1265,8 +1285,12 @@ $(PAYLOAD_TESTS_ON): $(PAYLOAD_TESTS_ON_OBJS)
 	$(CC) $(CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 -DFE_GC_STRESS=1 $(CFLAGS) \
 		-c $< -o $@
 
-check-payload: $(PAYLOAD_TESTS) $(PAYLOAD_TESTS_ON)
+check-payload: run-payload-tests run-payload-tests-stress
+
+run-payload-tests: $(PAYLOAD_TESTS)
 	./$(PAYLOAD_TESTS)
+
+run-payload-tests-stress: $(PAYLOAD_TESTS_ON)
 	./$(PAYLOAD_TESTS_ON)
 
 # The counting build (Phase 21.1 of kg's elisp data-model plan).  `fe_perf.h`
@@ -1339,10 +1363,19 @@ perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST) $(PERF_WORKLOADS) \
 # whole script corpus against the counting interpreter, so every instrumented
 # line is executed rather than merely compiled.  `FE_BIN` is what keeps
 # test.sh from rebuilding and re-cleaning the ordinary tree underneath it.
-perf-check: perf perf-workloads
+perf-check: perf-workloads run-perf-test-api run-perf-payload \
+	run-perf-example-host run-perf-scripts
+
+run-perf-test-api: $(PERF_TEST_API)
 	./$(PERF_TEST_API)
+
+run-perf-payload: $(PAYLOAD_TESTS_PERF)
 	./$(PAYLOAD_TESTS_PERF)
+
+run-perf-example-host: $(PERF_EXAMPLE_HOST)
 	$(EXAMPLE_RUNNER) ./$(PERF_EXAMPLE_HOST)
+
+run-perf-scripts: $(PERF_TARGET)
 	FE_BIN=./$(PERF_TARGET) ./test.sh
 
 # The battery at its default sizes, which are chosen to stay inside the
@@ -1543,6 +1576,9 @@ iwyu:
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
 .PHONY: all check test core test-header check-gc-stress check-payload \
+	run-test-api run-example-host run-scripts run-gc-stress run-gc-stress-on \
+	run-payload-tests run-payload-tests-stress \
+	run-perf-test-api run-perf-payload run-perf-example-host run-perf-scripts \
 	perf perf-check \
 	perf-workloads sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
