@@ -4,4 +4,4 @@ set -euxo pipefail
 cd "$(dirname "$0")/.."
 source .ci/ci-env.sh
 
-make complexity-check pmccabe-check
+"${MAKE_PARALLEL[@]}" complexity-check pmccabe-check

@@ -20,8 +20,12 @@ export CFLAGS="-Werror -Wall -Wextra -pedantic -std=c2x -fsanitize=address,undef
 # Makefile), so the standalone header checks compile the armed header too.
 export FE_DEBUG_PAYLOAD_MOVE=1
 
-"${MAKE_PARALLEL[@]}" -B check
-
+# One invocation, not two: naming both goals in one make lets -j interleave
+# the two DAGs instead of idling the box through the tail of the first one.
+# The battery's own objects live in perfobj/, and the one target the two DAGs
+# share -- tiny-regex-c/re.o -- make builds once per invocation, where two
+# invocations under -B compile it twice.
+#
 # Phase 21.2's workload battery, under the same sanitizers.  It drives
 # allocation and collection harder than anything in `check` -- 45 collections
 # in a 96 KiB arena, a live set at 80% of a 256 KiB one, 8192 interned symbols,
@@ -33,4 +37,4 @@ export FE_DEBUG_PAYLOAD_MOVE=1
 # under the sanitizers for no new coverage.  The objects land in `perfobj/`,
 # and `.build-flags` is their prerequisite, so an ordinary `make perf-check`
 # afterwards rebuilds them rather than relinking these.
-"${MAKE_PARALLEL[@]}" perf-workloads
+"${MAKE_PARALLEL[@]}" -B check perf-workloads

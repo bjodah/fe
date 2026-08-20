@@ -9,4 +9,4 @@ source .ci/ci-env.sh
 # them (make compat-oracle) is a separate, manual/on-demand target that
 # needs a resolved Emacs and is not part of this or any other numbered
 # stage; see compat/README.md.
-make compat
+"${MAKE_PARALLEL[@]}" compat
