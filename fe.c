@@ -1130,7 +1130,7 @@ bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b) {
   const size_t gc = FeSaveGC(ctx);
   FeObject* left = StringOperand(ctx, a);
   FePushGC(ctx, left);
-  FeObject* right = StringOperand(ctx, b);
+  const FeObject* const right = StringOperand(ctx, b);
   FeRestoreGC(ctx, gc);
   const size_t left_length = StringLength(left);
   const size_t right_length = StringLength(right);
@@ -1845,7 +1845,7 @@ static bool IsConfusingSymbolName(const char* name) {
 // allocate, and an allocation may compact this name's bytes out from under an
 // address taken before it. That is clause 2 of the publish protocol, and this
 // loop plus `EmitStoredString`'s are the two places in fe that pay it.
-static void EmitSymbolName(Writer* w, FeObject* name) {
+static void EmitSymbolName(Writer* w, const FeObject* name) {
   const size_t length = StringLength(name);
   if (length == 0) {
     EmitString(w, "##");
@@ -1889,7 +1889,7 @@ static void EmitSymbolName(Writer* w, FeObject* name) {
 // exactly the class `reader-string-raw-byte-printing` already records in the
 // other direction. Nothing else is escaped, Emacs included: a newline inside
 // a string prints as a newline there too.
-static void EmitStoredString(Writer* w, FeObject* obj, int qt) {
+static void EmitStoredString(Writer* w, const FeObject* obj, int qt) {
   if (qt) {
     Emit(w, '"');
   }
@@ -3933,7 +3933,7 @@ static FeObject* Aref(FeContext* ctx, FeObject* array, FeObject* index_obj) {
 // Writing over one byte of a two-byte UTF-8 character is a recorded
 // divergence rather than an error.
 static void SetStringByte(FeContext* ctx,
-                          FeObject* string,
+                          const FeObject* string,
                           size_t index,
                           FeObject* value) {
   if (FeGetType(value) != FeTInteger || INTEGER(value) < 0) {

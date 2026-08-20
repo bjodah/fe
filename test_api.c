@@ -914,7 +914,7 @@ static bool ReadsBytes(FeContext* context,
                        const char* source,
                        const char* expected,
                        size_t length) {
-  FeObject* const object =
+  const FeObject* const object =
       FeReadString(context, source, strlen(source), nullptr);
   CHECK(object != nullptr);
   CHECK(FeGetType(object) == FeTString);
@@ -9997,7 +9997,7 @@ static bool TestStringRepresentation(void) {
       source[at] = at % 3 == 1 ? '\0' : (char)('a' + (int)(at % 26));
     }
     const size_t gc = FeSaveGC(context);
-    FeObject* const string = FeMakeStringBytes(context, source, length);
+    const FeObject* const string = FeMakeStringBytes(context, source, length);
     CHECK(FeGetType(string) == FeTString);
     CHECK(FeStringByteLength(context, string) == length);
     // The one-call form answers the length whether or not it copies, and
@@ -10045,14 +10045,15 @@ static bool TestStringRepresentation(void) {
     CHECK(FeWriteWithOptions(context, original, CollectRendered, &sink, 1,
                              nullptr));
     CHECK(strcmp(printed, "\"a\\000b\\000\"") == 0);
-    FeObject* const read =
+    const FeObject* const read =
         FeReadString(context, printed, strlen(printed), nullptr);
     CHECK(read != nullptr && read != original);
     CHECK(FeStringBytes(context, read, copy, sizeof(copy)) == 4);
     CHECK(memcmp(copy, "a\0b\0", 4) == 0);
     // A digit after the escape stays a digit, which is why the escape is
     // three digits wide and not one.
-    FeObject* const digit = FeReadString(context, "\"\\0001\"", 7, nullptr);
+    const FeObject* const digit =
+        FeReadString(context, "\"\\0001\"", 7, nullptr);
     CHECK(FeStringBytes(context, digit, copy, sizeof(copy)) == 2);
     CHECK(memcmp(copy,
                  "\0"

@@ -1615,13 +1615,14 @@ static bool TestReaderLiteralGrowsAndTrims(void) {
 
   const size_t before_used = context->payload_used;
   FeObject* const string = FeReadString(context, source, Length + 2, nullptr);
+  const size_t grown_used = context->payload_used;
   CHECK(string != nullptr && FeGetType(string) == FeTString);
   CHECK(FeStringByteLength(context, string) == Length);
   CHECK(FeStringBytes(context, string, copy, sizeof(copy)) == Length);
   CHECK(memcmp(copy, source + 1, Length) == 0);
   // More than one block was published -- the growth -- and after a collection
   // reclaims the dead ones the survivor is exactly one trimmed block.
-  CHECK(context->payload_used - before_used > StringBlockBytes(Length));
+  CHECK(grown_used > before_used + StringBlockBytes(Length));
   const size_t gc = FeSaveGC(context);
   FePushGC(context, string);
   FeCollectGarbage(context);
