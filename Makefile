@@ -1419,7 +1419,9 @@ $(PERF_DIR):
 $(PERF_TARGET): $(PERF_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(PERF_TEST_API): $(PERF_DIR)/test_api.o $(PERF_CORE_OBJS)
+$(PERF_TEST_API): $(PERF_DIR)/test_api.o $(PERF_CORE_OBJS) \
+		$(PERF_DIR)/fex.o $(PERF_DIR)/fex_io.o $(PERF_DIR)/fex_re.o \
+		tiny-regex-c/re.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(PERF_EXAMPLE_HOST): $(PERF_DIR)/example_host.o $(PERF_CORE_OBJS)
