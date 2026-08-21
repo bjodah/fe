@@ -169,3 +169,11 @@ when the grammar moves.
   mark arities appear, so the let-dynamic-only flag is steered too. Before
   the arm existed the shape was unreachable by construction: fe has no
   `defvar`, and the marking primitive the grammar now calls is 11B's.
+
+## write
+
+- `cyclic-writer-m07` -- the exact eight-byte M0.7 reproducer
+  `81 81 a4 a4 0f 52 86 81`. It builds the two-node car/cdr cycle that used
+  the no-options writer's old 8-million-node backstop. The write smoke replays
+  this tracked seed directly; the fuzzer also asserts its callback work stays
+  below a deterministic 12 MiB ceiling.

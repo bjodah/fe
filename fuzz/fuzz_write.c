@@ -34,6 +34,12 @@ static void Count(FeContext*, void* udata, char) {
   sink->written++;
 }
 
+static bool IsM07Seed(const uint8_t* data, size_t size) {
+  static const uint8_t seed[] = {0x81, 0x81, 0xa4, 0xa4,
+                                 0x0f, 0x52, 0x86, 0x81};
+  return size == sizeof(seed) && memcmp(data, seed, sizeof(seed)) == 0;
+}
+
 typedef struct Source {
   char text[SourceSize];
   size_t length;
@@ -150,6 +156,11 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
       abort();
     }
     if (complete && sink.written == 0) {
+      abort();
+    }
+    // M0.7's two-node car/cdr cycle must stay bounded by deterministic work,
+    // not merely by the fuzz lane's wall-clock timeout.
+    if (IsM07Seed(data, size) && sink.written > 12u * (1u << 20)) {
       abort();
     }
 

@@ -64,11 +64,13 @@ void FexInstallNativeFn(FeContext* ctx, const char* name, FeNativeFn fn) {
 // not escape, and cannot truncate. A string carrying an embedded NUL is
 // refused loudly rather than silently reduced to its first segment at the
 // C-string boundary this helper exists to cross -- every caller hands the
-// result to an interface (fopen, exec, the regex compiler) that would stop at
-// the NUL and behave as if the rest had never been there. `cleanup` is freed
-// before raising, which is how a caller that already holds an allocation hands
-// it over; `FeHandleError` does not return, so there is no other way to
-// release it.
+// result to an interface (fopen, remove, the regex compiler) that would stop
+// at the NUL and behave as if the rest had never been there. `execute`'s argv
+// lives in one block of its own instead (fex_process.c), so that the same
+// refusal there can release the vector and every earlier argument. `cleanup`
+// is freed before raising, which is how a caller that already holds an
+// allocation hands it over; `FeHandleError` does not return, so there is no
+// other way to release it.
 static void RejectEmbeddedNul(FeContext* ctx,
                               char* bytes,
                               size_t length,

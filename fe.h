@@ -395,7 +395,9 @@
 // 15: no declaration in this header changed.
 //
 // Version 19 (the external-review correctness tranche of the same campaign)
-// is the Fex boundary cut, and it changes what two extensions answer.  A
+// is the Fex boundary cut, and it changes what two extensions answer.  It
+// lands under `FeVersion` "23.0" (which moves 22.0 -> 23.0); `FE_API_VERSION`
+// stays at 15: no declaration in this header changed.  A
 // length-bearing string has been readable since version 17, but the I/O and
 // regex extensions still crossed their C-string boundaries through one
 // helper: `read-file` built its record with `strlen`'s length -- reading

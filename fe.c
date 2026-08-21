@@ -23,7 +23,7 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-const char* FeVersion = "22.0";
+const char* FeVersion = "23.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -2099,7 +2099,9 @@ FeObject* FeCdr(FeContext* ctx, FeObject* obj) {
 // unreasonable, not the cycle defence.
 enum {
   DefaultWriteMaxBytes = 64u << 20,
-  DefaultWriteMaxNodes = 8u << 20,
+  // Keep the no-options path bounded tightly enough for cyclic graphs under
+  // sanitizer fuzzing; explicit nonzero limits remain caller-owned policy.
+  DefaultWriteMaxNodes = 1u << 20,
   // Public, because `main.c` bounds its escaping-raise trace by the same
   // number and used to say "256" a second time to do it (09A Decision 5).
   DefaultWriteMaxDepth = FeWriteDefaultMaxDepth,

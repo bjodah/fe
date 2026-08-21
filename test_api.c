@@ -13,6 +13,7 @@
 #include "fe.h"
 #include "fe_internal.h"
 #include "fe_perf.h"
+#include "fex.h"
 
 #define CHECK(condition)                                                     \
   do {                                                                       \
@@ -143,7 +144,15 @@ static bool TestContextCreation(void) {
   // only be checked here.
   static_assert(FE_API_VERSION == 15);
   static_assert(FE_LANGUAGE_VERSION == 19);
-  CHECK(strcmp(FeVersion, "22.0") == 0);
+  CHECK(strcmp(FeVersion, "23.0") == 0);
+
+  // FexVersion is mechanically tied to the language version -- it is built
+  // from FE_LANGUAGE_VERSION_STRING -- so assert the live string carries the
+  // language version rather than only checking that it is non-empty.
+  char fex_tail[32];
+  (void)snprintf(fex_tail, sizeof fex_tail, "(fe language %d)",
+                 FE_LANGUAGE_VERSION);
+  CHECK(strstr(FexVersion, fex_tail) != NULL);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();

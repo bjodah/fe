@@ -1,0 +1,19 @@
+;; The C-string boundaries refuse an embedded NUL by name -- the refusal
+;; io-nul-pattern.fe dies on for compile-re's pattern, caught here at every
+;; other caller so one script covers the census: open path, open mode,
+;; remove path, match-re's subject, and both ends of execute's argv. The
+;; later argv slot is the one that used to raise past the arguments copied
+;; before it; execute-nul-later-arg.fe dies on that shape uncaught.
+(assert-is 'error
+  (condition-case e (open-file "a\0b" "r") (error (car e))))
+(assert-is 'error
+  (condition-case e (open-file "fe.c" "r\0+") (error (car e))))
+(assert-is 'error
+  (condition-case e (remove-file "a\0b") (error (car e))))
+(assert-is 'error
+  (condition-case e (match-re (compile-re "a") "a\0b") (error (car e))))
+(assert-is 'error
+  (condition-case e (execute "a\0b") (error (car e))))
+(assert-is 'error
+  (condition-case e (execute "true" "fine" "a\0b") (error (car e))))
+(print "nul-refusals: every C-string boundary refused")

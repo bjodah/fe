@@ -1573,6 +1573,8 @@ bool FeWriteWithOptions(FeContext* ctx, FeObject* obj, FeWriteFn fn,
 ```
 
 A zero field takes the default, and a null `options` takes all three.
+The public node default is 1,048,576 rendered objects; the depth default is
+`FeWriteDefaultMaxDepth` (256), and explicit nonzero limits remain authoritative.
 `FeWriteWithOptions()` returns `true` when the whole object was rendered and
 `false` when it stopped early; `FeWrite()` is the same call with default
 options and the answer discarded.
