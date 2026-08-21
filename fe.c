@@ -23,7 +23,7 @@
 #include "fe_internal.h"
 #include "fe_perf.h"
 
-const char* FeVersion = "23.0";
+const char* FeVersion = "24.0";
 
 // Collect before *every* arena allocation, so an object that is live only
 // through an unrooted C local is reclaimed at the first opportunity rather
@@ -3161,7 +3161,10 @@ static int ReadHexEscape(FeContext* ctx, FeReadFn fn, void* udata) {
 // character's value rather than the bytes it will occupy. The caller decides
 // what a value means: a `?` literal takes any of them, a string body is a
 // byte string and rejects the ones that do not fit in a byte.
-static int ReadEscape(FeContext* ctx, FeReadFn fn, void* udata) {
+static int ReadEscape(FeContext* ctx,
+                      FeReadFn fn,
+                      void* udata,
+                      bool string_body) {
   const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
   ctx->nextchr = '\0';
   if (chr == '\0')
@@ -3209,6 +3212,8 @@ static int ReadEscape(FeContext* ctx, FeReadFn fn, void* udata) {
     }
     return value;
   }
+  if (string_body)
+    return (unsigned char)chr;
   FeHandleError(ctx, "unsupported read syntax: unknown escape");
 }
 
@@ -3327,7 +3332,7 @@ static int ReadEscapedCharacter(FeContext* ctx,
     return ' ';
   }
   ctx->nextchr = chr;
-  return ReadEscape(ctx, fn, udata);
+  return ReadEscape(ctx, fn, udata, false);
 }
 
 // A `?` literal ends at a delimiter, as it does in Emacs, which reads `?ab`,
@@ -3482,7 +3487,17 @@ static FeObject* ReadHash(FeContext* ctx, FeReadFn fn, void* udata) {
 // type rather than a length. That half of the divergence is recorded in
 // `compat/features.json` and `doc/language.md`.
 static int ReadStringEscape(FeContext* ctx, FeReadFn fn, void* udata) {
-  const int value = ReadEscape(ctx, fn, udata);
+  const char chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+  switch (chr) {
+    case ' ':
+    case '\n':
+      ctx->nextchr = '\0';
+      return -1;
+    default:
+      break;
+  }
+  ctx->nextchr = chr;
+  const int value = ReadEscape(ctx, fn, udata, true);
   if (value > 0xff) {
     FeHandleError(ctx,
                   "unsupported read syntax: character above 255 in string");
@@ -3509,7 +3524,13 @@ static FeObject* ReadStringLiteral(FeContext* ctx, FeReadFn fn, void* udata) {
     if (chr == '\0')
       FeHandleError(ctx, "unclosed string");
     if (chr == '\\') {
-      chr = (char)ReadStringEscape(ctx, fn, udata);
+      const int value = ReadStringEscape(ctx, fn, udata);
+      if (value < 0) {
+        chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
+        ctx->nextchr = '\0';
+        continue;
+      }
+      chr = (char)value;
     }
     AppendStringByte(ctx, res, chr);
     chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);

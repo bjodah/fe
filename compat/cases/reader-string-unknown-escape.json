@@ -2,5 +2,6 @@
 	"id": "reader-string-unknown-escape",
 	"setup": [],
 	"expr": "\"\\q\"",
+	"expect": "agree",
 	"note": "An escape spelling that is in no escape table."
 }

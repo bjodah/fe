@@ -2,5 +2,6 @@
 	"id": "reader-string-escaped-space",
 	"setup": [],
 	"expr": "\"\\ \"",
+	"expect": "agree",
 	"note": "A backslash followed by a space in a string body."
 }

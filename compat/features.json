@@ -2502,7 +2502,7 @@
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Emacs is permissive about escapes it does not know: `\"\\q\"` is \"q\" (the backslash is dropped), `\"\\ \"` and a backslash-newline continuation both produce nothing, and `\"\\N{U+41}\"` is \"A\". Fe rejects each by name. 08C's plan text made this choice explicitly -- an init-file dialect earns strictness -- and the reason is that silently dropping a backslash is how a typo in a regexp or a path becomes a wrong string instead of a diagnostic. `\\N{...}` additionally needs a Unicode name table Fe does not carry; its `U+` form is a second spelling of `\\x`."
+    "rationale": "Phase M3 implements the three measured reader forms that were previously loud: Emacs is permissive about unknown escapes (`\"\\q\"` is \"q\"), and backslash-space and backslash-newline are empty continuations. Those cases carry `expect: agree`; `reader-string-named-character` remains the deliberate divergence because Fe has no Unicode name table."
   },
   {
    "id": "reader-symbol-escape",

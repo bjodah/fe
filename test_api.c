@@ -143,8 +143,8 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 15);
-  static_assert(FE_LANGUAGE_VERSION == 19);
-  CHECK(strcmp(FeVersion, "23.0") == 0);
+  static_assert(FE_LANGUAGE_VERSION == 20);
+  CHECK(strcmp(FeVersion, "24.0") == 0);
 
   // FexVersion is mechanically tied to the language version -- it is built
   // from FE_LANGUAGE_VERSION_STRING -- so assert the live string carries the
@@ -886,8 +886,7 @@ static bool TestStringInput(void) {
                         "byte 1: unsupported read syntax: #"));
   CHECK(ExpectReadError(context, &state, "[1 2", 4,
                         "byte 4: end-of-file: unclosed vector"));
-  CHECK(ExpectReadError(context, &state, "\"\\q\"", 4,
-                        "byte 2: unsupported read syntax: unknown escape"));
+  CHECK(IsRendered(context, FeReadString(context, "\"\\q\"", 4, nullptr), "q"));
   CHECK(ExpectReadError(context, &state, "?\\q", 3,
                         "byte 2: unsupported read syntax: unknown escape"));
   CHECK(ExpectEvaluationError(context, &state, "lines.fe", "\n(car 2)", 8,
@@ -1049,7 +1048,9 @@ static bool TestReaderLiterals(void) {
           "unsupported read syntax: character above 255 in string");
   REJECTS("\"\\x41f\"",
           "unsupported read syntax: character above 255 in string");
-  REJECTS("\"\\q\"", "unsupported read syntax: unknown escape");
+  CHECK(ReadsBytes(context, "\"\\q\\(\\z\"", "q(z", 3));
+  CHECK(ReadsBytes(context, "\"a\\ b\\\nb\"", "abb", 3));
+  CHECK(ReadsBytes(context, "\"a\\\\q\"", "a\\q", 3));
 
   // Symbol escapes were a named rejection until Phase 14 implemented them
   // (`TestSymbolPrimitives` below has the positive assertions). What is left

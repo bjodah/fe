@@ -91,12 +91,17 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 15);
-static_assert(FE_LANGUAGE_VERSION == 19);
+static_assert(FE_LANGUAGE_VERSION == 20);
 ```
 
-Fe 23.0 moves `FE_LANGUAGE_VERSION` 18 -> 19 and leaves `FE_API_VERSION` at
-15: the Fex boundary cut. `read-file` builds its record from getdelim's byte
-count instead of `strlen`'s, so a record with embedded NULs -- the shape
+Fe 24.0 moves `FE_LANGUAGE_VERSION` 19 -> 20 and leaves `FE_API_VERSION` at
+15: the string-reader escape cut. An unknown escape in a string yields its
+escaped byte, while known escapes and the measured backslash-space and
+backslash-newline continuations retain their meanings. The writer's existing
+backslash quoting keeps these strings readable. Fe 23.0 moved
+`FE_LANGUAGE_VERSION` 18 -> 19 and left `FE_API_VERSION` at 15: the Fex
+boundary cut. `read-file` builds its record from getdelim's byte count instead
+of `strlen`'s, so a record with embedded NULs -- the shape
 /proc/self/cmdline is made of -- comes back whole; and every extension
 boundary that hands a string to an interface which cannot carry a NUL
 (`open-file`'s path and mode, `remove-file`, `execute`'s argv, `compile-re`'s

@@ -410,7 +410,13 @@
 // refuses an embedded NUL by name instead of truncating; `write-file`
 // keeps writing exact bytes, NULs included.  A program that never puts a
 // NUL in one of those strings answers exactly what it answered under 18.
-#define FE_LANGUAGE_VERSION 19
+// Version 20 (Phase M3's reader cut) lands under FeVersion "24.0" and makes an
+// unknown escape in a string read
+// as the escaped byte, while preserving known escapes and the measured
+// backslash-space and backslash-newline continuations. Character literals keep
+// their existing named refusals for unknown escapes. The writer already emits
+// a backslash before a stored backslash, so its string output remains readable.
+#define FE_LANGUAGE_VERSION 20
 
 // The language version spelled as a string literal, so a banner that reports
 // it composes the two and they cannot drift apart.

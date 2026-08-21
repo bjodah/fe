@@ -75,6 +75,13 @@
 (assert-equals " " "\s")
 (assert-equals "AA" "\x41\101")
 
+;; Unknown string escapes keep the character; space and newline continuations
+;; keep their measured empty meaning, and a printed backslash reads back.
+(assert-equals "q(z" "\q\(\z")
+(assert-equals "abb" "a\ b\
+b")
+(assert-equals "a\\q" "a\\q")
+
 ;; A `?` literal ends at a delimiter, so a character can abut the closing
 ;; paren, a quote or a string with nothing between them.
 (assert-equals '(97 x) (list ?a 'x))
