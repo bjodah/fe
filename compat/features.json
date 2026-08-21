@@ -2961,6 +2961,17 @@
    "kg_test": "fe/test_api.c:TestErrorMessageString",
    "rationale": "fe's `print` writes a TOP-LEVEL string bare -- `(print \"abc\")` is `abc` -- where Emacs' `print` writes `\"abc\"`. Nested strings are quoted on both sides, which is why every other string-valued case in this corpus agrees: the compat runner wraps each case in `(print EXPR)`, so only a case whose whole value is a string sees this. Fe's historical convention, unchanged by Phase 19 and deliberately not changed by it -- `print` is fe's `princ`-at-the-top spelling and the scripts' goldens are written in it. `cond-h2` is the case: it recorded `error-message-string`'s target rendering while the name was unsupported, and now that the name exists it measures this instead, byte for byte (`Wrong type argument: listp, 5` against Emacs' `\"Wrong type argument: listp, 5\"`). The rendering itself is measured by the five `error-message-string-*` cases, whose values are lists.",
    "source_name": null
-  }
- ]
+   },
+   {
+    "id": "define-error",
+    "category": "errors-and-non-local-exits",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "kg-policy",
+    "cases": [],
+    "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+    "rationale": "The primitive is exercised through kg's M2.2 oracle and package scenarios; Fe owns its property construction and condition ancestry.",
+    "source_name": "define-error"
+   }
+  ]
 }
