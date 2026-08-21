@@ -91,8 +91,19 @@ should assert both versions it was written against at compile time:
 
 ```c
 static_assert(FE_API_VERSION == 15);
-static_assert(FE_LANGUAGE_VERSION == 18);
+static_assert(FE_LANGUAGE_VERSION == 19);
 ```
+
+Fe 23.0 moves `FE_LANGUAGE_VERSION` 18 -> 19 and leaves `FE_API_VERSION` at
+15: the Fex boundary cut. `read-file` builds its record from getdelim's byte
+count instead of `strlen`'s, so a record with embedded NULs -- the shape
+/proc/self/cmdline is made of -- comes back whole; and every extension
+boundary that hands a string to an interface which cannot carry a NUL
+(`open-file`'s path and mode, `remove-file`, `execute`'s argv, `compile-re`'s
+pattern, `match-re`'s subject) refuses an embedded NUL by name where it used
+to truncate silently. `write-file` still writes exact bytes. A program that
+never puts a NUL in one of those strings answers what it answered under
+22.0.
 
 Fe 22.0 moves `FE_LANGUAGE_VERSION` 17 -> 18 and leaves `FE_API_VERSION` at
 15: one row joins the condition hierarchy (`search-failed`, a child of

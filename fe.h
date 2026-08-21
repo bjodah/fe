@@ -393,7 +393,28 @@
 // macro that does not move cannot tell kg whether the fe it links against
 // has the condition its search family raises.  `FE_API_VERSION` stays at
 // 15: no declaration in this header changed.
-#define FE_LANGUAGE_VERSION 18
+//
+// Version 19 (the external-review correctness tranche of the same campaign)
+// is the Fex boundary cut, and it changes what two extensions answer.  A
+// length-bearing string has been readable since version 17, but the I/O and
+// regex extensions still crossed their C-string boundaries through one
+// helper: `read-file` built its record with `strlen`'s length -- reading
+// /proc/self/cmdline answered the first argv element where the whole
+// NUL-separated record was read -- and pattern/subject/path/mode strings
+// were silently truncated at an embedded NUL, so a pattern "a\0b" behaved
+// as "a".  `read-file` now builds its record from getdelim's byte count,
+// and every boundary that cannot carry a NUL (open-file's path and mode,
+// remove-file, execute's argv, compile-re's pattern, match-re's subject)
+// refuses an embedded NUL by name instead of truncating; `write-file`
+// keeps writing exact bytes, NULs included.  A program that never puts a
+// NUL in one of those strings answers exactly what it answered under 18.
+#define FE_LANGUAGE_VERSION 19
+
+// The language version spelled as a string literal, so a banner that reports
+// it composes the two and they cannot drift apart.
+#define FE_STRINGIZE_(x) #x
+#define FE_STRINGIZE(x) FE_STRINGIZE_(x)
+#define FE_LANGUAGE_VERSION_STRING FE_STRINGIZE(FE_LANGUAGE_VERSION)
 
 extern const char* FeVersion;
 

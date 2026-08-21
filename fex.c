@@ -9,7 +9,11 @@
 #include "fex_io.h"
 #include "fex_re.h"
 
-const char* FexVersion = "0.1";
+// The extension surface reports the Fe LANGUAGE version it rides on, not just
+// its own number: Fex 0.1 stayed put across observable regex and string
+// semantic changes, so a downstream user had nothing to assert against. The
+// spelling is composed so the two cannot drift apart again.
+const char* FexVersion = "0.2 (fe language " FE_LANGUAGE_VERSION_STRING ")";
 
 FeObject* FexGC(FeContext* ctx, FeObject* o) {
   switch (FeGetType(o)) {
@@ -57,9 +61,25 @@ void FexInstallNativeFn(FeContext* ctx, const char* name, FeNativeFn fn) {
 
 // The exact bytes of a string or symbol, NUL terminated, in storage the caller
 // frees. Unlike `FeToString` this is not the printer: it does not quote, does
-// not escape, and cannot truncate. `cleanup` is freed before raising, which is
-// how a caller that already holds an allocation hands it over; `FeHandleError`
-// does not return, so there is no other way to release it.
+// not escape, and cannot truncate. A string carrying an embedded NUL is
+// refused loudly rather than silently reduced to its first segment at the
+// C-string boundary this helper exists to cross -- every caller hands the
+// result to an interface (fopen, exec, the regex compiler) that would stop at
+// the NUL and behave as if the rest had never been there. `cleanup` is freed
+// before raising, which is how a caller that already holds an allocation hands
+// it over; `FeHandleError` does not return, so there is no other way to
+// release it.
+static void RejectEmbeddedNul(FeContext* ctx,
+                              char* bytes,
+                              size_t length,
+                              void* cleanup) {
+  if (memchr(bytes, '\0', length) != NULL) {
+    free(bytes);
+    free(cleanup);
+    FeHandleError(ctx, "string contains an embedded NUL byte");
+  }
+}
+
 char* FexCopyStringZ(FeContext* ctx, const FeObject* obj, void* cleanup) {
   const size_t length = FeStringByteLength(ctx, obj);
   size_t size;
@@ -77,6 +97,7 @@ char* FexCopyStringZ(FeContext* ctx, const FeObject* obj, void* cleanup) {
     free(cleanup);
     FeHandleError(ctx, "failed to copy string bytes");
   }
+  RejectEmbeddedNul(ctx, bytes, length, cleanup);
   bytes[length] = '\0';
   return bytes;
 }

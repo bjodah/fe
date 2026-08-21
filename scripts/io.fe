@@ -35,3 +35,27 @@
 (assert-is 0 (execute "true"))
 (assert-is 1 (execute "false"))
 (assert-is 143 (execute "sh" "-c" "kill -TERM $$"))
+
+;; A record keeps its byte length: an embedded NUL is data, not a
+;; terminator. The record read back from the 4-byte file below used to be
+;; the 1-byte C string "a".
+(setq nul-a "fe-io-nul-a.tmp")
+(setq nul-b "fe-io-nul-b.tmp")
+(setq w (open-file nul-a "w"))
+(assert-is 4 (write-file w "a\0b\n"))
+(assert-nil (close-file w))
+
+(setq r (open-file nul-a "r"))
+(setq record (read-file r "\n"))
+(assert-nil (close-file r))
+(assert-is 4 (length record))
+(assert-is 0 (aref record 1))
+(assert-is 98 (aref record 2))
+
+;; And it round trips byte for byte, NUL included.
+(setq w (open-file nul-b "w"))
+(assert-is 4 (write-file w record))
+(assert-nil (close-file w))
+(assert-is 0 (execute "cmp" nul-a nul-b))
+(assert-nil (remove-file nul-a))
+(assert-nil (remove-file nul-b))

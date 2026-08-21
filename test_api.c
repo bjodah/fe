@@ -142,7 +142,7 @@ static bool TestContextCreation(void) {
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
   static_assert(FE_API_VERSION == 15);
-  static_assert(FE_LANGUAGE_VERSION == 18);
+  static_assert(FE_LANGUAGE_VERSION == 19);
   CHECK(strcmp(FeVersion, "22.0") == 0);
 
   const size_t minimum = FeMinimumArenaSize();

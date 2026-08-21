@@ -622,7 +622,7 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # WHAT THESE TWO NUMBERS ARE TODAY, which is all a comment beside a knob
 # should say -- the derivation of any one raise is in `git log`, and the
 # blocks above are the record of the ones that predate that rule. The total
-# is the measured actual with no slack: 1063 across the thirteen sources and
+# is the measured actual with no slack: 1068 across the thirteen sources and
 # ten headers `SCC_COMPLEXITY_PATHS` names, of which fe.c is 385 and
 # fe_eval.c 402. The per-file cap is 520 and the most complex file is
 # fe_eval.c at 402, so it binds at 118 above the tree and has not moved since
@@ -634,7 +634,7 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # on where its quotes fall. `pmccabe` reads every function either way and is
 # the authoritative aggregate; a large move in this number with a small one
 # in `PMCCABE_TOTAL_MAX` is that boundary shifting, not complexity arriving.
-SCC_COMPLEXITY_MAX ?= 1063
+SCC_COMPLEXITY_MAX ?= 1068
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -1080,11 +1080,11 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # one, and is named above rather than absorbed silently.
 #
 # WHAT THIS NUMBER IS TODAY, the rule the scc knobs above now carry too: the
-# measured actual with no slack, 1468 across 482 symbols, the worst single
+# measured actual with no slack, 1473 across 484 symbols, the worst single
 # function being `ResumeEvalList` at 16 against the 22 cap. Any one raise is
 # derived in `git log`, with its per-symbol deltas; the blocks above are the
 # record of the raises that predate that rule.
-PMCCABE_TOTAL_MAX ?= 1468
+PMCCABE_TOTAL_MAX ?= 1473
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=

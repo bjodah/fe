@@ -1,0 +1,8 @@
+;; A death test: a pattern with an embedded NUL is refused by name, not
+;; silently truncated into a different pattern that matches the wrong
+;; thing. The same refusal covers match-re's subject, open-file's path and
+;; mode, remove-file's path, and execute's argv -- every boundary whose
+;; C string would stop at the NUL and behave as if the rest had never
+;; been there.
+(compile-re "a\0b")
+(print "not reached")

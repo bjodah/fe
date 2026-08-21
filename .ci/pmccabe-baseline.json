@@ -425,6 +425,8 @@
   "fex.c:FexGC": 2,
   "fex.c:FexInit": 1,
   "fex.c:FexInstallNativeFn": 1,
+  "fex.c:RejectEmbeddedNul": 2,
+  "fex_io.c:CopyStringBytes": 3,
   "fex_io.c:FexCloseFile": 4,
   "fex_io.c:FexGCFile": 4,
   "fex_io.c:FexInstallIO": 1,
