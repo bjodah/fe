@@ -977,6 +977,7 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PPut] = {3, 3},
     [PGet] = {2, 2},
     [PSymbolPlist] = {1, 1},
+    [PDefineError] = {2, 3},
     // Phase 20: `string<`/`string>` are strictly binary, Emacs' own arity --
     // measured on the pinned 31.0.90, `(string<)`, `(string< "a")` and
     // `(string< "a" "b" "c")` are all `wrong-number-of-arguments`.
@@ -2415,6 +2416,7 @@ static const bool primitive_is_function[PSentinel] = {
     [PPut] = true,
     [PGet] = true,
     [PSymbolPlist] = true,
+    [PDefineError] = true,
     // Phase 19: `error-message-string` is an ordinary function in Emacs too
     // -- `(special-form-p 'error-message-string)` is nil there and
     // `(mapcar 'error-message-string '((error "a")))` works -- and its arm

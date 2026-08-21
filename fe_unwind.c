@@ -202,34 +202,9 @@ const ConditionParent* ConditionRowAt(size_t index) {
 }
 
 bool IsConditionSymbol(const FeContext* ctx, const FeObject* symbol) {
-  for (size_t i = 0;
-       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (IsNamedSymbol(ctx, symbol, condition_parents[i].name)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static const ConditionParent* FindConditionParent(const FeContext* ctx,
-                                                  const FeObject* symbol) {
-  for (size_t i = 0;
-       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (IsNamedSymbol(ctx, symbol, condition_parents[i].name)) {
-      return &condition_parents[i];
-    }
-  }
-  return nullptr;
-}
-
-static const ConditionParent* FindConditionParentByName(const char* name) {
-  for (size_t i = 0;
-       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (name != nullptr && strcmp(name, condition_parents[i].name) == 0) {
-      return &condition_parents[i];
-    }
-  }
-  return nullptr;
+  const FeObject* const property = FindInternedSymbol(ctx, "error-conditions");
+  return property != nullptr && FeGetType(symbol) == FeTSymbol &&
+         !FeIsNil(ReadPlistGet(ReadSymbolPlist(symbol), property));
 }
 
 // Whether SYMBOL is ANCESTOR or a subtype of it, walking the same chain
@@ -240,11 +215,16 @@ static const ConditionParent* FindConditionParentByName(const char* name) {
 bool ConditionInheritsFrom(const FeContext* ctx,
                            const FeObject* symbol,
                            const char* ancestor) {
-  for (const ConditionParent* entry = FindConditionParent(ctx, symbol);
-       entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
-    if (strcmp(entry->name, ancestor) == 0) {
+  const FeObject* const property = FindInternedSymbol(ctx, "error-conditions");
+  const FeObject* conditions =
+      property == nullptr || FeGetType(symbol) != FeTSymbol
+          ? &nil
+          : ReadPlistGet(ReadSymbolPlist(symbol), property);
+  while (!FeIsNil(conditions)) {
+    if (IsNamedSymbol(ctx, CAR(conditions), ancestor)) {
       return true;
     }
+    conditions = CDR(conditions);
   }
   return false;
 }
@@ -270,11 +250,16 @@ static bool ConditionMatches(const FeContext* ctx,
   if (FeGetType(condition) != FeTPair) {
     return false;
   }
-  for (const ConditionParent* entry = FindConditionParent(ctx, CAR(condition));
-       entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
-    if (IsNamedSymbol(ctx, spec, entry->name)) {
+  const FeObject* const property = FindInternedSymbol(ctx, "error-conditions");
+  const FeObject* conditions =
+      property == nullptr
+          ? &nil
+          : ReadPlistGet(ReadSymbolPlist(CAR(condition)), property);
+  while (!FeIsNil(conditions)) {
+    if (spec == CAR(conditions)) {
       return true;
     }
+    conditions = CDR(conditions);
   }
   return false;
 }

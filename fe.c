@@ -117,6 +117,7 @@ static const char* primitive_names[] = {
     [PPut] = "put",
     [PGet] = "get",
     [PSymbolPlist] = "symbol-plist",
+    [PDefineError] = "define-error",
     [PErrorMessageString] = "error-message-string",
     [PStringLess] = "string<",
     [PStringGreater] = "string>",
@@ -1824,7 +1825,7 @@ static size_t SymbolIndexNext(size_t slot, size_t capacity) {
 //
 // The comparison is `IsStringEqual`, unchanged: length first, then bytes,
 // embedded NUL included. Phase 26 moved it, it did not rewrite it.
-static FeObject* FindInternedSymbol(const FeContext* ctx, const char* name) {
+FeObject* FindInternedSymbol(const FeContext* ctx, const char* name) {
   const size_t capacity = SymbolIndexCapacity(ctx);
   size_t slot = SymbolIndexHome(HashCName(name), capacity);
   FE_PERF_INC(FePerfInternLookup);
@@ -2807,6 +2808,10 @@ FeObject* SymbolPlist(FeObject* sym) {
 
 void SetSymbolPlist(FeObject* sym, FeObject* plist) {
   CDR(CAR(CAR(SymbolBindingCell(sym)))) = plist;
+}
+
+const FeObject* ReadSymbolPlist(const FeObject* sym) {
+  return CDR(CAR(CAR(CDR(sym))));
 }
 
 FeObject* SymbolBindingCell(FeObject* sym) {
@@ -4018,7 +4023,7 @@ FeObject* FeEvaluateFileWithOptions(FeContext* ctx,
 // family is contiguous and why the routing is a range test.
 
 bool IsSymbolPrimitive(Primitive primitive) {
-  return primitive >= PIntern && primitive <= PSymbolPlist;
+  return primitive >= PIntern && primitive <= PDefineError;
 }
 
 // A name operand as a C string. `SymbolNameLimit` is the reader's own token
@@ -4117,9 +4122,19 @@ static FeObject* FindPlistCell(FeObject* plist, FeObject* property) {
   return nullptr;
 }
 
-static FeObject* PlistGet(FeObject* plist, FeObject* property) {
+FeObject* PlistGet(FeObject* plist, FeObject* property) {
   FeObject* const cell = FindPlistCell(plist, property);
   return cell == nullptr ? &nil : CAR(cell);
+}
+
+const FeObject* ReadPlistGet(const FeObject* plist, const FeObject* property) {
+  while (!FeIsNil(plist) && !FeIsNil(CDR(plist))) {
+    if (CAR(plist) == property) {
+      return CAR(CDR(plist));
+    }
+    plist = CDR(CDR(plist));
+  }
+  return &nil;
 }
 
 static FeObject* PlistPut(FeContext* ctx, FeObject* arguments) {
@@ -4144,6 +4159,57 @@ static FeObject* PlistPut(FeContext* ctx, FeObject* arguments) {
   }
   CDR(plist) = tail;
   return value;
+}
+
+static FeObject* DefineError(FeContext* ctx, FeObject* arguments) {
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* const name = CheckType(ctx, CAR(arguments), FeTSymbol);
+  FeObject* const message = CheckType(ctx, CAR(CDR(arguments)), FeTString);
+  FeObject* parents = CDR(CDR(arguments));
+  FePushGC(ctx, name);
+  FePushGC(ctx, message);
+  if (FeIsNil(parents)) {
+    parents = FeCons(ctx, FeMakeSymbol(ctx, "error"), &nil);
+    FePushGC(ctx, parents);
+  } else {
+    parents = CAR(parents);
+  }
+  FeObject* reverse = &nil;
+  FePushGC(ctx, reverse);
+  while (!FeIsNil(parents)) {
+    FeObject* const parent = CheckType(ctx, CAR(parents), FeTSymbol);
+    FeObject* conditions =
+        PlistGet(SymbolPlist(parent), FeMakeSymbol(ctx, "error-conditions"));
+    if (FeIsNil(conditions)) {
+      reverse = FeCons(ctx, parent, reverse);
+      FePushGC(ctx, reverse);
+    } else {
+      while (!FeIsNil(conditions)) {
+        reverse = FeCons(ctx, CAR(conditions), reverse);
+        FePushGC(ctx, reverse);
+        conditions = CDR(conditions);
+      }
+    }
+    parents = CDR(parents);
+  }
+  FeObject* conditions = &nil;
+  FePushGC(ctx, conditions);
+  while (!FeIsNil(reverse)) {
+    conditions = FeCons(ctx, CAR(reverse), conditions);
+    FePushGC(ctx, conditions);
+    reverse = CDR(reverse);
+  }
+  conditions = FeCons(ctx, name, conditions);
+  FePushGC(ctx, conditions);
+  FeObject* const condition_property = FeMakeSymbol(ctx, "error-conditions");
+  FeObject* const message_property = FeMakeSymbol(ctx, "error-message");
+  SetSymbolPlist(
+      name, FeCons(ctx, condition_property,
+                   FeCons(ctx, conditions,
+                          FeCons(ctx, message_property,
+                                 FeCons(ctx, message, SymbolPlist(name))))));
+  FeRestoreGC(ctx, gc);
+  return name;
 }
 
 FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
@@ -4198,6 +4264,9 @@ FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
       result = FeIsNil(CAR(arguments))
                    ? &nil
                    : SymbolPlist(CheckType(ctx, CAR(arguments), FeTSymbol));
+      break;
+    case PDefineError:
+      result = DefineError(ctx, arguments);
       break;
     default:
       abort();
@@ -4636,7 +4705,8 @@ size_t FeErrorMessageString(FeContext* ctx,
   return used;
 }
 
-// The `error-message` property of every condition in the hierarchy, seeded
+// The `error-conditions` and `error-message` properties of every condition in
+// the hierarchy, seeded
 // once while the arena is still empty. Seeded rather than looked up in the
 // C table on demand, because Emacs' properties are real -- `(get
 // 'wrong-type-argument 'error-message)` answers there -- and because it
@@ -4648,13 +4718,39 @@ size_t FeErrorMessageString(FeContext* ctx,
 // symbol is rooted before the string beside it is allocated; the GC stack
 // carries the string and the first pair across the second allocation.
 void SeedConditionMessages(FeContext* ctx) {
-  FeObject* const property = FeMakeSymbol(ctx, ErrorMessageProperty);
+  FeObject* const message_property = FeMakeSymbol(ctx, ErrorMessageProperty);
+  FeObject* const condition_property = FeMakeSymbol(ctx, "error-conditions");
   for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
     const ConditionParent* const row = ConditionRowAt(i);
     const size_t gc = FeSaveGC(ctx);
     FeObject* const symbol = FeMakeSymbol(ctx, row->name);
     FeObject* const text = FeMakeString(ctx, row->message);
-    SetSymbolPlist(symbol, FeCons(ctx, property, FeCons(ctx, text, &nil)));
+    FeObject* conditions = &nil;
+    FeObject* tail = nullptr;
+    for (const ConditionParent* parent = row; parent != nullptr;) {
+      FeObject* const cell = FeCons(ctx, FeMakeSymbol(ctx, parent->name), &nil);
+      if (FeIsNil(conditions)) {
+        conditions = cell;
+      } else {
+        CDR(tail) = cell;
+      }
+      tail = cell;
+      FePushGC(ctx, conditions);
+      FePushGC(ctx, tail);
+      const char* next = parent->parent;
+      parent = nullptr;
+      for (size_t j = 0; next != nullptr && ConditionRowAt(j) != nullptr; j++) {
+        if (strcmp(ConditionRowAt(j)->name, next) == 0) {
+          parent = ConditionRowAt(j);
+          break;
+        }
+      }
+    }
+    SetSymbolPlist(
+        symbol,
+        FeCons(ctx, condition_property,
+               FeCons(ctx, conditions,
+                      FeCons(ctx, message_property, FeCons(ctx, text, &nil)))));
     FeRestoreGC(ctx, gc);
   }
 }
@@ -4679,10 +4775,21 @@ static size_t GetStringPayloadBytes(const char* text) {
 // per row a message string, the two pairs of the plist, and the condition
 // symbol unless one of the tables above already interned it.
 static size_t GetConditionMessageObjectCount(void) {
-  size_t count = SymbolObjectCount;
+  size_t count = SymbolObjectCount * 2;
   for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
     const ConditionParent* const row = ConditionRowAt(i);
-    count += StringObjectCount + 2;
+    count += StringObjectCount + 4;
+    for (const ConditionParent* parent = row; parent != nullptr;) {
+      count++;
+      const char* next = parent->parent;
+      parent = nullptr;
+      for (size_t j = 0; next != nullptr && ConditionRowAt(j) != nullptr; j++) {
+        if (strcmp(ConditionRowAt(j)->name, next) == 0) {
+          parent = ConditionRowAt(j);
+          break;
+        }
+      }
+    }
     if (!IsCoreSymbolName(row->name)) {
       count += SymbolObjectCount;
     }
@@ -4692,7 +4799,8 @@ static size_t GetConditionMessageObjectCount(void) {
 
 // The same seeding, in region bytes: one block per name and one per message.
 static size_t GetConditionMessagePayloadBytes(void) {
-  size_t bytes = GetStringPayloadBytes(ErrorMessageProperty);
+  size_t bytes = GetStringPayloadBytes(ErrorMessageProperty) +
+                 GetStringPayloadBytes("error-conditions");
   for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
     const ConditionParent* const row = ConditionRowAt(i);
     bytes += GetStringPayloadBytes(row->message);

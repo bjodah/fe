@@ -156,6 +156,7 @@ typedef enum Primitive {
   PPut,
   PGet,
   PSymbolPlist,
+  PDefineError,
   // Phase 19 of kg's Emacs-subset program: `error-message-string`, Emacs'
   // rendering of an ERROR object `(SYMBOL . DATA)` into the sentence a
   // handler prints. An ordinary unary function -- its operand is evaluated
@@ -1000,7 +1001,11 @@ void SetSymbolFunction(FeObject* sym, FeObject* fn);
 // first symbol fe has that the collector may reclaim, and a registry keyed
 // by symbol would pin every one that ever carried a property.
 FeObject* SymbolPlist(FeObject* sym);
+const FeObject* ReadSymbolPlist(const FeObject* sym);
 void SetSymbolPlist(FeObject* sym, FeObject* plist);
+FeObject* PlistGet(FeObject* plist, FeObject* property);
+const FeObject* ReadPlistGet(const FeObject* plist, const FeObject* property);
+FeObject* FindInternedSymbol(const FeContext* ctx, const char* name);
 // Phase 14's symbol family (see the `PIntern`..`PSymbolPlist` block above):
 // the range test the evaluator routes on, and the one entry point that
 // finishes all eight from their evaluated operand list.

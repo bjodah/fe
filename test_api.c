@@ -8300,10 +8300,10 @@ static bool TestCaughtExhaustionSession(void) {
 // forever; PEAK follows TOTAL as it always does, and the collection count is
 // unchanged for the tenth time, which is the invariance 09C pinned.
 enum {
-  PinnedTotalSlots = 11935,
+  PinnedTotalSlots = 12031,
   PinnedCollectionCount = 4,
-  PinnedPeakLive = 11935,
-  PinnedLiveAfterCollection = 1446,
+  PinnedPeakLive = 12031,
+  PinnedLiveAfterCollection = 1542,
 };
 
 // ---------------------------------------------------------------------------

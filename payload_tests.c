@@ -332,8 +332,8 @@ static bool TestOpenOptionsPartition(void) {
   // payload blocks), so this fixed arena moves the same way for the same
   // reason -- cells 41971 -> 41970, payload bytes 227536 -> 227576, the
   // region's floor rising by both blocks while the surplus it shares falls.
-  CHECK(carved.cells == 41970);
-  CHECK(carved.payload_bytes == 227576);
+  CHECK(carved.cells == 41997);
+  CHECK(carved.payload_bytes == 227304);
 
   // A smaller share moves the same bytes back the other way, and the frame
   // region -- funded before the split -- notices neither.
