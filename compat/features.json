@@ -112,6 +112,7 @@
    "id": "condition-case-success-handler",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -125,6 +126,7 @@
    "id": "condition-hierarchy",
    "category": "errors-and-non-local-exits",
    "status": "unsupported",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -199,6 +201,7 @@
    "id": "constant-function-cell-writes",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -213,6 +216,7 @@
    "id": "constant-lambda-parameters",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -227,6 +231,7 @@
    "id": "constant-let-lambda-list-keyword",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -297,6 +302,7 @@
    "id": "error-message-quoting-style",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -328,6 +334,7 @@
    "id": "eval-lexical-argument",
    "category": "control-flow",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -372,6 +379,7 @@
    "id": "hash-tables",
    "category": "values-and-equality",
    "status": "unsupported",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -517,6 +525,7 @@
    "id": "lisp2-funcall-lexical-value",
    "category": "functions-and-macros",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -556,6 +565,7 @@
    "id": "lisp2-functionp-symbol",
    "category": "functions-and-macros",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -570,6 +580,7 @@
    "id": "lisp2-let-no-function-shadow",
    "category": "bindings",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -583,6 +594,7 @@
    "id": "lisp2-macro-representation",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "kg-policy",
    "cases": [
@@ -683,6 +695,7 @@
    "id": "macroexpand-all",
    "category": "functions-and-macros",
    "status": "unsupported",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -696,6 +709,7 @@
    "id": "macroexpand-environment",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -874,6 +888,7 @@
    "id": "num-equal",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -939,6 +954,7 @@
    "id": "num-int64-literal-overflow",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1045,6 +1061,7 @@
    "id": "num-overflow-bignum",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1059,6 +1076,7 @@
    "id": "num-predicates",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1176,6 +1194,7 @@
    "id": "num-round-half-even",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1189,6 +1208,7 @@
    "id": "num-rounding",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1228,6 +1248,7 @@
    "id": "num-type-of",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1267,6 +1288,7 @@
    "id": "num-zerop",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1307,6 +1329,7 @@
    "id": "phase7-arity-condition-rendering",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1320,6 +1343,7 @@
    "id": "phase7-arity-identity-policy",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1354,6 +1378,7 @@
    "id": "phase7-lambda-fe-rest-spellings",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1380,6 +1405,7 @@
    "id": "phase7-lambda-rest-trailing",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1462,6 +1488,7 @@
    "id": "phase7-primitive-print-arity",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1586,6 +1613,7 @@
    "id": "primitive-assert",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1705,6 +1733,7 @@
    "id": "primitive-env",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1873,6 +1902,7 @@
    "id": "primitive-let",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2058,6 +2088,7 @@
    "id": "primitive-setcar",
    "category": "sequences",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2071,6 +2102,7 @@
    "id": "primitive-setcdr",
    "category": "sequences",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2194,6 +2226,7 @@
    "id": "reader-character-delimiter",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2258,6 +2291,7 @@
    "id": "reader-character-modifiers-unsupported",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2276,6 +2310,7 @@
    "id": "reader-character-range",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2321,6 +2356,7 @@
    "id": "reader-hash-syntax-unsupported",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2367,6 +2403,7 @@
    "id": "reader-radix-overflow",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2393,6 +2430,7 @@
    "id": "reader-string-byte-limit",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2423,6 +2461,7 @@
    "id": "reader-string-modifiers",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2437,6 +2476,7 @@
    "id": "reader-string-raw-byte-printing",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2451,6 +2491,7 @@
    "id": "reader-string-strict-escapes",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2508,6 +2549,7 @@
    "id": "sequence-length-string-bytes",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2653,6 +2695,7 @@
    "id": "symbol-intern-obarray-argument",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2738,6 +2781,7 @@
    "id": "symbol-put-on-nil",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2824,6 +2868,7 @@
    "id": "unwind-protect-cleanup-raise-residuals",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2853,6 +2898,7 @@
    "id": "vector-read-dot",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2892,6 +2938,7 @@
    "id": "writer-bounded-output",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "kg-policy",
    "cases": [
@@ -2953,6 +3000,7 @@
    "id": "writer-top-level-string-print",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
