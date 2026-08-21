@@ -4173,6 +4173,10 @@ static FeObject* DefineError(FeContext* ctx, FeObject* arguments) {
     FePushGC(ctx, parents);
   } else {
     parents = CAR(parents);
+    if (FeGetType(parents) == FeTSymbol) {
+      parents = FeCons(ctx, parents, &nil);
+      FePushGC(ctx, parents);
+    }
   }
   FeObject* reverse = &nil;
   FePushGC(ctx, reverse);
@@ -4185,8 +4189,18 @@ static FeObject* DefineError(FeContext* ctx, FeObject* arguments) {
       FePushGC(ctx, reverse);
     } else {
       while (!FeIsNil(conditions)) {
-        reverse = FeCons(ctx, CAR(conditions), reverse);
-        FePushGC(ctx, reverse);
+        FeObject* candidate = CAR(conditions);
+        bool duplicate = false;
+        for (FeObject* seen = reverse; !FeIsNil(seen); seen = CDR(seen)) {
+          if (CAR(seen) == candidate) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) {
+          reverse = FeCons(ctx, candidate, reverse);
+          FePushGC(ctx, reverse);
+        }
         conditions = CDR(conditions);
       }
     }
