@@ -2968,7 +2968,9 @@
     "status": "supported",
     "owner": "fe-core",
     "comparison": "kg-policy",
-    "cases": [],
+    "cases": [
+     "define-error-primitive"
+    ],
     "kg_test": "fe/test_api.c:TestSymbolPrimitives",
     "rationale": "The primitive is exercised through kg's M2.2 oracle and package scenarios; Fe owns its property construction and condition ancestry.",
     "source_name": "define-error"
