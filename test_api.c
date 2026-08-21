@@ -1745,6 +1745,18 @@ static bool TestWriter(void) {
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
 
+  // An unknown escape's character and a stored backslash both survive the
+  // writer/read-back pair.
+  FeObject* const escaped = FeEvaluateString(
+      context, "roundtrip.fe", "\"a\\\\q\"", strlen("\"a\\\\q\""));
+  Rendered roundtrip = {0};
+  CHECK(FeWriteWithOptions(context, escaped, Collect, &roundtrip, 1, nullptr));
+  CHECK(strcmp(roundtrip.text, "\"a\\\\q\"") == 0);
+  CHECK(IsRendered(
+      context,
+      FeReadString(context, roundtrip.text, strlen(roundtrip.text), nullptr),
+      "a\\q"));
+
   // Cycles through the cdr spine terminate, with the two-pointer walk finding
   // both a self-loop and a longer one.
   CHECK(Renders(context, "(do (setq a (cons 1 nil)) (setcdr a a) a)", nullptr,
