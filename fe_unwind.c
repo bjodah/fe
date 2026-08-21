@@ -159,6 +159,19 @@ static const ConditionParent condition_parents[] = {
     // do.
     {"search-failed", "error", "Search failed"},
     {"arith-error", "error", "Arithmetic error"},
+    // Phase M2 (master plan 2026-08-21, section 6): Emacs' own chain and
+    // text, measured on 31.0.91: `(get 'invalid-regexp 'error-conditions)`
+    // is `(invalid-regexp error)` and its `error-message` is "Invalid
+    // regexp". It is the condition `string-match', `re-search-forward' and
+    // the rest of the search family raise when the pattern fails to compile,
+    // carrying the engine's diagnostic as its one data item -- measured,
+    // (string-match "[" "") signals `(invalid-regexp "Unmatched [ or [^")'
+    // and `(condition-case e (string-match "[") (error (car e)))` is
+    // `invalid-regexp', not the bare `error' symbol. The regexp engine reports
+    // only a status code, so fe's own layers (fex_re.c and kg's lisp_search)
+    // translate `RE_STATUS_BAD_PATTERN' into this condition; nothing here
+    // raises it directly.
+    {"invalid-regexp", "error", "Invalid regexp"},
     {"file-error", "error", "File error"},
     // Sub-plan 12C Part 1. Emacs' own chain, measured on 31.0.90: `(get
     // 'file-missing 'error-conditions)` is `(file-missing file-error error)`

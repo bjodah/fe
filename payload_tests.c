@@ -332,8 +332,13 @@ static bool TestOpenOptionsPartition(void) {
   // payload blocks), so this fixed arena moves the same way for the same
   // reason -- cells 41971 -> 41970, payload bytes 227536 -> 227576, the
   // region's floor rising by both blocks while the surplus it shares falls.
-  CHECK(carved.cells == 41997);
-  CHECK(carved.payload_bytes == 227304);
+  // Phase M2 (master plan 2026-08-21, section 6) adds the `invalid-regexp'
+  // condition row, which moves `FeMinimumArenaSize` by one more cell and 24
+  // region bytes against this fixed arena -- carved.cells 41997 -> 41998,
+  // payload_bytes 227304 -> 227328 -- the region's floor rising while the
+  // surplus it shares falls.
+  CHECK(carved.cells == 41998);
+  CHECK(carved.payload_bytes == 227328);
 
   // A smaller share moves the same bytes back the other way, and the frame
   // region -- funded before the split -- notices neither.

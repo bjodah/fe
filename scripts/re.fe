@@ -1,9 +1,11 @@
 (setq re (compile-re "goats?"))
 
-;; Verify compile error behavior
+;; Verify compile error behavior: a pattern that fails to compile is Emacs'
+;; `invalid-regexp', a child of `error' the handler can name.
 (setq bad-re (compile-re "\\"))
-(assert-equals 'error (car bad-re))
-(assert-equals 'bad-pattern (car (cdr bad-re)))
+(assert-equals 'invalid-regexp (car bad-re))
+(assert-equals 'invalid-regexp
+  (condition-case e (signal 'invalid-regexp '("x")) (error (car e))))
 
 ;; Verify successful matches with span lists
 (assert-equals '((7 12)) (match-re re "hello, goats"))

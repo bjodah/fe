@@ -8299,11 +8299,20 @@ static bool TestCaughtExhaustionSession(void) {
 // everything the seeding builds being reachable from the symbol list
 // forever; PEAK follows TOTAL as it always does, and the collection count is
 // unchanged for the tenth time, which is the invariance 09C pinned.
+// Phase M2 (master plan 2026-08-21, section 6) adds one condition row,
+// `invalid-regexp', seeded before any program runs like every other row:
+// `GetConditionMessageObjectCount' moves it by thirteen -- `SymbolObjectCount'
+// (6) for a name no core table already interned, `StringObjectCount' (1) for
+// its message, the two plist pairs, and the two cells of its `(invalid-regexp
+// error)' ancestor chain. `FeMinimumArenaSize' grows by 240 bytes for the nine
+// new cells plus the 96 region bytes of the two payload blocks the name and
+// message own. TOTAL/PEAK 12031 -> 12044 and LIVE AFTER COLLECTION 1542 ->
+// 1555; the collection count is unchanged for the eleventh time.
 enum {
-  PinnedTotalSlots = 12031,
+  PinnedTotalSlots = 12044,
   PinnedCollectionCount = 4,
-  PinnedPeakLive = 12031,
-  PinnedLiveAfterCollection = 1542,
+  PinnedPeakLive = 12044,
+  PinnedLiveAfterCollection = 1555,
 };
 
 // ---------------------------------------------------------------------------

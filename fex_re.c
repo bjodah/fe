@@ -82,8 +82,27 @@ static FeObject* BuildError(FeContext* ctx,
       3);
 }
 
+// A condition whose symbol is NAME (not the generic `error') carrying the
+// diagnostic message as its single data item -- what Emacs raises for a
+// named error class such as `invalid-regexp'.
+static FeObject* BuildNamedError(FeContext* ctx,
+                                 const char* name_str,
+                                 const char* message_str) {
+  return FeMakeList(ctx,
+                    (FeObject*[]){FeMakeSymbol(ctx, name_str),
+                                  FeMakeString(ctx, message_str)},
+                    2);
+}
+
 static FeObject* BuildStatusError(FeContext* ctx, re_status status) {
   struct StatusInfo info = GetStatusInfo(status);
+  // A pattern that fails to compile is Emacs' `invalid-regexp', not the
+  // generic `error' -- the condition a handler can name, and the one
+  // `(string-match "[")' actually signals.  Phase M2 (master plan
+  // 2026-08-21, section 6).
+  if (status == RE_STATUS_BAD_PATTERN) {
+    return BuildNamedError(ctx, "invalid-regexp", info.message);
+  }
   return BuildError(ctx, info.code, info.message);
 }
 

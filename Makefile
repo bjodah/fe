@@ -634,7 +634,7 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # on where its quotes fall. `pmccabe` reads every function either way and is
 # the authoritative aggregate; a large move in this number with a small one
 # in `PMCCABE_TOTAL_MAX` is that boundary shifting, not complexity arriving.
-SCC_COMPLEXITY_MAX ?= 1086
+SCC_COMPLEXITY_MAX ?= 1088
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -1084,7 +1084,7 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # function being `ResumeEvalList` at 16 against the 22 cap. Any one raise is
 # derived in `git log`, with its per-symbol deltas; the blocks above are the
 # record of the raises that predate that rule.
-PMCCABE_TOTAL_MAX ?= 1493
+PMCCABE_TOTAL_MAX ?= 1499
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
