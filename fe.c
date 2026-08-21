@@ -4212,7 +4212,7 @@ static FeObject* DefineError(FeContext* ctx, FeObject* arguments) {
       while (!FeIsNil(conditions)) {
         FeObject* candidate = CAR(conditions);
         bool duplicate = false;
-        for (FeObject* seen = reverse; !FeIsNil(seen); seen = CDR(seen)) {
+        for (const FeObject* seen = reverse; !FeIsNil(seen); seen = CDR(seen)) {
           if (CAR(seen) == candidate) {
             duplicate = true;
             break;
@@ -4811,8 +4811,9 @@ static size_t GetStringPayloadBytes(const char* text) {
 // symbol unless one of the tables above already interned it.
 static size_t GetConditionMessageObjectCount(void) {
   size_t count = SymbolObjectCount * 2;
-  for (size_t i = 0; ConditionRowAt(i) != nullptr; i++) {
-    const ConditionParent* const row = ConditionRowAt(i);
+  size_t i = 0;
+  for (const ConditionParent* row = ConditionRowAt(i); row != nullptr;
+       row = ConditionRowAt(++i)) {
     count += StringObjectCount + 4;
     for (const ConditionParent* parent = row; parent != nullptr;) {
       count++;

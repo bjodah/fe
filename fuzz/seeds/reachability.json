@@ -100,7 +100,7 @@
     "requires": [
      "(x &rest y)"
     ],
-    "why": "07B: a &rest parameter list."
+    "why": "07B: a &rest parameter list; the re-derived seed reaches it x1."
    }
   }
  }

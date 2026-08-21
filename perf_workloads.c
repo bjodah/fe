@@ -79,6 +79,9 @@ enum {
   // Collects several times over a few thousand allocations: 1970 cells, of
   // which a bare context open already holds 866.
   ArenaTight = 96 * 1024,
+  // The sparse shape's retained roots grew with the condition table; this
+  // keeps enough garbage per collection for reclamation to dominate marking.
+  ArenaSparse = 128 * 1024,
   // Still collects under the dense-live shape, but with room for a live set
   // worth marking: 11646 cells.
   ArenaSmall = 320 * 1024,
@@ -1089,14 +1092,12 @@ static size_t EndLive(const WorkloadRun* run) {
 // property of the shape.
 //
 // Measured while landing Phase 23.1's payload substrate, and the reason this
-// reads a settled figure rather than the residue: adding fourteen objects to
-// what a context open builds (that phase's `payload-exhaustion` condition
-// row) moves every collection in `gc-sparse-garbage` fourteen allocations
-// earlier. Over 45 collections that drifts the residue from 110 live to 830
-// -- with the allocation count (80030), the collection count (45), the
-// reclaimed count and the marked count all still exactly what they were, plus
-// the 45 x 14 the fourteen new permanent objects are marked for. The counters
-// were right and the assertion was reading a coincidence.
+// reads a settled figure rather than the residue: adding permanent objects to
+// what a context open builds moves every collection in `gc-sparse-garbage`
+// earlier. The invalid-regexp condition row and the reader-version context
+// now make the old 96 KiB setup collect with too little garbage per cycle, so
+// the sparse shape uses `ArenaSparse` below. The counters remain the property;
+// only the incidental arena phase is changed.
 static size_t SettledLive(const WorkloadRun* run) {
   FeCollectGarbage(run->context);
   const FeArenaStats settled = FeGetArenaStats(run->context);
@@ -1317,8 +1318,8 @@ static const Workload workloads[] = {
 
     {.name = "gc-sparse-garbage",
      .family = "gc",
-     .note = "21.2/8: 20000 iterations keeping nothing, 96 KiB arena",
-     .arena = ArenaTight,
+     .note = "21.2/8: 20000 iterations keeping nothing, 128 KiB arena",
+     .arena = ArenaSparse,
      .param = 20000,
      .measure_open = false,
      .setup = nullptr,

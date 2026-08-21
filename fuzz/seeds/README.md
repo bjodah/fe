@@ -99,7 +99,7 @@ when the grammar moves.
   | seed | bytes | reaches |
   |---|---|---|
   | `strict-arity-optional` | 30 | `(x &optional y)` x1 |
-  | `strict-arity-rest` | 97 | `(x &rest y)` x2 |
+  | `strict-arity-rest` | 3 | `(x &rest y)` x1 |
   | `strict-arity-malformed` | 59 | `(&rest y x)` x2 |
   | `strict-arity-primitive` | 8 | `(not t)` then `(car)` |
   | `strict-arity-native` | 9 | `(native-arity nil nil nil)`, i.e. `FeRequireNoArguments`' "too many arguments" |
