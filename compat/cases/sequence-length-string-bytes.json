@@ -1,0 +1,6 @@
+{
+ "id": "sequence-length-string-bytes",
+ "setup": [],
+ "expr": "(length \"é\")",
+ "note": "A DIVERGENCE that has nothing to do with vectors and shows through a new name: a fe string is a BYTE string, so `length' answers its byte count (2 for a two-byte UTF-8 character) where Emacs' strings are sequences of characters and it answers 1. The same rule gives `aref' and `elt' a byte where Emacs gives a character. Recorded here because Phase 24 is the first time a fe program could ask; the representation change is Phase 25's, not this one's."
+}

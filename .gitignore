@@ -3,6 +3,8 @@ example_host
 test_api
 gc_stress
 gc_stress_on
+payload_tests
+payload_tests_stress
 *.o
 *.dSYM
 .vscode
@@ -19,3 +21,5 @@ fuzz/artifacts/
 .repomixignore
 repomix-output.*
 .cache
+perfobj/
+.ci/.run/

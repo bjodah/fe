@@ -27,6 +27,7 @@
 #include <string.h>
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
 
 FeEvaluationControl SaveEvaluationControl(const FeContext* ctx) {
   return (FeEvaluationControl){
@@ -124,6 +125,15 @@ static const ConditionParent condition_parents[] = {
     {"void-variable", "error", "Symbol's value as variable is void"},
     {"void-function", "error", "Symbol's function definition is void"},
     {"args-out-of-range", "error", "Args out of range"},
+    // Phase 24. Emacs' own chain and text, measured on 31.0.91: `(get
+    // 'end-of-file 'error-conditions)` is `(end-of-file error)` and its
+    // `error-message` is "End of file during parsing". It is the condition
+    // the READER raises when input stops inside a form -- `[1 2` and `(1 2`
+    // alike, which is what Emacs answers for both -- and it arrived with
+    // vectors because the vector contract froze the missing-bracket answer
+    // by name and the name turned out to be the generic one rather than a
+    // vector-specific invention.
+    {"end-of-file", "error", "End of file during parsing"},
     // Phase 20. Emacs' own chain and text, measured on 31.0.90: `(get
     // 'end-of-buffer 'error-conditions)` is `(end-of-buffer error)` and its
     // `error-message` is "End of buffer", the same shape for
@@ -136,7 +146,32 @@ static const ConditionParent condition_parents[] = {
     // since `IsConditionSymbol` gates `signal` on this table.
     {"end-of-buffer", "error", "End of buffer"},
     {"beginning-of-buffer", "error", "Beginning of buffer"},
+    // Emacs' own chain and text, measured on 31.0.91: `(get 'search-failed
+    // 'error-conditions)` is `(search-failed error)` and its `error-message`
+    // is "Search failed". It is the condition Emacs' search family raises
+    // when NOERROR is nil, carrying the pattern as its data, and it is here
+    // for the same reason the two buffer edges above are: a host that
+    // searches text has to be able to raise a failure a handler can name,
+    // and `IsConditionSymbol` gates `signal` on this table, so without the
+    // row `(signal 'search-failed '("z"))` is not merely unraised but
+    // illegal. One data line and no code -- the three consumers of the table
+    // are sizeof-driven loops. Fe raises it nowhere; kg's four search names
+    // do.
+    {"search-failed", "error", "Search failed"},
     {"arith-error", "error", "Arithmetic error"},
+    // Phase M2 (master plan 2026-08-21, section 6): Emacs' own chain and
+    // text, measured on 31.0.91: `(get 'invalid-regexp 'error-conditions)`
+    // is `(invalid-regexp error)` and its `error-message` is "Invalid
+    // regexp". It is the condition `string-match', `re-search-forward' and
+    // the rest of the search family raise when the pattern fails to compile,
+    // carrying the engine's diagnostic as its one data item -- measured,
+    // (string-match "[" "") signals `(invalid-regexp "Unmatched [ or [^")'
+    // and `(condition-case e (string-match "[") (error (car e)))` is
+    // `invalid-regexp', not the bare `error' symbol. The regexp engine reports
+    // only a status code, so fe's own layers (fex_re.c and kg's lisp_search)
+    // translate `RE_STATUS_BAD_PATTERN' into this condition; nothing here
+    // raises it directly.
+    {"invalid-regexp", "error", "Invalid regexp"},
     {"file-error", "error", "File error"},
     // Sub-plan 12C Part 1. Emacs' own chain, measured on 31.0.90: `(get
     // 'file-missing 'error-conditions)` is `(file-missing file-error error)`
@@ -156,6 +191,13 @@ static const ConditionParent condition_parents[] = {
     {"no-catch", "error", "No catch for tag"},
     {"evaluation-stack-exhaustion", "error", "Evaluation stack exhausted"},
     {"arena-exhaustion", "error", "Arena exhausted"},
+    // Phase 23.1's payload region. Its own condition rather than a second
+    // arena-exhaustion, because the two name different pools and a handler
+    // that wants to shrink what it is building needs to know which one ran
+    // out. Nothing in a shipped interpreter can raise it yet -- no release
+    // type owns a payload before Phase 25 -- and it is here now because the
+    // substrate that raises it is here now.
+    {"payload-exhaustion", "error", "Payload region exhausted"},
     // `quit` is a root of its own, as it is in Emacs -- `(get 'quit
     // 'error-conditions)` is `(quit)` there, so `error` does not catch it --
     // and it is here only for its name and its message: `ConditionMatches`
@@ -172,34 +214,10 @@ const ConditionParent* ConditionRowAt(size_t index) {
              : nullptr;
 }
 
-bool IsConditionSymbol(const FeObject* symbol) {
-  for (size_t i = 0;
-       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (IsNamedSymbol(symbol, condition_parents[i].name)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static const ConditionParent* FindConditionParent(const FeObject* symbol) {
-  for (size_t i = 0;
-       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (IsNamedSymbol(symbol, condition_parents[i].name)) {
-      return &condition_parents[i];
-    }
-  }
-  return nullptr;
-}
-
-static const ConditionParent* FindConditionParentByName(const char* name) {
-  for (size_t i = 0;
-       i < sizeof(condition_parents) / sizeof(condition_parents[0]); i++) {
-    if (name != nullptr && strcmp(name, condition_parents[i].name) == 0) {
-      return &condition_parents[i];
-    }
-  }
-  return nullptr;
+bool IsConditionSymbol(const FeContext* ctx, const FeObject* symbol) {
+  const FeObject* const property = FindInternedSymbol(ctx, "error-conditions");
+  return property != nullptr && FeGetType(symbol) == FeTSymbol &&
+         !FeIsNil(ReadPlistGet(ReadSymbolPlist(symbol), property));
 }
 
 // Whether SYMBOL is ANCESTOR or a subtype of it, walking the same chain
@@ -207,20 +225,28 @@ static const ConditionParent* FindConditionParentByName(const char* name) {
 // "is this a `file-error`?" -- because that class alone takes its message
 // from the DATA rather than from the property, and prints its items with
 // `princ` rather than `prin1`.
-bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor) {
-  for (const ConditionParent* entry = FindConditionParent(symbol);
-       entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
-    if (strcmp(entry->name, ancestor) == 0) {
+bool ConditionInheritsFrom(const FeContext* ctx,
+                           const FeObject* symbol,
+                           const char* ancestor) {
+  const FeObject* const property = FindInternedSymbol(ctx, "error-conditions");
+  const FeObject* conditions =
+      property == nullptr || FeGetType(symbol) != FeTSymbol
+          ? &nil
+          : ReadPlistGet(ReadSymbolPlist(symbol), property);
+  while (!FeIsNil(conditions)) {
+    if (IsNamedSymbol(ctx, CAR(conditions), ancestor)) {
       return true;
     }
+    conditions = CDR(conditions);
   }
   return false;
 }
 
-static bool ConditionMatches(const FeObject* condition,
+static bool ConditionMatches(const FeContext* ctx,
+                             const FeObject* condition,
                              const FeObject* spec,
                              FeCompletion kind) {
-  if (IsNamedSymbol(spec, "t")) {
+  if (IsNamedSymbol(ctx, spec, "t")) {
     return true;
   }
   if (FeGetType(spec) != FeTSymbol) {
@@ -232,28 +258,34 @@ static bool ConditionMatches(const FeObject* condition,
   // ...)` catch it. Testing the object first is what made a genuine
   // interrupt catchable by `t` but not by the handler that names it.
   if (kind == FeCompletionQuit) {
-    return IsNamedSymbol(spec, "quit");
+    return IsNamedSymbol(ctx, spec, "quit");
   }
   if (FeGetType(condition) != FeTPair) {
     return false;
   }
-  for (const ConditionParent* entry = FindConditionParent(CAR(condition));
-       entry != nullptr; entry = FindConditionParentByName(entry->parent)) {
-    if (IsNamedSymbol(spec, entry->name)) {
+  const FeObject* const property = FindInternedSymbol(ctx, "error-conditions");
+  const FeObject* conditions =
+      property == nullptr
+          ? &nil
+          : ReadPlistGet(ReadSymbolPlist(CAR(condition)), property);
+  while (!FeIsNil(conditions)) {
+    if (spec == CAR(conditions)) {
       return true;
     }
+    conditions = CDR(conditions);
   }
   return false;
 }
 
-static bool HandlerMatches(const FeObject* condition,
+static bool HandlerMatches(const FeContext* ctx,
+                           const FeObject* condition,
                            const FeObject* spec,
                            FeCompletion kind) {
   if (FeGetType(spec) != FeTPair) {
-    return ConditionMatches(condition, spec, kind);
+    return ConditionMatches(ctx, condition, spec, kind);
   }
   while (!FeIsNil(spec)) {
-    if (ConditionMatches(condition, CAR(spec), kind)) {
+    if (ConditionMatches(ctx, condition, CAR(spec), kind)) {
       return true;
     }
     spec = CDR(spec);
@@ -277,7 +309,7 @@ static bool FindConditionHandler(const FeContext* ctx,
          handlers = CDR(handlers)) {
       FeObject* candidate = CAR(handlers);
       if (FeGetType(candidate) == FeTPair &&
-          HandlerMatches(ctx->condition, CAR(candidate), kind)) {
+          HandlerMatches(ctx, ctx->condition, CAR(candidate), kind)) {
         *index = i;
         *clause = candidate;
         return true;
@@ -879,6 +911,23 @@ static void PublishExhaustion(FeContext* ctx,
   RaiseCondition(ctx, FeCompletionError, name, &nil, message);
 }
 
+// The payload region is full and the compacting collection `PublishPayload`
+// ran did not free enough of it. Naming that takes cells -- `RaiseNamedError`
+// builds a condition object -- so when the cell pool is spent too this
+// degrades to the one condition a state with no cells can signal, the
+// pre-built `(arena-exhaustion)`. Both are catchable by name and both are
+// caught by `error`, which is the whole point of the degradation being a
+// different condition rather than a bare message.
+[[noreturn]] void RaisePayloadExhaustion(FeContext* ctx) {
+  static const char message[] = "payload region exhausted";
+  if (!ArenaCanAllocate(ctx)) {
+    PublishExhaustion(ctx, ctx->arena_exhaustion_condition,
+                      ctx->arena_exhaustion_name);
+    RaiseCompletion(ctx, FeCompletionError, message);
+  }
+  RaiseNamedError(ctx, "payload-exhaustion", message);
+}
+
 // The condition data is deliberately built in one place.  Keep both values
 // rooted while the two list allocations run: callers commonly pass a symbol
 // or a freshly resolved callable that has no other reference at this point.
@@ -1047,6 +1096,7 @@ bool BeginEvaluationControl(FeContext* ctx, const FeEvalOptions* options) {
 }
 
 void EvaluationStep(FeContext* ctx) {
+  FE_PERF_INC(FePerfEvalStep);
   if (ctx->evaluation_limited) {
     if (ctx->evaluation_steps == 0) {
       // Step-budget exhaustion is a Budget completion (06B): the host set a

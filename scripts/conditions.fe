@@ -99,6 +99,22 @@
                (error-message-string '(beginning-of-buffer)))
 (assert-equals "End of buffer" (get 'end-of-buffer 'error-message))
 
+;; `search-failed`, the condition a host's search family raises when it is
+;; told not to answer nil.  Emacs' chain, measured on 31.0.91: `(get
+;; 'search-failed 'error-conditions)` is `(search-failed error)`, so `error`
+;; catches it and it catches nothing else.  The DATA is the pattern that was
+;; not found, which is what a handler reads it for.
+(assert-equals '(search-failed "z")
+  (condition-case e (signal 'search-failed '("z")) (error e)))
+(assert-equals "z"
+  (condition-case e (signal 'search-failed '("z")) (search-failed (car (cdr e)))))
+(assert-equals 'E
+  (condition-case nil (signal 'search-failed '("z"))
+    (end-of-buffer 'EOB) (search-failed 'E)))
+(assert-equals "Search failed" (get 'search-failed 'error-message))
+(assert-equals "Search failed: \"z\""
+               (error-message-string '(search-failed "z")))
+
 ;; The uncaught tail: everything above is caught, so nothing above this line
 ;; reaches the host. This one does, and the golden `tests/conditions.fe.err`
 ;; is what an uncaught condition looks like on its way out of the standalone

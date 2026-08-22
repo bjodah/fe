@@ -1,0 +1,50 @@
+;; Form feed (0x0C) is reader whitespace, Phase C2 of kg's fe-simplification
+;; plan.  Emacs' `read1` retries on exactly space, form feed, newline, tab and
+;; carriage return; fe had the other four, so a page separator -- the
+;; conventional Elisp section break, `s.el:770` and `f.el:39` -- was an
+;; ordinary symbol constituent instead.  Every page break below is a REAL 0x0C
+;; byte, not the two characters `\f`; before the fix the first one read as part
+;; of the symbol beside it and this file died at that line with
+;; `void-variable`.
+
+;; Between two top-level forms, which is how a page separator is actually
+;; written: alone on a line of its own.
+(assert-nil nil)
+
+(assert-equals 2 (+ 1 1))
+
+;; Immediately terminating a symbol, with nothing else between.  `nilnil` is
+;; TWO forms; it read as one symbol whose name held the byte.
+(assert-equals '(nil nil) (list nilnil))
+(assert-equals '(a b) '(ab))
+(assert-equals 2 (+ 11))
+
+;; It separates a token wherever the other four do: after an opening paren,
+;; before a closing one, and ending a character or radix literal, both of
+;; which ask their own delimiter question.
+(assert-equals '(1 2) '(1 2))
+(assert-equals '(97 1) (list ?a1))
+(assert-equals '(16 1) (list #x101))
+
+;; Escaped, it is a symbol constituent again -- the escape decides, exactly as
+;; it does for a space.
+(assert-equals "a\fb" (symbol-name 'a\b))
+
+;; Inside a string body it is not reader syntax at all, just the byte: the
+;; same string `\f` spells, and not the two-byte "ab".
+(assert-equals "a\fb" "ab")
+(assert-not-equals "ab" "ab")
+
+;; A comment still ends at a NEWLINE and nothing else, which is Emacs' rule
+;; too -- `read1`'s `;` arm reads to `\n` whatever it passes.  If a form feed
+;; ended a comment, the form hidden on the next line would run and this would
+;; answer 2.
+(setq marker 1)
+; a comment, and everything after this page break is still in it:(setq marker 2)
+(assert-equals 1 marker)
+
+(print "form feed ok")
+
+;; A lone form feed at end of input is end of input, not a symbol: the last
+;; byte of this file is one.
+

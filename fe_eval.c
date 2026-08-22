@@ -25,11 +25,13 @@
 #include <stdlib.h>
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
 
 static FeObject* Bind(FeContext* ctx,
                       FeObject* env,
                       FeObject* name,
                       FeObject* value) {
+  FE_PERF_INC(FePerfEnvBind);
   return FeCons(ctx, FeCons(ctx, name, value), env);
 }
 
@@ -43,7 +45,7 @@ static FeObject* BindValue(FeContext* ctx,
                            FeObject* env,
                            FeObject* name,
                            FeObject* value) {
-  if (FeIsNil(name) || IsConstantSymbol(name)) {
+  if (FeIsNil(name) || IsConstantSymbol(ctx, name)) {
     RaiseSettingConstant(ctx, name);
   }
   CheckType(ctx, name, FeTSymbol);
@@ -55,14 +57,17 @@ static FeObject* BindLambda(FeContext* ctx,
                             FeObject* name,
                             FeObject* value) {
   // Lexical Emacs lambdas permit `t` to shadow the global constant.
-  if ((FeIsNil(name) || IsConstantSymbol(name)) && !IsNamedSymbol(name, "t")) {
+  if ((FeIsNil(name) || IsConstantSymbol(ctx, name)) &&
+      !IsNamedSymbol(ctx, name, "t")) {
     RaiseSettingConstant(ctx, name);
   }
   return Bind(ctx, env, name, value);
 }
 
 static bool HasLexicalBinding(FeObject* env, const FeObject* name) {
+  FE_PERF_INC(FePerfEnvLookup);
   while (!FeIsNil(env)) {
+    FE_PERF_INC(FePerfEnvCell);
     const FeObject* cell = CAR(env);
     if (CAR(cell) == name) {
       return true;
@@ -76,8 +81,8 @@ static void ValidateSetqTarget(FeContext* ctx,
                                FeObject* env,
                                FeObject* target) {
   if (FeIsNil(target) ||
-      (IsConstantSymbol(target) &&
-       !(IsNamedSymbol(target, "t") && HasLexicalBinding(env, target)))) {
+      (IsConstantSymbol(ctx, target) &&
+       !(IsNamedSymbol(ctx, target, "t") && HasLexicalBinding(env, target)))) {
     RaiseSettingConstant(ctx, target);
   }
   if (FeGetType(target) != FeTSymbol) {
@@ -88,7 +93,7 @@ static void ValidateSetqTarget(FeContext* ctx,
 static FeObject* SetEvaluatedValue(FeContext* ctx,
                                    FeObject* symbol,
                                    FeObject* value) {
-  if (FeIsNil(symbol) || IsConstantSymbol(symbol)) {
+  if (FeIsNil(symbol) || IsConstantSymbol(ctx, symbol)) {
     RaiseSettingConstant(ctx, symbol);
   }
   if (FeGetType(symbol) != FeTSymbol) {
@@ -99,14 +104,14 @@ static FeObject* SetEvaluatedValue(FeContext* ctx,
 }
 
 static void ValidateValueTarget(FeContext* ctx, FeObject* target) {
-  if (FeIsNil(target) || IsConstantSymbol(target)) {
+  if (FeIsNil(target) || IsConstantSymbol(ctx, target)) {
     RaiseSettingConstant(ctx, target);
   }
   CheckType(ctx, target, FeTSymbol);
 }
 
 static void RejectConstantTarget(FeContext* ctx, FeObject* target) {
-  if (FeIsNil(target) || IsConstantSymbol(target)) {
+  if (FeIsNil(target) || IsConstantSymbol(ctx, target)) {
     RaiseSettingConstant(ctx, target);
   }
 }
@@ -154,7 +159,8 @@ static FeObject* ReverseList(FeObject* list) {
 // so instead of quietly meaning something else. Only the two names the
 // decoder acts on are refused; `(let ((&foo 1)) &foo)` is 1 in both.
 static void ValidateLetBindingTarget(FeContext* ctx, FeObject* target) {
-  if (IsNamedSymbol(target, "&optional") || IsNamedSymbol(target, "&rest")) {
+  if (IsNamedSymbol(ctx, target, "&optional") ||
+      IsNamedSymbol(ctx, target, "&rest")) {
     FeHandleError(ctx, "lambda-list keyword in let binding");
   }
   ValidateValueTarget(ctx, target);
@@ -362,7 +368,7 @@ static void ValidateParameterName(FeContext* ctx,
                                   const FeObject* name,
                                   bool optional) {
   if (!IsParameterName(name) ||
-      (optional && IsNamedSymbol(name, "&optional"))) {
+      (optional && IsNamedSymbol(ctx, name, "&optional"))) {
     RaiseNamedError(ctx, "invalid-function", "invalid-function");
   }
 }
@@ -373,11 +379,11 @@ static void ValidateParameters(FeContext* ctx, FeObject* prm) {
     const FeObject* name = CAR(prm);
     prm = CDR(prm);
     ValidateParameterName(ctx, name, optional);
-    if (IsNamedSymbol(name, "&optional")) {
+    if (IsNamedSymbol(ctx, name, "&optional")) {
       optional = true;
       continue;
     }
-    if (IsNamedSymbol(name, "&rest")) {
+    if (IsNamedSymbol(ctx, name, "&rest")) {
       if (FeGetType(prm) != FeTPair || FeGetType(CAR(prm)) != FeTSymbol ||
           !FeIsNil(CDR(prm))) {
         RaiseNamedError(ctx, "invalid-function", "invalid-function");
@@ -417,11 +423,11 @@ static FeObject* ArgsToEnv(FeContext* ctx,
     }
     FeObject* name = CAR(prm);
     prm = CDR(prm);
-    if (IsNamedSymbol(name, "&optional")) {
+    if (IsNamedSymbol(ctx, name, "&optional")) {
       optional = true;
       continue;
     }
-    if (IsNamedSymbol(name, "&rest")) {
+    if (IsNamedSymbol(ctx, name, "&rest")) {
       if (FeGetType(prm) != FeTPair) {
         RaiseNamedError(ctx, "invalid-function", "invalid-function");
       }
@@ -554,6 +560,7 @@ static FeObject* ReportFunctionCycle(FeContext* ctx, bool* cycle) {
 // host-facing `FeGetFunction`, which may be called with no evaluation running
 // at all and so has no frame to raise into.
 FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn, bool* cycle) {
+  FE_PERF_INC(FePerfFunctionResolve);
   FeObject* slow = fn;
   FeObject* fast = fn;
   while (FeGetType(slow) == FeTSymbol) {
@@ -565,6 +572,10 @@ FeObject* ResolveFunctionCallable(FeContext* ctx, FeObject* fn, bool* cycle) {
       return cell;
     }
     EvaluationStep(ctx);
+    // One `defalias` link followed. The two-pointer cycle detector below
+    // reads function cells of its own; those are deliberately not counted,
+    // so this is the length of the chain walked and not the memory traffic.
+    FE_PERF_INC(FePerfFunctionHop);
     slow = cell;
     if (FeGetType(fast) == FeTSymbol) {
       FeObject* const f1 = SymbolFunction(fast);
@@ -664,6 +675,7 @@ static void EnterMacroBody(FeContext* ctx,
                            FeObject* call,
                            FeObject* identity,
                            FeObject* caller_env) {
+  FE_PERF_INC(FePerfMacroExpansion);
   frame->kind = FeFrameMacro;
   // Root the callable while `ArgsToEnv` below allocates (a collection may
   // run inside it): `frame->fn` is a collector root. It is then overwritten
@@ -700,6 +712,7 @@ static bool DispatchResolvedCall(FeContext* ctx,
                                  FeObject** frame_bind,
                                  FeObject** result) {
   if (FeGetType(fn) == FeTPrimitive) {
+    FE_PERF_INC(FePerfDispatchPrimitive);
     PreflightPrimitive(ctx, (Primitive)(unsigned char)PRIM(fn),
                        CallIdentity(frame->expr, fn), CDR(frame->expr));
     if (PRIM(fn) == PQuote) {
@@ -710,6 +723,10 @@ static bool DispatchResolvedCall(FeContext* ctx,
     return DispatchPrimitive(ctx, frame, fn, frame_bind, result);
   }
   if (FeGetType(fn) == FeTNativeFn || FeGetType(fn) == FeTFn) {
+    // The family the two share: an ordinary callable whose arguments are
+    // about to be evaluated. Which of the two it is becomes a
+    // `dispatch_native` or a `dispatch_lambda` once that list is complete.
+    FE_PERF_INC(FePerfDispatchCallable);
     frame->kind = FeFrameCallArguments;
     frame->fn = fn;
     frame->rest = CDR(frame->expr);
@@ -724,6 +741,7 @@ static bool DispatchResolvedCall(FeContext* ctx,
     return false;
   }
   if (FeGetType(fn) == FeTMacro) {
+    FE_PERF_INC(FePerfDispatchMacro);
     EnterMacroBody(ctx, frame, fn, frame->expr, CallIdentity(frame->expr, fn),
                    frame->env);
     return false;
@@ -763,6 +781,7 @@ static FeEvalFrame* AllocateFrame(FeContext* ctx) {
     // are not refused by the same wall the body just hit.
     RaiseBudget(ctx, "evaluation frame limit exceeded");
   }
+  FE_PERF_INC(FePerfFramePush);
   FeEvalFrame* const frame = &ctx->frame_stack[ctx->frame_stack_index++];
   if (ctx->frame_stack_index > ctx->arena_peak_frame_depth) {
     ctx->arena_peak_frame_depth = ctx->frame_stack_index;
@@ -958,11 +977,26 @@ static const PrimitiveArity primitive_arities[PSentinel] = {
     [PPut] = {3, 3},
     [PGet] = {2, 2},
     [PSymbolPlist] = {1, 1},
+    [PDefineError] = {2, 3},
     // Phase 20: `string<`/`string>` are strictly binary, Emacs' own arity --
     // measured on the pinned 31.0.90, `(string<)`, `(string< "a")` and
     // `(string< "a" "b" "c")` are all `wrong-number-of-arguments`.
     [PStringLess] = {2, 2},
     [PStringGreater] = {2, 2},
+    // Phase 24's vector family, every row Emacs' own arity measured on the
+    // pinned 31.0.91. `vector` and `vconcat` take any number, zero included
+    // (`(vector)` is `[]` and `(vconcat)` is `[]`); `make-vector` takes
+    // LENGTH and INIT, both required, so `(make-vector 3)` is
+    // `wrong-number-of-arguments` rather than a vector of nils; `aset` is
+    // the only ternary primitive in this table.
+    [PVector] = {0, SIZE_MAX},
+    [PMakeVector] = {2, 2},
+    [PVectorp] = {1, 1},
+    [PAref] = {2, 2},
+    [PAset] = {3, 3},
+    [PVconcat] = {0, SIZE_MAX},
+    [PLength] = {1, 1},
+    [PElt] = {2, 2},
 };
 
 // An improper argument list has no argument *count*, so it is not an arity
@@ -1018,12 +1052,14 @@ static bool DispatchPrimitive(FeContext* ctx,
   // about 4% of `scripts/mandelbrot.fe` -- for an answer that cannot have
   // changed in between.
   FeObject* arguments = CDR(frame->expr);
-  // Phase 14's symbol family, routed as one: eight ordinary functions that
-  // share the whole setup below and finish in fe.c's
-  // `EvaluateSymbolPrimitive`. A range test rather than eight `case` labels
-  // here and eight more in `ResumeEvalList` -- see the `PIntern` block in
-  // fe_internal.h.
-  if (IsSymbolPrimitive((Primitive)PRIM(fn))) {
+  // Phase 14's symbol family and Phase 24's vector family, routed as one
+  // each: sixteen ordinary functions that share the whole setup below and
+  // finish in fe.c's `EvaluateSymbolPrimitive`/`EvaluateVectorPrimitive`,
+  // beside the storage each family reads. Two range tests rather than
+  // sixteen `case` labels here and sixteen more in `ResumeEvalList` -- see
+  // the `PIntern` and `PVector` blocks in fe_internal.h.
+  if (IsSymbolPrimitive((Primitive)PRIM(fn)) ||
+      IsVectorPrimitive((Primitive)PRIM(fn))) {
     frame->kind = FeFrameEvalList;
     frame->fn = fn;
     frame->rest = arguments;
@@ -1059,8 +1095,9 @@ static bool DispatchPrimitive(FeContext* ctx,
         *result = form;
         return true;
       }
-      if (FeGetType(form) == FeTPair && (IsNamedSymbol(CAR(form), "lambda") ||
-                                         IsNamedSymbol(CAR(form), "fn"))) {
+      if (FeGetType(form) == FeTPair &&
+          (IsNamedSymbol(ctx, CAR(form), "lambda") ||
+           IsNamedSymbol(ctx, CAR(form), "fn"))) {
         *result = MakeClosure(ctx, frame->env, CDR(form), FeTFn);
         return true;
       }
@@ -1362,6 +1399,7 @@ static bool ResumeArguments(FeContext* ctx, FeEvalFrame* frame) {
     frame->callee = &unbound;
     return false;
   }
+  FE_PERF_INC(FePerfDispatchLambda);
   FeObject* va = CDR(fn);  // (env params ...)
   FeObject* vb = CDR(va);  // (params ...)
   frame->kind = FeFrameLambda;
@@ -1890,7 +1928,7 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
       break;
     case PKeywordp:
       FeRequireNoArguments(ctx, frame->rest);
-      *result = FeMakeBool(ctx, IsKeywordSymbol(value));
+      *result = FeMakeBool(ctx, IsKeywordSymbol(ctx, value));
       break;
     // `error-message-string` (Phase 19). The type check is Emacs' own: it
     // takes the ERROR object apart with `car`/`cdr`, so a non-list is
@@ -1918,7 +1956,7 @@ static bool ResumeUnary(FeContext* ctx, FeEvalFrame* frame, FeObject** result) {
     // `(wrong-type-argument symbolp X)`, which is Emacs' answer too.
     case PSpecialVariableP: {
       FeRequireNoArguments(ctx, frame->rest);
-      if (FeIsNil(value) || IsConstantSymbol(value)) {
+      if (FeIsNil(value) || IsConstantSymbol(ctx, value)) {
         *result = FeMakeBool(ctx, true);
         break;
       }
@@ -2021,7 +2059,7 @@ static bool ResumeBinary(FeContext* ctx,
       *result = &nil;
       break;
     case PIs:
-      *result = FeMakeBool(ctx, Equal(first, second));
+      *result = FeMakeBool(ctx, Equal(ctx, first, second));
       break;
     case PEq:
       *result = FeMakeBool(ctx, IdentityObjects(first, second, false));
@@ -2378,6 +2416,7 @@ static const bool primitive_is_function[PSentinel] = {
     [PPut] = true,
     [PGet] = true,
     [PSymbolPlist] = true,
+    [PDefineError] = true,
     // Phase 19: `error-message-string` is an ordinary function in Emacs too
     // -- `(special-form-p 'error-message-string)` is nil there and
     // `(mapcar 'error-message-string '((error "a")))` works -- and its arm
@@ -2388,6 +2427,18 @@ static const bool primitive_is_function[PSentinel] = {
     // t there -- and both operands evaluate here on the binary frame.
     [PStringLess] = true,
     [PStringGreater] = true,
+    // Phase 24: every one of the vector family is an ordinary function in
+    // Emacs -- `(special-form-p 'aref)` is nil, `(mapcar 'vectorp '([1] 1))`
+    // works -- and every one of them evaluates all of its operands here,
+    // routed as one family into the eval-list frame.
+    [PVector] = true,
+    [PMakeVector] = true,
+    [PVectorp] = true,
+    [PAref] = true,
+    [PAset] = true,
+    [PVconcat] = true,
+    [PLength] = true,
+    [PElt] = true,
     // Phase 13: all three are ordinary functions in Emacs -- `(special-form-p
     // 'signal)`, `'error` and `'keywordp` are all nil there, and
     // `(funcall 'signal 'error '("x"))`, `(apply 'error '("boom"))` and
@@ -2928,11 +2979,17 @@ static bool ResumeEvalList(FeContext* ctx,
     list = frame->accumulator;
     frame->accumulator = next;
   }
-  // Phase 14's symbol family: the other half of `DispatchPrimitive`'s range
-  // test. Its answer is computed in fe.c, beside the symbol accessors and the
-  // obarray, so the whole family costs this evaluator one decision point.
+  // Phase 14's symbol family and Phase 24's vector family: the other half of
+  // `DispatchPrimitive`'s two range tests. Each family's answer is computed
+  // in fe.c, beside the storage it reads -- the obarray for one, the payload
+  // region for the other -- so a family of eight costs this evaluator one
+  // decision point.
   if (IsSymbolPrimitive((Primitive)PRIM(frame->fn))) {
     *result = EvaluateSymbolPrimitive(ctx, (Primitive)PRIM(frame->fn), list);
+    return true;
+  }
+  if (IsVectorPrimitive((Primitive)PRIM(frame->fn))) {
+    *result = EvaluateVectorPrimitive(ctx, (Primitive)PRIM(frame->fn), list);
     return true;
   }
   switch (PRIM(frame->fn)) {
@@ -2982,7 +3039,7 @@ static bool ResumeEvalList(FeContext* ctx,
       }
       (void)FeCopyStringBytes(ctx, SymbolName(name), symbol, symbol_length);
       symbol[symbol_length] = '\0';
-      if (!IsConditionSymbol(name)) {
+      if (!IsConditionSymbol(ctx, name)) {
         FeObject* data = FeMakeList(
             ctx, (FeObject*[]){FeMakeString(ctx, "Invalid error symbol"), name},
             2);
@@ -2990,10 +3047,10 @@ static bool ResumeEvalList(FeContext* ctx,
                        "Invalid error symbol");
       }
       FeObject* const data = FeIsNil(CDR(list)) ? &nil : CAR(CDR(list));
-      RaiseCondition(
-          ctx,
-          IsNamedSymbol(name, "quit") ? FeCompletionQuit : FeCompletionError,
-          symbol, data, symbol);
+      RaiseCondition(ctx,
+                     IsNamedSymbol(ctx, name, "quit") ? FeCompletionQuit
+                                                      : FeCompletionError,
+                     symbol, data, symbol);
     }
     case PError: {
       // `(error)` with no format string at all is
@@ -3260,6 +3317,7 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
   ctx->native_argc = saved_native_argc;
   ctx->native_call_active = saved_native_active;
   while (ctx->frame_stack_index > base) {
+    FE_PERF_INC(FePerfEvalDispatch);
     FeEvalFrame* frame = &ctx->frame_stack[ctx->frame_stack_index - 1];
     FeObject* const expr = frame->expr;
     FeObject* const frame_env = frame->env;
@@ -3397,6 +3455,7 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         ctx->native_identity = CallIdentity(frame->expr, frame->fn);
         ctx->native_argc = CountRawArguments(ctx, CDR(frame->expr));
         ctx->native_call_active = true;
+        FE_PERF_INC(FePerfDispatchNative);
         result = GetNativeFn(frame->fn)(ctx, frame->accumulator);
         ctx->native_identity = saved_identity;
         ctx->native_argc = saved_argc;

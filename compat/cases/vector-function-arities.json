@@ -1,0 +1,6 @@
+{
+ "id": "vector-function-arities",
+ "setup": [],
+ "expr": "(list (vector) (vector 1) (vector 1 \"a\" '(b)))",
+ "note": "`vector' at zero, one and mixed-type arity. Nothing about a vector's elements is homogeneous, which is what makes its payload block a block of object references rather than a typed array."
+}

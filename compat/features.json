@@ -112,6 +112,7 @@
    "id": "condition-case-success-handler",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -125,6 +126,7 @@
    "id": "condition-hierarchy",
    "category": "errors-and-non-local-exits",
    "status": "unsupported",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -167,6 +169,21 @@
    "source_name": null
   },
   {
+   "id": "condition-hierarchy-search-failed",
+   "category": "errors-and-non-local-exits",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "condition-search-failed-signal",
+    "condition-search-failed-handlers",
+    "condition-search-failed-message"
+   ],
+   "kg_test": "fe/test_api.c:TestErrorMessageString",
+   "rationale": "The frontier demand phase of kg's Elisp campaign: `search-failed` joins the hierarchy as a child of `error` -- Emacs' own chain, measured on 31.0.91, `(get 'search-failed 'error-conditions)` being `(search-failed error)` -- with Emacs' own `error-message` text. One data line and no code, like the two buffer edges before it: the three consumers of `condition_parents` are sizeof-driven loops. What the line buys is that `(signal 'search-failed '(\"z\"))` is legal at all -- `IsConditionSymbol` gates `signal` on this table and answered `Invalid error symbol` before -- and that a handler can name the failure rather than catching everything. Nothing in fe raises it; kg's four search names do, once their NOERROR argument means what Emacs' does, and the DATA they carry is the pattern that was not found.",
+   "source_name": null
+  },
+  {
    "id": "condition-object",
    "category": "errors-and-non-local-exits",
    "status": "supported",
@@ -184,6 +201,7 @@
    "id": "constant-function-cell-writes",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -198,6 +216,7 @@
    "id": "constant-lambda-parameters",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -212,6 +231,7 @@
    "id": "constant-let-lambda-list-keyword",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -282,6 +302,7 @@
    "id": "error-message-quoting-style",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -313,13 +334,15 @@
    "id": "eval-lexical-argument",
    "category": "control-flow",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "eval-lexical-non-nil-rejected"
+    "eval-lexical-non-nil-rejected",
+    "eval-nil-lexical-closure-inside-form"
    ],
    "kg_test": null,
-   "rationale": "Sub-plan 12B Part 2's one deliberate divergence in `eval'. Emacs' LEXICAL argument selects an environment: `t' means lexical binding with an empty lexical environment (`(eval '(+ 1 2) t)' is 3 there) and an alist of (NAME . VALUE) pairs supplies one (`(eval 'zz '((zz . 5)))' is 5). Fe has no environment model for either -- its lexical environments are the evaluator's own chain and there is no reader or constructor for one at the Lisp level -- so a non-nil LEXICAL raises `unsupported feature: eval lexical argument' rather than being silently ignored, which is the convention `macroexpand''s ENVIRONMENT argument already set (macroexpand-environment, the sibling row). Nil and absent are the supported spellings and behave exactly as Emacs' do. Closing this means Lisp-level lexical environments, which nothing in either tree needs; it is recorded, not planned.",
+   "rationale": "Sub-plan 12B Part 2's deliberate divergence in `eval', widened by Phase M0.5. Emacs' LEXICAL argument selects an environment: `t' means lexical binding with an empty lexical environment (`(eval '(+ 1 2) t)' is 3 there) and an alist of (NAME . VALUE) pairs supplies one (`(eval 'zz '((zz . 5)))' is 5). Fe has no environment model for either -- its lexical environments are the evaluator's own chain and there is no reader or constructor for one at the Lisp level -- so a non-nil LEXICAL raises `unsupported feature: eval lexical argument' rather than being silently ignored, which is the convention `macroexpand''s ENVIRONMENT argument already set (macroexpand-environment, the sibling row). WHAT USED TO BE CLAIMED HERE -- that nil and absent are the supported spellings and BEHAVE EXACTLY as Emacs' do -- was false, and the closure-inside-eval case records why: Emacs' LEXICAL=nil evaluates DYNAMICALLY, so a closure created inside the evaluated form captures nothing and a `funcall' of it raises `void-variable', while fe evaluates lexically by default and ignores the nil argument, so the same lambda closes over its binding and returns the captured value. Nil/absent `eval' agrees with Emacs only for the GLOBAL environment (the caller's lexical bindings are not visible to the evaluated form, which `eval-lexical-scope-not-inherited' pins); it diverges the moment the evaluated form builds a closure over a lexically-scoped name. Closing this means a Lisp-level dynamic evaluator or a real LEXICAL environment model, neither of which M0 implements (the gap is recorded, not closed); keeping `lexical-binding' at truthful `t' makes the remaining divergence explicit rather than silent.",
    "source_name": null
   },
   {
@@ -356,6 +379,7 @@
    "id": "hash-tables",
    "category": "values-and-equality",
    "status": "unsupported",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -501,6 +525,7 @@
    "id": "lisp2-funcall-lexical-value",
    "category": "functions-and-macros",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -540,6 +565,7 @@
    "id": "lisp2-functionp-symbol",
    "category": "functions-and-macros",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -554,6 +580,7 @@
    "id": "lisp2-let-no-function-shadow",
    "category": "bindings",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -567,6 +594,7 @@
    "id": "lisp2-macro-representation",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "kg-policy",
    "cases": [
@@ -667,6 +695,7 @@
    "id": "macroexpand-all",
    "category": "functions-and-macros",
    "status": "unsupported",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -680,6 +709,7 @@
    "id": "macroexpand-environment",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -858,6 +888,7 @@
    "id": "num-equal",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -923,6 +954,7 @@
    "id": "num-int64-literal-overflow",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1029,6 +1061,7 @@
    "id": "num-overflow-bignum",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1043,6 +1076,7 @@
    "id": "num-predicates",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1160,6 +1194,7 @@
    "id": "num-round-half-even",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1173,6 +1208,7 @@
    "id": "num-rounding",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1212,6 +1248,7 @@
    "id": "num-type-of",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1251,6 +1288,7 @@
    "id": "num-zerop",
    "category": "values-and-equality",
    "status": "planned",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1291,6 +1329,7 @@
    "id": "phase7-arity-condition-rendering",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1304,6 +1343,7 @@
    "id": "phase7-arity-identity-policy",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1338,6 +1378,7 @@
    "id": "phase7-lambda-fe-rest-spellings",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1364,6 +1405,7 @@
    "id": "phase7-lambda-rest-trailing",
    "category": "functions-and-macros",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1446,6 +1488,7 @@
    "id": "phase7-primitive-print-arity",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1525,9 +1568,52 @@
    "source_name": "and"
   },
   {
+   "id": "primitive-aref",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-aref-values",
+    "vector-aref-out-of-range",
+    "vector-aref-non-array"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "aref"
+  },
+  {
+   "id": "primitive-aset",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-aset-shared-reference",
+    "vector-aset-out-of-range"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "aset"
+  },
+  {
+   "id": "primitive-aset-string",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-aset-on-string"
+   ],
+   "kg_test": "fe/test_api.c:TestStringMutation",
+   "rationale": "Closed by Phase 25. A string's bytes live in the payload region now instead of in a chain of seven-byte cells, so a byte write has no chain shape to preserve: `(aset \"ab\" 0 120)' stores the byte and answers 120, which is Emacs' answer. Emacs' unibyte rule is implemented both halves -- a value from 0 to 255 goes in, and a value above 255 is refused with Emacs' own sentence, \"Attempt to store non-byte value into unibyte string\", because storing it would have to WIDEN the string and Emacs will not either. Emacs' other refusal, \"Attempt to replace non-ASCII char in multibyte string\", has no analogue: a fe string is a sequence of bytes, so writing over one byte of a multibyte character is allowed here -- the sequence-length-string-bytes divergence showing through a third name. source_name is null: `aset' is claimed by primitive-aset.",
+   "source_name": null
+  },
+  {
    "id": "primitive-assert",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1629,9 +1715,25 @@
    "source_name": "do"
   },
   {
+   "id": "primitive-elt",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "sequence-elt-shapes",
+    "sequence-elt-list-past-end",
+    "sequence-elt-vector-past-end"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "elt"
+  },
+  {
    "id": "primitive-env",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1757,6 +1859,20 @@
    "source_name": "lambda"
   },
   {
+   "id": "primitive-length",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "sequence-length-shapes",
+    "sequence-length-non-sequence"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "length"
+  },
+  {
    "id": "primitive-less",
    "category": "values-and-equality",
    "status": "supported",
@@ -1786,6 +1902,7 @@
    "id": "primitive-let",
    "category": "bindings",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1820,6 +1937,20 @@
    "kg_test": "fe/test_api.c:TestMacroExpansion",
    "rationale": null,
    "source_name": "macro"
+  },
+  {
+   "id": "primitive-make-vector",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-make-vector-shapes",
+    "vector-make-vector-init-identity"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "make-vector"
   },
   {
    "id": "primitive-makunbound",
@@ -1957,6 +2088,7 @@
    "id": "primitive-setcar",
    "category": "sequences",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -1970,6 +2102,7 @@
    "id": "primitive-setcdr",
    "category": "sequences",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2025,6 +2158,45 @@
    "source_name": "unwind-protect"
   },
   {
+   "id": "primitive-vconcat",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-vconcat-shapes"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "vconcat"
+  },
+  {
+   "id": "primitive-vector",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-function-arities"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "vector"
+  },
+  {
+   "id": "primitive-vectorp",
+   "category": "values-and-equality",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-predicate-values"
+   ],
+   "kg_test": null,
+   "rationale": null,
+   "source_name": "vectorp"
+  },
+  {
    "id": "primitive-while",
    "category": "control-flow",
    "status": "supported",
@@ -2054,6 +2226,7 @@
    "id": "reader-character-delimiter",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2118,6 +2291,7 @@
    "id": "reader-character-modifiers-unsupported",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2136,6 +2310,7 @@
    "id": "reader-character-range",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2160,19 +2335,37 @@
    "source_name": null
   },
   {
+   "id": "reader-form-feed-whitespace",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-form-feed-token-separator",
+    "reader-form-feed-symbol-terminator",
+    "reader-form-feed-character-delimiter",
+    "reader-form-feed-radix-delimiter",
+    "reader-form-feed-escaped-symbol",
+    "reader-form-feed-string-byte"
+   ],
+   "kg_test": "fe/test_api.c:TestReaderLiterals",
+   "rationale": "Phase C2: the form feed (0x0C) is reader whitespace, which it was not. Emacs' `read1` retries on exactly space, form feed, newline, tab and carriage return; fe had the other four, so a page separator -- the conventional Elisp section break, `s.el:770` and `f.el:39` -- was an ordinary symbol constituent and `nil\\fnil` read as one symbol rather than two forms. One case per arm the fix touches: the skip loop (token-separator), the atom delimiter (symbol-terminator), the `?` literal's own delimiter (character-delimiter) and the radix digits' (radix-delimiter); plus the two arms it must not touch -- an escaped form feed, still a constituent as an escaped space is (escaped-symbol), and a string body, where it was never reader syntax (string-byte). The six snapshots were taken on 31.0.91, the version this box's Emacs pin now reports; the corpus's older snapshots stay at the 31.0.90 that produced them, since a snapshot carries the Emacs that made it.",
+   "source_name": null
+  },
+  {
    "id": "reader-hash-syntax-unsupported",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
     "reader-uninterned-symbol",
-    "reader-vector-literal",
     "reader-record-literal"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Emacs reads `#:sym` as an uninterned symbol, `[1 2 3]` as a vector and `#s(a 1)` as a record. Fe has none of those types, so each is a named read error. Before 08C they were silent misreads: `#:sym` read as the symbol `#:sym`, which is eq to nothing Emacs would produce, and `[1 2 3]` read as bracket-bearing symbols. This is also where the release's one reader break lives: a bare `#` and `#`-initial symbols are no longer readable, which forced Fe's own scripts/concatenate.fe to stop naming a function `#`. `##` left this row at Phase 14, which implements it -- see reader-empty-symbol; it is the one `#` spelling that phase opened, and `#:` is deliberately not among them, fe having no `print-gensym` half to match it with."
+   "rationale": "Emacs reads `#:sym' as an uninterned symbol and `#s(a 1)' as a record. Fe has neither type, so each is a named read error. Before 08C they were silent misreads: `#:sym' read as the symbol `sym' and `#s(a 1)' as `(a 1)', which is worse than refusing. PHASE 24 TOOK THE THIRD MEMBER OF THIS ROW AWAY: `[1 2 3]' was the vector-brackets rejection and is now a vector, recorded by vector-read-brackets below. What is left here is the two `#'-initial spellings, which Phase 24 does not close."
   },
   {
    "id": "reader-no-integers",
@@ -2210,6 +2403,7 @@
    "id": "reader-radix-overflow",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2236,16 +2430,16 @@
    "id": "reader-string-byte-limit",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "reader-string-nul-escape",
     "reader-string-octal-above-byte",
     "reader-string-hex-above-byte"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "A Fe string is a byte string, built by appending at strlen, so a string escape has to land in one byte. Emacs holds a NUL like any other character and reads `\"\\400\"` as U+0100 and `\"\\x41f\"` as U+041F. Before 08C's repair Fe wrote (char)value into that buffer: a decoded NUL was a silent no-op that shifted the rest of the string down -- `(list \"\\0a\" \"a\\0b\")` answered `(\"a\" \"ab\")` -- and anything above 255 was truncated into the same hole. All three are named read errors now, which is the rule the reader already applied to a literal NUL byte in the source text. Matching Emacs instead would need a length-carrying string representation and a multibyte character type, neither of which is funded here. The character-literal forms of the same escapes agree with Emacs exactly (reader-char-hex-greedy, reader-char-octal-nul); it is only a string body that is byte-limited."
+   "rationale": "A fe string is a byte string, so a string escape has to land in one byte: Emacs reads `\"\\400\"` as U+0100 and `\"\\x41f\"` as U+041F, and fe refuses both by name. Matching Emacs would need a multibyte character type, not merely a length. The NUL half of this row closed in Phase 25 and its case moved to reader-string-raw-byte-printing: a length-bearing string holds a stored NUL like any other byte, so `\"a\\0b\"` is three bytes on both sides and only the printed form still differs. The character-literal forms of the same escapes agree with Emacs exactly (reader-char-hex-greedy, reader-char-octal-nul); it is only a string body that is byte-limited."
   },
   {
    "id": "reader-string-escapes",
@@ -2267,6 +2461,7 @@
    "id": "reader-string-modifiers",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2281,19 +2476,22 @@
    "id": "reader-string-raw-byte-printing",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
-    "reader-string-raw-byte"
+    "reader-string-raw-byte",
+    "reader-string-nul-escape"
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Both sides read `\"\\377\"` to the same thing -- the byte 0377 -- and disagree only in the printed record: Emacs' prin1 re-escapes it as \\377 for a unibyte string, Fe's writer emits the raw byte. A printer divergence, the same class as writer-bounded-output, recorded here because the octal escape family is otherwise compared as supported."
+   "rationale": "Two bytes both dialects READ the same way and PRINT differently, one in each direction. `\"\\377\"` is the byte 0377 on both sides; Emacs' prin1 re-escapes it as \\377 for a unibyte string and fe's writer emits it raw. `\"\\0a\"` is the two bytes NUL and `a` on both sides since Phase 25; Emacs emits the NUL raw between the quotes and fe escapes it as \\000, in three digits so that a digit after it stays a digit. fe escapes that one deliberately and cannot do otherwise: a `FeReadFn` answers one `char` and spells end of input as 0, so a raw NUL is where fe's reader stops -- escaping it is what makes print-then-read-back round-trip a string with a NUL in it, which is Phase 25's first required gate. A printer divergence in both rows, the same class as writer-bounded-output."
   },
   {
    "id": "reader-string-strict-escapes",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2304,7 +2502,7 @@
    ],
    "kg_test": "fe/test_api.c:TestReaderLiterals",
    "source_name": null,
-   "rationale": "Emacs is permissive about escapes it does not know: `\"\\q\"` is \"q\" (the backslash is dropped), `\"\\ \"` and a backslash-newline continuation both produce nothing, and `\"\\N{U+41}\"` is \"A\". Fe rejects each by name. 08C's plan text made this choice explicitly -- an init-file dialect earns strictness -- and the reason is that silently dropping a backslash is how a typo in a regexp or a path becomes a wrong string instead of a diagnostic. `\\N{...}` additionally needs a Unicode name table Fe does not carry; its `U+` form is a second spelling of `\\x`."
+    "rationale": "Phase M3 implements the three measured reader forms that were previously loud: Emacs is permissive about unknown escapes (`\"\\q\"` is \"q\"), and backslash-space and backslash-newline are empty continuations. Those cases carry `expect: agree`; `reader-string-named-character` remains the deliberate divergence because Fe has no Unicode name table."
   },
   {
    "id": "reader-symbol-escape",
@@ -2345,6 +2543,20 @@
    ],
    "kg_test": null,
    "rationale": null,
+   "source_name": null
+  },
+  {
+   "id": "sequence-length-string-bytes",
+   "category": "values-and-equality",
+   "status": "divergent",
+   "failure_mode": "silent-wrong",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "sequence-length-string-bytes"
+   ],
+   "kg_test": null,
+   "rationale": "A fe string is a BYTE string -- the reader-string-byte-limit family's rule -- so `length', `aref' and `elt' answer bytes where Emacs' character strings answer characters. ASCII agrees; anything above it does not. Phase 24 is the first time a fe program could ask the question, and Phase 25 -- which moved a string's bytes onto the payload region and gave it an explicit length -- deliberately did NOT change the answer: byte indexing is fe's contract and the character view is kg's prelude wrapper's. What Phase 25 changed is why it is cheap: `length' is a field read now and not a walk. source_name is null: `length' is claimed by primitive-length.",
    "source_name": null
   },
   {
@@ -2483,6 +2695,7 @@
    "id": "symbol-intern-obarray-argument",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2568,6 +2781,7 @@
    "id": "symbol-put-on-nil",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "loud-unsupported",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2654,6 +2868,7 @@
    "id": "unwind-protect-cleanup-raise-residuals",
    "category": "errors-and-non-local-exits",
    "status": "divergent",
+   "failure_mode": "silent-wrong",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2662,6 +2877,48 @@
    ],
    "kg_test": null,
    "rationale": "Two divergences in 06A Decision 4's replacement rule -- the rule the `unwind-protect-cleanup-handlers' row above says is `measured correct against Emacs on every probe' and which doc/implementation.md and doc/language.md stated unconditionally. Both are PRE-EXISTING: byte-identical on every revision since the replacement rule was implemented, unchanged by sub-plan 12B Part 1, and DISCOVERED POST-CLOSE, by the acceptance review that re-measured this area rather than by the phase that wrote about it. The rule itself holds -- an unhandled cleanup raise does replace the completion being unwound, and the remaining cleanups do still run -- and what diverges is WHERE the replacement is delivered. (1) Emacs delivers it to the ENCLOSING handler; fe delivers it to a `condition-case' established in the ABANDONED BODY if that frame is still on the stack. Measured on 31.0.90, lexical-binding: t, 2026-08-07: `(condition-case o (catch 'tg (unwind-protect (condition-case nil (throw 'tg 'body) (error 'IN)) (error \"cleanup\"))) (error (list 'OUT o)))' is `(OUT (error \"cleanup\"))' there and `IN' here. (2) The throw twin: a cleanup's `throw' can reach a `catch' the in-flight completion had already exited. `(catch 'a (unwind-protect (catch 'b (throw 'a 1)) (throw 'b 2)))' is `(no-catch b 2)' there and 2 here. ONE CAUSE, on both: `RunOneCleanupEntry' replays the cleanup's completion after restoring the frame stack the drain STARTED FROM, which still holds the abandoned computation's handler and catch frames, while Emacs unwinds as it goes and no longer has them to match. Closing it means discarding frames as the drain descends rather than at the replay, which is a different unwind model and not a bug fix; it is recorded here, qualified in doc/language.md and doc/implementation.md, and pinned by `scripts/unwind-cleanup-handler.fe' so a change of answer is visible. Note that fe's answer to (2) is the direct consequence of a rule doc/language.md states positively and deliberately -- `a catch the original throw was on its way past is still a candidate for the cleanup's own throw' -- so this row is what makes that rule's disagreement with Emacs explicit rather than implicit.",
+   "source_name": null
+  },
+  {
+   "id": "vector-read-brackets",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "reader-vector-literal",
+    "vector-nested-literal",
+    "vector-empty-literal"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 24: `[...]' is vector read syntax and the writer emits the same syntax back, so a vector round-trips through print and read. This row is the flip of the vector third of reader-hash-syntax-unsupported, which recorded the rejection it replaces.",
+   "source_name": null
+  },
+  {
+   "id": "vector-read-dot",
+   "category": "reader-and-literals",
+   "status": "divergent",
+   "failure_mode": "loud-unsupported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-dot-in-literal"
+   ],
+   "kg_test": null,
+   "rationale": "Both sides reject `[1 . 2]' and only the condition symbol differs: Emacs raises `invalid-read-syntax' and fe raises its own named read error, the same shape of disagreement reader-character-delimiter already records. Phase 8's rule for this reader is reject rather than misread, and accepting the dot would silently produce the three-element vector [1 \\. 2].",
+   "source_name": null
+  },
+  {
+   "id": "vector-read-unclosed",
+   "category": "reader-and-literals",
+   "status": "supported",
+   "owner": "fe-core",
+   "comparison": "emacs",
+   "cases": [
+    "vector-unclosed-literal"
+   ],
+   "kg_test": null,
+   "rationale": "Phase 24: input that stops inside a vector raises `end-of-file' with nil data, which is Emacs' generic incomplete-input condition and was measured before fe had one. The same condition now names an unclosed LIST, whose message text is unchanged.",
    "source_name": null
   },
   {
@@ -2681,13 +2938,14 @@
    "id": "writer-bounded-output",
    "category": "values-and-equality",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "kg-policy",
    "cases": [
     "writer-bounded-output"
    ],
    "kg_test": "fe/test_api.c:TestWriter",
-   "rationale": "This is kg/fe's own deliberate policy, not an Emacs contract: the parent kg repository's CLAUDE.md already states the precedent for exactly this shape of decision (kg_regex_match_backward's backward-matching policy is kg's own, not Emacs', so an oracle for it would have to encode kg's policy rather than read Emacs'), and 00b-oracle-and-differential-corpus.md's own 'What this does not do' names cyclic-structure printing explicitly. Pinned by fe/test_api.c's TestWriter, which already asserts all three bounded forms (#<cycle>, #<deep>, #<truncated>).",
+   "rationale": "This is kg/fe's own deliberate policy, not an Emacs contract: the parent kg repository's CLAUDE.md already states the precedent for exactly this shape of decision (kg_regex_match_backward's backward-matching policy is kg's own, not Emacs', so an oracle for it would have to encode kg's policy rather than read Emacs'), and 00b-oracle-and-differential-corpus.md's own 'What this does not do' names cyclic-structure printing explicitly. Pinned by fe/test_api.c's TestWriter, which already asserts all three bounded forms (#<cycle>, #<deep>, #<truncated>). PHASE 24: a vector inherits this policy unchanged rather than acquiring one of its own. A vector that contains itself terminates in the writer's existing depth bound and prints nested brackets ending in `#<deep>', exactly as a list whose car is itself already did; Emacs prints the lossy back-reference `[0 #0]' at its `print-circle' default and the re-readable `#1=[0 #1#]' with `print-circle' bound to t. Adopting `#N' would need an ancestor stack in every `Writer' -- including the one `RenderErrorMessage' runs on the error path -- and would buy a spelling that still does not read back. doc/language.md states the decision; fe/test_api.c's TestVectors asserts the bounded shape.",
    "source_name": null
   },
   {
@@ -2742,6 +3000,7 @@
    "id": "writer-top-level-string-print",
    "category": "reader-and-literals",
    "status": "divergent",
+   "failure_mode": "intentional-policy",
    "owner": "fe-core",
    "comparison": "emacs",
    "cases": [
@@ -2750,6 +3009,19 @@
    "kg_test": "fe/test_api.c:TestErrorMessageString",
    "rationale": "fe's `print` writes a TOP-LEVEL string bare -- `(print \"abc\")` is `abc` -- where Emacs' `print` writes `\"abc\"`. Nested strings are quoted on both sides, which is why every other string-valued case in this corpus agrees: the compat runner wraps each case in `(print EXPR)`, so only a case whose whole value is a string sees this. Fe's historical convention, unchanged by Phase 19 and deliberately not changed by it -- `print` is fe's `princ`-at-the-top spelling and the scripts' goldens are written in it. `cond-h2` is the case: it recorded `error-message-string`'s target rendering while the name was unsupported, and now that the name exists it measures this instead, byte for byte (`Wrong type argument: listp, 5` against Emacs' `\"Wrong type argument: listp, 5\"`). The rendering itself is measured by the five `error-message-string-*` cases, whose values are lists.",
    "source_name": null
-  }
- ]
+   },
+   {
+    "id": "define-error",
+    "category": "errors-and-non-local-exits",
+    "status": "supported",
+    "owner": "fe-core",
+    "comparison": "kg-policy",
+    "cases": [
+     "define-error-primitive"
+    ],
+    "kg_test": "fe/test_api.c:TestSymbolPrimitives",
+    "rationale": "The primitive is exercised through kg's M2.2 oracle and package scenarios; Fe owns its property construction and condition ancestry.",
+    "source_name": "define-error"
+   }
+  ]
 }

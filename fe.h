@@ -113,7 +113,78 @@
 // and restores exactly as version 10 did, so no existing host changes
 // behaviour and none has to recompile for meaning. The bump is the same
 // `static_assert` tripwire every earlier one is.
-#define FE_API_VERSION 11
+//
+// Version 12 (kg's embedded-prelude program, the post-prelude collect) adds
+// one declaration, `FeCollectGarbage`: an immediate, forced mark-and-sweep,
+// the same one `ArenaCanAllocate` and `MakeObject`'s exhaustion path already
+// run on their own schedule, now reachable from outside fe.c. Before this a
+// host had no way to ask for a collection -- `CollectGarbage` stays
+// `static`, unreachable from any other translation unit including fe's own
+// test suite, which is why `ForceCollection` in test_api.c allocates
+// disposable objects in a loop until natural exhaustion triggers one. kg's
+// motivating case is a startup-only host, evaluating a large, fixed set of
+// definitions once and wanting the transient reader/macro-expansion garbage
+// that loading them produced back before a session's own work starts,
+// without waiting for that session to allocate enough to trigger a
+// collection on its own. Nothing is removed and no existing declaration
+// changes meaning, so every existing call keeps compiling; the bump exists
+// because a version that does not move cannot tell kg whether the fe it is
+// linking against has the entry point at all -- the same reasoning
+// versions 7, 8 and 11 (the input-unit trio, the value-cell readers, the
+// binding-location seam) already used for an addition with no removal.
+//
+// Version 13 (Phase 23.2 of kg's Elisp data-model program) is the payload
+// substrate's host surface: `FeOpenContextWithOptions` with the
+// `FeOpenOptions` record it takes, and five payload fields on
+// `FeArenaStats`. Phase 23.1 built the substrate itself -- a bump-allocated,
+// compactable region carved out of the caller's arena, which the Phase 22
+// ADR selected -- entirely inside fe, with nothing in this header at all.
+// What this version adds is the two things a host cannot do without: ASK for
+// a region (the arena is the host's memory, so how it is divided is the
+// host's decision, not a compiled-in constant), and SEE what the region is
+// doing (capacity, live bytes, high-water mark, compactions, and requests
+// that could not be met). Nothing is removed and no existing declaration
+// changes meaning -- `FeOpenContext` opens the same partition, byte for
+// byte, that it did under version 12 -- so every existing call keeps
+// compiling; the bump exists because a version that does not move cannot
+// tell a host whether the fe it is linking against has the entry point and
+// the fields at all, the same reasoning versions 7, 8, 11 and 12 used.
+// `FE_LANGUAGE_VERSION` does not move: no Lisp program can reach any of
+// this, since no release type owns a payload until Phase 25.
+//
+// Version 14 (Phase 24 of the same program) is the vector cut, and it is a
+// real ABI break rather than an addition: `FeTVector` is inserted into the
+// `FeType` enumeration immediately after `FeTString`, renumbering every later
+// constant including `FeTPtr` and the three `FeTFex*` extension slots, so a
+// host that stored an `FeType` value across the boundary, or that spells one
+// of those slots in a `switch`, must recompile. It is 05A's placement
+// Decision again and for the same reason: the vector sits beside the string,
+// the other sequence and the other type whose contents live outside its own
+// cell. What the version adds beside the enumerator is the vector's own
+// surface -- `FeMakeVector`, `FeVectorLength`, `FeVectorRef` and
+// `FeVectorSet`, the construction / length / checked-ref / checked-set
+// quartet -- and, for the first time, an `FeArenaStats` whose payload fields
+// move in an ordinary run: a vector's elements ARE its payload block, so a
+// host that carves no region cannot make one.
+//
+// Version 15 (Phase 25 of the same program) is the string cut, and four
+// things in this header follow from it. A string is a header plus a payload
+// block of bytes now, with its LENGTH in the header, where it was a chain of
+// seven-byte cells terminated by a NUL: so `FeMakeStringBytes` builds one
+// from a buffer and a length, and a host can hold a string with a NUL in it,
+// while `FeMakeString` is that same function called with `strlen`.
+// `FeStringBytes` asks for the length and the bytes in ONE call, which is
+// what a host copying into a fixed buffer wants; `FeStringByteLength` and
+// `FeCopyStringBytes` keep their exact meaning and were already binary-safe,
+// neither having ever handed out an interior pointer. `FeWriteFn`'s
+// allocation contract is stated for the first time -- a write callback MAY
+// allocate, and the printer re-derives its payload addresses after every
+// callback so that it can. And `FeOpenContext` now carves the payload region
+// it used to leave at zero, because a symbol's name is a string and a context
+// without a region cannot finish opening: `FePayloadPercentNone` is REMOVED
+// rather than kept as a partition no program can run in, which is the ABI
+// break in this version.
+#define FE_API_VERSION 15
 
 // The Lisp language Fe evaluates. Version 1 was implicit -- Fe's historical,
 // non-Emacs dialect, where `=` assigned and returned nil. Version 2 (sub-plan
@@ -265,7 +336,93 @@
 // macro that does not move cannot tell kg whether the fe it links against
 // has the names it reflects with.  `FE_API_VERSION` stays at 10: no
 // declaration in this header changed.
-#define FE_LANGUAGE_VERSION 14
+// Version 15 (Phase C2 of kg's fe-simplification plan) is one byte in the
+// reader: the form feed (`\f`, 0x0C) is whitespace, which it was not.  Emacs'
+// `read1` retries on exactly space, form feed, newline, tab and carriage
+// return; fe had the other four, so a page separator -- the conventional
+// Elisp section break, `s.el:770` and `f.el:39` -- was a symbol constituent,
+// and `nil\f\nnil` read as one symbol named "nil\f" and answered
+// `void-variable` where Emacs reads two `nil`s.  It IS a break, in the
+// narrow direction a program can notice: a symbol whose name contained a
+// literal form feed no longer reads back as itself unless the byte is
+// escaped, which is what `(intern "a\fb")` has printed as `a\<FF>b` since
+// version 12's printer escapes.  A form feed inside a string body is
+// unaffected -- it never was reader syntax there.  `FE_API_VERSION` stays at
+// 12: no declaration in this header changed.
+// Version 16 (Phase 24 of kg's Elisp data-model program) is the VECTOR cut:
+// the first Lisp-visible aggregate fe has ever had, its reader and writer
+// syntax, and the sequence contract that comes with it.  `[1 2 3]` reads as
+// a vector where it was the named read error `unsupported read syntax:
+// vector brackets`, and prints back in the same syntax; `vector`,
+// `make-vector`, `vectorp`, `aref`, `aset`, `vconcat`, `length` and `elt`
+// are eight names that answered `void-function`.  `length` and `elt` are
+// generic over lists, strings and vectors -- Emacs' own contract, including
+// its asymmetry, where `(elt LIST 9)` past the end is nil (it routes to
+// `nth`) and `(elt VECTOR 9)` is `args-out-of-range` (it routes to `aref`).
+// `end-of-file` joins the condition hierarchy, which is what `[1 2` raises,
+// measured on the pinned Emacs rather than invented; the same condition now
+// names an unclosed LIST, whose message text is unchanged but which used to
+// be a bare `error`.  A program that never writes a bracket and never calls
+// one of the eight names cannot tell the difference, except for that one
+// condition symbol.  `FE_API_VERSION` moves to 14 in the same slice for the
+// C quartet and the `FeType` enumerator, and the two land under one
+// `FeVersion` "20.0".
+//
+// Version 17 (Phase 25 of the same program) is what a length-bearing string
+// makes reachable from Lisp.  `"a\0b"` is a three-byte string where that
+// escape used to be the named read error `unsupported read syntax: NUL
+// character in string`, and it prints as `"a\000b"` -- three octal digits, so
+// that a digit after it stays a digit -- which reads back to the same three
+// bytes.  `(aset STRING INDEX BYTE)` writes the byte in place and answers it,
+// where every `aset` on a string was `unsupported: aset on a string`; a value
+// above 255 is refused with Emacs' own sentence, since Emacs will not widen a
+// string either, and `aset` therefore never changes a string's length in
+// either dialect.  `length`, `aref` and `elt` still answer BYTES for a string
+// -- fe's strings are byte strings and that contract is unchanged.
+// `FE_API_VERSION` moves to 15 in the same slice, and the two land under one
+// `FeVersion` "21.0".
+//
+// Version 18 (the frontier demand phase of kg's Elisp campaign) is one row
+// in the condition hierarchy: `search-failed`, a child of `error` with
+// Emacs' own message text.  `(signal 'search-failed '("z"))` is legal where
+// it was `Invalid error symbol`, `(get 'search-failed 'error-message)`
+// answers "Search failed" where it answered nil, and an `error` handler
+// catches it.  It is not a break -- no program that ran under 17 answers
+// differently under 18 -- and it bumps the macro for Phase 10's recorded
+// reason: kg's compile-time `static_assert` is the only consumer, and a
+// macro that does not move cannot tell kg whether the fe it links against
+// has the condition its search family raises.  `FE_API_VERSION` stays at
+// 15: no declaration in this header changed.
+//
+// Version 19 (the external-review correctness tranche of the same campaign)
+// is the Fex boundary cut, and it changes what two extensions answer.  It
+// lands under `FeVersion` "23.0" (which moves 22.0 -> 23.0); `FE_API_VERSION`
+// stays at 15: no declaration in this header changed.  A
+// length-bearing string has been readable since version 17, but the I/O and
+// regex extensions still crossed their C-string boundaries through one
+// helper: `read-file` built its record with `strlen`'s length -- reading
+// /proc/self/cmdline answered the first argv element where the whole
+// NUL-separated record was read -- and pattern/subject/path/mode strings
+// were silently truncated at an embedded NUL, so a pattern "a\0b" behaved
+// as "a".  `read-file` now builds its record from getdelim's byte count,
+// and every boundary that cannot carry a NUL (open-file's path and mode,
+// remove-file, execute's argv, compile-re's pattern, match-re's subject)
+// refuses an embedded NUL by name instead of truncating; `write-file`
+// keeps writing exact bytes, NULs included.  A program that never puts a
+// NUL in one of those strings answers exactly what it answered under 18.
+// Version 20 (Phase M3's reader cut) lands under FeVersion "24.0" and makes an
+// unknown escape in a string read
+// as the escaped byte, while preserving known escapes and the measured
+// backslash-space and backslash-newline continuations. Character literals keep
+// their existing named refusals for unknown escapes. The writer already emits
+// a backslash before a stored backslash, so its string output remains readable.
+#define FE_LANGUAGE_VERSION 20
+
+// The language version spelled as a string literal, so a banner that reports
+// it composes the two and they cannot drift apart.
+#define FE_STRINGIZE_(x) #x
+#define FE_STRINGIZE(x) FE_STRINGIZE_(x)
+#define FE_LANGUAGE_VERSION_STRING FE_STRINGIZE(FE_LANGUAGE_VERSION)
 
 extern const char* FeVersion;
 
@@ -280,6 +437,13 @@ typedef void FeErrorFn(FeContext* ctx, const char* err, FeObject* cl);
 // must not raise, must not call back into the evaluator, and must not create
 // Fe objects -- see `FeProtectWithCleanup`'s comment for the full contract.
 typedef void FeCleanupFn(FeContext* ctx, void* data);
+// The writer's byte sink, one byte per call. Unlike a mark callback
+// (`FeSetMarkFn`), it MAY allocate Fe objects and it MAY raise: the printer
+// holds no address into object storage across it, deriving a string's bytes
+// or a vector's elements again after every call, precisely because a host's
+// sink is where a host does host things -- kg's grows a buffer with
+// `realloc` and can run out of memory. A raise from inside it leaves the
+// printer by `longjmp`, which is an exit and not a half-written object.
 typedef void FeWriteFn(FeContext* ctx, void* udata, char chr);
 typedef char FeReadFn(FeContext* ctx, void* udata);
 // The two halves of the dynamic-binding location seam (FE_API_VERSION 11),
@@ -389,6 +553,14 @@ typedef enum FeType {
   FeTInteger,
   FeTSymbol,
   FeTString,
+  // Phase 24 of kg's Elisp data-model program: the vector, placed beside the
+  // string it shares a shape with -- both are sequences, and both keep their
+  // contents somewhere other than their own cell -- and renumbering every
+  // later constant exactly as 05A's `FeTInteger` did. The ABI break rides
+  // FE_API_VERSION 14 above. A vector's elements live in the payload region
+  // (Phase 23's substrate), which is why a host that opens a context with no
+  // payload carve cannot build one.
+  FeTVector,
   FeTFn,
   FeTMacro,
   FeTPrimitive,
@@ -459,10 +631,97 @@ typedef struct FeArenaStats {
   size_t peak_native_reentry;
   size_t allocation_failures;  // MakeObject() calls that still found no free
                                // slot after a collection.
+
+  // The payload region (FE_API_VERSION 13), the pool the cells are priced
+  // against: `FeOpenOptions.payload_percent` is what divides them, and the
+  // frame capacity above is funded before either. Every context has a region
+  // and every context has blocks in it, because a symbol's name is a string
+  // and a string's bytes live there (FE_API_VERSION 15); the numbers below
+  // are never all zero the way they were when only a vector could reach the
+  // region.
+  size_t payload_capacity_bytes;    // bytes carved for the region; the
+                                    // denominator the other four are read
+                                    // against.
+  size_t payload_live_bytes;        // bytes currently held by published blocks,
+                                    // block headers included.
+  size_t payload_peak_bytes;        // high-water mark of payload_live_bytes.
+  size_t payload_compaction_count;  // collections that moved survivors
+                                    // down over reclaimed blocks.
+  size_t payload_allocation_failures;  // payload requests the region could
+                                       // not meet even after a collection,
+                                       // i.e. `(payload-exhaustion)` raises.
 } FeArenaStats;
 
 [[nodiscard]] FeArenaStats FeGetArenaStats(const FeContext* ctx);
 
+// Force an immediate collection (FE_API_VERSION 12): the same
+// mark-and-sweep `ArenaCanAllocate`/`MakeObject`'s exhaustion path and the
+// `FE_GC_STRESS` build already run on their own schedule, now callable on
+// demand. `collection_count` in `FeGetArenaStats` moves by exactly one, and
+// whatever was unreachable at the call comes back to `free_slots`; a call
+// with nothing new to reclaim is still a real, counted collection rather
+// than a no-op. Safe to call whenever re-entering the collector would be
+// safe at all: not from inside a `mark_fn` or `gc_fn` callback, and not
+// while a collection this same call started is still running (both raise
+// through `FatalCollectorViolation`, exactly as an `ArenaCanAllocate`- or
+// `MakeObject`-triggered collection would). It allocates nothing itself.
+void FeCollectGarbage(FeContext* ctx);
+
+// What `FeOpenOptions.payload_percent` means when it is not an ordinary
+// percentage (FE_API_VERSION 13).
+enum {
+  // What a zero-initialized `FeOpenOptions` asks for, and what a null
+  // `options` selects: Fe's own split of the arena, which is the Phase 22
+  // ADR's selected 25% of what is left once the frame region is funded. Zero
+  // means "Fe decides" here for the same reason it does in `FeEvalOptions` --
+  // a host that has an opinion about one knob writes that one field and
+  // leaves the rest alone.
+  //
+  // There is no "none" any more (FE_API_VERSION 15). It was a real partition
+  // while only a vector could own a payload; now a symbol's name is a string
+  // and a string's bytes are payload, so a context with no region cannot
+  // finish opening, let alone run a program. The floor the core names need is
+  // funded out of `FeMinimumArenaSize` and is not this percentage's to
+  // withhold; what this divides is the surplus above that floor.
+  FeDefaultPayloadPercent = 25,
+};
+
+// The knobs `FeOpenContextWithOptions` takes (FE_API_VERSION 13). Zero-
+// initialize it -- `(FeOpenOptions){0}`, or a designated initializer that
+// names only the fields it cares about -- and every field it does not name
+// takes its documented default, which is what lets a later version add a
+// field without touching a host that does not want it.
+typedef struct FeOpenOptions {
+  // How much of the arena becomes the payload region, as a percentage of the
+  // bytes left once the frame region is funded. The cells get the rest, so
+  // this is a division between the two pools and never a raid on the third:
+  // frame capacity is identical at every value here.
+  //
+  // `FeDefaultPayloadPercent` (0, the zero-initialized value) selects Fe's
+  // own split; 1 to 100 ask for exactly that percentage of the surplus.
+  //
+  // OUT OF RANGE IS REFUSED, NOT CLAMPED: anything negative or above 100
+  // makes `FeOpenContextWithOptions` return null, exactly as a null arena or
+  // one below `FeMinimumArenaSize` does. A clamp would hand back a context
+  // partitioned to a number the host never asked for and no way to find out,
+  // which is a lie about the one budget Fe's product contract is built on.
+  int payload_percent;
+} FeOpenOptions;
+
+// Open a context with knobs (FE_API_VERSION 13). `ptr` and `size` are
+// `FeOpenContext`'s arena, with the same requirements; `options` may be null,
+// which selects every default.
+//
+// A host that calls this with default options is asking Fe to divide its
+// arena Fe's way, which is what `FeOpenContext` below now asks for too: the
+// two differ only in that this one can say a number.
+[[nodiscard]] FeContext* FeOpenContextWithOptions(void* ptr,
+                                                  size_t size,
+                                                  const FeOpenOptions* options);
+// `FeOpenContextWithOptions` with default options, and the entry point every
+// host with no opinion about the split should keep calling. Until
+// FE_API_VERSION 15 it carved no payload region at all; strings ended that,
+// since a context whose region cannot hold the name `car` cannot open.
 [[nodiscard]] FeContext* FeOpenContext(void* ptr, size_t size);
 void FeCloseContext(FeContext* ctx);
 void FeSetUserData(FeContext* ctx, void* userdata);
@@ -471,29 +730,54 @@ void FeSetErrorFn(FeContext* ctx, FeErrorFn* fn);
 // The two collector callbacks. `mark_fn` is called once per reachable
 // pointer-carrying object (`FeTPtr`, `FeTFex0`..`FeTFex2`) during the mark
 // phase so the host can `FeMark()` whatever that object refers to; `gc_fn`
-// is called once per object about to be freed, during the sweep.
+// is called once per object about to be freed.
 //
-// Both run *inside* collection, and collection is the one window in which
-// the object graph is not readable. The mark phase stores its return path in
-// the objects it is walking (Deutsch-Schorr-Waite pointer reversal), so
-// while it is inside a `car` chain those cells hold parent links rather than
-// their own cars. Two rules follow, and neither is advisory:
+// Both run *inside* collection, and both must RETURN NORMALLY. Neither may
+// `longjmp` out, and neither may raise -- no `FeHandleError()`, no
+// `FeRaiseCompletion()`, and nothing that raises on its behalf, including
+// `FeCar`/`FeCdr` on a non-pair. There is no stack to unwind the mark walk
+// from: its state *is* the graph it has reversed, so leaving non-locally
+// abandons the arena half-reversed. fe detects a raise from inside
+// collection and aborts with a message naming this contract rather than
+// continuing on a heap that will fault later somewhere unrelated. Neither
+// may allocate, for the same reason: an allocation can collect, and a
+// nested collection would clear the outer one's marks.
 //
-//   - A callback may call `FeMark()` and may read the object it was handed.
-//     It must not read `car`/`cdr` of anything else, and must not allocate.
-//   - A callback must return normally. It may not `longjmp` out, and it may
-//     not raise -- no `FeHandleError()`, no `FeRaiseCompletion()`, and
-//     nothing that raises on its behalf, including `FeCar`/`FeCdr` on a
-//     non-pair. There is no stack to unwind the walk from: its state *is*
-//     the reversed graph, so leaving non-locally abandons the arena
-//     half-reversed. fe detects a raise from inside collection and aborts
-//     with a message naming this contract rather than continuing on a heap
-//     that will fault later somewhere unrelated.
+// Beyond that the two run in DIFFERENT PHASES and have different rules.
 //
-// Printing is safe from a callback (`FeToString()` on the object it was
+//   - `mark_fn` runs inside the walk, which is the one window in which the
+//     object graph is not readable: the walk stores its return path in the
+//     objects it is passing (Deutsch-Schorr-Waite pointer reversal), so
+//     while it is inside a `car` chain those cells hold parent links rather
+//     than their own cars. A `mark_fn` may call `FeMark()` -- that is what
+//     it is for -- and may read the object it was handed. It must not read
+//     `car`/`cdr` of anything else.
+//
+//   - `gc_fn` runs in a FINALIZATION PASS of its own, after the walk has put
+//     every field back and before anything is reclaimed or moved. The whole
+//     graph is intact there, so a `gc_fn` may read the object it was handed
+//     AND anything reachable from it, whether or not that is doomed too: a
+//     dead pair may be printed even though its children are dead, and a dead
+//     string or vector still owns its payload bytes at the handle it names.
+//     Until FE_API_VERSION 15 this callback ran inline in the sweep, where
+//     both of those were false; a host written against that behaviour needs
+//     no change, since everything it was allowed to do it may still do.
+//
+//     `FeMark()` from a `gc_fn` IS A NO-OP, and calling it is not an error.
+//     The pass runs on a decided graph and its value is precisely that every
+//     doomed object is still readable, which holds only while nothing can
+//     still change who is doomed: a mark taken here would make the payload
+//     compaction retain a block whose owner the sweep then frees. Marking
+//     from a finalizer never resurrected anything -- under the old inline
+//     callback it kept an object the sweep had not reached yet and did
+//     nothing for one it had already passed, an accident of arena order that
+//     was never a contract.
+//
+// Printing is safe from either callback (`FeToString()` on the object it was
 // handed): the writer does not charge the evaluation step budget or poll the
 // interrupt while collecting, precisely so that the obvious diagnostic
-// callback cannot trip the rule above.
+// callback cannot trip the return-normally rule. `main.c`'s `-d` tracers are
+// that callback, and `make check` runs them.
 void FeSetMarkFn(FeContext* ctx, FeNativeFn* fn);
 void FeSetGCFn(FeContext* ctx, FeNativeFn* fn);
 // Where a dynamic binding's saved value came from, and where it goes back
@@ -621,6 +905,14 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 // program yet. `FeToDouble` accepts it, so a host-made integer already flows
 // through every double-taking host read; `FeToInteger` is its mirror.
 [[nodiscard]] FeObject* FeMakeInteger(FeContext* ctx, int64_t n);
+// A string of exactly LENGTH bytes, copied from a buffer the caller owns and
+// keeps (FE_API_VERSION 15). The bytes may contain NUL and are not
+// terminated: a fe string carries its length, so it is whatever bytes it was
+// given. `FeMakeString` is this with `strlen`, and remains the spelling for
+// the ordinary case of a C string.
+[[nodiscard]] FeObject* FeMakeStringBytes(FeContext* ctx,
+                                          const char* bytes,
+                                          size_t length);
 [[nodiscard]] FeObject* FeMakeString(FeContext* ctx, const char* str);
 [[nodiscard]] FeObject* FeMakeSymbol(FeContext* ctx, const char* name);
 [[nodiscard]] FeObject* FeMakeNativeFn(FeContext* ctx, FeNativeFn fn);
@@ -629,6 +921,35 @@ void FeProtectWithCleanup(FeContext* ctx, FeCleanupFn* fn, void* data);
 
 [[nodiscard]] FeObject* FeCar(FeContext* ctx, FeObject* obj);
 [[nodiscard]] FeObject* FeCdr(FeContext* ctx, FeObject* obj);
+
+// The vector surface (FE_API_VERSION 14): construction, length, checked ref,
+// checked set. Four functions and no fifth, because everything else a host
+// might want -- copying, concatenating, converting a list -- is those four in
+// a loop, and a vector's elements live in the payload region, which no host
+// may hold a pointer into. There is no borrowed-elements accessor and there
+// will not be one: the storage MOVES when the collector compacts, and the
+// only address that survives that is the `FeObject*` header these all take.
+//
+// `FeMakeVector` fills every slot with nil and needs a context whose arena
+// was opened with a payload carve (`FeOpenContextWithOptions`); a context
+// without one raises `(payload-exhaustion)` for any length, zero included.
+// `FeVectorLength` is O(1) -- a vector's length is its payload block's child
+// count, not a walk -- and so are the two accessors.
+//
+// All four raise rather than return an error code, which is fe's convention
+// for a checked accessor (`FeCar`, `FeToInteger`): a non-vector is
+// `(wrong-type-argument vectorp OBJ)` and an index at or past the length is
+// `(args-out-of-range VECTOR INDEX)`, the same two conditions the Lisp
+// `aref`/`aset` raise, because they are the same checks.
+[[nodiscard]] FeObject* FeMakeVector(FeContext* ctx, size_t length);
+[[nodiscard]] size_t FeVectorLength(FeContext* ctx, FeObject* vector);
+[[nodiscard]] FeObject* FeVectorRef(FeContext* ctx,
+                                    FeObject* vector,
+                                    size_t index);
+void FeVectorSet(FeContext* ctx,
+                 FeObject* vector,
+                 size_t index,
+                 FeObject* value);
 
 // The writer's default `car`-nesting bound: how deep `FeWrite()` and
 // `FeToString()` descend into one object before emitting `#<truncated>`. It
@@ -773,6 +1094,23 @@ void FeLeaveInputUnit(FeContext* ctx, const FeInputUnit* enclosing);
                                           FeObject* error,
                                           char* dst,
                                           size_t size);
+// The three ways to read a string's (or a symbol's name's) bytes out. None
+// of them hands back a pointer into object storage and none ever will: the
+// bytes live in the payload region and MOVE when the collector compacts, so
+// the only address that survives that is the `FeObject*` these all take.
+//
+// `FeStringBytes` (FE_API_VERSION 15) is the one-call form, `snprintf`'s
+// contract without the terminator: it answers the string's full byte length,
+// and it copies the bytes into DST when they fit in SIZE. A caller compares
+// the answer against SIZE to learn whether the copy happened; a caller that
+// only wants the length passes `(nullptr, 0)`. DST may be null only when SIZE
+// is zero. The older pair below says the same thing in two calls -- a length
+// pass, then a copy that refuses rather than truncates -- and is what a
+// caller sizing a heap buffer wants, since it has to ask twice anyway.
+[[nodiscard]] size_t FeStringBytes(FeContext* ctx,
+                                   const FeObject* obj,
+                                   char* dst,
+                                   size_t size);
 [[nodiscard]] size_t FeStringByteLength(FeContext* ctx, const FeObject* obj);
 [[nodiscard]] bool FeCopyStringBytes(FeContext* ctx,
                                      const FeObject* obj,

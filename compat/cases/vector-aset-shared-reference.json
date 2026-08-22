@@ -1,0 +1,6 @@
+{
+ "id": "vector-aset-shared-reference",
+ "setup": [],
+ "expr": "(let ((a (make-vector 3 0))) (let ((b a)) (list (aset a 1 'x) (aref b 1) (eq a b) b)))",
+ "note": "Mutation observed through two references to one vector: `b' is not a copy, so a write through `a' is visible through `b', the two stay `eq', and `aset' answers the VALUE it stored rather than the vector. Under Design B this is also the case that fails if a compaction gave the two references different blocks."
+}

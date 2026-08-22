@@ -1,0 +1,6 @@
+{
+ "id": "vector-aref-non-array",
+ "setup": [],
+ "expr": "(aref 5 0)",
+ "note": "The wrong-type condition data on a non-array: `wrong-type-argument' with data (arrayp 5) -- the predicate that failed, `arrayp' and not `vectorp', because `aref' is an ARRAY operation and strings are arrays too."
+}

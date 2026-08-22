@@ -1,0 +1,6 @@
+{
+ "id": "vector-empty-literal",
+ "setup": [],
+ "expr": "[]",
+ "note": "The zero-length vector is a distinct object, not nil. It is the n = 0 corner of the payload substrate -- a vector with no elements still publishes a block header -- which is why it is its own case."
+}

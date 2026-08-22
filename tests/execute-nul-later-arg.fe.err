@@ -1,0 +1,2 @@
+error: string contains an embedded NUL byte
+(execute "true" "a\000b")

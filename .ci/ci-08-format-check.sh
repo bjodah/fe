@@ -4,4 +4,4 @@ set -euxo pipefail
 cd "$(dirname "$0")/.."
 source .ci/ci-env.sh
 
-make format-check
+"${MAKE_PARALLEL[@]}" format-check

@@ -156,6 +156,7 @@ typedef enum Primitive {
   PPut,
   PGet,
   PSymbolPlist,
+  PDefineError,
   // Phase 19 of kg's Emacs-subset program: `error-message-string`, Emacs'
   // rendering of an ERROR object `(SYMBOL . DATA)` into the sentence a
   // handler prints. An ordinary unary function -- its operand is evaluated
@@ -174,8 +175,39 @@ typedef enum Primitive {
   // own `string-greaterp` is defined.
   PStringLess,
   PStringGreater,
+  // Phase 24 of kg's Elisp data-model program: the vector family, and the
+  // sequence contract that ships with it rather than a phase later. Eight
+  // ordinary functions -- every operand is evaluated, none of them touches
+  // the evaluator's state -- so the evaluator only routes them, exactly as
+  // it routes Phase 14's symbol family: one `FeFrameEvalList` set up by
+  // `DispatchPrimitive` and one arm in `ResumeEvalList`, both selected by
+  // the range test `IsVectorPrimitive`, both finishing in fe.c's
+  // `EvaluateVectorPrimitive` beside the payload storage the family reads.
+  // Two range tests cost this evaluator two decision points where sixteen
+  // `case` labels would cost sixteen.
+  //
+  // `length` and `elt` are here rather than in a family of their own
+  // because Emacs' contract for them is the SEQUENCE contract -- they answer
+  // for lists, strings and vectors alike -- and a `length` that knew about
+  // two of the three would be the deliberately broken interval the master
+  // plan's Phase 24 exists to avoid. Keep `PVector` first and `PElt` last if
+  // this block ever grows.
+  PVector,
+  PMakeVector,
+  PVectorp,
+  PAref,
+  PAset,
+  PVconcat,
+  PLength,
+  PElt,
   PSentinel
 } Primitive;
+
+// A block in the payload region, named by its offset within the live extent
+// plus one so that zero can mean "no block". Offsets rather than addresses
+// because the storage a handle names MOVES and the handle does not; see the
+// publish protocol below.
+typedef size_t FePayloadHandle;
 
 typedef union {
   FeObject* o;
@@ -185,6 +217,10 @@ typedef union {
   // spike confirmed the union stays pointer-sized with it; the assert below
   // makes that permanent.
   int64_t i;
+  // Phase 23.1's payload handle. A member of its own rather than a cast of
+  // `i`, so that the one place an object names its block is spelled with the
+  // handle's own type.
+  FePayloadHandle p;
   // TODO: Might need/want to make this `uintptr_t` someday.
   char c;
 } Value;
@@ -225,12 +261,15 @@ enum {
   // completion (`ctx->completion != FeCompletionNormal`) may use these
   // slots; see `FePushGC`.
   GcStackReserve = 64,
-  StringBufferSize = (sizeof(FeObject*) - 1),
+  // The bytes of a non-pair cell's `car` word that are not its type tag.
+  // Phase 25 gives them to a string's byte LENGTH, where the cell chain they
+  // replaced kept that many bytes of text; see "Strings" in fe.c.
+  StringLengthBytes = (sizeof(FeObject*) - 1),
   // The longest symbol name fe builds, in bytes. It has been the reader's
   // token buffer since long before Phase 14; that phase made `intern`,
   // `make-symbol` and `gensym` share it, so a name a program constructs is
   // bounded exactly where a name a program writes is. A symbol's name is a
-  // cons chain and has no structural limit -- this is a policy, and the
+  // string object and has no structural limit -- this is a policy, and the
   // reason it is one is that a 64-byte stack buffer is also what the
   // printer's number-lookalike test and `signal`'s condition-name copy use.
   SymbolNameLimit = 63,
@@ -616,7 +655,9 @@ static_assert(alignof(FeEvalFrame) == alignof(FeObject));
 // to a host: the only place it lives is a symbol's value cell, which Lisp
 // cannot reach (`(cdr sym)` is a type error) and which every reader of a value
 // cell turns into `void-variable`. It is tagged `FeTFree` so that an escape
-// aborts in the writer instead of impersonating a value. Defined in fe.c;
+// into the writer cannot impersonate a value; the writer names it
+// `#<unbound>` for the one reader that legitimately meets it, a collector
+// callback handed a dying symbol's cells. See fe.c. Defined in fe.c;
 // both fe.c (installs it in a fresh symbol's value cell) and fe_eval.c (the
 // evaluator compares value cells against it) need it, so it is not `static`.
 extern FeObject unbound;
@@ -628,7 +669,200 @@ extern FeObject unbound;
 #define INTEGER(x) ((x)->cdr.i)
 #define PRIM(x) ((x)->cdr.c)
 #define NATIVE_FN(x) ((x)->cdr.f)
-#define STRING_BUFFER(x) (&(x)->car.c + 1)
+// Phase 23.1: where an object names its payload block. Only a type the
+// substrate knows about keeps a handle here; see `PayloadSlot` in fe.c.
+#define PAYLOAD(x) ((x)->cdr.p)
+
+// THE PAYLOAD SUBSTRATE, AND THE PROTOCOL THAT KEEPS IT SAFE (Phase 23 of
+// kg's Elisp data-model program; the Phase 22 ADR's Design B).
+//
+// A payload is storage an object OWNS but does not contain: it lives in a
+// bump-allocated region carved out of the caller's arena, and it MOVES when
+// the compactor runs. The `FeObject*` header does not move, which is the
+// whole premise -- a host, and every C pointer fe hands out, keeps naming
+// the header.
+//
+// The layout is one block per owner:
+//
+//     [ FePayloadBlock header ][ `children` FeObject* ][ `bytes` raw bytes ]
+//
+// The collector traces the leading `children` words and never looks at the
+// bytes after them, so one region serves an aggregate (all children) and a
+// string (all bytes) without either knowing about the other.
+//
+// A string's bytes live in the region (Phase 25), so an interior pointer
+// into one is a pointer into storage that slides, and the whole class of
+// bugs nelisp documented -- a raw pointer held across an allocation that
+// compacts under it -- is available to fe.
+//
+// One protocol keeps it unavailable, and it has three clauses:
+//
+//   1. A payload pointer is obtained through the one accessor
+//      (`PayloadBytes`), IMMEDIATELY before the read or write that spends
+//      it. Never parked in a local that outlives the statement, never
+//      hoisted out of a loop, never returned to a caller and never handed to
+//      a host.
+//   2. A payload pointer is INVALID after ANY allocation. "Any allocation"
+//      means anything that reaches `MakeObject` or `PublishPayload`,
+//      including through a host callback: an `FeWriteFn` running inside the
+//      printer, an `FeReadFn` running inside the reader. Re-derive from the
+//      handle afterwards; the handle is what stays valid.
+//   3. A new or replacement block reaches its owning header through the ONE
+//      publish function and no other way. That function roots the owner
+//      across its own allocation, because that allocation may collect and an
+//      unrooted owner would be swept out from under the handle about to be
+//      written into it.
+//
+// `doc/payload-pointer-census.md` is the checklist: every site in fe and in
+// kg that reads through a payload pointer, each with the clause that keeps
+// it correct. The printer's byte loops are the ones that straddle an
+// allocation and therefore pay clause 2.
+//
+// WHAT OWNS A PAYLOAD: a vector, whose elements are its block's traced
+// children (Phase 24), and a STRING, whose bytes are its block's byte tail
+// (Phase 25) -- and a symbol's name is a string, so every context that opens
+// at all has a region with blocks in it. That is why `FeOpenContext` carves
+// one and why `FeMinimumArenaSize` funds one: an interpreter with no region
+// cannot hold its own primitive names.
+
+typedef struct FePayloadBlock {
+  // The header this block belongs to. Half of the liveness rule: a block
+  // survives only when its owner survived the mark phase.
+  FeObject* owner;
+  // How many leading words of the block are `FeObject*` the collector traces.
+  size_t children;
+  // The block's payload bytes, children included, rounded up to
+  // `FePayloadAlignment`.
+  size_t bytes;
+  // Which child the collector is currently inside, while it is inside one.
+  // This is what lets the mark phase walk an aggregate of any width without
+  // a C frame per element: fe's pointer reversal keeps a pair's position in
+  // a tag bit, and a block of n children keeps its position here.
+  size_t mark_cursor;
+} FePayloadBlock;
+
+enum {
+  // No block. A handle is a one-based offset, so zero can never name one.
+  FePayloadNone = 0,
+  // The granularity a block is rounded to, and the poison step's stride.
+  // `alignof(FeObject)` is 8 and a payload word is pointer-sized, so one
+  // unit is one word either way.
+  FePayloadAlignment = 8,
+  // What a vacated byte reads as under the poison knob. Not 0 and not 0xff:
+  // both of those are values real data takes, and a NUL in particular is
+  // what fe's string walks stop on, so poisoning with one would look like an
+  // empty string rather than like a bug.
+  FePayloadPoisonByte = 0xa5,
+  // The Phase 22 ADR's selected split, as a percentage of the bytes left
+  // after the frame region is funded. The number itself lives in fe.h, where
+  // a host reads it as the default `FeOpenContextWithOptions` applies; this
+  // is the internal name for it, so there is one constant and not two.
+  // `FeOpenContext` does NOT apply it: the ADR requires that entry point to
+  // keep today's behaviour, and carving a quarter of every host's cells for
+  // a region nothing can allocate from until Phase 25 is not today's
+  // behaviour.
+  PayloadArenaPercent = FeDefaultPayloadPercent,
+};
+
+static_assert(sizeof(FePayloadBlock) % FePayloadAlignment == 0);
+
+// Turn a handle into bytes. Clause 1: call it immediately before the access
+// and let the result die there.
+unsigned char* PayloadBytes(const FeContext* ctx, FePayloadHandle handle);
+// Clause 3: the one way a block reaches its owner, for a first block and for
+// a replacement alike. Rounds the request up to `FePayloadAlignment`,
+// zero-fills the block and stores its handle in the owner. `owner` is rooted
+// across the collection this may run, and a request the region cannot hold
+// after that collection raises `(payload-exhaustion)` rather than returning
+// a half-published block.
+void PublishPayload(FeContext* ctx,
+                    FeObject* owner,
+                    size_t children,
+                    size_t bytes);
+// Reclaim the blocks whose owners did not survive, and slide the survivors
+// down. Called by `CollectGarbage` after the mark phase has restored the
+// graph and BEFORE the sweep clears the mark bits, which is the ordering the
+// liveness rule depends on.
+void CompactPayloads(FeContext* ctx);
+
+// A diagnostic knob that BREAKS the compactor on purpose, by running it after
+// the sweep instead of before it. 0 in every configuration and set by no
+// target: it exists so that the ordering `CompactPayloads` depends on can be
+// shown to be load-bearing -- reversed, the sweep has already cleared every
+// mark bit, so the liveness rule reads false for survivors too and the
+// substrate's tests fail. An ordering that is merely currently right is not
+// evidence.
+#ifndef FE_PAYLOAD_COMPACT_ORDER_BUG
+#define FE_PAYLOAD_COMPACT_ORDER_BUG 0
+#endif
+
+// The same knob for the finalization pass, and the same reason for existing.
+// At 1 the pass that hands doomed objects to `gc_fn` runs AFTER
+// `CompactPayloads` instead of before it, which is exactly where it sat until
+// the ordering was repaired: the dead string a callback is handed then names
+// a block compaction has already reclaimed, and a survivor may have slid over
+// its bytes. 0 in every configuration and set by no target -- it is how
+// `test_api.c`'s three finalization regressions are shown to be load-bearing
+// rather than merely currently passing.
+#ifndef FE_GC_FINALIZE_ORDER_BUG
+#define FE_GC_FINALIZE_ORDER_BUG 0
+#endif
+
+#ifndef FE_DEBUG_PAYLOAD_MOVE
+#define FE_DEBUG_PAYLOAD_MOVE 0
+#endif
+
+#if FE_DEBUG_PAYLOAD_MOVE
+
+// The poison mode, in the shape kg's `KG_DEBUG_COORDS` and fe's own
+// `FE_GC_STRESS` have: the whole facility compiles to nothing at 0, so the
+// shipped interpreter carries neither the storage nor a branch for it, and a
+// CI lane arms it. At 1, EVERY allocation slides the live payload extent by
+// one alignment unit and pattern-fills the bytes it vacates, so a pointer
+// held across an allocation reads `FePayloadPoisonByte` instead of data.
+// Natural compaction moves only when something died; this moves always,
+// which is what turns "corrupts quietly one run in a thousand" into "fails
+// on the first run, in the lane".
+void MovePayloadRegion(FeContext* ctx);
+#define FE_POISON_PAYLOAD_POINTERS(ctx) MovePayloadRegion(ctx)
+
+#else
+
+#define FE_POISON_PAYLOAD_POINTERS(ctx) ((void)(ctx))
+
+#endif  // FE_DEBUG_PAYLOAD_MOVE
+
+#ifndef FE_PAYLOAD_TEST_OBJECT
+#define FE_PAYLOAD_TEST_OBJECT 0
+#endif
+
+#if FE_PAYLOAD_TEST_OBJECT
+
+// The child-bearing object the substrate's own tests are written against,
+// under a knob in the `FE_GC_STRESS` shape: it exists only in the build that
+// arms it, so a shipped interpreter has neither the constructor nor a type
+// that owns a payload. Phase 24 is where a Lisp-visible aggregate is
+// designed, and a substrate test must not pre-empt that decision -- so this
+// one borrows `FeTFex2`, the extension slot fe already reserves for a host's
+// own types, and the `FeType` enum, the printer and every exhaustive switch
+// over a type stay untouched by it.
+//
+// `children` object slots (initialised to nil) followed by `bytes` raw
+// bytes, which is the block layout above with nothing added.
+FeObject* MakeAggregate(FeContext* ctx, size_t children, size_t bytes);
+FeObject* AggregateChild(const FeContext* ctx,
+                         FeObject* aggregate,
+                         size_t index);
+void SetAggregateChild(const FeContext* ctx,
+                       FeObject* aggregate,
+                       size_t index,
+                       FeObject* value);
+// The raw tail, for the allocator's own tests. Clause 1 applies to the
+// result exactly as it does to `PayloadBytes`.
+unsigned char* AggregateBytes(const FeContext* ctx, FeObject* aggregate);
+FePayloadHandle AggregateHandle(const FeObject* aggregate);
+
+#endif  // FE_PAYLOAD_TEST_OBJECT
 
 // Small object-layer accessors both translation units use. Defined in fe.c,
 // declared here instead of kept `static` because fe_eval.c calls them too.
@@ -647,6 +881,115 @@ FeObject* GetBound(FeContext* ctx, FeObject* sym, FeObject* env);
 // would hide exactly the symmetry. `SymbolFunction`/`SetSymbolFunction` reach
 // the independent function cell used by call-position resolution.
 FeObject* SymbolName(const FeObject* sym);  // the name string chain
+// HASH AND EQUALITY CONTRACTS (Phase 26 of kg's Elisp data-model program,
+// doc/plans/2026-08-18-elisp-data-model.md).
+//
+// Phase 26 gave fe its first hash table -- the symbol index in fe.c, keyed on
+// name bytes -- and Phase 27's user tables would be its second, keyed on
+// `eq`, `eql` and `equal`. These are the rules a key hash obeys, written
+// before anything is built on them, because each one is a rule a plausible
+// implementation gets wrong in a way that no test of the index alone would
+// show. Nothing here is Lisp-visible; the index's own name hash is the first
+// and so far only consumer.
+//
+// THE ONE-WAY RULE, which everything below is an application of. A hash owes
+// its equality predicate exactly one implication:
+//
+//     EQUAL(a, b)  =>  hash(a) == hash(b)
+//
+// and never the converse. Two keys that are NOT equal may hash the same; the
+// table probes on and compares, which is what a probe is for. So a hash may
+// lose information freely -- stop early, ignore part of a structure, fold a
+// whole subtree to a constant -- and stay correct, while a hash that
+// distinguishes two keys the predicate calls equal is broken however clever
+// it is. Every bound below is licensed by this and is not a compromise on it.
+//
+// `eq` KEYS. fe's `eq` is `IdentityObjects(a, b, false)`: pointer identity,
+// or two INTEGERS with equal values, `(eq 3 3)` being t. So an `eq` hash
+// hashes the ADDRESS of every object except an integer, and an integer by its
+// VALUE. Hashing an integer's address instead is the one way to get this
+// wrong, and it puts two `eq` fixnums in different slots. Addresses are safe
+// to hash at all because Design B never moves a header: a payload block
+// slides under compaction and an `FeObject*` does not, so an `eq` table needs
+// no rehash after a collection -- which is the same property the symbol index
+// relies on. Doubles take the address route, `(eq 3.0 3.0)` being nil.
+//
+// `eql` KEYS. `IdentityObjects(a, b, true)` adds same-type doubles equal BY
+// BITS, so an `eql` hash reads a double's 64 BITS and nothing derived from
+// its value:
+//   * `(eql 0.0 -0.0)` is nil -- the sign bit is the one distinction IEEE
+//     `==` folds away. A hash that folded -0.0 onto 0.0 would only be
+//     colliding, which is free; but a hash computed by floating-point
+//     arithmetic can go the other way and give two bit-identical doubles
+//     different numbers, and THAT is the broken direction. Hash the bytes.
+//   * a NaN is `eql` to itself and to any NaN with the same bits, and a bit
+//     hash agrees with that for free. NaNs with different payloads are not
+//     `eql` and may hash apart; nothing has to canonicalise a NaN, and
+//     nothing may read its payload as a number.
+//   * `(eql 1 1.0)` is nil and `(equal 1 1.0)` is nil: an integer and a
+//     double are never equal across the type boundary. Mixing the type tag
+//     into the hash is therefore a quality choice and not a correctness one.
+//
+// `equal` KEYS, and the trap in fe's own source. fe has no `equal` primitive.
+// It has `eq`, `eql` and `is` -- and `bool Equal(...)` in fe.c is `is`, the
+// TOLERANT comparator: it calls `1` and `1.0` equal and compares two doubles
+// within an epsilon. Emacs' `equal`, which is what a Phase 27 `:test equal`
+// would mean, is the structural one kg defines in `lisp/prelude.el`:
+// iterative on the spine, recursive on the car, strings by content, numbers
+// by `eql`, vectors element by element, everything else by identity. A hash
+// written against fe's `Equal` would fold `1` onto `1.0`, which is harmless,
+// and would also be free to call two doubles an epsilon apart equal, which
+// the table would then have to make good on. An `equal` hash is written
+// against the structural rule and against nothing in fe.c.
+//
+// CYCLES, and what fe does at its bound. `equal` on circular structure does
+// not return. That is Emacs' behaviour and it is kg's: the prelude's spine
+// loop keeps no visited set, so it runs until the evaluator's step budget
+// trips or `C-g` interrupts it, and what comes back is a raise rather than an
+// answer. A HASH has no such liberty, because it is asked BEFORE any
+// comparison is possible -- so an `equal` hash carries a bound and folds a
+// constant when it reaches it. The one-way rule is what makes that sound: two
+// structures that are `equal` agree on every prefix, so they agree on the
+// bounded prefix too. The consequence, stated here so that nobody discovers
+// it during Phase 27: a cyclic key can be HASHED, and therefore inserted and
+// found by identity, while a lookup that has to compare two DISTINCT cyclic
+// structures still does not return. A hash table does not make `equal`
+// terminate. It makes the HASH terminate.
+//
+// THE STEP BOUND, which Phase 27 spells as two constants: at most 32 levels
+// of car descent and at most 1024 elements consumed in total, whichever comes
+// first, after which the hash folds a fixed constant and stops. Depth and
+// work rather than a visited set, because a visited set is an allocation
+// inside a hash, and a hash that allocates is a hash that can raise, collect,
+// and move the very storage the table is about to write into.
+//
+// MUTABLE KEYS. A hash by content is a hash of the content AT INSERTION TIME,
+// and the slot does not move when the content does. fe's strings and vectors
+// are mutable (`aset` writes both) and so are pairs (`setcar`), so a key
+// mutated after insertion is LOST to any lookup by content while remaining
+// reachable by `eq`. fe will not detect that and will not rehash; Emacs
+// behaves the same way and documents it. So the rule is a rule for the
+// caller: a key in an `equal` table is immutable for as long as it is a key.
+// `eq` and `eql` tables are unaffected -- an address does not change, and an
+// integer or a double object holds no mutable part.
+//
+// WHAT THE SYMBOL INDEX IS UNDER THESE RULES: an `equal` hash restricted to
+// strings, which is the case with no recursion, no cycles and no bound to
+// reach -- `HashNameBytes` over the bytes, and a comparison that is length
+// then bytes, embedded NUL included. It is exempt from the mutable-key rule
+// for a reason particular to it rather than by luck: a symbol's name string
+// is written by the constructor and by nothing afterwards, `symbol-name`
+// handing out a fresh copy (`SymbolNameString`), so no Lisp program has a
+// reference to mutate. If that ever stopped being true the debug check below
+// would say so, a mutated name being a symbol no longer found at its own
+// name.
+// Phase 26's debug check: does the symbol index still say exactly what
+// `symbol_list` says? Every listed symbol reachable in the table from its own
+// name's home slot, no slot holding anything else, and the three counts --
+// listed, occupied, `symbol_index_count` -- equal. Allocates nothing and
+// changes nothing, so it can be called from anywhere a test can stand,
+// including between two allocations in the poison lane.
+bool SymbolIndexMatchesSymbolList(const FeContext* ctx);
 bool StringOperandLess(FeContext* ctx, FeObject* a, FeObject* b);
 FeObject* SymbolBindingCell(
     FeObject* sym);  // the cell GetBound's global path returns
@@ -658,7 +1001,11 @@ void SetSymbolFunction(FeObject* sym, FeObject* fn);
 // first symbol fe has that the collector may reclaim, and a registry keyed
 // by symbol would pin every one that ever carried a property.
 FeObject* SymbolPlist(FeObject* sym);
+const FeObject* ReadSymbolPlist(const FeObject* sym);
 void SetSymbolPlist(FeObject* sym, FeObject* plist);
+FeObject* PlistGet(FeObject* plist, FeObject* property);
+const FeObject* ReadPlistGet(const FeObject* plist, const FeObject* property);
+FeObject* FindInternedSymbol(const FeContext* ctx, const char* name);
 // Phase 14's symbol family (see the `PIntern`..`PSymbolPlist` block above):
 // the range test the evaluator routes on, and the one entry point that
 // finishes all eight from their evaluated operand list.
@@ -666,6 +1013,29 @@ bool IsSymbolPrimitive(Primitive primitive);
 FeObject* EvaluateSymbolPrimitive(FeContext* ctx,
                                   Primitive primitive,
                                   FeObject* arguments);
+// Phase 24's vector family (see the `PVector`..`PElt` block above), in the
+// same two-function shape: the range test the evaluator routes on, and the
+// one entry point that finishes all eight from their evaluated operand list.
+bool IsVectorPrimitive(Primitive primitive);
+FeObject* EvaluateVectorPrimitive(FeContext* ctx,
+                                  Primitive primitive,
+                                  FeObject* arguments);
+// A vector's length and its elements, unchecked, for fe's own code: the
+// public `FeVectorLength`/`FeVectorRef`/`FeVectorSet` are these three behind
+// the type and bounds checks. The length is the payload block's child count,
+// which is why it is O(1) and why a vector needs no length word of its own.
+//
+// `VectorElement` and `SetVectorElement` derive the block address inside
+// themselves and spend it there, which is clause 1 of the publish protocol:
+// a caller that hoisted the address out of a loop containing an allocation
+// -- the printer's element loop is exactly such a loop, because an
+// `FeWriteFn` may allocate -- would read storage the compactor had moved.
+size_t VectorLength(const FeContext* ctx, FeObject* vector);
+FeObject* VectorElement(const FeContext* ctx, FeObject* vector, size_t index);
+void SetVectorElement(const FeContext* ctx,
+                      FeObject* vector,
+                      size_t index,
+                      FeObject* value);
 // The special-variable registry (sub-plan 11B), defined in fe.c beside the
 // symbol accessors because it is symbol metadata; the evaluator's binding
 // paths and the two primitives that expose it are in fe_eval.c.
@@ -675,14 +1045,18 @@ void MarkSpecialSymbol(FeContext* ctx, FeObject* sym, bool full);
 bool SymbolIsSpecial(FeContext* ctx, const FeObject* sym);
 bool SymbolIsLetDynamic(FeContext* ctx, const FeObject* sym);
 FeObject* MakeObject(FeContext* ctx);
-bool Equal(FeObject* a, FeObject* b);
+// Emacs' `equal`: structural for strings, tolerant for numbers, identity
+// otherwise. It takes a CONTEXT because a string's bytes are payload and a
+// payload address is only reachable from the context that owns the region
+// -- the shape every predicate below that reads a name shares.
+bool Equal(const FeContext* ctx, FeObject* a, FeObject* b);
 // `eq`/`eql`'s shared answer (05D): pointer identity, both-integers-equal, or
 // -- for `eql` (`compare_floats`) -- same-type floats equal by bits. Defined
 // in fe.c beside `Equal`; the evaluator's `eq`/`eql` primitives call it.
 bool IdentityObjects(FeObject* a, FeObject* b, bool compare_floats);
-bool IsNamedSymbol(const FeObject* v, const char* name);
-bool IsKeywordSymbol(const FeObject* v);
-bool IsConstantSymbol(const FeObject* v);
+bool IsNamedSymbol(const FeContext* ctx, const FeObject* v, const char* name);
+bool IsKeywordSymbol(const FeContext* ctx, const FeObject* v);
+bool IsConstantSymbol(const FeContext* ctx, const FeObject* v);
 void __attribute((format(printf, 3, 4))) Format(char* result,
                                                 size_t size,
                                                 const char* format,
@@ -722,6 +1096,13 @@ struct FeContext {
   // the obvious thing for such a callback to do (`main.c` does exactly
   // that). Collection is not evaluation, so it does not charge.
   bool collecting;
+  // True for exactly as long as `FinalizeDoomedObjects` is running -- the
+  // pass, inside the window above, that hands every doomed object to the
+  // host's `gc_fn` while the graph and the payload region are still whole.
+  // `FeMark` reads it and returns immediately, which is what freezes the
+  // doomed/live decision for the whole pass: see the comment there, and the
+  // callback contract in `fe.h`. Always false when `collecting` is false.
+  bool finalizing;
   void* userdata;
   FeObject* gc_stack[GcStackSize];
   size_t gc_stack_index;
@@ -730,6 +1111,16 @@ struct FeContext {
   FeObject* call_list;
   FeObject* free_list;
   FeObject* symbol_list;
+  // Phase 26's symbol index: the private owner of the open-addressed table
+  // that answers `FindInternedSymbol`, and how many of its slots are taken.
+  // `symbol_list` above is still the authority and still the enumeration
+  // order; this is a cache over it, and `SymbolIndexMatchesSymbolList` is
+  // what says so. `symbol_index_count` is the length of `symbol_list` --
+  // every interned symbol is in exactly one slot -- so a disagreement
+  // between the two numbers is the whole of "one of them has a symbol the
+  // other does not". See "THE SYMBOL INDEX" in fe.c for the table itself.
+  FeObject* symbol_index;
+  size_t symbol_index_count;
   FeObject* evaluation_result;
   FeObject* call_result;
   FeObject* root_list;
@@ -1004,7 +1395,40 @@ struct FeContext {
   // moves this off zero, however deep its ordinary Lisp nesting.
   size_t arena_peak_native_reentry;
   size_t arena_allocation_failures;
+
+  // The payload region (Phase 23.1). Seven fields, and every one of them is
+  // zero in a context opened by `FeOpenContext`: that entry point carves no
+  // payload bytes, so a host that has not asked for a region has one of
+  // length zero and every path below is a comparison against it. See the
+  // substrate's comment above for what a block is.
+  //
+  // `payload_base` is the region's own first byte and never moves.
+  // `payload_start` is where the LIVE EXTENT begins inside it, and is zero
+  // except under the poison knob, whose whole job is to move the extent at
+  // every allocation. A handle is an offset within the extent, so it
+  // survives that slide; an address does not, which is the point.
+  unsigned char* payload_base;
+  size_t payload_capacity;
+  size_t payload_start;
+  size_t payload_used;
+  // High-water mark of `payload_start + payload_used`: the margin this
+  // phase's results are read against, and what Phase 23.2 reports through
+  // `FeArenaStats`.
+  size_t payload_peak_used;
+  size_t payload_compaction_count;
+  size_t payload_allocation_failures;
 };
+
+// The context open the payload region needs, and what
+// `FeOpenContextWithOptions` resolves its options to: `payload_percent` of
+// the bytes left after the frame region is funded becomes the payload
+// region, and the rest stays cells. `FeOpenContext` passes 0, which is
+// byte-for-byte today's partition; `PayloadArenaPercent` is the ADR's
+// selected split, which is what default options ask for. A percentage above
+// 100 is refused here as it is there, by returning null.
+FeContext* OpenContextWithPayload(void* arena,
+                                  size_t size,
+                                  size_t payload_percent);
 
 // The whole ambient evaluation-control record, as one value: everything
 // `ClearEvaluationControl` clears, so a raise that ends up *resuming* the
@@ -1081,7 +1505,9 @@ typedef struct ConditionParent {
   const char* message;
 } ConditionParent;
 const ConditionParent* ConditionRowAt(size_t index);
-bool ConditionInheritsFrom(const FeObject* symbol, const char* ancestor);
+bool ConditionInheritsFrom(const FeContext* ctx,
+                           const FeObject* symbol,
+                           const char* ancestor);
 // Emacs' `error-message-string` rendering of the ERROR object `error`,
 // written into `dst` (always NUL-terminated) and never allocating: both its
 // callers -- the primitive, and `FeErrorMessageString` on the host's error
@@ -1173,11 +1599,18 @@ FeObject* RunEvaluationBody(FeContext* ctx, FeObject* forms, FeObject* env);
                                   const char* name,
                                   const char* message);
 [[noreturn]] void RaiseBudget(FeContext* ctx, const char* msg);
+// The payload region is full and a compacting collection did not free enough
+// of it. `(payload-exhaustion)` names that, and degrades to the pre-built
+// `(arena-exhaustion)` when the cell pool is spent too -- building a
+// condition object needs cells, and the pre-built one is the only condition
+// a state with none can signal. Both are catchable, and `error` catches
+// either.
+[[noreturn]] void RaisePayloadExhaustion(FeContext* ctx);
 void PushCleanup(FeContext* ctx, FeCleanupEntry entry);
 void PushDynamicBinding(FeContext* ctx, FeObject* symbol, FeObject* value);
 void RunCleanupsDownTo(FeContext* ctx, size_t target);
 void ValidateConditionHandlers(FeContext* ctx, FeObject* handlers);
-bool IsConditionSymbol(const FeObject* symbol);
+bool IsConditionSymbol(const FeContext* ctx, const FeObject* symbol);
 //
 // fe_unwind.c -> fe_eval.c: one edge, the throw a cleanup re-issues.
 bool PerformThrow(FeContext* ctx, FeObject* tag, FeObject* value);

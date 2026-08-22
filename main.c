@@ -10,6 +10,7 @@
 
 #include "auto.h"
 #include "fe.h"
+#include "fe_perf.h"
 #include "fex.h"
 #include "fex_io.h"
 #include "fex_math.h"
@@ -124,8 +125,19 @@ static FeObject* HandleMark(FeContext* ctx, FeObject* args) {
   return Handle(ctx, args, "mark");
 }
 
+// Whether `FexInit` installed the extension collector callback that this
+// tracer has to chain to. Set once, beside the install itself.
+static bool tracing_extensions;
+
 static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
-  return Handle(ctx, args, "gc");
+  (void)Handle(ctx, args, "gc");
+  // CHAIN, never replace. `FeSetGCFn` holds one function, so `-d` installing
+  // this tracer took the extensions' own callback out of the collector -- and
+  // with it the close of an owned `FILE*` and the free of a compiled regular
+  // expression. Invisible until the debug host joined `make check`, whose
+  // valgrind and ASan lanes then named the three `FexTFile` records `-d` was
+  // leaking on every run.
+  return tracing_extensions ? FexGC(ctx, args) : &nil;
 }
 
 [[noreturn]] static void PrintHelp(int status) {
@@ -146,6 +158,30 @@ static FeObject* HandleGC(FeContext* ctx, FeObject* args) {
           "  -x    Do not install the Fex extensions\n");
   exit(status);
 }
+
+#if FE_PERF_COUNTERS
+// The counting build's report (`make perf`): every counter, and the arena
+// gauges beside them, written to $FE_PERF_OUT as JSON when a run completes.
+// Unset, or unwritable, means "not measuring" -- a counting interpreter still
+// has to be a usable one, so nothing here fails loudly. A run that ends
+// through an escaping error exits before this by design: the counters
+// describe a completed run.
+static void WritePerfCounters(FeContext* ctx) {
+  const char* const path = getenv("FE_PERF_OUT");
+  if (path == nullptr || *path == '\0') {
+    return;
+  }
+  FILE* const out = fopen(path, "w");
+  if (out == nullptr) {
+    return;
+  }
+  const FeArenaStats stats = FeGetArenaStats(ctx);
+  FePerfWriteJson(out, &stats);
+  (void)fclose(out);
+}
+#else
+#define WritePerfCounters(ctx) ((void)0)
+#endif
 
 static size_t ReadEvaluatePrint(FeContext* context, FILE* input, size_t gc) {
   while (true) {
@@ -215,9 +251,14 @@ int main(int count, char* arguments[]) {
   arguments += optind;
   interactive |= count == 0;
 
-  // Initialize the context:
+  // Initialize the context. With Fe's own payload split (Phase 24): this
+  // interpreter is a host, and a host that wants vectors has to ask for the
+  // region their elements live in -- `FeOpenContext` deliberately carves
+  // nothing and says so. Default options rather than a number spelled here,
+  // so the ADR's split stays one constant in fe.h.
   AUTO(char*, arena, malloc(arena_size), FreeChar);
-  FeContext* opened_context = FeOpenContext(arena, arena_size);
+  FeContext* opened_context =
+      FeOpenContextWithOptions(arena, arena_size, nullptr);
   if (opened_context == nullptr) {
     fprintf(stderr,
             "could not initialize Fe: arena must be aligned and at least %zu "
@@ -231,6 +272,7 @@ int main(int count, char* arguments[]) {
   FeSetErrorFn(context, HandleFatalError);
   if (extensions) {
     FexInit(context);
+    tracing_extensions = true;
     FexInstallIO(context);
     FexInstallMath(context);
     FexInstallProcess(context);
@@ -263,4 +305,5 @@ int main(int count, char* arguments[]) {
   if (interactive) {
     ReadEvaluatePrint(context, stdin, gc);
   }
+  WritePerfCounters(context);
 }

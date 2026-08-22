@@ -12,6 +12,8 @@
 
 #include "fe.h"
 #include "fe_internal.h"
+#include "fe_perf.h"
+#include "fex.h"
 
 #define CHECK(condition)                                                     \
   do {                                                                       \
@@ -140,9 +142,17 @@ static bool TestContextCreation(void) {
   // asserted together: the two macros are compile-time (test_header.c states
   // them for the header on its own), `FeVersion` is a runtime string and can
   // only be checked here.
-  static_assert(FE_API_VERSION == 11);
-  static_assert(FE_LANGUAGE_VERSION == 14);
-  CHECK(strcmp(FeVersion, "16.0") == 0);
+  static_assert(FE_API_VERSION == 15);
+  static_assert(FE_LANGUAGE_VERSION == 20);
+  CHECK(strcmp(FeVersion, "24.0") == 0);
+
+  // FexVersion is mechanically tied to the language version -- it is built
+  // from FE_LANGUAGE_VERSION_STRING -- so assert the live string carries the
+  // language version rather than only checking that it is non-empty.
+  char fex_tail[32];
+  (void)snprintf(fex_tail, sizeof fex_tail, "(fe language %d)",
+                 FE_LANGUAGE_VERSION);
+  CHECK(strstr(FexVersion, fex_tail) != NULL);
 
   const size_t minimum = FeMinimumArenaSize();
   const size_t alignment = FeArenaAlignment();
@@ -821,7 +831,8 @@ static bool TestStringInput(void) {
   CHECK(FeReadString(context, sequential, sizeof(sequential) - 1, &offset) ==
         nullptr);
 
-  CHECK(ExpectReadError(context, &state, "(", 1, "byte 1: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(", 1,
+                        "byte 1: end-of-file: unclosed list"));
   const char truncated_string[] = {'"', '\\'};
   CHECK(ExpectReadError(context, &state, truncated_string,
                         sizeof(truncated_string), "byte 2: unclosed string"));
@@ -830,7 +841,7 @@ static bool TestStringInput(void) {
   CHECK(ExpectEvaluationError(context, &state, "nul.fe", with_nul,
                               sizeof(with_nul), "nul.fe:1: embedded NUL byte"));
   CHECK(ExpectEvaluationError(context, &state, "syntax.fe", "1 (+ 2 3", 8,
-                              "syntax.fe:1: unclosed list"));
+                              "syntax.fe:1: end-of-file: unclosed list"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-syntax.fe", "6", 1), "6"));
   CHECK(ExpectEvaluationError(context, &state, "runtime.fe", "1 (car 2) 3", 11,
@@ -873,17 +884,15 @@ static bool TestStringInput(void) {
                    "AA\x1b\x7f "));
   CHECK(ExpectReadError(context, &state, "#q", 2,
                         "byte 1: unsupported read syntax: #"));
-  CHECK(ExpectReadError(context, &state, "[1 2]", 5,
-                        "byte 0: unsupported read syntax: vector brackets"));
-  CHECK(ExpectReadError(context, &state, "\"\\q\"", 4,
-                        "byte 2: unsupported read syntax: unknown escape"));
+  CHECK(ExpectReadError(context, &state, "[1 2", 4,
+                        "byte 4: end-of-file: unclosed vector"));
+  CHECK(IsRendered(context, FeReadString(context, "\"\\q\"", 4, nullptr), "q"));
   CHECK(ExpectReadError(context, &state, "?\\q", 3,
                         "byte 2: unsupported read syntax: unknown escape"));
   CHECK(ExpectEvaluationError(context, &state, "lines.fe", "\n(car 2)", 8,
                               "lines.fe:2: expected pair, got integer"));
-  CHECK(ExpectEvaluationError(
-      context, &state, "lines.fe", "\n[", 2,
-      "lines.fe:2: unsupported read syntax: vector brackets"));
+  CHECK(ExpectEvaluationError(context, &state, "lines.fe", "\n[", 2,
+                              "lines.fe:2: end-of-file: unclosed vector"));
   CHECK(IsRendered(context,
                    FeEvaluateString(context, "after-runtime.fe", "7", 1), "7"));
 
@@ -904,6 +913,25 @@ static bool TestStringInput(void) {
 // 31.0.90 reads it to (measured with `emacs -Q --batch` against
 // /opt-3/emacs-31-lucid, TERM=xterm-256color), or a spelling Fe refuses with
 // an error that names the syntax. Nothing in between.
+// A string literal read as BYTES rather than as printed text, which is what
+// an embedded NUL needs: `print` writes a top-level string bare, so a
+// rendering comparison would stop at the NUL and call two different strings
+// equal. It is also the one-call copy-out API (FE_API_VERSION 15) exercised
+// where a caller with a fixed buffer would use it.
+static bool ReadsBytes(FeContext* context,
+                       const char* source,
+                       const char* expected,
+                       size_t length) {
+  const FeObject* const object =
+      FeReadString(context, source, strlen(source), nullptr);
+  CHECK(object != nullptr);
+  CHECK(FeGetType(object) == FeTString);
+  char buffer[64];
+  CHECK(FeStringBytes(context, object, buffer, sizeof(buffer)) == length);
+  CHECK(memcmp(buffer, expected, length) == 0);
+  return true;
+}
+
 static bool TestReaderLiterals(void) {
   static TestArena arena;
   FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
@@ -1003,18 +1031,26 @@ static bool TestReaderLiterals(void) {
   REJECTS("?\\x3fffffff",
           "unsupported read syntax: \\x character out of range");
 
-  // A Fe string is a byte string. `BuildString` writes at `strlen`, so a
-  // decoded NUL was a no-op that shifted the rest of the string down --
-  // `(list "\0a" "a\0b")` answered `("a" "ab")` -- and a value above 255 was
-  // truncated into the same hole, which is what `"\400"` did.
-  REJECTS("\"\\0a\"", "unsupported read syntax: NUL character in string");
-  REJECTS("\"a\\0b\"", "unsupported read syntax: NUL character in string");
-  REJECTS("\"\\x00\"", "unsupported read syntax: NUL character in string");
+  // A fe string is a byte string, and since Phase 25 a length-bearing one, so
+  // a decoded NUL is an ordinary byte. It was a named read error before, and
+  // before THAT it was a silent no-op that shifted the rest of the string down
+  // -- `(list "\0a" "a\0b")` answered `("a" "ab")`. A value above 255 is
+  // still refused: holding it would mean a multibyte string and not a length.
+  CHECK(ReadsBytes(context, "\"\\0a\"", "\0a", 2));
+  CHECK(ReadsBytes(context, "\"a\\0b\"", "a\0b", 3));
+  CHECK(ReadsBytes(context, "\"\\x00\"", "\0", 1));
+  CHECK(ReadsBytes(context, "\"a\\000b\"", "a\0b", 3));
+  CHECK(ReadsBytes(context, "\"\\0001\"",
+                   "\0"
+                   "1",
+                   2));
   REJECTS("\"\\400\"",
           "unsupported read syntax: character above 255 in string");
   REJECTS("\"\\x41f\"",
           "unsupported read syntax: character above 255 in string");
-  REJECTS("\"\\q\"", "unsupported read syntax: unknown escape");
+  CHECK(ReadsBytes(context, "\"\\q\\(\\z\"", "q(z", 3));
+  CHECK(ReadsBytes(context, "\"a\\ b\\\nb\"", "abb", 3));
+  CHECK(ReadsBytes(context, "\"a\\\\q\"", "a\\q", 3));
 
   // Symbol escapes were a named rejection until Phase 14 implemented them
   // (`TestSymbolPrimitives` below has the positive assertions). What is left
@@ -1023,8 +1059,14 @@ static bool TestReaderLiterals(void) {
 
   // The remaining named reject arms, each asserted to name its syntax.
   REJECTS("#q", "unsupported read syntax: #");
-  REJECTS("[1 2]", "unsupported read syntax: vector brackets");
-  REJECTS("]", "unsupported read syntax: vector brackets");
+  // Phase 24 turned `[1 2 3]` from a named rejection into a vector
+  // (`TestVectors` below has the positive assertions). What is left to reject
+  // is a bracket that closes nothing, a bracket crossed with a paren, and the
+  // dotted-tail marker inside a vector, which `[1 . 2]` is on Emacs too.
+  REJECTS("]", "stray ']'");
+  REJECTS("(1 2]", "stray ']'");
+  REJECTS("[1 2)", "stray ')'");
+  REJECTS("[1 . 2]", "'.' inside a vector");
   REJECTS("#xg", "unsupported read syntax: malformed radix integer");
   REJECTS("#x", "unsupported read syntax: malformed radix integer");
   REJECTS("#x0g", "unsupported read syntax: malformed radix integer");
@@ -1036,6 +1078,23 @@ static bool TestReaderLiterals(void) {
   REJECTS("?\x80", "unsupported read syntax: invalid UTF-8 character");
   REJECTS("?\xC3(", "unsupported read syntax: invalid UTF-8 character");
   REJECTS("?\xED\xA0\x80", "unsupported read syntax: invalid UTF-8 character");
+
+  // The form feed (0x0C) is whitespace, as it is in Emacs' `read1`, which
+  // retries on exactly space, form feed, newline, tab and carriage return.
+  // Fe had the other four, so a page separator -- the conventional Elisp
+  // section break -- was an ordinary symbol constituent and `(nil\fnil)` was
+  // a one-element list holding a symbol whose name carried the byte. One row
+  // per arm the fix touches: the skip loop, the atom delimiter, the `?`
+  // literal's own delimiter, and the radix digits' -- plus the two arms it
+  // must NOT touch, an escaped form feed (a constituent again, exactly as an
+  // escaped space is) and a string body, where it was never reader syntax.
+  READS("\f1", "1");
+  READS("(nil\fnil)", "(nil nil)");
+  READS("(a\fb)", "(a b)");
+  READS("(?a\f1)", "(97 1)");
+  READS("(#x10\f1)", "(16 1)");
+  READS("(a\\\fb)", "(a\\\fb)");
+  READS("\"a\fb\"", "a\fb");
 
 #undef READS
 #undef REJECTS
@@ -1064,7 +1123,7 @@ static bool TestReaderLiterals(void) {
       {";1\n;2\n;3\n;4\n;5\n;6\n;7\n;8\n;9\n;10\n(car 2)",
        "lines.fe:11: expected pair, got integer"},
       // A *read* error after a comment block, not a runtime one.
-      {"; a\n; b\n[", "lines.fe:3: unsupported read syntax: vector brackets"},
+      {"; a\n; b\n[", "lines.fe:3: end-of-file: unclosed vector"},
   };
   for (size_t i = 0; i < sizeof(line_cases) / sizeof(line_cases[0]); i++) {
     CHECK(ExpectEvaluationError(
@@ -1685,6 +1744,18 @@ static bool TestWriter(void) {
   ErrorState state = {.context = context};
   FeSetUserData(context, &state);
   FeSetErrorFn(context, HandleError);
+
+  // An unknown escape's character and a stored backslash both survive the
+  // writer/read-back pair.
+  FeObject* const escaped = FeEvaluateString(
+      context, "roundtrip.fe", "\"a\\\\q\"", strlen("\"a\\\\q\""));
+  Rendered roundtrip = {0};
+  CHECK(FeWriteWithOptions(context, escaped, Collect, &roundtrip, 1, nullptr));
+  CHECK(strcmp(roundtrip.text, "\"a\\\\q\"") == 0);
+  CHECK(IsRendered(
+      context,
+      FeReadString(context, roundtrip.text, strlen(roundtrip.text), nullptr),
+      "a\\q"));
 
   // Cycles through the cdr spine terminate, with the two-pointer walk finding
   // both a self-loop and a longer one.
@@ -3968,8 +4039,10 @@ static bool TestDottedLists(void) {
                         "byte 8: extra value after dotted tail"));
   CHECK(ExpectReadError(context, &state, "(a . b . c)", 11,
                         "byte 8: extra value after dotted tail"));
-  CHECK(ExpectReadError(context, &state, "(a .", 4, "byte 4: unclosed list"));
-  CHECK(ExpectReadError(context, &state, "(a . b", 6, "byte 6: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(a .", 4,
+                        "byte 4: end-of-file: unclosed list"));
+  CHECK(ExpectReadError(context, &state, "(a . b", 6,
+                        "byte 6: end-of-file: unclosed list"));
   CHECK(ExpectReadError(context, &state, "(a . b c", 8,
                         "byte 8: extra value after dotted tail"));
 
@@ -4680,6 +4753,8 @@ static bool TestErrorMessageString(void) {
   // Phase 20's two buffer-edge conditions, seeded the same way.
   CHK("(get 'end-of-buffer 'error-message)", "End of buffer");
   CHK("(get 'beginning-of-buffer 'error-message)", "Beginning of buffer");
+  // The search family's failure, seeded the same way again.
+  CHK("(get 'search-failed 'error-message)", "Search failed");
 
   // The rendering itself, measured against Emacs 31.0.90 in every case.
   CHK("(error-message-string '(wrong-type-argument listp 6))",
@@ -4692,6 +4767,13 @@ static bool TestErrorMessageString(void) {
   CHK("(error-message-string '(arith-error))", "Arithmetic error");
   CHK("(error-message-string '(end-of-buffer))", "End of buffer");
   CHK("(error-message-string '(beginning-of-buffer))", "Beginning of buffer");
+  // A `search-failed` carries the pattern as its data, and the data is
+  // prin1'd because the condition is not a `file-error` subtype: measured on
+  // 31.0.91, `(error-message-string '(search-failed "z"))` is `Search
+  // failed: "z"` there, quotes included, and the bare condition is the
+  // message alone.
+  CHK("(error-message-string '(search-failed \"z\"))", "Search failed: \"z\"");
+  CHK("(error-message-string '(search-failed))", "Search failed");
   CHK("(error-message-string '(quit))", "Quit");
   // `error` takes its message from the DATA, not from the property: this is
   // the case the bare-symbol reporting got most visibly wrong.
@@ -5732,7 +5814,7 @@ static bool TestFrameSubstrate(void) {
   // the temporary-dispatch frame was marked, rather than merely surviving by
   // accident on the GC stack.
   static TestArena gc_arena;
-  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  const size_t gc_size = FeMinimumArenaSize() + 12 * 1024;
   FeContext* gc_context = FeOpenContext(gc_arena.bytes, gc_size);
   CHECK(gc_context != nullptr);
   ErrorState gc_state = {.context = gc_context};
@@ -6589,7 +6671,7 @@ static bool TestMacroFrame(void) {
   // small arena's own physical capacity -- as 03C's exhaustion test did --
   // so the frame push check is what fires, with the exact frame-limit text,
   // the original macro-call trace, and a context still usable afterwards.
-  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  const size_t gc_size = FeMinimumArenaSize() + 12 * 1024;
   static TestArena frame_arena;
   FeContext* frame_context = FeOpenContext(frame_arena.bytes, gc_size);
   CHECK(frame_context != nullptr);
@@ -6854,7 +6936,12 @@ static bool PrepareGCNative(FeContext* context, ErrorState* state) {
 
 static bool RunFrameGCCase(const FrameGCCase* c) {
   static TestArena arena;
-  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  // 16 KiB of surplus rather than 8: a quarter of the surplus funds the
+  // payload region since Phase 25, so the same cell budget these cases were
+  // sized against costs a third more arena. What they need is cells enough to
+  // collect several times without exhausting the pool, which is why the
+  // number is a surplus over the minimum and not an absolute size.
+  const size_t gc_size = FeMinimumArenaSize() + 12 * 1024;
   FeContext* context = FeOpenContext(arena.bytes, gc_size);
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -7035,7 +7122,7 @@ static bool TestResumableFrameGC(void) {
 // now pinned for the cleanup's own nested run.
 static bool TestCleanupRunGC(void) {
   static TestArena arena;
-  const size_t gc_size = FeMinimumArenaSize() + 8 * 1024;
+  const size_t gc_size = FeMinimumArenaSize() + 12 * 1024;
   FeContext* context = FeOpenContext(arena.bytes, gc_size);
   CHECK(context != nullptr);
   ErrorState state = {.context = context};
@@ -8156,11 +8243,89 @@ static bool TestCaughtExhaustionSession(void) {
 // everything here being reachable from the symbol list forever. The
 // collection count and the peak are unchanged for the sixth time, which is
 // the invariance 09C pinned.
+// Re-measured at Phase 23.1 for the seventh time, and it moves by 14 for one
+// reason: the `payload-exhaustion` condition row, built before any program
+// runs like every other row. Its symbol is 8 slots ("payload-exhaustion" is
+// 18 characters, so three name cells beside the symbol's own five), its
+// message string "Payload region exhausted" is 4, and its plist costs the
+// usual 2. The arena grows with `FeMinimumArenaSize()` and holds 14 more
+// slots (15637 -> 15651), of which the same 14 are live after a collection
+// (1466 -> 1480), everything here being reachable from the symbol list
+// forever. The payload region itself changes NOTHING in this test:
+// `FeOpenContext` carves no payload bytes, so the cell partition is what it
+// was. The collection count and the peak are unchanged for the seventh time,
+// which is the invariance 09C pinned.
+// Re-measured at Phase 24 for the eighth time, and it moves by 70, all of it
+// built before any program runs. Fifty-seven is the vector family: eight
+// primitives, each one primitive object plus its symbol, which is 7 slots for
+// the seven names of seven characters or fewer (`vector`, `vectorp`, `aref`,
+// `aset`, `vconcat`, `length`, `elt`) and 8 for `make-vector`, whose
+// 11-character name needs a second name cell. Thirteen is the `end-of-file`
+// condition row: its symbol (7), its message string "End of file during
+// parsing" (4), and the usual two plist pairs. The arena grows with
+// `FeMinimumArenaSize()` and holds 70 more slots (15651 -> 15721), of which
+// the same 70 are live after a collection (1480 -> 1550), everything here
+// being reachable from the symbol list forever. No vector exists in this test
+// -- the corpus builds none -- so the payload region is still zero bytes
+// under `FeOpenContext` and the cell partition is what it was. The collection
+// count and the peak are unchanged for the eighth time, which is the
+// invariance 09C pinned.
+// Re-measured at Phase 25 for the ninth time, and this is the first re-measure
+// in which every one of the four numbers moves, because this is the first one
+// that changes what a string IS. Three separate effects, and they pull in
+// different directions:
+//   * TOTAL falls 15721 -> 11925. `FeOpenContext` carves the payload region
+//     now, so a quarter of the 256 KiB surplus this arena is sized from funds
+//     the region rather than cells. The region is not lost memory -- it is
+//     where every string in the corpus lives -- but it is not slots.
+//   * LIVE AFTER COLLECTION falls 1550 -> 1436. A string is ONE cell whatever
+//     its length, where it was one per seven bytes: the corpus's `"a string
+//     long enough to span cells"` was five cells and is one, and each of the
+//     interpreter's own ~138 names loses its extra cells the same way.
+//   * COLLECTIONS rises 3 -> 4, and PEAK follows TOTAL. Fewer cells for the
+//     same corpus is one more trip round the free list; the peak is
+//     `total_slots` by construction, as the comment below the corpus says.
+// The interesting number is the third one being only 3 -> 4 while the pool
+// shrank by a quarter: the corpus's garbage is mostly pairs, which the string
+// change does not touch.
+// Re-measured at Phase 26 for the tenth time, and this one moves by ONE, in
+// the two figures a cell moves: the symbol index's owner. Its table is a
+// payload block and costs no cell at all, so what the arena sees is the one
+// string header that owns the block -- `FeMinimumArenaSize()` grows by that
+// cell and by the block's 2080 region bytes, this arena is that minimum plus
+// a fixed 256 KiB, and the region's floor rises inside the payload partition
+// rather than out of the cells. TOTAL 11925 -> 11926 and LIVE AFTER
+// COLLECTION 1436 -> 1437, the owner being reachable from the context
+// forever; PEAK follows TOTAL as it always does, and the collection count is
+// unchanged for the ninth time. The index itself is invisible here for the
+// reason it is invisible everywhere: nothing in the corpus interns enough
+// names to grow it.
+// Re-measured at the frontier demand phase for the eleventh time, and this
+// one moves by NINE, in the two figures a condition row moves: the
+// `search-failed` row, seeded before any program runs like every other row.
+// `GetConditionMessageObjectCount` says what nine is -- `SymbolObjectCount`
+// (6) for a name no core table already interned, `StringObjectCount` (1) for
+// its message, and the usual 2 for the plist pair -- and
+// `FeMinimumArenaSize` grows by 240 bytes: those nine cells at 16 bytes
+// each, plus 96 region bytes for the two payload blocks the name and the
+// message own. TOTAL 11926 -> 11935 and LIVE AFTER COLLECTION 1437 -> 1446,
+// everything the seeding builds being reachable from the symbol list
+// forever; PEAK follows TOTAL as it always does, and the collection count is
+// unchanged for the tenth time, which is the invariance 09C pinned.
+// Phase M2 (master plan 2026-08-21, section 6) adds one condition row,
+// `invalid-regexp', seeded before any program runs like every other row:
+// `GetConditionMessageObjectCount' moves it by thirteen -- `SymbolObjectCount'
+// (6) for a name no core table already interned, `StringObjectCount' (1) for
+// its message, the two plist pairs, and the two cells of its `(invalid-regexp
+// error)' ancestor chain. `FeMinimumArenaSize' grows by 240 bytes for the nine
+// new cells plus the 96 region bytes of the two payload blocks the name and
+// message own. TOTAL/PEAK 12031 -> 12044 and LIVE AFTER COLLECTION 1542 ->
+// 1555; the collection count is unchanged for the eleventh time.
 enum {
-  PinnedTotalSlots = 15637,
-  PinnedCollectionCount = 3,
-  PinnedPeakLive = 15637,
-  PinnedLiveAfterCollection = 1466,
+  PinnedTotalSlots = 12044,
+  PinnedCollectionCount = 4,
+  PinnedPeakLive = 12044,
+  PinnedLiveAfterCollection = 1555,
 };
 
 // ---------------------------------------------------------------------------
@@ -9051,7 +9216,8 @@ static bool TestHostedInputUnit(void) {
   // A reader error inside the unit reports the unit too.
   static const char unread[] = "(hosted-load \"bad.el\" \"(setq q 1)\n(a b\")";
   CHECK(ExpectEvaluationError(context, &state, "unit.fe", unread,
-                              sizeof(unread) - 1, "bad.el:2: unclosed list"));
+                              sizeof(unread) - 1,
+                              "bad.el:2: end-of-file: unclosed list"));
 
   // NO NEW RUN -- the whole point. A condition, a throw and a quit raised
   // by a hosted form all reach handlers and catches established OUTSIDE the
@@ -9713,6 +9879,1113 @@ static bool TestProtectedEvaluateString(void) {
   return true;
 }
 
+// kg's embedded-prelude program, the post-prelude collect: the public
+// collect-now entry point (FE_API_VERSION 12). `CollectGarbage` stays
+// `static`, so even this translation unit could not call it directly
+// before now -- `ForceCollection` above exists only because every other
+// test in this file has to allocate disposable objects in a loop until
+// natural exhaustion happens to trigger one. This test builds the rooted
+// value and the garbage directly instead, and checks the collection
+// `FeCollectGarbage` runs is real rather than a stub: the count moves, the
+// unrooted objects come back, the rooted one does not -- and once its root
+// is released it does too, which is the half that says the root list is
+// what was holding it.
+static bool TestPublicCollectGarbage(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  const size_t collections_before = FeGetArenaStats(context).collection_count;
+
+  // The checkpoint comes BEFORE the value is built, because `MakeObject`
+  // pushes everything it hands out onto the GC stack. Taken afterwards it
+  // would leave the integer and the pair rooted by the stack as well, and
+  // then "reachable only through `root`" would hold whatever the collector
+  // did with `ctx->root_list` -- which is what this test is for.
+  const size_t gc = FeSaveGC(context);
+
+  // A rooted pair that must survive the sweep: reachable only through
+  // `root`, which the collector marks by walking `ctx->root_list`. Three
+  // slots go out here -- the integer, the pair, and the cons cell
+  // `FeCreateRoot` allocates for the root itself, over whose pushes it
+  // restores the stack on its own -- and the restore below drops the other
+  // two, so from that line on the root list is the only retainer.
+  FeObject* const kept =
+      FeCons(context, FeMakeInteger(context, 7), FeNil(context));
+  FeRoot* const root = FeCreateRoot(context, kept);
+  FeRestoreGC(context, gc);
+  const size_t free_before_garbage = FeGetArenaStats(context).free_slots;
+
+  // 64 unrooted pairs that must not survive it: pushed onto the GC stack
+  // by `MakeObject` as every allocation is, and dropped from it by a second
+  // restore to that same checkpoint rather than kept alive by anything else.
+  for (size_t i = 0; i < 64; i++) {
+    (void)FeCons(context, FeNil(context), FeNil(context));
+  }
+  FeRestoreGC(context, gc);
+  CHECK(FeGetArenaStats(context).free_slots == free_before_garbage - 64);
+
+  FeCollectGarbage(context);
+
+  const FeArenaStats after = FeGetArenaStats(context);
+  CHECK(after.collection_count == collections_before + 1);
+  // Exactly the 64 unrooted pairs came back -- free_slots returns to what
+  // it read before they were allocated, not merely "some slots freed".
+  CHECK(after.free_slots == free_before_garbage);
+  CHECK(FeGetRoot(root) == kept);
+  CHECK(IsRendered(context, FeGetRoot(root), "(7)"));
+
+  // A second call with nothing new to reclaim is still a real, counted
+  // collection -- not a cached answer -- and idempotent: nothing else
+  // moves.
+  FeCollectGarbage(context);
+  const FeArenaStats twice = FeGetArenaStats(context);
+  CHECK(twice.collection_count == after.collection_count + 1);
+  CHECK(twice.free_slots == after.free_slots);
+
+  // The complement: with the root gone and the GC stack still at the
+  // checkpoint taken before the value existed, nothing retains it and the
+  // next collection takes it. Three slots come back -- the pair, its
+  // integer, and the root's own cons cell, which `FeReleaseRoot` unlinks
+  // from `ctx->root_list` and nothing else refers to. `root` is dangling
+  // from here and is never read again.
+  FeReleaseRoot(context, root);
+  FeCollectGarbage(context);
+  const FeArenaStats released = FeGetArenaStats(context);
+  CHECK(released.collection_count == twice.collection_count + 1);
+  CHECK(released.free_slots == twice.free_slots + 3);
+
+  FeCloseContext(context);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 24: vectors, the payload substrate's first release consumer.
+//
+// The Lisp surface is asserted from Lisp, where a reader is available and an
+// expression says what it means; what is here is everything that cannot be
+// said that way -- the C quartet, the raises a host sees, a collection landing
+// in the middle of a construction, and the sizes a script would take too long
+// to build. The oracle contract these answers were frozen against is kg's
+// `test/lisp-compat/cases/vector-*.json`, recorded before any of this existed.
+// ---------------------------------------------------------------------------
+
+// The condition object a raise left behind, rendered AFTER the unwind: the
+// data list is the half of a condition that a native implementation gets
+// wrong silently, and the half Phase 24.0 froze.
+static bool ConditionRenders(FeContext* context, const char* expected) {
+  char rendered[128];
+  (void)FeToString(context, FeGetCondition(context), rendered,
+                   sizeof(rendered));
+  if (strcmp(rendered, expected) != 0) {
+    fprintf(stderr, "unexpected condition\n  expected: %s\n  actual:   %s\n",
+            expected, rendered);
+    return false;
+  }
+  return true;
+}
+
+static bool VectorErrorIs(FeContext* context,
+                          ErrorState* state,
+                          const char* source,
+                          const char* message,
+                          const char* condition) {
+  CHECK(ExpectEvaluationError(context, state, "vectors.fe", source,
+                              strlen(source), message));
+  CHECK(ConditionRenders(context, condition));
+  return true;
+}
+
+static bool EvaluatesTo(FeContext* context,
+                        const char* source,
+                        const char* expected) {
+  const size_t gc = FeSaveGC(context);
+  const bool ok = IsRendered(
+      context, FeEvaluateString(context, "vectors.fe", source, strlen(source)),
+      expected);
+  FeRestoreGC(context, gc);
+  if (!ok) {
+    fprintf(stderr, "unexpected value for %s\n", source);
+  }
+  return ok;
+}
+
+// A `FeWriteFn` that appends into a caller-owned buffer, for the one
+// assertion below that needs `FeWriteWithOptions`'s completeness answer as
+// well as its bytes.
+typedef struct WriteBufferState {
+  char* at;
+  size_t left;
+} WriteBufferState;
+
+static void CollectRendered(FeContext* context, void* udata, char chr) {
+  (void)context;
+  WriteBufferState* const state = udata;
+  if (state->left > 1) {
+    *state->at++ = chr;
+    state->left--;
+    *state->at = '\0';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25: the string as a header with a byte length over payload bytes.
+// These sit beside the vector cases below because the two are the payload
+// region's release consumers, and because most of what is asserted here
+// cannot be spelled in Lisp at all -- there is no way to type a NUL into a
+// source file, so the C API is the only place the contract can be asked.
+// ---------------------------------------------------------------------------
+
+static bool TestStringRepresentation(void) {
+  static TestArena arena;
+  FeContext* context =
+      FeOpenContext(arena.bytes, FeMinimumArenaSize() + 512 * 1024);
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // The five lengths the master plan names, each built from a buffer with a
+  // NUL every third byte -- so the stored LENGTH is the only thing that can
+  // be telling a reader where the text ends.
+  static char source[8192];
+  static char copy[8192];
+  static const size_t lengths[] = {0, 7, 8, 256, 8192};
+  for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
+    const size_t length = lengths[i];
+    for (size_t at = 0; at < length; at++) {
+      source[at] = at % 3 == 1 ? '\0' : (char)('a' + (int)(at % 26));
+    }
+    const size_t gc = FeSaveGC(context);
+    const FeObject* const string = FeMakeStringBytes(context, source, length);
+    CHECK(FeGetType(string) == FeTString);
+    CHECK(FeStringByteLength(context, string) == length);
+    // The one-call form answers the length whether or not it copies, and
+    // copies only when the whole string fits: `snprintf`'s contract without
+    // the terminator.
+    CHECK(FeStringBytes(context, string, nullptr, 0) == length);
+    memset(copy, '?', sizeof(copy));
+    CHECK(FeStringBytes(context, string, copy, sizeof(copy)) == length);
+    CHECK(memcmp(copy, source, length) == 0);
+    if (length > 0) {
+      memset(copy, '?', sizeof(copy));
+      CHECK(FeStringBytes(context, string, copy, length - 1) == length);
+      CHECK(copy[0] == '?');
+      // ...and the two-call form refuses rather than truncating.
+      CHECK(!FeCopyStringBytes(context, string, copy, length - 1));
+    }
+    CHECK(FeCopyStringBytes(context, string, copy, length));
+    CHECK(memcmp(copy, source, length) == 0);
+    // A second string with the same bytes is a second OBJECT: identity is
+    // the header, and nothing about a payload is shared or interned.
+    CHECK(FeMakeStringBytes(context, source, length) != string);
+    FeRestoreGC(context, gc);
+  }
+
+  // `FeMakeString` is `FeMakeStringBytes` with `strlen`, which is the whole
+  // of its remaining contract: it stops at the NUL and the other does not.
+  {
+    const size_t gc = FeSaveGC(context);
+    CHECK(FeStringByteLength(context, FeMakeString(context, "a\0b")) == 1);
+    CHECK(FeStringByteLength(context, FeMakeStringBytes(context, "a\0b", 3)) ==
+          3);
+    FeRestoreGC(context, gc);
+  }
+
+  // THE ROUND TRIP, which is this phase's first required gate: a string with
+  // an embedded NUL survives print-then-read as the same bytes. `prin1`
+  // escapes the NUL in three octal digits, so what the writer produces is
+  // ASCII the reader can take back -- Emacs prints the byte raw and fe
+  // cannot, since a `FeReadFn` spells end of input as 0.
+  {
+    const size_t gc = FeSaveGC(context);
+    FeObject* const original = FeMakeStringBytes(context, "a\0b\0", 4);
+    char printed[64] = "";
+    WriteBufferState sink = {.at = printed, .left = sizeof(printed)};
+    CHECK(FeWriteWithOptions(context, original, CollectRendered, &sink, 1,
+                             nullptr));
+    CHECK(strcmp(printed, "\"a\\000b\\000\"") == 0);
+    const FeObject* const read =
+        FeReadString(context, printed, strlen(printed), nullptr);
+    CHECK(read != nullptr && read != original);
+    CHECK(FeStringBytes(context, read, copy, sizeof(copy)) == 4);
+    CHECK(memcmp(copy, "a\0b\0", 4) == 0);
+    // A digit after the escape stays a digit, which is why the escape is
+    // three digits wide and not one.
+    const FeObject* const digit =
+        FeReadString(context, "\"\\0001\"", 7, nullptr);
+    CHECK(FeStringBytes(context, digit, copy, sizeof(copy)) == 2);
+    CHECK(memcmp(copy,
+                 "\0"
+                 "1",
+                 2) == 0);
+    FeRestoreGC(context, gc);
+  }
+
+  // Equality and order are length-then-bytes, which is asked from Lisp
+  // because that is the surface they serve. A NUL is byte 0: it sorts before
+  // every other byte, and it does not end anything.
+  {
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "strings.fe", expr, sizeof(expr) - 1), \
+      expected))
+    CHK("(length \"a\\0b\")", "3");
+    CHK("(aref \"a\\0b\" 1)", "0");
+    CHK("(is \"a\\0b\" \"a\\0b\")", "t");
+    CHK("(is \"a\\0b\" \"a\")", "nil");
+    CHK("(is \"a\\0b\" \"a\\0c\")", "nil");
+    CHK("(string< \"a\\0\" \"a1\")", "t");
+    CHK("(string< \"a\" \"a\\0\")", "t");
+    CHK("(list \"a\\0b\")", "(\"a\\000b\")");
+#undef CHK
+  }
+
+  FeCloseContext(context);
+  return true;
+}
+
+// `aset` on a string: Emacs' unibyte rule, both halves, and the length that
+// does not move. The compat corpus's `vector-aset-on-string` pins the value
+// this answers; what is here is everything that case cannot ask -- the
+// refusals, the bounds, and the fact that a write leaves the object's
+// identity and length alone.
+static bool TestStringMutation(void) {
+  static TestArena arena;
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  static ErrorState state;
+  state = (ErrorState){.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+#define CHK(expr, expected)                                            \
+  CHECK(IsRendered(                                                    \
+      context,                                                         \
+      FeEvaluateString(context, "strings.fe", expr, sizeof(expr) - 1), \
+      expected))
+
+  // A byte goes in, the character is answered, and the string is changed in
+  // place -- so a second reference sees it.
+  CHK("(aset \"ab\" 0 120)", "120");
+  CHK("(do (setq s \"abc\") (setq t2 s) (aset s 0 122) (list s t2 (is s t2)))",
+      "(\"zbc\" \"zbc\" t)");
+  // Every byte value is a byte, 0 and 255 included, and the length never
+  // moves: a string is bytes, so a write is a write and not a widening.
+  CHK("(do (setq s \"abc\") (aset s 1 0) (list (length s) (aref s 1)))",
+      "(3 0)");
+  CHK("(do (setq s \"abc\") (aset s 2 255) (list (length s) (aref s 2)))",
+      "(3 255)");
+  // Above a byte is Emacs' own refusal, word for word, because storing it
+  // would have to widen the string and Emacs will not do that either.
+  CHK("(condition-case e (aset \"abc\" 0 26085) (error (car (cdr e))))",
+      "Attempt to store non-byte value into unibyte string");
+  CHK("(condition-case e (aset \"abc\" 0 256) (error (car (cdr e))))",
+      "Attempt to store non-byte value into unibyte string");
+  // A value that is not a character at all, and an index outside the string,
+  // are the two conditions `aset` on a vector already raises.
+  CHK("(condition-case e (aset \"abc\" 0 'x) (error e))",
+      "(wrong-type-argument characterp x)");
+  CHK("(condition-case e (aset \"abc\" 0 -1) (error e))",
+      "(wrong-type-argument characterp -1)");
+  CHK("(condition-case e (aset \"abc\" 3 97) (error (car e)))",
+      "args-out-of-range");
+  CHK("(condition-case e (aset \"\" 0 97) (error (car e)))",
+      "args-out-of-range");
+  CHK("(condition-case e (aset 5 0 97) (error e))",
+      "(wrong-type-argument arrayp 5)");
+  // A write over one byte of a multibyte character is allowed, which is the
+  // byte-string divergence showing through `aset`: Emacs refuses this one.
+  CHK("(do (setq s \"\303\251\") (aset s 0 97) (list (length s) (aref s 0)))",
+      "(2 97)");
+
+#undef CHK
+
+  FeCloseContext(context);
+  return true;
+}
+
+static bool TestVectors(void) {
+  static TestArena storage;
+  const size_t size = FeMinimumArenaSize() + 512 * 1024;
+  CHECK(size <= sizeof(storage.bytes));
+  // The first context in this file that ASKS for a payload region, because
+  // it is the first thing in this file whose contents live in one. The last
+  // group below is the other half of that sentence.
+  FeContext* const ctx = FeOpenContextWithOptions(storage.bytes, size, nullptr);
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx, .expected_message = "unused"};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+
+  // Reader and writer, the same syntax in both directions.
+  CHECK(EvaluatesTo(ctx, "[1 2 3]", "[1 2 3]"));
+  CHECK(EvaluatesTo(ctx, "[]", "[]"));
+  CHECK(EvaluatesTo(ctx, "[[1] [2]]", "[[1] [2]]"));
+  CHECK(EvaluatesTo(ctx, "'(a [1 2] b)", "(a [1 2] b)"));
+  CHECK(EvaluatesTo(ctx, "[1 (2) \"x\"]", "[1 (2) \"x\"]"));
+  // `[` and `]` end a token as well as opening and closing a vector, which
+  // is what keeps `[1 2 3]` from reading as `1 2 3]`.
+  CHECK(EvaluatesTo(ctx, "[?a #x10 1.5]", "[97 16 1.5]"));
+
+  // The eight names, at the arities and on the argument types the frozen
+  // contract pins.
+  CHECK(EvaluatesTo(ctx, "(list (vector) (vector 1) (vector 1 \"a\" '(b)))",
+                    "([] [1] [1 \"a\" (b)])"));
+  CHECK(EvaluatesTo(ctx, "(list (make-vector 3 'a) (make-vector 0 'a))",
+                    "([a a a] [])"));
+  CHECK(EvaluatesTo(ctx, "(list (vectorp [1]) (vectorp []))", "(t t)"));
+  CHECK(EvaluatesTo(
+      ctx, "(list (vectorp '(1 2)) (vectorp \"ab\") (vectorp 1) (vectorp nil))",
+      "(nil nil nil nil)"));
+  CHECK(EvaluatesTo(ctx, "(list (aref [10 20 30] 0) (aref [10 20 30] 2))",
+                    "(10 30)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(list (length '(1 2 3)) (length \"abc\") "
+                    "(length [1 2 3]) (length []))",
+                    "(3 3 3 0)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(list (elt '(a b c) 1) (elt \"abc\" 1) (elt [a b c] 1))",
+                    "(b 98 b)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(list (vconcat [1 2] [3]) (vconcat [1] '(2 3)) "
+                    "(vconcat \"ab\") (vconcat))",
+                    "([1 2 3] [1 2 3] [97 98] [])"));
+  // `aref` is an ARRAY operation, so a string answers its byte.
+  CHECK(EvaluatesTo(ctx, "(aref \"abc\" 1)", "98"));
+  // The INIT argument is stored, not copied: every slot is the same object.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 2 (list 1)))) "
+                    "(list (eq (aref v 0) (aref v 1)) v))",
+                    "(t [(1) (1)])"));
+  // Identity, not structure: two reads of `[1]` are two objects.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((a [1]) (b [1])) "
+                    "(list (eq a b) (eq a a) (eql a a) (eql a b)))",
+                    "(nil t t nil)"));
+  // Mutation through two references to ONE vector, and `aset`'s answer.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((a (make-vector 3 0))) (let ((b a)) "
+                    "(list (aset a 1 'x) (aref b 1) (eq a b) b)))",
+                    "(x x t [0 x 0])"));
+
+  // The frozen condition data, symbol and data list both. `args-out-of-range`
+  // carries the OFFENDING SEQUENCE first and then the index; `aref` on a
+  // non-array names `arrayp`, not `vectorp`, because strings are arrays too.
+  CHECK(VectorErrorIs(ctx, &state, "(aref [10 20] 5)",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [10 20] 5)"));
+  CHECK(VectorErrorIs(ctx, &state, "(aref [10 20] -1)",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [10 20] -1)"));
+  CHECK(VectorErrorIs(ctx, &state, "(aref 5 0)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument arrayp 5)"));
+  CHECK(VectorErrorIs(ctx, &state, "(let ((v (make-vector 2 0))) (aset v 2 1))",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [0 0] 2)"));
+  CHECK(VectorErrorIs(ctx, &state, "(elt [1 2] 9)",
+                      "vectors.fe:1: args-out-of-range",
+                      "(args-out-of-range [1 2] 9)"));
+  CHECK(VectorErrorIs(ctx, &state, "(length 5)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument sequencep 5)"));
+  CHECK(VectorErrorIs(ctx, &state, "(make-vector -1 0)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument wholenump -1)"));
+  CHECK(VectorErrorIs(ctx, &state, "(aref [1 2] 1.0)",
+                      "vectors.fe:1: wrong-type-argument",
+                      "(wrong-type-argument fixnump 1.0)"));
+  // `elt` past the end of a LIST is nil -- it routes to `nth` -- where the
+  // same index into a vector raises. The asymmetry is Emacs', measured.
+  CHECK(EvaluatesTo(ctx, "(elt '(1 2) 9)", "nil"));
+
+  // A collection landing INSIDE a construction, and one immediately after a
+  // mutation. `internal--collect` is this file's own native; what matters is
+  // that the elements a vector holds are reachable through the payload arm
+  // and nothing else, so a collection that did not trace them would leave
+  // the vector holding swept cells.
+  FeSetFunction(ctx, FeMakeSymbol(ctx, "internal--collect"),
+                FeMakeNativeFn(ctx, CollectNow));
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (vector (list 1) (internal--collect) (list 3)))) "
+                    "(internal--collect) v)",
+                    "[(1) t (3)]"));
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 2 nil))) "
+                    "(aset v 0 (list 'kept)) (internal--collect) "
+                    "(aset v 1 (list 'later)) (internal--collect) v)",
+                    "[(kept) (later)]"));
+  // A vector reached only through another vector: the mark phase's payload
+  // arm has to descend twice, which is what `[[...]]` is for.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (vector (vector 'inner)))) "
+                    "(internal--collect) (aref (aref v 0) 0))",
+                    "inner"));
+
+  // MORE THAN 4032 ELEMENTS, the master plan's required size, by each of the
+  // three routes that build a vector. 4032 is `GcStackSize - GcStackReserve`,
+  // the root stack's ordinary ceiling, and it is the number to test at
+  // because every one of these routes would hit it if it held one root per
+  // element instead of one per construction. None does: the reader restores
+  // its checkpoint per element (`ReadVector`), the evaluator's operand frame
+  // restores its own (`ResumeEvalList`), and `vconcat`'s string arm restores
+  // after each byte it boxes. The vector itself has no such ceiling at all --
+  // its elements are payload bytes, not roots.
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 5000 7))) "
+                    "(list (length v) (aref v 4999) (vectorp v)))",
+                    "(5000 7 t)"));
+  CHECK(EvaluatesTo(ctx,
+                    "(let ((v (make-vector 5000 0))) (aset v 4999 'last) "
+                    "(list (length (vconcat v)) (aref (vconcat v) 4999)))",
+                    "(5000 last)"));
+  {
+    // A 5000-element READ literal and a 5000-byte string through `vconcat`,
+    // both built as source text rather than spelled out.
+    static char source[64 * 1024];
+    size_t at = 0;
+    at += (size_t)snprintf(source + at, sizeof(source) - at, "(length [");
+    for (size_t i = 0; i < 5000; i++) {
+      at += (size_t)snprintf(source + at, sizeof(source) - at, "1 ");
+    }
+    at += (size_t)snprintf(source + at, sizeof(source) - at, "])");
+    CHECK(at < sizeof(source));
+    CHECK(EvaluatesTo(ctx, source, "5000"));
+  }
+
+  // THE SELF-REFERENTIAL PRINTING DECISION (Phase 24.1), pinned so that it is
+  // a decision and not an accident. Emacs prints the lossy back-reference
+  // `[0 #0]` at its `print-circle` default; fe keeps its own deliberately
+  // bounded writer -- the recorded `writer-bounded-output` policy -- and a
+  // vector that contains itself terminates in the depth bound exactly as a
+  // list whose `car` is itself already did. doc/language.md states the
+  // reason. Asserted at a small `max_depth` rather than the default 256, so
+  // the expectation is a string a reader can check by eye; the property is
+  // that it TERMINATES, says so, and reports itself incomplete.
+  {
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const cyclic = FeMakeVector(ctx, 2);
+    FePushGC(ctx, cyclic);
+    FeVectorSet(ctx, cyclic, 0, FeMakeInteger(ctx, 0));
+    FeVectorSet(ctx, cyclic, 1, cyclic);
+    char rendered[64] = {0};
+    WriteBufferState state_buffer = {rendered, sizeof(rendered)};
+    const FeWriteOptions bounded = {.max_depth = 3};
+    CHECK(!FeWriteWithOptions(ctx, cyclic, CollectRendered, &state_buffer, 1,
+                              &bounded));
+    CHECK(strcmp(rendered, "[0 [0 [#<deep> #<deep>]]]") == 0);
+    FeRestoreGC(ctx, gc);
+  }
+
+  // The C quartet. `FeMakeVector` fills with nil; the two accessors are
+  // checked, and a host that ignores the check gets a raise and not a wild
+  // write.
+  {
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const vector = FeMakeVector(ctx, 3);
+    CHECK(FeGetType(vector) == FeTVector);
+    CHECK(FeVectorLength(ctx, vector) == 3);
+    CHECK(FeIsNil(FeVectorRef(ctx, vector, 0)));
+    FeVectorSet(ctx, vector, 1, FeMakeInteger(ctx, 42));
+    CHECK(FeToInteger(ctx, FeVectorRef(ctx, vector, 1)) == 42);
+    CHECK(IsRendered(ctx, vector, "[nil 42 nil]"));
+    // Zero length is a vector, not nil, and its length is readable.
+    CHECK(FeVectorLength(ctx, FeMakeVector(ctx, 0)) == 0);
+    FeRestoreGC(ctx, gc);
+  }
+  {
+    const size_t gc = FeSaveGC(ctx);
+    FeObject* const vector = FeMakeVector(ctx, 2);
+    FePushGC(ctx, vector);
+    state.called = false;
+    state.expected_message = "args-out-of-range";
+    if (setjmp(state.jump) == 0) {
+      (void)FeVectorRef(ctx, vector, 2);
+      CHECK(false);
+    }
+    CHECK(state.called);
+    CHECK(ConditionRenders(ctx, "(args-out-of-range [nil nil] 2)"));
+    state.called = false;
+    // Read between the two assignments by `HandleError`, which cppcheck
+    // cannot see because it runs from inside fe through a callback -- the
+    // same blind spot the `constParameterCallback` suppressions elsewhere in
+    // this file cover.
+    // cppcheck-suppress redundantAssignment
+    state.expected_message = "expected vector, got integer";
+    if (setjmp(state.jump) == 0) {
+      (void)FeVectorLength(ctx, FeMakeInteger(ctx, 5));
+      CHECK(false);
+    }
+    CHECK(state.called);
+    CHECK(ConditionRenders(ctx, "(wrong-type-argument vectorp 5)"));
+    FeRestoreGC(ctx, gc);
+  }
+  FeCloseContext(ctx);
+
+  // The other half of "a vector's elements live in the payload region". Until
+  // Phase 25 this was "a context opened through `FeOpenContext` carves no
+  // region and therefore cannot build a vector at all"; every context has a
+  // region now, because a symbol's name is a string, so what is left to pin
+  // is the edge: a vector the region cannot hold raises a catchable condition
+  // rather than crashing, which is what makes the limit a host-visible
+  // contract instead of a trap.
+  {
+    FeContext* const bare = FeOpenContext(storage.bytes, size);
+    CHECK(bare != nullptr);
+    ErrorState bare_state = {.context = bare, .expected_message = nullptr};
+    FeSetUserData(bare, &bare_state);
+    FeSetErrorFn(bare, HandleError);
+    const FeArenaStats bare_stats = FeGetArenaStats(bare);
+    CHECK(bare_stats.payload_capacity_bytes > 0);
+    // Not empty either: the core names are in there already.
+    CHECK(bare_stats.payload_live_bytes > 0);
+    // An empty vector is an ordinary allocation now.
+    CHECK(FeVectorLength(bare, FeMakeVector(bare, 0)) == 0);
+    const size_t impossible =
+        bare_stats.payload_capacity_bytes / sizeof(FeObject*) + 1;
+    bare_state.called = false;
+    bare_state.expected_message = "payload region exhausted";
+    if (setjmp(bare_state.jump) == 0) {
+      (void)FeMakeVector(bare, impossible);
+      CHECK(false);
+    }
+    CHECK(bare_state.called);
+    CHECK(ConditionRenders(bare, "(payload-exhaustion)"));
+    CHECK(FeGetArenaStats(bare).payload_allocation_failures == 1);
+    FeCloseContext(bare);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE FINALIZATION PASS (repair R1 of the Phases 23--26 adversarial review).
+//
+// `fe.h` promises a `gc_fn` may read -- and specifically may PRINT -- the
+// object it is handed. Phase 25 gave strings a movable payload block without
+// moving the callback out of the sweep, which ran after `CompactPayloads()`
+// had already reclaimed every dead block and slid the survivors down over
+// them, so the promise became false and `./fe -d -e '"x"'` aborted on the
+// assertion in `PayloadBytes`. `CollectGarbage` now hands every doomed object
+// over in a pass of its own, between the mark phase and the compaction.
+//
+// These three cases are the review's own list, and each of them fails with
+// `FE_GC_FINALIZE_ORDER_BUG=1` -- the knob that puts the pass back where it
+// was -- which is what makes them evidence about the ORDER rather than about
+// the callback merely being called.
+
+enum { FinalizerLogSize = 8192 };
+
+// What the callback saw, rendered as it saw it. Text rather than the
+// `FeObject*`s themselves, because after the collection returns a doomed
+// header is an `FeTFree` cell on the free list and its block is gone: the
+// only honest record of what was readable is what was read.
+static char finalizer_log[FinalizerLogSize];
+static size_t finalizer_log_used;
+static size_t finalizer_calls;
+// Whether the callback re-marks what it is handed. The contract says such a
+// mark is a no-op; `TestFinalizerMarkIsNoOp` is what says so executably.
+static bool finalizer_marks;
+
+static void ResetFinalizerLog(void) {
+  // A leading newline so every entry is delimited on both sides and
+  // `FinalizerLogHas` can match whole lines rather than substrings -- `("a")`
+  // must not be found inside `(("a") . #<unbound>)`.
+  finalizer_log[0] = '\n';
+  finalizer_log[1] = '\0';
+  finalizer_log_used = 1;
+  finalizer_calls = 0;
+  finalizer_marks = false;
+}
+
+static FeObject* FinalizerRecorder(FeContext* ctx, FeObject* obj) {
+  char rendered[256];
+  (void)FeToString(ctx, obj, rendered, sizeof(rendered));
+  finalizer_calls++;
+  if (finalizer_marks) {
+    FeMark(ctx, obj);
+  }
+  const size_t length = strlen(rendered);
+  if (finalizer_log_used + length + 2 < sizeof(finalizer_log)) {
+    memcpy(finalizer_log + finalizer_log_used, rendered, length);
+    finalizer_log_used += length;
+    finalizer_log[finalizer_log_used++] = '\n';
+    finalizer_log[finalizer_log_used] = '\0';
+  }
+  return FeNil(ctx);
+}
+
+static bool FinalizerLogHas(const char* line) {
+  char wanted[256];
+  const int written = snprintf(wanted, sizeof(wanted), "\n%s\n", line);
+  return written > 0 && (size_t)written < sizeof(wanted) &&
+         strstr(finalizer_log, wanted) != nullptr;
+}
+
+// Case 1 of the review's list: a `gc_fn` that calls `FeToString()` on a dead
+// STRING and on a dead VECTOR. Both own payload blocks, and both blocks are
+// what the compaction used to have reclaimed before the callback ran.
+static bool TestFinalizerReadsDeadPayloads(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+
+  const size_t gc = FeSaveGC(ctx);
+  FeObject* const string = FeMakeString(ctx, "doomed-string");
+  FeObject* const vector = FeMakeVector(ctx, 3);
+  FeVectorSet(ctx, vector, 0, FeMakeInteger(ctx, 11));
+  FeVectorSet(ctx, vector, 1, FeMakeInteger(ctx, 22));
+  FeVectorSet(ctx, vector, 2, FeMakeString(ctx, "in-vector"));
+  // Both are readable while they are alive, which is the control: what the
+  // callback answers below has to be these same two renderings.
+  CHECK(IsRendered(ctx, string, "doomed-string"));
+  CHECK(IsRendered(ctx, vector, "[11 22 \"in-vector\"]"));
+
+  // The GC stack is the only thing holding either of them, so this one line
+  // is what makes them garbage.
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  CHECK(finalizer_calls >= 2);
+  CHECK(FinalizerLogHas("doomed-string"));
+  CHECK(FinalizerLogHas("[11 22 \"in-vector\"]"));
+  // The vector's own dead element string is a doomed object in its own right
+  // and is handed over separately, whatever order the two happen to sit in.
+  CHECK(FinalizerLogHas("in-vector"));
+
+  FeCloseContext(ctx);
+  return true;
+}
+
+// Case 2: a dead block published BEFORE a live one, so that the survivor is
+// PROVED to slide down over the hole -- and proved to do it after the
+// callback read what used to be there. Under the old order the callback was
+// handed a string whose handle named bytes the compaction had already given
+// to somebody else.
+static bool TestFinalizerSeesPreSlideBytes(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+
+  const size_t gc = FeSaveGC(ctx);
+  // Allocation order is publication order and the region is a bump, so the
+  // doomed block is the lower one. Different lengths, so a survivor that slid
+  // over the hole cannot accidentally render as its old self.
+  FeObject* const doomed = FeMakeString(ctx, "AAAAAAAAAAAAAAAAAAAAAAAA");
+  FeObject* const survivor = FeMakeString(ctx, "BBBB");
+  FeRoot* const root = FeCreateRoot(ctx, survivor);
+  const FePayloadHandle doomed_handle = PAYLOAD(doomed);
+  const FePayloadHandle survivor_handle = PAYLOAD(survivor);
+  CHECK(doomed_handle < survivor_handle);
+  const size_t compactions_before =
+      FeGetArenaStats(ctx).payload_compaction_count;
+
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  // The callback read the doomed string's own bytes...
+  CHECK(FinalizerLogHas("AAAAAAAAAAAAAAAAAAAAAAAA"));
+  // ... and the compaction that followed really did move the survivor down
+  // ONTO the block it had just read: same handle, different string.
+  const FeArenaStats after = FeGetArenaStats(ctx);
+  CHECK(after.payload_compaction_count == compactions_before + 1);
+  CHECK(PAYLOAD(survivor) == doomed_handle);
+  CHECK(PAYLOAD(survivor) != survivor_handle);
+  CHECK(IsRendered(ctx, FeGetRoot(root), "BBBB"));
+
+  FeReleaseRoot(ctx, root);
+  FeCloseContext(ctx);
+  return true;
+}
+
+// Case 3: a dead pair printed from its own `gc_fn`, whose child sits at a
+// LOWER arena index than the pair. The pass walks the arena in index order,
+// so the child is handed over first; when the callback ran inline in the
+// sweep, "handed over" meant "already retyped to `FeTFree` and threaded onto
+// the free list", and printing the pair walked into a free cell. Callback
+// safety must not depend on which of two doomed objects the sweep reaches
+// first.
+static bool TestFinalizerChildBeforeParent(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+
+  const size_t gc = FeSaveGC(ctx);
+  // TWO pairs, built in opposite orders, because which of the two arena
+  // indices is the lower one is not a contract: the free list is populated
+  // head-first at open, so a fresh context hands cells out in DESCENDING
+  // index order, and after any collection the order is whatever that sweep
+  // pushed. One of these two therefore has its child below it and the other
+  // above it whichever way a given build goes, and the assertion below says
+  // that exactly one does rather than assuming which.
+  //
+  // String children rather than pairs: a string is both a doomed object in
+  // its own right and a payload owner, so this covers the sweep-order half
+  // and the compaction half of the same question at once.
+  FeObject* const late_pair = FeCons(ctx, FeNil(ctx), FeNil(ctx));
+  FeObject* const late_child = FeMakeString(ctx, "late-child");
+  CAR(late_pair) = late_child;
+  FeObject* const early_child = FeMakeString(ctx, "early-child");
+  const FeObject* const early_pair = FeCons(ctx, early_child, FeNil(ctx));
+  CHECK((late_child < late_pair) != (early_child < early_pair));
+
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  // Both children were handed over -- one of them before its pair was...
+  CHECK(FinalizerLogHas("late-child"));
+  CHECK(FinalizerLogHas("early-child"));
+  // ... and both pairs still printed as the lists they are, which is the
+  // whole claim: nothing here depends on which one that was.
+  CHECK(FinalizerLogHas("(\"late-child\")"));
+  CHECK(FinalizerLogHas("(\"early-child\")"));
+
+  FeCloseContext(ctx);
+  return true;
+}
+
+// The frozen decision, from the one place that can break it. `FeMark()` from
+// a `gc_fn` is a documented no-op (`fe.h`, `doc/c-api.md`): a mark taken here
+// would make `CompactPayloads` retain a block whose owner the sweep then
+// frees. So the object is reclaimed exactly as it would have been had the
+// callback not called anything at all.
+static bool TestFinalizerMarkIsNoOp(void) {
+  static TestArena arena;
+  FeContext* const ctx = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(ctx != nullptr);
+  ErrorState state = {.context = ctx};
+  FeSetUserData(ctx, &state);
+  FeSetErrorFn(ctx, HandleError);
+  ResetFinalizerLog();
+  FeSetGCFn(ctx, FinalizerRecorder);
+  finalizer_marks = true;
+
+  const size_t gc = FeSaveGC(ctx);
+  const size_t free_before = FeGetArenaStats(ctx).free_slots;
+  // One cell and one payload block, dropped and collected while the callback
+  // marks everything it is handed.
+  (void)FeMakeString(ctx, "not-resurrected");
+  const size_t payload_bytes_before = FeGetArenaStats(ctx).payload_live_bytes;
+  CHECK(FeGetArenaStats(ctx).free_slots == free_before - 1);
+  FeRestoreGC(ctx, gc);
+  FeCollectGarbage(ctx);
+
+  CHECK(FinalizerLogHas("not-resurrected"));
+  const FeArenaStats after = FeGetArenaStats(ctx);
+  // The cell came back...
+  CHECK(after.free_slots == free_before);
+  // ... and so did its block, which is the half a retained mark would have
+  // broken: the region would have kept a block whose owner is on the free
+  // list.
+  CHECK(after.payload_live_bytes < payload_bytes_before);
+
+  // A second collection with the callback still marking changes nothing --
+  // there is no accumulated mark to clear and nothing came back to life.
+  const size_t calls_after_first = finalizer_calls;
+  FeCollectGarbage(ctx);
+  CHECK(finalizer_calls == calls_after_first);
+  CHECK(FeGetArenaStats(ctx).free_slots == free_before);
+
+  FeCloseContext(ctx);
+  return true;
+}
+
+// Phase 21.1's counter gate: the DETERMINISTIC RELATIONSHIPS between the
+// counters declared in fe_perf.h, which is what Phase 21.2's workload
+// battery will build its assertions on. Relationships, not magic constants:
+// a constant here would be a golden number that any later change to the
+// prelude, the primitive table or the Fex surface invalidates without
+// telling anyone what actually broke.
+//
+// The whole test is compiled out of an ordinary build, where the counters do
+// not exist; `make perf-check` builds and runs the counting one.
+#if FE_PERF_COUNTERS
+
+// The sum of the by-final-type block, which must always be the number of
+// cells the arena handed out.
+static unsigned long long PerfAllocByType(void) {
+  unsigned long long total = 0;
+  for (int type = 0; type <= (int)FeTSentinel; type++) {
+    total += FePerfRead((FePerfCounter)((int)FePerfAllocType + type));
+  }
+  return total;
+}
+
+static unsigned long long PerfAllocOf(FeType type) {
+  return FePerfRead((FePerfCounter)FE_PERF_ALLOC_SLOT(type));
+}
+
+// Every cell handed out is charged to exactly one final type, and the live
+// arena is what has been allocated and not yet reclaimed. Both hold at every
+// point of a run, which is why this is asked repeatedly below rather than
+// once at the end.
+static bool PerfAllocationIsAccountedFor(const FeContext* context) {
+  const FeArenaStats stats = FeGetArenaStats(context);
+  CHECK(FePerfRead(FePerfAllocObject) == PerfAllocByType());
+  CHECK(FePerfRead(FePerfAllocObject) - FePerfRead(FePerfGcReclaimed) ==
+        (unsigned long long)(stats.total_slots - stats.free_slots));
+  return true;
+}
+
+static bool TestPerfCounters(void) {
+  static TestArena arena;
+  // The counters are process-wide, so the measurement starts here rather
+  // than at process start: every test above this one has allocated.
+  FePerfReset();
+  FeContext* context = FeOpenContext(arena.bytes, sizeof(arena.bytes));
+  CHECK(context != nullptr);
+  ErrorState state = {.context = context};
+  FeSetUserData(context, &state);
+  FeSetErrorFn(context, HandleError);
+
+  // Opening a context allocates and never collects, so this is also the
+  // assertion that the by-type block is complete for every type the
+  // primitive table, the symbol surface and the exhaustion conditions
+  // build.
+  CHECK(PerfAllocationIsAccountedFor(context));
+  CHECK(FePerfRead(FePerfGcCollection) == 0);
+  CHECK(PerfAllocOf(FeTFree) == 0);
+  CHECK(PerfAllocOf(FeTNil) == 0);
+  CHECK(PerfAllocOf(FeTSentinel) == 0);
+
+  // A pair is one cell, charged to the pair slot and to nothing else.
+  const unsigned long long objects_before = FePerfRead(FePerfAllocObject);
+  const unsigned long long pairs_before = PerfAllocOf(FeTPair);
+  (void)FeCons(context, FeNil(context), FeNil(context));
+  CHECK(FePerfRead(FePerfAllocObject) == objects_before + 1);
+  CHECK(PerfAllocOf(FeTPair) == pairs_before + 1);
+
+  // A string is ONE cell whatever its length (Phase 25), and its bytes are a
+  // payload block: so the cell count no longer depends on the text, the byte
+  // count still does, and the region grows by one block per string. The four
+  // texts straddle what used to be the cell boundary, which is now nothing at
+  // all -- that is the point of keeping them.
+  static const char* const texts[] = {"", "1234567", "12345678",
+                                      "123456789012345"};
+  for (size_t i = 0; i < sizeof(texts) / sizeof(*texts); i++) {
+    const unsigned long long objects = FePerfRead(FePerfAllocObject);
+    const unsigned long long made = FePerfRead(FePerfStringObject);
+    const unsigned long long strings = PerfAllocOf(FeTString);
+    const unsigned long long bytes = FePerfRead(FePerfStringByte);
+    const unsigned long long blocks = FePerfRead(FePerfPayloadAlloc);
+    const size_t gc = FeSaveGC(context);
+    (void)FeMakeString(context, texts[i]);
+    FeRestoreGC(context, gc);
+    CHECK(FePerfRead(FePerfStringObject) == made + 1);
+    CHECK(PerfAllocOf(FeTString) == strings + 1);
+    CHECK(FePerfRead(FePerfAllocObject) == objects + 1);
+    CHECK(FePerfRead(FePerfStringByte) == bytes + strlen(texts[i]));
+    // One block per string, the empty one included: every string owns a
+    // block, so `StringBytes` is always derivable and no reader has to test
+    // for storage that is not there.
+    CHECK(FePerfRead(FePerfPayloadAlloc) == blocks + 1);
+    CHECK(PerfAllocationIsAccountedFor(context));
+  }
+  // One object per string, exactly, which is what the Phase 22 ADR could only
+  // bracket while a string was a chain: the cell count and the object count
+  // were two different measurements and are now the same one.
+  CHECK(FePerfRead(FePerfStringObject) == PerfAllocOf(FeTString));
+
+  // Interning, since Phase 26's index (this block previously pinned the
+  // linear obarray scan it replaced -- a miss examined every interned symbol
+  // and a hit on the name just interned examined exactly one, that symbol
+  // being at the head of the list).
+  //
+  // A miss walks its name's probe from the home slot to the first FREE slot,
+  // examining whatever occupied slots lie between; the insertion then puts
+  // the new symbol in exactly that free slot. So a HIT on the name just
+  // interned walks the same probe and examines the same candidates plus the
+  // one now at the end of it -- which is an exact relationship rather than a
+  // measured constant, and it does not depend on where in the table the name
+  // happened to hash to.
+  const unsigned long long lookups = FePerfRead(FePerfInternLookup);
+  const unsigned long long misses = FePerfRead(FePerfInternMiss);
+  const unsigned long long probes = FePerfRead(FePerfInternProbe);
+  unsigned long long candidates = FePerfRead(FePerfInternCandidate);
+  const FeObject* const fresh = FeMakeSymbol(context, "perf-counter-probe");
+  const unsigned long long miss_candidates =
+      FePerfRead(FePerfInternCandidate) - candidates;
+  CHECK(FePerfRead(FePerfInternLookup) == lookups + 1);
+  CHECK(FePerfRead(FePerfInternMiss) == misses + 1);
+  // The free slot the miss stopped on is the one probe a candidate count
+  // cannot see.
+  CHECK(FePerfRead(FePerfInternProbe) == probes + miss_candidates + 1);
+  candidates = FePerfRead(FePerfInternCandidate);
+  const unsigned long long hit_bytes = FePerfRead(FePerfNameByte);
+  CHECK(FeMakeSymbol(context, "perf-counter-probe") == fresh);
+  const unsigned long long hit_candidates =
+      FePerfRead(FePerfInternCandidate) - candidates;
+  CHECK(FePerfRead(FePerfInternLookup) == lookups + 2);
+  CHECK(FePerfRead(FePerfInternMiss) == misses + 1);
+  CHECK(hit_candidates == miss_candidates + 1);
+  // A hit reads exactly the bytes of the name it matched -- not a padded
+  // cell's worth, and not the whole obarray's. The candidates it passed on
+  // the way cost no byte at all: no other interned name is this length.
+  CHECK(FePerfRead(FePerfNameByte) - hit_bytes == strlen("perf-counter-probe"));
+  // ...and the same rule from the other side: a MISS on a name no interned
+  // symbol shares a LENGTH with reads no byte at all, whatever its probe
+  // examines. This is the comparison Phase 25 changed -- a chain had no
+  // length to test first, so every candidate cost bytes -- and Phase 26 only
+  // changed how many candidates there are to apply it to.
+  const unsigned long long scan_bytes = FePerfRead(FePerfNameByte);
+  (void)FeMakeSymbol(context,
+                     "perf-counter-probe-of-a-length-no-other-name-has");
+  CHECK(FePerfRead(FePerfNameByte) == scan_bytes);
+  // One name comparison per candidate, still.
+  CHECK(FePerfRead(FePerfNameCompare) >= FePerfRead(FePerfInternCandidate));
+
+  // One `defalias` link is one function-cell indirection, measured as the
+  // difference between calling the alias and calling the name it resolves
+  // to. Everything else about the two calls is identical, so the +1 is the
+  // hop and nothing else.
+  static const char definitions[] =
+      "(fset 'perf-direct (fn () 1)) (fset 'perf-alias 'perf-direct)";
+  (void)FeEvaluateString(context, "perf.fe", definitions,
+                         sizeof(definitions) - 1);
+  static const char direct_call[] = "(perf-direct)";
+  static const char alias_call[] = "(perf-alias)";
+  unsigned long long hops = FePerfRead(FePerfFunctionHop);
+  (void)FeEvaluateString(context, "perf.fe", direct_call,
+                         sizeof(direct_call) - 1);
+  const unsigned long long direct_hops = FePerfRead(FePerfFunctionHop) - hops;
+  hops = FePerfRead(FePerfFunctionHop);
+  (void)FeEvaluateString(context, "perf.fe", alias_call,
+                         sizeof(alias_call) - 1);
+  CHECK(FePerfRead(FePerfFunctionHop) == hops + direct_hops + 1);
+
+  // A lambda call binds one environment pair per parameter, evaluates its
+  // body on the frame stack, and is one of the two callable families. The
+  // native family is exercised beside it so the identity below is not
+  // trivially true.
+  static const char calls[] =
+      "(fset 'perf-two (fn (a b) (+ a b))) (perf-two (sin 0) 2)";
+  const unsigned long long binds = FePerfRead(FePerfEnvBind);
+  const unsigned long long frames = FePerfRead(FePerfFramePush);
+  const unsigned long long dispatches = FePerfRead(FePerfEvalDispatch);
+  const unsigned long long steps = FePerfRead(FePerfEvalStep);
+  const unsigned long long natives = FePerfRead(FePerfDispatchNative);
+  const unsigned long long lambdas = FePerfRead(FePerfDispatchLambda);
+  (void)FeEvaluateString(context, "perf.fe", calls, sizeof(calls) - 1);
+  CHECK(FePerfRead(FePerfEnvBind) == binds + 2);
+  CHECK(FePerfRead(FePerfDispatchLambda) == lambdas + 1);
+  CHECK(FePerfRead(FePerfDispatchNative) == natives + 1);
+  // A frame is pushed for work the loop then has to turn over, so a
+  // dispatch happens for every frame and usually for more than one. Steps
+  // are NOT bounded by dispatches and deliberately are not asserted to be:
+  // an environment walk and a function-designator chain each charge a step
+  // per link without turning the loop over at all, which is exactly the
+  // asymmetry Phase 22 has to look at.
+  CHECK(FePerfRead(FePerfFramePush) - frames <=
+        FePerfRead(FePerfEvalDispatch) - dispatches);
+  CHECK(FePerfRead(FePerfEvalStep) > steps);
+  // Every callable whose arguments were evaluated was afterwards invoked as
+  // exactly one of the two families -- no call went missing and none was
+  // counted twice. True across the whole test because nothing above it
+  // unwinds out of a call.
+  CHECK(FePerfRead(FePerfDispatchCallable) ==
+        FePerfRead(FePerfDispatchNative) + FePerfRead(FePerfDispatchLambda));
+  CHECK(PerfAllocationIsAccountedFor(context));
+
+  // A macro call and a reflective expansion both evaluate the transformer
+  // once, so both are counted, and a macro is not one of the two ordinary
+  // callable families.
+  static const char macros[] =
+      "(fset 'perf-macro (macro (x) (list '+ x 1)))"
+      " (perf-macro 1) (macroexpand-1 '(perf-macro 2))";
+  const unsigned long long expansions = FePerfRead(FePerfMacroExpansion);
+  const unsigned long long macro_calls = FePerfRead(FePerfDispatchMacro);
+  const unsigned long long callables = FePerfRead(FePerfDispatchCallable);
+  (void)FeEvaluateString(context, "perf.fe", macros, sizeof(macros) - 1);
+  CHECK(FePerfRead(FePerfMacroExpansion) == expansions + 2);
+  CHECK(FePerfRead(FePerfDispatchMacro) == macro_calls + 1);
+  // A macro is its own family: the expansion above calls only primitives,
+  // so nothing joined the ordinary callable count.
+  CHECK(FePerfRead(FePerfDispatchCallable) == callables);
+
+  // The collector. A sweep looks at the whole arena rather than at the live
+  // set -- which is the cost Phase 22 has to price -- it reclaims exactly
+  // the cells the free list got back, and the mark walk visits at least as
+  // many objects as it newly marks (a revisit stops at the mark bit).
+  const size_t gc = FeSaveGC(context);
+  for (size_t i = 0; i < 64; i++) {
+    (void)FeCons(context, FeNil(context), FeNil(context));
+  }
+  FeRestoreGC(context, gc);
+  const FeArenaStats before_collection = FeGetArenaStats(context);
+  const unsigned long long collections = FePerfRead(FePerfGcCollection);
+  const unsigned long long swept = FePerfRead(FePerfGcSweepExamined);
+  const unsigned long long reclaimed = FePerfRead(FePerfGcReclaimed);
+  const unsigned long long visits = FePerfRead(FePerfGcMarkVisit);
+  const unsigned long long marks = FePerfRead(FePerfGcMarkNew);
+  FeCollectGarbage(context);
+  const FeArenaStats after_collection = FeGetArenaStats(context);
+  CHECK(FePerfRead(FePerfGcCollection) == collections + 1);
+  CHECK(FePerfRead(FePerfGcSweepExamined) - swept ==
+        (unsigned long long)after_collection.total_slots);
+  CHECK(FePerfRead(FePerfGcReclaimed) - reclaimed ==
+        (unsigned long long)(after_collection.free_slots -
+                             before_collection.free_slots));
+  CHECK(FePerfRead(FePerfGcReclaimed) - reclaimed >= 64);
+  CHECK(FePerfRead(FePerfGcMarkVisit) - visits >=
+        FePerfRead(FePerfGcMarkNew) - marks);
+  CHECK(PerfAllocationIsAccountedFor(context));
+
+  // A second collection with nothing new to reclaim marks every live arena
+  // cell exactly once: the two static objects outside the arena (`nil` and
+  // `unbound`) kept the mark bit the first collection set, since the sweep
+  // walks the arena only, so this delta is the live set itself and not the
+  // live set plus a constant.
+  const unsigned long long second_marks = FePerfRead(FePerfGcMarkNew);
+  const unsigned long long second_reclaimed = FePerfRead(FePerfGcReclaimed);
+  FeCollectGarbage(context);
+  const FeArenaStats twice = FeGetArenaStats(context);
+  CHECK(FePerfRead(FePerfGcReclaimed) == second_reclaimed);
+  CHECK(FePerfRead(FePerfGcMarkNew) - second_marks ==
+        (unsigned long long)(twice.total_slots - twice.free_slots));
+
+  // The JSON report is what a workload runner serialises, so it is exercised
+  // rather than only declared. Its shape is checked by writing it, not by a
+  // golden: the counter set moves with the plan.
+  FILE* const report = tmpfile();
+  CHECK(report != nullptr);
+  FePerfWriteJson(report, &twice);
+  CHECK(ftell(report) > 0);
+  (void)fclose(report);
+
+  FeCloseContext(context);
+  return true;
+}
+
+#else
+
+// Counters compiled out: the relationships above cannot be asked, and their
+// absence is not a failure. `make perf-check` is the build that asks them.
+static bool TestPerfCounters(void) {
+  return true;
+}
+
+#endif  // FE_PERF_COUNTERS
+
 int main(void) {
   return TestContextCreation() && TestUserDataAndErrors() &&
                  TestStringInput() && TestReaderLiterals() && TestFileInput() &&
@@ -9751,7 +11024,12 @@ int main(void) {
                  TestProtectedCall() && TestHostRaiseCompletion() &&
                  TestDynamicBinding() && TestBindingLocationSeam() &&
                  TestOneArgDefvarScope() && TestHostedInputUnit() &&
-                 TestProtectedEvaluateString()
+                 TestProtectedEvaluateString() && TestPublicCollectGarbage() &&
+                 TestVectors() && TestStringRepresentation() &&
+                 TestStringMutation() && TestFinalizerReadsDeadPayloads() &&
+                 TestFinalizerSeesPreSlideBytes() &&
+                 TestFinalizerChildBeforeParent() &&
+                 TestFinalizerMarkIsNoOp() && TestPerfCounters()
              ? EXIT_SUCCESS
              : EXIT_FAILURE;
 }

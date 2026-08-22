@@ -14,7 +14,25 @@ The two numbers are counted separately and are currently close enough to be
 confused for each other, so every mention below names its unit.
 
 `FE_API_VERSION` identifies the public embedding interface -- the C functions,
-types, and callback signatures declared in `fe.h`; API version 11 adds the
+types, and callback signatures declared in `fe.h`; API version 15 is the
+string cut: a string is a stable header with a byte length over payload bytes
+that may contain NUL, so `FeMakeStringBytes` builds one from a buffer and a
+length, `FeStringBytes` reads the length and the bytes back in one call,
+`FeWriteFn`'s allocation contract is stated for the first time (a write
+callback MAY allocate), and `FeOpenContext` now carves the payload region it
+used to leave at zero -- `FePayloadPercentNone` is REMOVED, which is the ABI
+break in this version, because a symbol's name is a string and a context with
+no region cannot finish opening; API version 14 is the
+vector cut, and unlike every version since 6 it is a real ABI break --
+`FeTVector` is inserted into the `FeType` enumeration immediately after
+`FeTString`, renumbering `FeTPtr` and the three `FeTFex*` extension slots --
+beside which it adds the vector quartet `FeMakeVector`/`FeVectorLength`/
+`FeVectorRef`/`FeVectorSet`; API version 13 adds the
+payload region's host surface -- `FeOpenContextWithOptions` with the
+`FeOpenOptions` record it takes, and five payload fields on `FeArenaStats`;
+API version 12 adds
+`FeCollectGarbage`, an immediate, forced collection reachable from outside
+fe.c for the first time; API version 11 adds the
 dynamic-binding location seam
 `FeBindingSaveFn`/`FeBindingTargetFn`/`FeSetBindingFns`, which is how a host
 whose storage moves says where a `let`'s saved value goes back to; API
@@ -26,6 +44,21 @@ input-unit trio `FeEnterInputUnit`/`FeReadInputForm`/`FeLeaveInputUnit`, and
 API version 7 added the
 protected string evaluation `FeTryEvaluateStringWithOptions`. `FE_LANGUAGE_VERSION`
 identifies the Lisp language `FeEvaluateString()` and friends evaluate --
+language version 17 is the string cut: `"a\0b"` is a three-byte string where
+the escape was a read error and it prints as `"a\000b"`, which reads back to
+the same three bytes; `(aset STRING INDEX BYTE)` writes a byte in place and
+answers it, where every `aset` on a string was refused by name, and a value
+above 255 is refused with Emacs' own sentence; `length`, `aref` and `elt`
+still answer BYTES for a string, which is unchanged;
+language version 16 is the vector cut: `[...]` reader and writer syntax,
+`vector`/`make-vector`/`vectorp`/`aref`/`aset`/`vconcat`, `length` and `elt`
+generic over lists, strings and vectors, and `end-of-file` in the condition
+hierarchy (which is what `[1 2` raises, and what an unclosed list raises now
+too); language version 15 is the reader's whitespace set: the form
+feed (`\f`, 0x0C) joins space, newline, tab and carriage return, so an
+Elisp page separator separates forms instead of being read into the symbol
+beside it; language version 14 added `string<` and `string>` and the
+`end-of-buffer`/`beginning-of-buffer` conditions;
 language version 13 is the error-rendering contract (`error-message-string`,
 the `error-message` property on every condition symbol, and a writer that
 escapes a backslash inside a printed string); language version 12 is the
@@ -57,9 +90,66 @@ primitives with Emacs' identity semantics. A host that vendors or pins Fe
 should assert both versions it was written against at compile time:
 
 ```c
-static_assert(FE_API_VERSION == 11);
-static_assert(FE_LANGUAGE_VERSION == 14);
+static_assert(FE_API_VERSION == 15);
+static_assert(FE_LANGUAGE_VERSION == 20);
 ```
+
+Fe 24.0 moves `FE_LANGUAGE_VERSION` 19 -> 20 and leaves `FE_API_VERSION` at
+15: the string-reader escape cut. An unknown escape in a string yields its
+escaped byte, while known escapes and the measured backslash-space and
+backslash-newline continuations retain their meanings. The writer's existing
+backslash quoting keeps these strings readable. Fe 23.0 moved
+`FE_LANGUAGE_VERSION` 18 -> 19 and left `FE_API_VERSION` at 15: the Fex
+boundary cut. `read-file` builds its record from getdelim's byte count instead
+of `strlen`'s, so a record with embedded NULs -- the shape
+/proc/self/cmdline is made of -- comes back whole; and every extension
+boundary that hands a string to an interface which cannot carry a NUL
+(`open-file`'s path and mode, `remove-file`, `execute`'s argv, `compile-re`'s
+pattern, `match-re`'s subject) refuses an embedded NUL by name where it used
+to truncate silently. `write-file` still writes exact bytes. A program that
+never puts a NUL in one of those strings answers what it answered under
+22.0.
+
+Fe 22.0 moves `FE_LANGUAGE_VERSION` 17 -> 18 and leaves `FE_API_VERSION` at
+15: one row joins the condition hierarchy (`search-failed`, a child of
+`error`), which a Lisp program can observe -- `signal` accepts the symbol,
+`get` answers its `error-message`, an `error` handler catches it -- while no
+declaration in `fe.h` changes. Nothing is removed and nothing that ran under
+21.0 answers differently under 22.0.
+
+Fe 21.0 moves `FE_API_VERSION` 14 -> 15 and `FE_LANGUAGE_VERSION` 16 -> 17
+together: the string cut is both a C break and a language one. What changed
+underneath is the representation -- a string was a cdr chain of cells holding
+seven bytes each and terminated by a NUL, and is now one object carrying a
+byte length over bytes in the payload region -- and everything above follows
+from a string having a length instead of a terminator. The C removals are
+`FePayloadPercentNone` and, with it, `FeOpenContext`'s no-region partition;
+nothing else is removed and no other declaration changes meaning.
+
+Fe 19.0 moves `FE_API_VERSION` 12 -> 13 and leaves `FE_LANGUAGE_VERSION` at
+15: the payload region's host surface is a C contract with no language
+surface at all -- no Fe type owns a payload yet, so nothing a Lisp program
+evaluates can observe whether a region exists, and no program that ran under
+Fe 18.0 answers differently under 19.0. Nothing is removed and no existing
+declaration changes meaning: `FeOpenContext` opens the same partition it
+always has, byte for byte, and every existing `FeArenaStats` field keeps its
+meaning and its place. The reasoning is under "The payload region" above.
+
+Fe 18.0 moves `FE_LANGUAGE_VERSION` 14 -> 15 and leaves `FE_API_VERSION` at
+12: the form feed (`\f`, 0x0C) is reader whitespace, which it was not, and no
+declaration in `fe.h` changed. It is a language break in one narrow
+direction -- a symbol whose name held a literal form feed no longer reads
+back as itself unless the byte is escaped -- and a fix in the direction that
+matters, since an Elisp page separator now separates forms instead of being
+read into the symbol beside it. The reasoning is below, under the version
+history.
+
+Fe 17.0 moves `FE_API_VERSION` 11 -> 12 and leaves `FE_LANGUAGE_VERSION` at
+14: `FeCollectGarbage` is a C contract with no language surface at all --
+nothing a Lisp program evaluates can observe whether or when a collection
+ran, beyond the arena not running out -- so no program that ran under Fe
+16.0 answers differently under 17.0. The reasoning is below, under the
+version history.
 
 Fe 16.0 moves `FE_API_VERSION` 10 -> 11 and leaves `FE_LANGUAGE_VERSION` at
 14: the dynamic-binding location seam is a C contract, and no program that
@@ -183,6 +273,24 @@ answer there, which is what Emacs gives for two separate files. Full marks
 a host-driven `let` -- every mark is visible, because there is no unit there
 for one to be foreign to. See `doc/language.md` for the model and its two
 recorded residuals.
+
+`FE_LANGUAGE_VERSION` moved 14 -> 15 in Phase C2 of kg's fe-simplification
+plan, with `FeVersion` "17.0" -> "18.0" and `FE_API_VERSION` left at 12 -- no
+declaration in `fe.h` changed. Emacs' `read1` retries on exactly space, form
+feed, newline, tab and carriage return; fe had the other four, so the form
+feed was an ordinary symbol constituent and `nil\fnil` read as one symbol
+whose name carried the byte, answering `void-variable` where Emacs reads two
+`nil`s. Elisp files use the byte as a page separator between sections
+(`s.el:770`, `f.el:39`), which is how the gap was found. The set is one
+definition in `fe.c` now, pasted into the three delimiter tests beside it, so
+a form feed separates tokens AND ends a symbol, a `?` literal and a radix
+literal's digits -- whitespace that did not terminate a token is what the bug
+was. Two things deliberately do not move: an ESCAPED form feed is a symbol
+constituent, exactly as an escaped space is, and a form feed inside a string
+body is the byte, never reader syntax. A comment still ends at a newline and
+nothing else, which is Emacs' rule too. The break a program can notice is
+narrow -- a symbol name holding a literal form feed -- and the printer has
+escaped that byte since version 12.
 
 `FE_LANGUAGE_VERSION` moved 11 -> 12 in Phase 14, with `FeVersion` "12.0" ->
 "13.0" and `FE_API_VERSION` left at 8 -- no declaration in `fe.h` changed.
@@ -370,6 +478,73 @@ close is the fixed arena to full" -- not a live diagnostic surface: there is
 no Lisp-visible primitive that exposes it, and a host that wants to surface
 it to users owns that decision and its own presentation.
 
+### The payload region (FE_API_VERSION 13)
+
+`FeOpenContextWithOptions(ptr, size, options)` opens a context with knobs.
+`FeOpenOptions` today carries one, `payload_percent`, and the record is meant
+to be zero-initialized: every field a host does not name takes its documented
+default, which is what lets a later version add a field without touching a
+host that does not want it. A null `options` selects every default.
+
+For `payload_percent` the values are: `FeDefaultPayloadPercent` (0, and
+therefore what a zero-initialized record asks for) for Fe's own split of the
+arena, which is 25% of the bytes left once the frame region is funded; and 1
+to 100 for exactly that percentage. Anything else -- negative, or above 100 --
+IS REFUSED, and `FeOpenContextWithOptions` returns null exactly as it does for
+a null arena or one below `FeMinimumArenaSize()`. It is never clamped: a clamp
+would hand back a context partitioned to a number the host did not choose,
+with no way to find out.
+
+`FeOpenContext(ptr, size)` is `FeOpenContextWithOptions` with default options.
+It carved NO region until FE_API_VERSION 15 and `FePayloadPercentNone` was the
+way to ask for that; both went with the string cut, because a symbol's name is
+a string and a string's bytes live in the region -- a context without one
+cannot finish opening, let alone run a program.
+
+What the percentage divides is the SURPLUS. The region has a floor that is not
+the percentage's to withhold: the blocks the interpreter's own names and
+seeded messages occupy, which `FeMinimumArenaSize()` funds beside the core
+cells. A context opened at exactly the minimum has that floor and no spare
+byte, in either pool.
+
+The carve is priced against the CELLS and never against the frames: frame
+capacity is identical at every percentage, because the frame region is funded
+first. At a 1 MiB arena the default 25% gives 42059 cells beside a
+225928-byte region, of which 6232 bytes are the floor, with a 1081-frame
+capacity at every percentage.
+
+`FeArenaStats` reports the region in five fields: `payload_capacity_bytes`
+(what the carve produced -- the denominator the rest are read against),
+`payload_live_bytes`, `payload_peak_bytes` (the high-water mark, which does
+not follow the live bytes back down), `payload_compaction_count` and
+`payload_allocation_failures` (requests the region could not meet even after
+a collection, i.e. `(payload-exhaustion)` raises). None of them is ever all
+zero any more: every context has a region and every context has blocks in it,
+because a symbol's name is a string.
+
+### Forcing a collection (FE_API_VERSION 12)
+
+`FeCollectGarbage(ctx)` runs an immediate mark-and-sweep: the same one
+`ArenaCanAllocate()` and `MakeObject()`'s exhaustion path already run when the
+free list runs dry, and the same one every allocation runs under the
+`FE_GC_STRESS` build knob, now reachable on demand rather than only as a side
+effect of allocation. `collection_count` in the next `FeGetArenaStats()`
+reading moves by exactly one; whatever was unreachable at the call returns to
+`free_slots`. It allocates nothing itself, so it is safe to call between
+evaluations, though not from inside a `mark_fn` or `gc_fn` callback (the same
+re-entrancy rule "Context Userdata And Callbacks" states below, enforced by
+the same `abort()`).
+
+It exists for a host that wants a collection's cost paid at a moment of its
+own choosing rather than fe's -- typically once, right after a large,
+fixed body of startup definitions has finished loading, to reclaim whatever
+reader and macro-expansion garbage that loading produced before a session's
+own work begins. Before this there was no way to ask for a collection from
+outside fe.c at all: `CollectGarbage()` stays `static`, and a host (or fe's
+own test suite) that wanted one had to allocate disposable objects until
+natural exhaustion happened to trigger one, which is a description of what
+it was trying to measure and not a control over when it happened.
+
 ## Context Userdata And Callbacks
 
 `FeSetUserData()` stores one host pointer in a context, and `FeGetUserData()`
@@ -393,6 +568,36 @@ it must not read `car`/`cdr` of anything else, and must not allocate. The
 collector puts every field back before it returns, so nothing outside the
 callback can observe any of it.
 
+The GC callback runs somewhere else: a **finalization pass of its own**, after
+the mark phase has restored every field it reversed and before anything at all
+is reclaimed or moved. Nothing about the arena has been destroyed yet when it
+runs, which is what the callback is allowed to rely on:
+
+- it may read the object it was handed, **and anything reachable from it**,
+  doomed or not -- a dead pair prints even though its children are dead too;
+- a dead string or vector still owns its payload bytes, at the handle it
+  names, so `FeToString()` on one answers what it held;
+- it must still not allocate, and must still return normally (below).
+
+Until FE_API_VERSION 15 this callback was made inline in the sweep, one object
+at a time as each was turned into a free cell. Both of the first two points
+were false there: a dead pair reached late in the sweep referred to children
+already retyped, and -- once Phase 25 gave strings a movable payload -- every
+dead block had already been reclaimed by the compaction and the survivors had
+slid down over it. `./fe -d -e '"payload"'`, the bundled tracer this document
+names as the example, aborted on exactly that. A host written against the old
+behaviour needs no change: everything it was permitted to do it may still do.
+
+**`FeMark()` from a GC callback is a documented no-op**, and calling it is not
+an error. The pass runs on a graph whose live/doomed partition is already
+decided, and its whole value is that every doomed object is still readable,
+which is true only for as long as nothing can change who is doomed: a mark
+taken from a finalizer would make the payload compaction retain a block whose
+owner the following sweep frees. Marking from a finalizer never resurrected
+anything anyway -- under the old inline callback it kept an object the sweep
+had not yet reached and did nothing for one it had already passed, which was
+an accident of arena order and never a contract.
+
 A mark or GC callback must also **return normally**. It may not `longjmp` out,
 and it may not raise: no `FeHandleError()`, no `FeRaiseCompletion()`, and
 nothing that raises on its behalf, `FeCar()`/`FeCdr()` on a non-pair included.
@@ -410,7 +615,16 @@ Printing from a callback is safe. `FeToString()` on the object it was handed
 does not charge the evaluation step budget and does not poll the interrupt
 while a collection is running, precisely so that the obvious diagnostic
 callback -- `main.c`'s own `mark`/`gc` tracers are this -- cannot trip the rule
-above through a step-limit or interrupt raise.
+above through a step-limit or interrupt raise. `make check` runs those tracers
+(`make run-debug-host`, which is `./fe -d -e '"payload"'` and asserts both that
+it exits cleanly and that it traced the collection), because a documented
+example nothing runs is a claim rather than a promise.
+
+One rendering exists only for that reader. A symbol's unassigned value and
+function cells hold a private sentinel that Lisp can never reach, and those
+cells are ordinary pairs which die with the symbol -- so a tracer is handed
+them and prints `#<unbound>` where the cell has never been assigned. It is not
+a value and cannot be produced by any other route.
 
 ### Where a dynamic binding is restored to (FE_API_VERSION 11)
 
@@ -1337,8 +1551,18 @@ and is now load-bearing, since the frame wall assigns `FeCompletionBudget`.
 
 `FeWrite()` renders an object as Fe syntax one character at a time through a
 caller-supplied `FeWriteFn`; `FeWriteFile()` is the `FILE*` wrapper. `qt`
-selects quoted rendering, in which strings are surrounded by `"` and embedded
-`"` characters are escaped.
+selects quoted rendering, in which strings are surrounded by `"` and three
+bytes inside one are escaped: `"`, `\` and NUL (as `\000`, in three digits so
+that a digit after it stays a digit).
+
+A WRITE CALLBACK MAY ALLOCATE Fe objects, and may raise. That is a promise
+rather than an absence of one, and it is the opposite of the mark callback's
+contract (`FeSetMarkFn`, which forbids both): the printer holds no address
+into object storage across a callback, deriving a string's bytes or a
+vector's elements again after every call, precisely because a host's sink is
+where a host does host things -- kg's grows a buffer with `realloc` and can
+run out of memory. A raise from inside a callback leaves the printer by
+`longjmp`, which is an exit and not a half-written object.
 
 Rendering is bounded, and always terminates:
 
@@ -1354,6 +1578,8 @@ bool FeWriteWithOptions(FeContext* ctx, FeObject* obj, FeWriteFn fn,
 ```
 
 A zero field takes the default, and a null `options` takes all three.
+The public node default is 1,048,576 rendered objects; the depth default is
+`FeWriteDefaultMaxDepth` (256), and explicit nonzero limits remain authoritative.
 `FeWriteWithOptions()` returns `true` when the whole object was rendered and
 `false` when it stopped early; `FeWrite()` is the same call with default
 options and the answer discarded.
@@ -1384,6 +1610,12 @@ polls its interrupt callback, so printing a large object answers a host's
 cancellation the way evaluating one does. `FeWriteFn` returns `void`, so a
 failing write callback cannot report itself; `FeWriteFile()` correspondingly
 does not detect `fputc` failures.
+
+The writer's NUL escape is a printed-form divergence from Emacs, which emits
+the byte raw, and it is deliberate: `FeReadFn` answers one `char` and spells
+end of input as 0, so a raw NUL in the input is where the reader stops.
+Escaping it on the way out is what makes print-then-read-back give the same
+string, embedded NULs included.
 
 `FeToString()` renders into a caller-supplied buffer:
 
@@ -1457,25 +1689,62 @@ You can then call the `FeNativeFn` from Fe like any other function:
 (print (pow 2 10))
 ```
 
-### Extracting String And Symbol Bytes
+### Vectors (FE_API_VERSION 14)
 
-`FeStringByteLength()` accepts a string or symbol and returns the exact number
-of stored text bytes. `FeCopyStringBytes()` accepts the same types and copies
-those bytes without quoting, escaping, serialization, or a trailing NUL. A
-buffer whose size is exactly the reported length succeeds. If the buffer is
-short, or is null for a non-empty value, the function returns `false` without
-writing anything. Other object types raise an `expected string or symbol`
-type error.
+Four functions, and there is no fifth. `FeMakeVector(ctx, length)` builds a
+vector whose every slot is nil; `FeVectorLength(ctx, vector)` answers its
+length; `FeVectorRef(ctx, vector, index)` and `FeVectorSet(ctx, vector, index,
+value)` read and write one slot. All four are O(1) in the vector's length --
+its elements are one payload block, so an element's address is arithmetic --
+and all four are checked: a non-vector raises `(wrong-type-argument vectorp
+OBJECT)` and an index at or past the length raises `(args-out-of-range VECTOR
+INDEX)`, which are the same conditions the Lisp `aref`/`aset` raise because
+they are the same checks.
 
-The extraction APIs are byte-counted and walk every chained string cell; they
-do not have `FeToString()`'s fixed-buffer serialization semantics.
-`FeToString()` renders any object as Fe syntax, including string quoting and
-escaping, and its destination may truncate; it is for display, not extracting
-host data. Fe source still rejects embedded NUL bytes, and `FeMakeString()`
-accepts a NUL-terminated C string, so the current public construction paths
-cannot create a string containing an embedded NUL. Extraction nevertheless
-reports and copies the exact stored payload rather than treating its
-destination as a C string.
+There is no borrowed-elements accessor, and there will not be one. A vector's
+elements live in the arena's payload region, which the collector COMPACTS: the
+bytes move and the `FeObject *` header does not. Every one of these functions
+therefore takes the header, derives the storage address immediately before
+using it, and lets it die there. A host that held such an address across any
+Fe allocation would be reading whatever slid into its place.
+
+Every context has a payload region (see "The payload region" above), so
+`FeMakeVector` needs nothing arranged first. What it can still meet is the
+region's edge: a vector the region cannot hold raises `(payload-exhaustion)`,
+which is a catchable condition and not a crash, and a host that wants more
+room for one asks for a larger `payload_percent`.
+
+### Building And Extracting String Bytes
+
+A string is a stable `FeObject *` header carrying a byte LENGTH, over payload
+bytes that may contain NUL and are not terminated (FE_API_VERSION 15). The
+bytes live in the region the collector compacts, so no function below hands
+one back: every one of them copies into a buffer the CALLER owns, which is
+the same rule the vector accessors follow and for the same reason.
+
+`FeMakeStringBytes(ctx, bytes, length)` builds a string of exactly `length`
+bytes from a buffer the caller owns and keeps. `FeMakeString(ctx, str)` is
+that function called with `strlen(str)`, and remains the spelling for the
+ordinary case of a C string -- it is also the only difference between the two:
+one stops at a NUL and the other does not.
+
+`FeStringBytes(ctx, obj, dst, size)` is the one-call read: it answers the
+string's full byte length, and copies the bytes into `dst` when they fit in
+`size`. A caller compares the answer against `size` to learn whether the copy
+happened; a caller that wants only the length passes `(nullptr, 0)`, and `dst`
+may be null only when `size` is zero.
+
+`FeStringByteLength()` and `FeCopyStringBytes()` are the same thing in two
+calls, and are what a caller sizing a heap buffer wants, since it has to ask
+twice anyway: a length pass, then a copy that REFUSES rather than truncating
+(`false`, with nothing written, when the buffer is short or is null for a
+non-empty value). All three accept a string or a symbol -- a symbol's name is
+a string -- and raise an `expected string or symbol` type error for anything
+else.
+
+None of the three has `FeToString()`'s semantics. `FeToString()` renders any
+object as Fe syntax, including string quoting and escaping, and its
+destination may truncate; it is for display, not for extracting host data.
 
 ### Legacy Fex Custom Types
 

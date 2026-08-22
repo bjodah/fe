@@ -1,0 +1,6 @@
+{
+	"id": "reader-form-feed-radix-delimiter",
+	"setup": [],
+	"expr": "(list #x10\f1)",
+	"note": "A radix literal's digits end at a delimiter, and a form feed is one."
+}

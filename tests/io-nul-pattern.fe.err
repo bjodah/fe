@@ -1,0 +1,2 @@
+error: string contains an embedded NUL byte
+(compile-re "a\000b")

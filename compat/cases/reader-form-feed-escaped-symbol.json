@@ -1,0 +1,6 @@
+{
+	"id": "reader-form-feed-escaped-symbol",
+	"setup": [],
+	"expr": "(eq 'a\\\fb (intern \"a\\fb\"))",
+	"note": "Escaped, a form feed is an ordinary symbol constituent again -- the same rule an escaped space follows."
+}

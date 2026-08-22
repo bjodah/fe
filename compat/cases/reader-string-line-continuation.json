@@ -2,5 +2,6 @@
 	"id": "reader-string-line-continuation",
 	"setup": [],
 	"expr": "\"a\\\nb\"",
+	"expect": "agree",
 	"note": "A backslash-newline continuation inside a string body."
 }

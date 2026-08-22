@@ -51,12 +51,26 @@ the letter the message names. The count is "corpus files whose *first*
 diagnostic was this arm", so it understates: a file that fails earlier for
 another reason hides whatever came after it.
 
-The harness uses a fresh 70 KiB arena for each input -- 64 KiB until Phase 19,
-raised twice since to hold the FREE portion at the ~290 object slots it had
-always been, because `FeMinimumArenaSize()` grew by 3248 bytes when the
+The census predates Phase 25, and `NUL character in string` is no longer an
+arm either: a string carries a length now, so `"\0"` reads as a one-byte
+string rather than raising. `character above 255 in string` stays -- that one
+would need a multibyte character type, not a length.
+
+The census predates Phase 24, and `vector brackets` is no longer an arm:
+`[...]` reads as a vector now, and a bracket that closes nothing or crosses a
+paren is `stray ']'`/`stray ')'` instead. Until Phase 25.0 a generated vector
+then raised `(payload-exhaustion)` anyway, because the harness carved no
+payload region; it carves Fe's default one now, so `[1 2 3]` reads as
+`[1 2 3]` here and the vector paths are reachable from a fuzz target for the
+first time.
+
+The harness uses a fresh 72.75 KiB arena for each input -- 64 KiB until Phase
+19, raised three times since to hold the FREE portion at the ~290 object slots
+it had always been, because `FeMinimumArenaSize()` grew by 3248 bytes when the
 condition hierarchy's `error-message` properties started being seeded at
-context open, and by 2064 more when API version 11 gave every cleanup entry
-a host tag (`fuzz/fuzz_support.h` carries both measurements). What steers this lane is how
+context open, by 2064 more when API version 11 gave every cleanup entry a host
+tag, and because Phase 25.0's carve then took a quarter of the cells
+(`fuzz/fuzz_support.h` carries every measurement). What steers this lane is how
 many allocations a generated form gets before the arena raises, not the
 arena's nominal size. Invalid syntax, excessive
 nesting, long symbols, and arena exhaustion are expected Fe errors and recover
@@ -185,11 +199,12 @@ The harness's arena is deliberately small and is *not* enlarged for this: the
 tracked `cons-second-operand-gc` seed reproduces only at that arena's
 collection rate ("a roomier one collects too rarely to land on that exact
 allocation"), and the depth this arm needs comes from its own loop rather than
-from arena size. Phase 19's 64 -> 68 KiB and API version 11's 68 -> 70 KiB
-are not enlargements in that sense and were made for exactly this reason:
-each holds the free portion constant across a growth in
-`FeMinimumArenaSize()`, and all fifteen tracked seeds --
-`cons-second-operand-gc` included -- still do what they claim afterwards.
+from arena size. Phase 19's 64 -> 68 KiB, API version 11's 68 -> 70 KiB and
+Phase 25.0's 70 -> 72.75 KiB are not enlargements in that sense and were made
+for exactly this reason: each holds the free portion constant -- 288 slots,
+measured, across the last of them -- against something else taking bytes away
+from it, and all fifteen tracked seeds -- `cons-second-operand-gc` included --
+still do what they claim afterwards.
 The seed that fails first when the free portion shrinks is
 `strict-arity-rest`, which stopped reaching `(x &rest y)` at 68 KiB under
 the version 11 growth and reaches it again at 70.

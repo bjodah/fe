@@ -1,6 +1,6 @@
 {
 	"id": "reader-string-nul-escape",
 	"setup": [],
-	"expr": "\"\\0a\"",
-	"note": "An escape decoding to NUL inside a string body."
+	"expr": "(list \"\\0a\")",
+	"note": "An escape decoding to NUL inside a string body; the list wrapper is only so both sides print the string with its quotes, as reader-string-hex does. Both sides now READ it to the same two bytes -- Phase 25 gave fe strings a length, so a stored NUL is a byte like any other -- and they disagree only in the printed form: Emacs emits the raw NUL between the quotes and fe escapes it as \\000, because a FeReadFn answers one char and spells end of input as 0, so a raw NUL is where fe's reader would stop."
 }

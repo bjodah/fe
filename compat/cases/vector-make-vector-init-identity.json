@@ -1,0 +1,6 @@
+{
+ "id": "vector-make-vector-init-identity",
+ "setup": [],
+ "expr": "(let ((v (make-vector 2 (list 1)))) (list (eq (aref v 0) (aref v 1)) v))",
+ "note": "The INIT argument is STORED, not copied: every slot holds the same object. An implementation that deep-copied the initialiser would print the same thing and answer nil here, which is why the identity is asked for explicitly."
+}

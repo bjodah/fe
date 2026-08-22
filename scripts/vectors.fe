@@ -1,0 +1,131 @@
+;; Vectors, and the sequence contract that ships with them (Phase 24 of kg's
+;; Elisp data-model program).  Every expectation below was measured on GNU
+;; Emacs 31.0.91; `fe/compat/cases/vector-*` and `sequence-*` carry the oracle
+;; snapshots, and this script is the executable half.
+;;
+;; A vector's elements live in the payload region the Phase 22 ADR selected
+;; (Design B: stable `FeObject *` headers over a compactable in-arena region),
+;; so nothing here is only about Lisp: every `aref` reads through a handle the
+;; collector is free to have moved since the vector was built.
+;;
+;; Structure is checked by PRINTING it, against `tests/vectors.fe.out`:
+;; `assert-equals` walks lists with `is`, and `is` on two vectors is identity,
+;; so it would answer nil for two separately built vectors with equal
+;; contents.  That is the correct answer for `is` and the wrong tool here.
+
+;; Reader and writer are the same syntax, in both directions.
+(assert-not-nil (vectorp []))
+(assert-not-nil (vectorp [1]))
+(print [1 2 3])
+(print [])
+(print [[1] [2]])
+(print [1 (2) "x"])
+;; A vector reached through a quoted LIST, which is the shape a real package
+;; carries -- a `declare` debug spec is a vector inside a form, not one
+;; somebody typed at top level.
+(print '(a [1 2] b))
+;; `[` and `]` end a token as well as opening and closing a vector, so the
+;; last element of a literal is not glued to the closing bracket.
+(print [?a #x10 1.5])
+
+;; The constructors.
+(print (vector))
+(print (vector 1 "a" '(b)))
+(print (make-vector 3 'a))
+(print (make-vector 0 'a))
+;; `make-vector` STORES its INIT argument, one object in every slot, rather
+;; than copying it per slot.
+(setq shared (make-vector 2 (list 1)))
+(assert-not-nil (eq (aref shared 0) (aref shared 1)))
+
+;; Identity, not structure: two reads of the same literal are two objects.
+(assert-nil (eq [1] [1]))
+(setq once [1])
+(assert-not-nil (eq once once))
+(assert-not-nil (eql once once))
+
+;; Random access, at both ends, and on a string -- `aref` is an ARRAY
+;; operation, and a string is an array.
+(assert-equals 10 (aref [10 20 30] 0))
+(assert-equals 30 (aref [10 20 30] 2))
+(assert-equals 98 (aref "abc" 1))
+
+;; Mutation observed through TWO references to one vector: `b` is not a copy,
+;; so a write through `a` is visible through `b`, the two stay `eq`, and
+;; `aset` answers the value it stored.
+(setq a (make-vector 3 0))
+(setq b a)
+(assert-equals 'x (aset a 1 'x))
+(assert-equals 'x (aref b 1))
+(assert-not-nil (eq a b))
+(print b)
+
+;; `length` and `elt` are generic over all three sequence types, at fe's own
+;; layer rather than in a host's prelude.
+(assert-equals 3 (length '(1 2 3)))
+(assert-equals 3 (length "abc"))
+(assert-equals 3 (length [1 2 3]))
+(assert-equals 0 (length []))
+(assert-equals 0 (length nil))
+(assert-equals 'b (elt '(a b c) 1))
+(assert-equals 98 (elt "abc" 1))
+(assert-equals 'b (elt [a b c] 1))
+;; THE MEASURED ASYMMETRY: past the end of a LIST `elt` answers nil, because
+;; it routes to `nth`; past the end of a VECTOR it raises, because it routes
+;; to `aref`.  A generalisation that made both raise would be wrong.
+(assert-nil (elt '(1 2) 9))
+
+;; `vconcat` over every combination, and the rule worth reading twice: a
+;; STRING contributes its character codes, not itself.
+(print (vconcat [1 2] [3]))
+(print (vconcat [1] '(2 3)))
+(print (vconcat "ab"))
+(print (vconcat))
+;; It always builds a NEW vector, never returns its argument.
+(assert-nil (eq once (vconcat once)))
+
+;; Condition names and DATA, which is the half an implementation gets wrong
+;; silently.  `args-out-of-range` carries the offending sequence first, and
+;; `aref` on a non-array names `arrayp` -- not `vectorp`, because strings are
+;; arrays too.
+(print (condition-case e (aref [10 20] 5) (error e)))
+(print (condition-case e (aref [10 20] -1) (error e)))
+(print (condition-case e (aref 5 0) (error e)))
+(print (condition-case e (aset (make-vector 2 0) 2 1) (error e)))
+(print (condition-case e (elt [1 2] 9) (error e)))
+(print (condition-case e (length 5) (error e)))
+(print (condition-case e (vconcat 5) (error e)))
+(print (condition-case e (make-vector -1 0) (error e)))
+(print (condition-case e (aref [1 2] 1.0) (error e)))
+;; A dotted list has no length; the complaint is about the offending TAIL.
+(print (condition-case e (length '(1 . 2)) (error e)))
+
+;; MORE THAN 4032 ELEMENTS, which is `GcStackSize - GcStackReserve` -- the
+;; root stack's ordinary ceiling, and the number every construction route
+;; would trip over if it held one root per element instead of one per
+;; construction.  None of them does: `make-vector` publishes one block,
+;; `vconcat` restores its checkpoint after each element it boxes, the reader
+;; restores its own per element, and the evaluator's operand frame restores
+;; its own per operand.
+(setq big (make-vector 5000 7))
+(assert-equals 5000 (length big))
+(assert-equals 7 (aref big 4999))
+(aset big 4999 'last)
+(assert-equals 5000 (length (vconcat big)))
+(assert-equals 'last (aref (vconcat big) 4999))
+
+;; The elements survive a collection that happens between the write and the
+;; read.  There is no `collect-garbage` in the language, so the collection is
+;; forced the way it happens in a real program: by allocating until the free
+;; list runs out.  `held` is the only thing keeping these pairs alive, and it
+;; keeps them through its payload block, which the collector traces and the
+;; compactor may move.
+(setq held (vector (list 'one) (list 'two)))
+(fset 'churn (fn (n) (while (< 0 n) (setq n (- n 1)) (cons n n))))
+(churn 100000)
+(print held)
+(aset held 0 (list 'three))
+(churn 100000)
+(print held)
+
+(print "vectors ok")

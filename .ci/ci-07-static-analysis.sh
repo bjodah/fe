@@ -47,11 +47,11 @@ bear -- "${MAKE_PARALLEL[@]}" -B
 export COMPILE_DB=$(/bin/pwd)
 make iwyu
 
-compile_db_files | "${PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_check
+compile_db_files | "${GNU_PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_check
 
 cppcheck --quiet --error-exitcode=1 --std=c23 \
 	--enable=warning,style,performance,portability --check-level=exhaustive \
 	--inline-suppr --suppress=preprocessorErrorDirective:auto.h \
 	-j "${JOBS}" ./*.c ./fuzz/*.c
 
-compile_db_files | "${PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_tidy
+compile_db_files | "${GNU_PARALLEL}" --halt soon,fail=1 --jobs "${JOBS}" --line-buffer run_clang_tidy

@@ -7,9 +7,8 @@
 ;; `fset`, `defalias`, `symbol-function`, `symbol-value`, `fboundp`,
 ;; `fmakunbound`, `funcall` and `apply`, including designator chains, apply's
 ;; spread (without mutating the caller's list), and the
-;; makunbound/fmakunbound independence pair. It must print byte-identically
-;; under the normal and RELEASE test.sh passes, so every call below
-;; is arity-correct and nothing prints an answer the 04D cut flips.
+;; makunbound/fmakunbound independence pair. Every call below is
+;; arity-correct and nothing prints an answer the 04D cut flips.
 
 ;; One symbol holds a value and a function at once: call position resolves
 ;; the function cell, bare-symbol evaluation the value cell.

@@ -135,8 +135,11 @@ FeObject* FexReadFile(FeContext* ctx, FeObject* arg) {
   size_t capacity = 0;
   const ssize_t r = getdelim(&record, &capacity, delimiter, file);
   const int error = errno;
-  FeObject* result =
-      r >= 0 ? FeMakeString(ctx, record) : BuildErrnoError(ctx, error);
+  // Length-bearing, with getdelim's byte count and not `strlen`'s: a record
+  // may hold embedded NULs -- /proc/self/cmdline is NUL-separated throughout
+  // -- and a C-string build answered (length "…/fe") for a whole argv record.
+  FeObject* result = r >= 0 ? FeMakeStringBytes(ctx, record, (size_t)r)
+                            : BuildErrnoError(ctx, error);
   free(record);
   return result;
 }
@@ -151,6 +154,25 @@ FeObject* FexRemoveFile(FeContext* ctx, FeObject* arg) {
   return removed ? &nil : BuildErrnoError(ctx, error);
 }
 
+// The exact bytes of a string or symbol, in storage the caller frees, with
+// the byte count in `*length`. Unlike `FexCopyStringZ` this is for boundaries
+// where an embedded NUL is as meaningful as any other byte -- written data --
+// so it copies by length and refuses nothing.
+static char* CopyStringBytes(FeContext* ctx,
+                             const FeObject* obj,
+                             size_t* length) {
+  *length = FeStringByteLength(ctx, obj);
+  char* bytes = malloc(*length + 1);
+  if (bytes == NULL) {
+    FeHandleError(ctx, "out of memory");
+  }
+  if (!FeCopyStringBytes(ctx, obj, bytes, *length)) {
+    free(bytes);
+    FeHandleError(ctx, "failed to copy string bytes");
+  }
+  return bytes;
+}
+
 // Writes the exact bytes of a string or symbol, not the printer's rendering of
 // an arbitrary object, and not through a 4 MiB buffer that silently truncated
 // anything longer and read errno even on success. Returns the byte count.
@@ -158,8 +180,8 @@ FeObject* FexWriteFile(FeContext* ctx, FeObject* arg) {
   FILE* file = GetOpenFile(ctx, &arg);
   const FeObject* object = FeGetNextArgument(ctx, &arg);
   FeRequireNoArguments(ctx, arg);
-  const size_t length = FeStringByteLength(ctx, object);
-  char* bytes = FexCopyStringZ(ctx, object, NULL);
+  size_t length = 0;
+  char* bytes = CopyStringBytes(ctx, object, &length);
 
   size_t written = 0;
   int error = 0;

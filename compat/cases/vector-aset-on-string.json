@@ -1,0 +1,6 @@
+{
+ "id": "vector-aset-on-string",
+ "setup": [],
+ "expr": "(aset \"ab\" 0 120)",
+ "note": "A DIVERGENCE fe chose rather than inherited: a string is an array Emacs can write in place, answering the character, while a fe string is a chain of seven-byte cells whose shape a byte write has to preserve. fe refuses by name instead of writing something it cannot promise. Phase 25 moves a string's bytes onto the payload region, which is where this becomes implementable rather than awkward; the non-array answer is Emacs' `(wrong-type-argument arrayp X)' either way."
+}

@@ -1,0 +1,6 @@
+{
+	"id": "reader-form-feed-symbol-terminator",
+	"setup": [],
+	"expr": "'(nil\fnil)",
+	"note": "A form feed with nothing beside it: it ends the symbol it abuts, so this is two symbols and not one whose name holds the byte."
+}

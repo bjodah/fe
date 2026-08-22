@@ -1,0 +1,6 @@
+{
+ "id": "eval-nil-lexical-closure-inside-form",
+ "setup": [],
+ "expr": "(condition-case e\n    (funcall (eval '(let ((x 7)) (lambda () x)) nil))\n  (error (car e)))",
+ "note": "M0.5: the nil/absent LEXICAL divergence. Emacs evaluates the inner form DYNAMICALLY, so the `let' binding of x is gone by the time the captured lambda runs and the funcall raises (void-variable x); the condition-case returns the condition symbol. Fe evaluates lexically by default and ignores the nil LEXICAL argument, so the lambda closes over x=7 and funcall returns 7. This is the case that disproves the old claim that absent/nil `eval' behaves exactly as Emacs."
+}

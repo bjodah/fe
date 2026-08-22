@@ -1,0 +1,6 @@
+{
+ "id": "vector-unclosed-literal",
+ "setup": [],
+ "expr": "[1 2 ;",
+ "note": "Reader error recovery for a missing closing bracket. Emacs raises the GENERIC incomplete-input condition `end-of-file' with data nil, not a vector-specific one, measured on the pinned Emacs before fe had an opinion; fe raises the same condition, which is why `end-of-file' joined the hierarchy in Phase 24. The trailing `;' is not decoration: run-fe-compat.py wraps every case in `(print EXPR)', so an expression that is unclosed ON PURPOSE has to swallow the closing paren the wrapper appends, and a line comment is the shortest thing that does. Both sides therefore read the same text and reach the same end of input."
+}

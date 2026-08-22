@@ -1,0 +1,7 @@
+;; A death test for cleanup safety, not for the refusal itself: a LATER
+;; execute argument carrying an embedded NUL used to raise past the argv
+;; vector and every argument copied before it -- 29 bytes definitely lost
+;; under the Valgrind lane. The refusal message is io-nul-pattern.fe's;
+;; what is pinned here is that nothing is left behind on the way out.
+(execute "true" "a\0b")
+(print "not reached")

@@ -1,0 +1,6 @@
+{
+ "id": "sequence-length-non-sequence",
+ "setup": [],
+ "expr": "(length 5)",
+ "note": "`length' of something that is not a sequence at all is `(wrong-type-argument sequencep 5)' -- naming `sequencep', not `listp', which is what a bare cdr walk reports by falling into (cdr 5)."
+}

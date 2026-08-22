@@ -32,8 +32,8 @@
 
 #include "fe.h"
 
-static_assert(FE_API_VERSION == 11);
-static_assert(FE_LANGUAGE_VERSION == 14);
+static_assert(FE_API_VERSION == 15);
+static_assert(FE_LANGUAGE_VERSION == 20);
 
 #ifndef FE_GC_STRESS
 #define FE_GC_STRESS 0
@@ -121,10 +121,16 @@ static bool RunStress(void) {
     return false;
   }
 
-  // Not `== 0`: the stress build has already collected some thousands of
-  // times bootstrapping the context, which is itself the knob working.
+  // Not `== 0` under either knob, and in both cases that IS the knob working.
+  // `FE_GC_STRESS` has already collected some thousands of times bootstrapping
+  // the context. `FE_DEBUG_PAYLOAD_MOVE` slides the live payload extent one
+  // alignment unit forward per allocation and leaves the bytes behind it
+  // unreachable until a collection returns the extent to the region's base, so
+  // opening a context -- which publishes one block per core symbol name since
+  // Phase 25 -- drifts past this 96 KiB arena's region and the publish that no
+  // longer fits collects to reclaim the drift.
   const FeArenaStats before = FeGetArenaStats(context);
-#if !FE_GC_STRESS
+#if !FE_GC_STRESS && !FE_DEBUG_PAYLOAD_MOVE
   CHECK(before.collection_count == 0);
 #endif
 

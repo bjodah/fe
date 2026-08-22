@@ -1,0 +1,6 @@
+{
+ "id": "vector-vconcat-shapes",
+ "setup": [],
+ "expr": "(list (vconcat [1 2] [3]) (vconcat [1] '(2 3)) (vconcat \"ab\") (vconcat))",
+ "note": "`vconcat' over every combination: vector+vector, vector+list, a string alone, and no arguments at all. The string row is the one worth reading twice -- a string concatenates as its CHARACTER CODES, so (vconcat \"ab\") is [97 98] and not [\"ab\"]."
+}

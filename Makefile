@@ -21,6 +21,19 @@ CFLAGS ?= -Weverything -Werror -std=c2x \
 	-Wno-reserved-identifier \
 	-Wno-extra-semi-stmt
 CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -Itiny-regex-c
+# Phase 23.0's payload poison knob (see the publish protocol in
+# fe_internal.h).  0 in every configuration but the lane that arms it, where
+# every allocation slides the payload region and pattern-fills what it
+# vacates.  Appended to CPPFLAGS rather than named in each rule so that the
+# standalone header checks compile the armed header too, and so that
+# .build-flags -- which hashes CPPFLAGS -- rebuilds when the knob moves.
+FE_DEBUG_PAYLOAD_MOVE ?= 0
+CPPFLAGS += -DFE_DEBUG_PAYLOAD_MOVE=$(FE_DEBUG_PAYLOAD_MOVE)
+# Phase 23.1's payload TEST OBJECT knob.  A shipped interpreter has no type
+# that owns a payload -- strings migrate in Phase 25 -- so the substrate's own
+# tests need a build that has one.  Unlike the poison knob above it is NOT
+# appended to CPPFLAGS: it is set per object, by the `%-payload.o` rules
+# below, so that the ordinary binaries in the same tree never carry it.
 LDLIBS ?= -lm
 
 # tiny-regex-c is third-party and is not held to Fe's -Weverything build, but it
@@ -45,19 +58,23 @@ $(shell [ "$$(cat $(BUILD_STAMP) 2>/dev/null)" = '$(BUILD_ID)' ] || \
 
 PROG = fe
 TARGET = $(PROG)
-SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fe_unwind.c fex.c fex_io.c \
-	fex_math.c fex_process.c fex_re.c fex_time.c
+SRCS = main.c auto.c fe.c fe_eval.c fe_run.c fe_unwind.c fe_perf.c fex.c \
+	fex_io.c fex_math.c fex_process.c fex_re.c fex_time.c
 # The evaluator's own object list, shared by every link rule that used to
 # name `fe.o` alone (sub-plan 03B's fe.c -> fe.c + fe_eval.c split, sub-plan
 # 11B's fe_eval.c -> fe_eval.c + fe_run.c one, and Phase 20's fe_eval.c ->
 # fe_eval.c + fe_unwind.c one): a list so every consumer below stays a
 # one-line change.
-FE_CORE_OBJS = fe.o fe_eval.o fe_run.o fe_unwind.o
+# `fe_perf.o` is one of them: an ordinary build compiles it to nothing (see
+# fe_perf.h), and a counting build needs it wherever the instrumented core
+# is linked.
+FE_CORE_OBJS = fe.o fe_eval.o fe_run.o fe_unwind.o fe_perf.o
 HDRS = $(wildcard *.h)
 OBJS = $(SRCS:.c=.o) tiny-regex-c/re.o
 SOURCES = $(SRCS) $(HDRS)
 TEST_API = test_api
-TEST_SRCS = test_api.c test_header.c test_internal_header.c gc_stress.c
+TEST_SRCS = test_api.c test_header.c test_internal_header.c gc_stress.c \
+	payload_tests.c perf_workloads.c
 EXAMPLE_HOST = example_host
 EXAMPLE_SRCS = example_host.c
 EXAMPLE_RUNNER ?=
@@ -539,7 +556,85 @@ SCC_COMPLEXITY_PATHS ?= $(SOURCES)
 # "FAIL: total complexity 854 exceeds limit 853" and exits 2, and at 854 it
 # passes; at 403 it reports "FAIL: 1 file(s) exceed per-file limit 403" and
 # exits 2, the one file being fe_eval.c at 404.
-SCC_COMPLEXITY_MAX ?= 854
+#
+# Set 854 -> 867 at Phase 21.1's compile-time performance counters (kg's
+# doc/plans/2026-08-18-elisp-data-model.md, 2026-08-19), pre-pin: the measured
+# actual after `fe_perf.h`/`fe_perf.c`, the instrumentation in fe.c,
+# fe_eval.c and fe_unwind.c, and main.c's $FE_PERF_OUT report. No
+# raise-then-spend cycle, as at Phase 19 and Phase 20's language slice: the
+# work is small enough to measure directly and set the cap to what it cost.
+#
+# The +13 is entirely code that a shipped build does not compile. scc reads
+# source text and does not evaluate `#if`, so every line inside
+# `FE_PERF_COUNTERS` is counted here even though `FE_PERF_COUNTERS` is 0 in
+# every build this repository ships; that is the price of the facility being
+# a compile-time knob rather than a runtime one, and it is why the
+# instrumentation itself was written as plain macro calls with no branch of
+# their own. By file:
+#   fe.c        186 -> 187  the one `chr != '\0'` in `BuildString`'s byte
+#                           charge, which scc counts as a comparison. Every
+#                           other instrumented site in fe.c, fe_eval.c and
+#                           fe_unwind.c is a bare macro call and costs zero,
+#                           which is why those two files do not move at all
+#                           (fe_eval.c 404, fe_unwind.c 119).
+#   main.c       37 ->  43  `WritePerfCounters`: two `if`s, one `||` and
+#                           three `==`, all of them the "not measuring" and
+#                           "cannot open the file" paths a counting
+#                           interpreter must not die on.
+#   fe_perf.c     0 ->   6  the new file: the report's `for`, the retype
+#                           rule's two type tests, and the unnamed-counter
+#                           guard's `!=`. The 45-entry name table and the
+#                           counter enum are data and cost nothing.
+# `fe_perf.h` measures 0: it is macros, an enum and comments.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does NOT move and stays at 520. Per-file after
+# this slice: fe_eval.c 404, fe.c 187, fe_unwind.c 119, main.c 43, fex_io.c
+# 28, fe_run.c 25, fex_re.c 21, fex_process.c 20, fe_perf.c 6.
+#
+#
+# Raised 874 -> 902 by Phase 23.1 of kg's Elisp data-model program: the
+# payload substrate the Phase 22 ADR selected (Design B -- stable `FeObject*`
+# headers over a bump-allocated, compactable region inside the caller's
+# arena).  The ADR priced the whole design at roughly +32; the measured cost
+# is +28.  By file:
+#   fe.c          194 -> 220  the region and its allocator, the compactor,
+#                             the collector's payload arm in `FeMark`, the
+#                             arena carve, and the test object's four
+#                             accessors.  A third of it is code a shipped
+#                             build does not compile: scc reads source text
+#                             and does not evaluate `#if`, so every line
+#                             under `FE_PAYLOAD_TEST_OBJECT` and
+#                             `FE_DEBUG_PAYLOAD_MOVE` is counted here even
+#                             though both are 0 in every configuration this
+#                             repository ships -- the same price the
+#                             `FE_PERF_COUNTERS` raise above paid.
+#   fe_unwind.c   119 -> 120  `RaisePayloadExhaustion`, whose one branch is
+#                             the degradation to `(arena-exhaustion)`.
+#   fe_internal.h   9 ->  10  the substrate's declarations and its two knobs
+#                             (headers together, which scc reports only in
+#                             the total).
+# fe_eval.c (404), main.c (43), fex_io.c (28), fe_run.c (25), fex_re.c (21),
+# fex_process.c (20), fe_perf.c (6) and auto.c (5) do not move at all.
+#
+# `SCC_FILE_COMPLEXITY_MAX` does NOT move and stays at 520; the most complex
+# file is still fe_eval.c at 404.
+#
+# WHAT THESE TWO NUMBERS ARE TODAY, which is all a comment beside a knob
+# should say -- the derivation of any one raise is in `git log`, and the
+# blocks above are the record of the ones that predate that rule. The total
+# is the measured actual with no slack: 1072 across the thirteen sources and
+# ten headers `SCC_COMPLEXITY_PATHS` names, of which fe.c is 385 and
+# fe_eval.c 402. The per-file cap is 520 and the most complex file is
+# fe_eval.c at 402, so it binds at 118 above the tree and has not moved since
+# it was set.
+#
+# The floor caveat above has a second half now: the desync ENDS partway
+# through fe.c, at the first even number of double quotes scc meets after the
+# `'"'` literal that started it, so how much of that file is counted depends
+# on where its quotes fall. `pmccabe` reads every function either way and is
+# the authoritative aggregate; a large move in this number with a small one
+# in `PMCCABE_TOTAL_MAX` is that boundary shifting, not complexity arriving.
+SCC_COMPLEXITY_MAX ?= 1089
 SCC_FILE_COMPLEXITY_MAX ?= 520
 PMCCABE ?= pmccabe
 PMCCABE_PATHS ?= $(SRCS)
@@ -897,7 +992,99 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # 1271 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
 # function(s) exceed complexity limit 14" and exits 2, those two being
 # `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
-PMCCABE_TOTAL_MAX ?= 1271
+#
+# Set 1271 -> 1272 at the public collect-now entry point (FE_API_VERSION 12,
+# kg's embedded-prelude program's post-prelude collect, 2026-08-18): the
+# measured actual, 403 symbols against 402. One new symbol,
+# `FeCollectGarbage` at 1 -- a one-line wrapper around the already-counted
+# `CollectGarbage` -- and no change to any existing symbol.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 and `PMCCABE_NEW_FUNCTION_MAX`
+# at 15; the worst function in the tree is still `RunEvaluationLoop` and
+# `ResumeEvalList`, both at 15, both unmoved.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1271 `make pmccabe-check` reports "FAIL:
+# total complexity 1272 exceeds funded budget 1271 (+1)" and exits 2, and at
+# 1272 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+#
+# Set 1272 -> 1285 at Phase 21.1's compile-time performance counters
+# (2026-08-19), pre-pin: the measured actual, 1285 across 408 symbols against
+# 1272 across 403, and this is the authoritative core measure, so it is the
+# one that says what the slice cost. Five new symbols and NO existing symbol
+# moved -- the instrumentation in fe.c, fe_eval.c and fe_unwind.c is macro
+# calls with no branch of their own, so every function it lands in measures
+# exactly what it measured before:
+#   main.c:WritePerfCounters      4  the $FE_PERF_OUT report's two guards
+#   fe_perf.c:FePerfWriteJson     4  the counter loop and its two `?:`
+#   fe_perf.c:FePerfCountRetype   3  the by-final-type charge's two tests
+#   fe_perf.c:FePerfRead          1
+#   fe_perf.c:FePerfReset         1
+# All five are inside `PMCCABE_NEW_FUNCTION_MAX` (15), and all five are
+# compiled out of every build this repository ships: pmccabe, like scc, reads
+# source text and takes the first arm of an `#if`, so a facility that
+# compiles to nothing is still measured here.
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22 with the worst functions in
+# the tree still `RunEvaluationLoop` and `ResumeEvalList`, both at 15, both
+# unmoved. `.ci/pmccabe-baseline.json` is regenerated in this commit to
+# record the five new symbols; no recorded symbol's value changes.
+#
+# Proved live at this head by temporarily lowering each gate and watching it
+# fire, exit status checked: at 1293 `make pmccabe-check` reports "FAIL:
+# total complexity 1294 exceeds funded budget 1293 (+1)" and exits 2, and at
+# 1294 it passes; at `PMCCABE_FUNCTION_COMPLEXITY_MAX=14` it reports "FAIL: 2
+# function(s) exceed complexity limit 14" and exits 2, those two being
+# `RunEvaluationLoop` and `ResumeEvalList`, both at 15.
+#
+# Set 1294 -> 1333 at Phase 23.1's payload substrate (2026-08-20), pre-pin:
+# the measured actual, 1333 across 429 symbols against 1294 across 412, and
+# the authoritative core measure, so it is the one that says what the phase
+# cost. The Phase 22 ADR priced the whole design at roughly +28; measured,
+# +39 = 42 in new symbols, +4 in the one existing symbol that moved, less 7
+# for two symbols that went away.
+#
+#   +9  fe.c:AllocatePayloadBlock    the bump allocator: two overflow-checked
+#                                    `ckd_*` chains and the capacity test
+#   +6  fe.c:OpenContextWithPayload  the old `OpenContext`, renamed, plus the
+#                                    percent validation (its 6 is the old
+#                                    one's 6, so the rename is free)
+#   +5  fe.c:CompactPayloads         the scan, the slide and the count
+#   +3  fe.c:DescendIntoPayload      the mark arm's "no block / no children"
+#   +2  fe.c:MakeAggregate           the test object's nil fill
+#   +2  fe.c:OwnedBlock              the not-published-yet answer
+#   +2  fe.c:PayloadBlockIsLive      the two halves of the liveness rule
+#   +2  fe_unwind.c:RaisePayloadExhaustion  the degradation branch
+#   +1  each, ten straight-line accessors: fe.c's `AggregateBytes`,
+#       `AggregateChild`, `AggregateHandle`, `HandleOfBlockAt`, `OwnsPayload`,
+#       `PayloadAt`, `PayloadBlockAt`, `PayloadCarveBytes`,
+#       `PayloadChildSlot`, `PayloadSlot`, `SetAggregateChild`
+#   +4  fe.c:FeMark  8 -> 12         the collector's payload arm: one test on
+#                                    the way down, one on the way up, and the
+#                                    block cursor's own bound
+#   -6  fe.c:OpenContext             renamed (see above)
+#   -1  fe.c:ResetPayloadRegion      23.0's scaffold reset, which a real
+#                                    per-context region does not need: a
+#                                    fresh context IS the known starting state
+#
+# Nine of the nineteen new symbols are compiled out of every build this
+# repository ships -- the test object's accessors and its constructor live
+# under `FE_PAYLOAD_TEST_OBJECT` -- and pmccabe, like scc, reads source text
+# and takes the first arm of an `#if`, so they are measured here anyway. That
+# is the same price the `FE_PERF_COUNTERS` raise above paid.
+# All nineteen are inside `PMCCABE_NEW_FUNCTION_MAX` (15).
+# `PMCCABE_FUNCTION_COMPLEXITY_MAX` stays at 22, with the worst functions in
+# the tree still `RunEvaluationLoop` and `ResumeEvalList`, both at 15, both
+# unmoved. `FeMark`'s one per-symbol regression is banked with
+# `PMCCABE_BASELINE_ARGS=--allow-regressions`, which is the only way to bank
+# one, and is named above rather than absorbed silently.
+#
+# WHAT THIS NUMBER IS TODAY, the rule the scc knobs above now carry too: the
+# measured actual with no slack, 1504 across 487 symbols, the worst single
+# function being `ResumeEvalList` at 16 against the 22 cap. Any one raise is
+# derived in `git log`, with its per-symbol deltas; the blocks above are the
+# record of the raises that predate that rule.
+PMCCABE_TOTAL_MAX ?= 1504
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
@@ -926,9 +1113,49 @@ all: $(TARGET)
 
 check: test
 
-test: core test-header $(TEST_API) $(EXAMPLE_HOST) $(TARGET) check-gc-stress
+# Every leaf below is a *run* of one already-built binary, and they are
+# prerequisites rather than recipe lines because a recipe's lines are a
+# sequence make may not reorder or overlap: `make -j` runs prerequisites
+# concurrently and recipe lines one after another.  The suite is dominated
+# by a single case -- the payload harness's GC-stress build is 23 s of a
+# 24 s `make check` here -- so what the other runs cost is whether they
+# overlap it or queue behind it.
+test: core test-header run-test-api run-example-host run-debug-host \
+	run-scripts check-gc-stress check-payload
+
+run-test-api: $(TEST_API)
 	./$(TEST_API)
+
+run-example-host: $(EXAMPLE_HOST)
 	$(EXAMPLE_RUNNER) ./$(EXAMPLE_HOST)
+
+# The repository's own documented example, as a test (repair R1 of the Phases
+# 23--26 review).  `-d` installs `main.c`'s bundled `mark`/`gc` tracers, which
+# print the object they are handed -- exactly what `fe.h` promises a callback
+# may do, and what `doc/c-api.md` names as THE example -- and every object a
+# context reclaims goes through them: strings, vectors, and a dying symbol's
+# internal cells.  It aborted for a whole phase while every other run here
+# passed, because nothing here ran the binary the documentation tells a reader
+# to run.  Both halves are asserted, because an exit status on its own would
+# still pass if `-d` quietly stopped installing anything.  It takes
+# `EXAMPLE_RUNNER` for the same reason the example host does: under valgrind
+# this is the case that walks a whole arena of doomed objects.
+run-debug-host: $(TARGET)
+	@output=$$($(EXAMPLE_RUNNER) ./$(TARGET) -d -e '"payload"' 2>&1); \
+	status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		printf '%s\n' "$$output" | tail -n 20; \
+		echo "FAIL: fe -d -e '\"payload\"' exited $$status"; \
+		exit 1; \
+	fi; \
+	if ! printf '%s\n' "$$output" | grep -q '^gc: payload$$'; then \
+		echo "FAIL: fe -d traced no collection of the string"; \
+		exit 1; \
+	fi; \
+	echo "debug host: fe -d traced $$(printf '%s\n' "$$output" | \
+		grep -c '^gc: ') collected objects"
+
+run-scripts: $(TARGET)
 	./test.sh
 
 core: $(CORE_OBJS)
@@ -947,7 +1174,10 @@ fuzz-eval: $(FUZZ_EVAL_BIN)
 
 fuzz-write: $(FUZZ_WRITE_BIN)
 
-fuzz-smoke: fuzz-eval-seed-verify fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
+# The three smoke runs are independent and overlap under `make -j`; the seed
+# verification is not, and is a prerequisite of the eval smoke run rather than
+# a sibling of it, since siblings have no order.
+fuzz-smoke: fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke
 
 # A tracked seed under fuzz/seeds/ steers the grammar by its bytes, so any
 # change to the grammar re-steers every one of them at once and nothing says
@@ -973,7 +1203,7 @@ fuzz-reader-smoke: $(FUZZ_READER_BIN)
 		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/reader/ \
 		$(FUZZ_CORPUS_DIR)/reader scripts
 
-fuzz-eval-smoke: $(FUZZ_EVAL_BIN)
+fuzz-eval-smoke: $(FUZZ_EVAL_BIN) fuzz-eval-seed-verify
 	mkdir -p $(FUZZ_CORPUS_DIR)/eval $(FUZZ_ARTIFACT_DIR)/eval
 	./$(FUZZ_EVAL_BIN) -runs=$(FUZZ_RUNS) -max_len=$(FUZZ_MAX_LEN) \
 		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
@@ -987,12 +1217,12 @@ fuzz-write-smoke: $(FUZZ_WRITE_BIN)
 		-timeout=$(FUZZ_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) \
 		-verbosity=$(FUZZ_VERBOSITY) \
 		-artifact_prefix=$(FUZZ_ARTIFACT_DIR)/write/ \
-		$(FUZZ_CORPUS_DIR)/write
+		$(FUZZ_CORPUS_DIR)/write $(FUZZ_DIR)/seeds/write
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(TEST_API): test_api.o $(FE_CORE_OBJS)
+$(TEST_API): test_api.o $(FE_CORE_OBJS) fex.o fex_io.o fex_re.o tiny-regex-c/re.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(EXAMPLE_HOST): example_host.o $(FE_CORE_OBJS)
@@ -1009,7 +1239,7 @@ $(EXAMPLE_HOST): example_host.o $(FE_CORE_OBJS)
 GC_STRESS = gc_stress
 GC_STRESS_ON = gc_stress_on
 GC_STRESS_ON_OBJS = gc_stress-stress.o fe-stress.o fe_eval-stress.o \
-	fe_run-stress.o fe_unwind-stress.o
+	fe_run-stress.o fe_unwind-stress.o fe_perf-stress.o
 
 $(GC_STRESS): gc_stress.o $(FE_CORE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -1032,9 +1262,184 @@ fe_run-stress.o: fe_run.c $(HDRS) $(BUILD_STAMP)
 fe_unwind-stress.o: fe_unwind.c $(HDRS) $(BUILD_STAMP)
 	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_unwind.c -o $@
 
-check-gc-stress: $(GC_STRESS) $(GC_STRESS_ON)
+# fe_perf.c reads no FE_GC_STRESS of its own, and gets a stress object anyway:
+# the whole point of the -stress.o names is that the on-build's link is made
+# entirely of objects that cannot be confused with the off-build's, and one
+# shared object in the middle of it is how a stale mixed-flag link starts.
+fe_perf-stress.o: fe_perf.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_GC_STRESS=1 $(CFLAGS) -c fe_perf.c -o $@
+
+check-gc-stress: run-gc-stress run-gc-stress-on
+
+run-gc-stress: $(GC_STRESS)
 	./$(GC_STRESS)
+
+run-gc-stress-on: $(GC_STRESS_ON)
 	./$(GC_STRESS_ON)
+
+# The payload substrate's harness (Phase 23.1).  Built against core objects
+# that carry `FE_PAYLOAD_TEST_OBJECT=1`, because a shipped interpreter has no
+# type that owns a payload and there would otherwise be nothing to allocate a
+# block for.  The `-payload.o` names are the `-stress.o` names' argument: the
+# link is made entirely of objects that cannot be confused with the ordinary
+# ones, so both builds coexist in one tree and neither invalidates the other.
+# Pattern rules rather than one rule per translation unit, since every object
+# in the set differs from its ordinary twin by exactly the one flag.
+# The second build is the compactor's: `FE_GC_STRESS=1` collects before every
+# allocation, so every one of these cases runs its own compaction between each
+# pair of allocations rather than at the handful of points an ordinary run
+# would.  A compactor that left a handle stale for one allocation looks
+# correct in the off build and cannot in the on one.
+PAYLOAD_TESTS = payload_tests
+PAYLOAD_TESTS_ON = payload_tests_stress
+PAYLOAD_TESTS_OBJS = payload_tests-payload.o fe-payload.o fe_eval-payload.o \
+	fe_run-payload.o fe_unwind-payload.o fe_perf-payload.o
+PAYLOAD_TESTS_ON_OBJS = payload_tests-payload-stress.o fe-payload-stress.o \
+	fe_eval-payload-stress.o fe_run-payload-stress.o \
+	fe_unwind-payload-stress.o fe_perf-payload-stress.o
+
+$(PAYLOAD_TESTS): $(PAYLOAD_TESTS_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PAYLOAD_TESTS_ON): $(PAYLOAD_TESTS_ON_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+%-payload.o: %.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 $(CFLAGS) -c $< -o $@
+
+%-payload-stress.o: %.c $(HDRS) $(BUILD_STAMP)
+	$(CC) $(CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 -DFE_GC_STRESS=1 $(CFLAGS) \
+		-c $< -o $@
+
+check-payload: run-payload-tests run-payload-tests-stress
+
+run-payload-tests: $(PAYLOAD_TESTS)
+	./$(PAYLOAD_TESTS)
+
+run-payload-tests-stress: $(PAYLOAD_TESTS_ON)
+	./$(PAYLOAD_TESTS_ON)
+
+# The counting build (Phase 21.1 of kg's elisp data-model plan).  `fe_perf.h`
+# compiles to nothing unless FE_PERF_COUNTERS is 1, so proving the counters
+# do anything needs the same sources built both ways -- the GC stress pair's
+# argument above, at a larger scale: every core translation unit is
+# instrumented here, not one knob in one file, so the whole interpreter is
+# relinked rather than four objects.
+#
+# The objects go in their own directory instead of taking the `-stress.o`
+# suffix the stress pair uses.  There are twelve of them rather than four,
+# they are the whole program rather than the collector, and a directory is
+# the discipline kg's own counting build (`test/perfobj/`) established: a
+# counting object cannot be linked into an ordinary binary, an ordinary
+# object cannot be linked into a counting one, and neither build invalidates
+# the other's objects.  `tiny-regex-c/re.o` is shared rather than duplicated
+# -- it carries no counter code and is compiled from RE_CFLAGS, which
+# FE_PERF_COUNTERS does not appear in.
+PERF_DIR ?= perfobj
+PERF_CPPFLAGS = $(CPPFLAGS) -DFE_PERF_COUNTERS=1
+PERF_TARGET = $(PERF_DIR)/$(PROG)
+PERF_TEST_API = $(PERF_DIR)/$(TEST_API)
+PERF_EXAMPLE_HOST = $(PERF_DIR)/$(EXAMPLE_HOST)
+PERF_CORE_OBJS = $(addprefix $(PERF_DIR)/,$(FE_CORE_OBJS))
+PERF_OBJS = $(addprefix $(PERF_DIR)/,$(SRCS:.c=.o)) tiny-regex-c/re.o
+# Phase 21.2's workload battery: one binary, built from the counting objects,
+# that runs each named shape in its own FeContext with the counters reset
+# around it.  It lives on the test side (`perf_workloads.c` is in TEST_SRCS,
+# not SRCS), so it costs the scc and pmccabe ratchets nothing and
+# `format-check` covers it.  It exists only in the counting build: an
+# ordinary one has no FePerfRead to call.
+PERF_WORKLOADS = $(PERF_DIR)/perf_workloads
+# The payload harness, counting: the one build in which fe_perf.h's payload
+# counters can be asserted at all.  The shipped counting build above has no
+# type that owns a payload -- deliberately, since none exists before Phase 25
+# -- so every payload counter in it is zero by construction, and a counter
+# nothing exercises is untested code.  Same objects as `$(PAYLOAD_TESTS)`,
+# with `FE_PERF_COUNTERS=1` on top, in `$(PERF_DIR)` so a counting object
+# still cannot reach an ordinary link.
+PAYLOAD_TESTS_PERF = $(PERF_DIR)/payload_tests
+PAYLOAD_TESTS_PERF_OBJS = $(PERF_DIR)/payload_tests-payload.o \
+	$(PERF_DIR)/fe-payload.o $(PERF_DIR)/fe_eval-payload.o \
+	$(PERF_DIR)/fe_run-payload.o $(PERF_DIR)/fe_unwind-payload.o \
+	$(PERF_DIR)/fe_perf-payload.o
+# Where the battery's machine-readable records go.  Not tracked: the numbers
+# a phase argues from belong in a commit message or a checked-in report, not
+# in a file a build rewrites.
+PERF_WORKLOAD_JSON ?= $(PERF_DIR)/workloads.json
+# The artifact line the battery writes into its JSON header: which fe tree,
+# and which binary, produced the numbers.  Both are taken here, at
+# measurement time, rather than compiled into `perf_workloads.c`: a describe
+# baked into an object file names the tree that last triggered a rebuild.  A
+# box without `git` or `sha256sum` passes an empty string, which the battery
+# reports as null rather than as an answer.
+PERF_DESCRIBE = git describe --always --dirty 2>/dev/null
+PERF_SHA256 = sha256sum ./$(PERF_WORKLOADS) 2>/dev/null | cut -d" " -f1
+# Extra arguments for the battery (`--list`).  There is no "slow" tier and
+# no flag to enable one: the whole battery, 8192-symbol interning tier
+# included, is 0.75 s here and 0.80 s under ASan+UBSan, against the ~12 s
+# `make check` already costs, so a workload the plan names by number is not
+# made optional to save a fraction of that.
+PERF_WORKLOAD_ARGS ?=
+
+perf: $(PERF_TARGET) $(PERF_TEST_API) $(PERF_EXAMPLE_HOST) $(PERF_WORKLOADS) \
+	$(PAYLOAD_TESTS_PERF)
+
+# The counting build's own `check`: the C API suite -- which is where the
+# counter relationships are asserted -- the payload harness, which is where
+# the payload counters are, the workload battery, the example host, and the
+# whole script corpus against the counting interpreter, so every instrumented
+# line is executed rather than merely compiled.  `FE_BIN` is what keeps
+# test.sh from rebuilding and re-cleaning the ordinary tree underneath it.
+perf-check: perf-workloads run-perf-test-api run-perf-payload \
+	run-perf-example-host run-perf-scripts
+
+run-perf-test-api: $(PERF_TEST_API)
+	./$(PERF_TEST_API)
+
+run-perf-payload: $(PAYLOAD_TESTS_PERF)
+	./$(PAYLOAD_TESTS_PERF)
+
+run-perf-example-host: $(PERF_EXAMPLE_HOST)
+	$(EXAMPLE_RUNNER) ./$(PERF_EXAMPLE_HOST)
+
+run-perf-scripts: $(PERF_TARGET)
+	FE_BIN=./$(PERF_TARGET) ./test.sh
+
+# The battery at its default sizes, which are chosen to stay inside the
+# perf-check lane's budget.  Its counter assertions are the gate; the wall
+# times it prints are a report and nothing reads them.
+perf-workloads: $(PERF_WORKLOADS)
+	$(EXAMPLE_RUNNER) ./$(PERF_WORKLOADS) --json $(PERF_WORKLOAD_JSON) \
+		--git-describe "$$($(PERF_DESCRIBE))" \
+		--binary-sha256 "$$($(PERF_SHA256))" \
+		$(PERF_WORKLOAD_ARGS)
+
+$(PERF_DIR):
+	mkdir -p $(PERF_DIR)
+
+$(PERF_TARGET): $(PERF_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_TEST_API): $(PERF_DIR)/test_api.o $(PERF_CORE_OBJS) \
+		$(PERF_DIR)/fex.o $(PERF_DIR)/fex_io.o $(PERF_DIR)/fex_re.o \
+		tiny-regex-c/re.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_EXAMPLE_HOST): $(PERF_DIR)/example_host.o $(PERF_CORE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_WORKLOADS): $(PERF_DIR)/perf_workloads.o $(PERF_CORE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PAYLOAD_TESTS_PERF): $(PAYLOAD_TESTS_PERF_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(PERF_DIR)/%.o: %.c $(HDRS) $(BUILD_STAMP) | $(PERF_DIR)
+	$(CC) $(PERF_CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+# Counting AND payload-owning.  Make prefers the shorter stem, so this rule
+# wins over `%-payload.o` for a target inside $(PERF_DIR).
+$(PERF_DIR)/%-payload.o: %.c $(HDRS) $(BUILD_STAMP) | $(PERF_DIR)
+	$(CC) $(PERF_CPPFLAGS) -DFE_PAYLOAD_TEST_OBJECT=1 $(CFLAGS) -c $< -o $@
 
 test-header: test_header.c test_internal_header.c fe.h fe_internal.h
 	$(CORE_GCC) $(CPPFLAGS) $(CORE_CFLAGS) -fsyntax-only test_header.c
@@ -1097,7 +1502,7 @@ sizes:
 
 clean:
 	-rm -f $(BUILD_STAMP)
-	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o
+	-rm -rf fe $(TEST_API) $(EXAMPLE_HOST) $(GC_STRESS) $(GC_STRESS_ON) $(PAYLOAD_TESTS) $(PAYLOAD_TESTS_ON) *.o *.dSYM $(FUZZ_READER_BIN) $(FUZZ_EVAL_BIN) $(FUZZ_WRITE_BIN) tiny-regex-c/*.o $(PERF_DIR)
 	-rm -f scripts/*.csv scripts/*.times
 
 fuzz-clean:
@@ -1198,7 +1603,13 @@ iwyu:
 	PATH="$$(dirname "$(IWYU)"):$${PATH}" \
 		$(IWYU_TOOL) -p . $(IWYU_FILES) -- $(IWYU_ARGS)
 
-.PHONY: all check test core test-header check-gc-stress sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
+.PHONY: all check test core test-header check-gc-stress check-payload \
+	run-test-api run-example-host run-debug-host run-scripts \
+	run-gc-stress run-gc-stress-on \
+	run-payload-tests run-payload-tests-stress \
+	run-perf-test-api run-perf-payload run-perf-example-host run-perf-scripts \
+	perf perf-check \
+	perf-workloads sizes clean fuzz fuzz-reader fuzz-eval fuzz-write fuzz-smoke fuzz-clean \
 	fuzz-reader-smoke fuzz-eval-smoke fuzz-write-smoke fuzz-eval-seed-verify \
 	complexity complexity-check pmccabe \
 	pmccabe-check pmccabe-baseline coverage coverage-clean compat compat-oracle format format-check compile-db iwyu

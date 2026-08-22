@@ -4,16 +4,27 @@
 
 The implementation uses a fixed-size region of memory supplied by the caller
 when creating the `FeContext`. The implementation stores the context at the
-start of this memory region, then an evaluator-frame region, then the
-`FeObject` region. The frame region has a 64-frame floor, a 32-frame cleanup
-reserve, and receives 10% of bytes beyond the minimum; the remaining bytes
-become object slots. The arena must satisfy `alignof(FeContext)`; static
-assertions ensure that both following regions are aligned. Fe neither
-reallocates nor frees this storage; its address, size, and exclusive lifetime
-are controlled by the caller through `FeCloseContext()`.
+start of this memory region, then an evaluator-frame region, then the payload
+region, then the `FeObject` region. The frame region has a 64-frame floor, a
+32-frame cleanup reserve, and receives 10% of bytes beyond the minimum; the
+payload region takes an agreed percentage of what is left, and the remaining
+bytes become object slots. The percentage is the host's to choose:
+`FeOpenContextWithOptions()` takes it in `FeOpenOptions.payload_percent`,
+where zero -- what a zero-initialized record and a null `options` both mean --
+selects Fe's own `FeDefaultPayloadPercent` of 25, `FePayloadPercentNone` asks
+for no region at all, and anything outside that range is refused with a null
+context rather than clamped. `FeOpenContext()` asks for **none**, so today's
+partition is exactly what it has always been and a host that has not asked for
+payload storage does not pay for it; see "The payload region" below. Whatever
+the split, the frame region is funded before it and is identical at every
+percentage. The arena must satisfy `alignof(FeContext)`; static assertions ensure
+that every following region is aligned. Fe neither reallocates nor frees this
+storage; its address, size, and exclusive lifetime are controlled by the
+caller through `FeCloseContext()`.
 
 `FeMinimumArenaSize()` derives its result from the private context and object
-layouts and from the objects required to intern and bind every core primitive.
+layouts, from the objects required to intern and bind every core primitive,
+and from the region bytes those names and the symbol index's first table take.
 `FeOpenContext()` validates null pointers, alignment, size, and address-space
 boundaries with checked arithmetic before writing to the arena. Invalid arenas
 return `nullptr` without invoking the error machinery.
@@ -37,10 +48,54 @@ Non-pair objects store their full type in the first byte of `car`.
 
 ### Strings
 
-Strings are stored using multiple objects of type `STRING_BUFFER` linked
-together — each string object stores a part of the string in the bytes of `car`
-not used by the type and GC mark. The `cdr` stores the object with the next part
-of the string, or `nil` if this was the last part of the string.
+A string (Phase 25 of kg's Elisp data-model program) is one `FeObject` whose
+`cdr` holds a payload HANDLE and whose `car` holds, beside the type tag, the
+string's BYTE LENGTH -- the bytes of that word the type and the GC mark do not
+use, written as base-256 digits least significant first so that the layout
+does not depend on the host's endianness. The bytes themselves are the payload
+block, may contain NUL, and are not terminated.
+
+Until this phase a string was a cdr chain of such objects, each carrying seven
+bytes of text in the same word, with the chain's end found by a NUL inside the
+last cell. That is why `length` was a walk, why a stored NUL was a read error,
+and why `aset` on a string was refused: a byte write had to preserve a shape
+that the bytes themselves encoded.
+
+A symbol's name is a string, which is what makes the region mandatory: see
+"The payload region" below for the arena floor that follows, and for the
+length/capacity division the reader's growing literal depends on.
+
+### Vectors
+
+A vector (Phase 24 of kg's Elisp data-model program) is an `FeObject` whose
+`cdr` holds a payload HANDLE and whose elements are that block's traced
+children. There is no length word: the block's `children` count IS the length,
+so `length`, `aref` and `aset` are a field read and one multiply-add rather
+than a walk, and an empty vector is a 32-byte block header with no words after
+it. It was the payload region's first release consumer; the string above is
+the second, and between them there is no such thing as a context without a
+region for `FeMakeVector` to fail in. What it can still meet is the region's
+edge, where it raises `(payload-exhaustion)`.
+
+The collector reaches a vector's elements through the payload arm described
+under "The payload region", which is the same pointer-reversal trampoline the
+rest of the mark phase uses: a vector of any width costs the mark phase no C
+stack. The compactor may move a vector's block on any collection, so every
+read and write derives the block address immediately before spending it --
+`VectorElement` and `SetVectorElement` in `fe.c` are those two derivations,
+and every other site in fe and in `fe.h` goes through them. The printer is the
+one caller that needs the rule stated: `WriteVectorElements` re-derives per
+element because the host's `FeWriteFn` may allocate between two of them.
+
+Three construction routes exist and all three hold ONE root per construction
+rather than one per element, which matters because the GC stack's ordinary
+ceiling is `GcStackSize - GcStackReserve` = 4032 slots: the reader
+(`ReadVector`) restores its checkpoint after each element it conses, the
+evaluator's operand frame (`ResumeEvalList`) restores its own after each
+operand, and `vconcat`'s string arm (`AppendSequence`) restores after each
+byte it boxes into an integer. A vector larger than 4032 is otherwise
+unremarkable -- its elements are payload bytes, not roots -- and the only
+ceilings it meets are the two pools' own.
 
 ### Symbols
 
@@ -66,6 +121,41 @@ representation readers.
 Symbols are interned by default; `make-symbol` and `gensym` (Phase 14) build
 one that is on no list at all, which is what makes it collectable and what
 `intern-soft` answers nil for.
+
+Interning goes through a SYMBOL INDEX (Phase 26). `symbol_list` is still the
+obarray -- the permanent GC root, the enumeration order, and the authority on
+what is interned -- but a name no longer finds its symbol by walking it. The
+index is an open-addressed table with linear probing, from a hash of the name
+BYTES to the stable `FeObject*` header, held in one payload block owned by one
+private header the context roots (`ctx->symbol_index`, a string header of
+length zero, a string's block being exactly the shape the table needs). It
+holds no tombstone and has no delete, because fe has no `unintern`: a symbol
+reaches `symbol_list` and stays for the life of its context. It doubles when
+two thirds of it is taken, and a resize rebuilds it from `symbol_list` rather
+than rehashing in place, the list being the authority.
+
+Creating a symbol publishes it to both structures as ONE RECOVERABLE
+OPERATION: the table's room for one more entry is reserved first, then the
+symbol object is built, then the `symbol_list` cell is consed, and only then
+is the slot written -- and that last step allocates nothing and cannot fail.
+A raise from any of the fallible steps leaves the symbol in NEITHER structure,
+so there is no state in which the two disagree and nothing needs a repair
+pass. A failed resize is invisible for the same reason `PublishPayload` is
+safe in general: a replacement block keeps its owner's child count, so a
+region that cannot hold the bigger table raises with the old block still owned
+and the old table still whole.
+
+The key is the name bytes and never a block address, which is what makes the
+table survive compaction with no rehash: the table's own storage moves and so
+do the name bytes, but a hash of the bytes is the same number wherever they
+are and the header a slot holds does not move at all.
+`SymbolIndexMatchesSymbolList` is the debug check -- every listed symbol where
+a lookup by its name would find it, the occupied slots numbering what the list
+holds and what the count claims, and nothing but a symbol in a slot -- and it
+allocates nothing, so it can be asked in an exhausted arena and between two
+allocations in the poison lane alike. `fe_internal.h` carries the hash and
+equality contracts the index is the first consumer of, and which Phase 27's
+`eq`/`eql`/`equal` tables would be the second.
 
 The value cell of a newly interned symbol whose name begins with `:` points
 back to the symbol itself, making keywords self-evaluating without an
@@ -380,6 +470,44 @@ freelist. If there are no more objects on the freelist, the garbage collector
 does a full mark-and-sweep run, pushing unreachable objects back to the
 freelist. Thus, garbage collection may occur whenever a new object is created.
 
+`CollectGarbage()` is FOUR phases, in this order, and the order is a
+correctness argument rather than a layout:
+
+1. **Mark.** Every root, then the host's `mark_fn` per pointer-carrying
+   object. The walk reverses pointers and puts them all back.
+2. **Finalize.** `FinalizeDoomedObjects()` hands every unmarked object to the
+   host's `gc_fn`, one pass over the arena, and does nothing else. Nothing has
+   been destroyed yet: every header still has its own type and fields and
+   every payload block still holds its own bytes at its own handle, so a
+   callback may read what it is handed and follow it into children that are
+   themselves doomed. The pass does not run at all when no `gc_fn` is
+   installed, which is every host that never called `FeSetGCFn`.
+3. **Compact.** `CompactPayloads()` reclaims dead blocks and slides the
+   survivors down, reading the mark bits phase 4 is about to clear.
+4. **Sweep.** Dead headers become `FeTFree` cells on the free list; live ones
+   lose their mark bit. This phase only destroys -- it calls nothing.
+
+Phases 2 and 4 were ONE phase until repair R1 of the Phases 23--26 review:
+the callback was made inline in the sweep, as each object became a free cell.
+That was already order-dependent -- a dead pair reached late referred to
+children the sweep had already retyped -- and Phase 25 turned it into a hard
+failure by giving strings a movable, reclaimable payload, so the compaction in
+phase 3 destroyed the very bytes a callback was about to read.
+`./fe -d -e '"payload"'`, fe's own documented tracer, aborted in
+`PayloadBytes()`. Splitting the pass out fixed both halves at once, and
+`FE_GC_FINALIZE_ORDER_BUG` (0 in every configuration, set by no target) puts
+it back after the compaction so that `test_api.c`'s four finalization cases
+can be watched to fail -- the same argument, and the same shape, as
+`FE_PAYLOAD_COMPACT_ORDER_BUG` beside it.
+
+The live/doomed partition is FROZEN across phase 2: `FeContext::finalizing` is
+true for its duration and `FeMark()` returns immediately while it is set. A
+mark from a finalizer would make phase 3 retain a block whose owner phase 4
+frees, which is a stale block in the region rather than a resurrection --
+resurrection was never on offer, since under the old inline callback a mark
+kept an object the sweep had not yet reached and did nothing for one it had
+already passed. `fe.h` and `doc/c-api.md` state the no-op as the contract.
+
 `FE_GC_STRESS`, a build-time knob in `fe.c` that defaults to 0 and compiles
 to nothing there, makes `MakeObject()` collect before *every* allocation
 instead of only when the freelist is empty. It exists because "collection may
@@ -395,6 +523,121 @@ which is why it is never on by default. `gc_stress.c` is the two-build
 harness: `make check-gc-stress` builds it with the knob off and on, and both
 runs assert that `FeGetArenaStats().collection_count` moved off zero over a
 churning script whose answer is still correct.
+
+`FE_DEBUG_PAYLOAD_MOVE` is the second knob in the same family, and it
+defaults to 0 and compiles to nothing in exactly the same way. It belongs to
+the payload substrate the Phase 22 ADR selected -- stable `FeObject*` headers
+over a bump-allocated, compactable payload region -- and it enforces that
+design's publish protocol, which is stated in `fe_internal.h` beside
+`STRING_BUFFER`: a payload pointer is obtained immediately before use, is
+invalid after ANY allocation, and a new or replacement block reaches its
+owning header only through the one publish function, which roots the owner
+across its own allocation. At 1, every allocation slides the live payload
+extent by one alignment unit and pattern-fills the bytes it vacates, so an
+address held across an allocation reads poison rather than data -- a natural
+compaction moves only sometimes, and a bug that surfaces only sometimes is
+the one that ships. `.ci/ci-04-clang-asan-ubsan.sh` arms it, and
+`payload_tests.c`'s `TestPoisonedPointerFailsLoudly` -- compiled only when
+the knob is on -- is where a deliberately stale pointer is proved to stop
+naming its data and the vacated unit is proved to read poison.
+`doc/payload-pointer-census.md` is the inventory of every site in fe and in
+kg that the protocol governs.
+
+### The payload region
+
+A payload is storage an object OWNS but does not contain. It lives in the
+region carved out of the caller's arena described under "Memory", and it is
+laid out one block per owner:
+
+    [ FePayloadBlock header ][ `children` FeObject* ][ `bytes` raw bytes ]
+
+The header records its owner, how many leading words are object pointers, how
+long the block is, and -- while the mark phase is inside the block -- which
+child the walk is currently in. The collector traces the leading `children`
+words and never looks at the bytes after them, so one region serves an
+aggregate (all children) and a string (all bytes) without either knowing
+about the other.
+
+An owner names its block by a HANDLE, not an address: the storage moves and
+the `FeObject*` header does not. `PublishPayload()` is the only way a block
+reaches an owner, for a first block and for a replacement alike, and it roots
+the owner across the collection it may run. A request the region cannot hold
+after that collection raises `(payload-exhaustion)`, which degrades to the
+pre-built `(arena-exhaustion)` when the cell pool is spent too -- naming a
+condition costs cells, and the pre-built one is the only condition a state
+with none can signal. Both are catchable, and `error` catches either.
+
+Allocation is a bump. Reclamation is a compaction that runs inside
+`CollectGarbage()`, AFTER the mark phase has restored the graph it reversed
+and after the finalization pass has shown every doomed object to the host,
+and BEFORE the sweep clears the mark bits: a block is live only when its
+owner survived the mark AND the owner still names that block, which is what
+makes a REPLACED block dead though its owner lives, and both halves of that
+rule read state the sweep is about to destroy. The compactor scans the region
+from its base and slides survivors down IN ALLOCATION ORDER, so a given
+history produces the same handles every time, which is what lets
+`payload_tests.c` assert addresses rather than relationships between them.
+`FE_PAYLOAD_COMPACT_ORDER_BUG`, 0 in every configuration and set by no
+target, reverses that ordering on purpose so the substrate's tests can be
+watched to fail.
+
+The mark phase reaches a block's children through the same Deutsch-Schorr-Waite
+pointer reversal the rest of the walk uses, with the block's cursor standing
+in for the tag bit a pair uses to say which half it is in. An aggregate's
+WIDTH therefore costs no C stack, and neither does a CHAIN of aggregates:
+`payload_tests.c` measures `__builtin_frame_address(0)` from inside the mark
+phase at chain depths of 10, 1000 and 100 000 and finds it flat.
+
+What a host SEES of the region is five fields of `FeArenaStats`
+(`FE_API_VERSION` 13): the capacity the carve produced, the bytes live in it
+now, the high-water mark of those bytes, the compactions that have run, and
+the requests that could not be met. They are tracked at the sites that change
+them, exactly as the cell gauges beside them are, so reading them costs
+nothing and changes nothing. `fe_perf.h`'s `payload_alloc`, `payload_byte`,
+`payload_compact` and `payload_compact_moved` are the counting build's view of
+the same work -- blocks handed out, region bytes they took, compactor calls,
+and survivors slid down over a reclaimed block.
+
+TWO TYPES OWN A PAYLOAD. `OwnsPayload()` in `fe.c` is the single place that
+says which: a VECTOR, whose elements are its block's traced children (Phase
+24), and a STRING, whose bytes are its block's byte tail (Phase 25) -- plus
+the aggregate that exists only under `FE_PAYLOAD_TEST_OBJECT`, the knob
+`payload_tests.c` is built with, which gives the substrate's own tests an
+owner whose width and byte tail they can choose independently.
+
+Strings are why every context has a region and why `FeMinimumArenaSize()`
+funds one: a symbol's name is a string, so an interpreter whose region cannot
+hold the name `car` cannot finish opening. The core names' blocks are funded
+out of the minimum beside the core cells, and `payload_percent` divides only
+the surplus above that floor. Since Phase 26 the floor also funds the symbol
+index's first table, whose owner is a string header of length zero and whose
+block is therefore one of the string blocks above rather than a fourth kind of
+thing: the index is the third payload owner in the tree and needed no fourth
+entry in `OwnsPayload()`. At kg's 1 MiB arena the floor is 8312 bytes of a
+227536-byte region, of which 2080 are the table.
+
+A STRING's own layout is the division that matters. The byte LENGTH is in the
+header, in the bytes of the `car` word that are not the type tag -- where the
+seven-byte cell chain this replaced kept text -- so a length read needs no
+context, costs no walk and cannot go stale. The BYTES are the block, and the
+block is CAPACITY rather than length: the allocator rounds up to
+`FePayloadAlignment` and the reader grows a literal geometrically, so the
+header's length is the only thing that knows how much of the block is text.
+Three accessors in `fe.c` are the whole read surface (`StringLength`,
+`StringBytes`, `StringCapacity`), and the reader's builder
+(`AppendStringByte`, `FinishString`) is the only thing that changes a length
+after construction: it republishes a bigger block through `PublishPayload`,
+which starts a replacement as a copy of what it replaces, and the object
+handed back is the same `FeObject *` throughout.
+
+Compaction ends by returning the live extent to the region's BASE, not merely
+sliding survivors down within it. `payload_start` is zero in every ordinary
+build -- only `FE_DEBUG_PAYLOAD_MOVE`'s poison step ever moves it -- so that is
+one comparison there and nothing else; in the poison lane it is what keeps the
+knob a diagnostic rather than a second, smaller region, since the extent
+otherwise drifts forward one unit per allocation until a publish the region
+could satisfy fails anyway. Handles are offsets INTO the extent, so moving the
+extent does not change one.
 
 The context maintains a `gc_stack` which protects objects that may not be
 otherwise reachable. Newly created objects are automatically pushed to this
@@ -875,8 +1118,8 @@ stack-balanced. The next call replaces this root.
 The reader has one strict escape decoder shared by string bodies and character
 literals. It returns a character value, and the caller decides what a value
 means: a `?` literal takes any of them, a string body is a byte string and
-rejects 0 and anything above 255 rather than writing it into a
-NUL-terminated buffer. `\x` consumes hex digits greedily to a U+10FFFF bound,
+takes 0 like any other byte -- it carries a length rather than a terminator --
+but rejects anything above 255, which would need a multibyte character type. `\x` consumes hex digits greedily to a U+10FFFF bound,
 as Emacs does.
 
 Character literals decode UTF-8 directly from the byte callback; the lead byte
@@ -889,6 +1132,16 @@ the duplicate-modifier rejection. A literal must end at a delimiter, so
 `?ab` and `?\s-a` are read errors rather than a character followed by a
 leftover token; that check is the one place the reader looks one byte ahead
 and pushes it back.
+
+The reader's whitespace is one definition, `ReaderWhitespace`, pasted into
+the three delimiter sets beside the skip loop that spells it: space, form
+feed, newline, tab and carriage return, which is byte for byte what Emacs'
+`read1` retries on. One definition rather than four literals because the
+question is asked four times -- skip a byte, end an atom, end a `?` literal,
+end a radix literal's digits -- and a byte added to one of them and forgotten
+in the others is exactly the bug the form feed was: whitespace that did not
+terminate a symbol is not whitespace. Comments are not part of it and end at
+a newline only, as they do in Emacs.
 
 Evaluated input maintains a one-based line counter in its string/file adapter
 and records the line before each top-level form is evaluated. `Read` skips
@@ -1220,10 +1473,12 @@ which the sweep's `TAG(obj) &= ~GcMarkBit` puts back -- and bit 2 is
 | cdr half | the pair's own car \| mark \| cdr bit | parent |
 | finished | the pair's own car \| mark | the pair's own cdr |
 
-An object with exactly one pointer child -- `fn`, `macro`, `symbol`, `string`,
-whose `car` word is a type tag (plus, for a string, seven bytes of text) and
-never a pointer -- needs no state bit: its link is always in `cdr`, and the
-ascent tells it from a pair by its type. Everything else is a leaf.
+An object with exactly one pointer child -- `fn`, `macro`, `symbol`, whose
+`car` word is a type tag and never a pointer -- needs no state bit: its link
+is always in `cdr`, and the ascent tells it from a pair by its type. A vector
+and a string take the payload arm above the switch instead, and a string's
+block has no traced child at all, so that arm finds it a leaf. Everything
+else is a leaf too.
 
 Two invariants make this safe. Every intermediate state keeps `GcMarkBit` set
 and bit 0 clear, so `FeGetType()` never lies about a cell and a cycle that
@@ -1237,9 +1492,10 @@ immediately -- but must not read `car`/`cdr` of anything but the object it was
 handed; `doc/c-api.md` says so.
 
 It also must not leave non-locally. A `longjmp` or a raise out of `mark_fn`
-(or out of `gc_fn`, during the sweep) jumps past the ascent that would put the
-graph back, and the walk has no state anywhere else to restore it from -- the
-reversed graph *is* the state. The recursive walk had no such rule because it
+(or out of `gc_fn`, in the finalization pass after it) jumps past the ascent
+that would put the graph back, or past the compaction and sweep that still
+have to run, and the collector has no state anywhere else to restore itself
+from -- the reversed graph *is* the state. The recursive walk had no such rule because it
 only set mark bits. `FeContext::collecting` is true for exactly the duration of
 `CollectGarbage()`, and `RaiseCompletionCore()` treats a raise while it is set
 as fatal: it prints the contract and aborts, without calling `error_fn` (whose
@@ -1255,6 +1511,233 @@ for *any* data shape costs one slot per object, which for kg's 1 MiB arena is
 56 224 pointers -- 439 KiB, 43% of the whole arena -- and growing one on demand
 puts a failable allocation inside the one routine that runs after allocation
 has already failed. Pointer reversal costs neither.
+
+## Performance Counters
+
+`fe_perf.h` declares 48 compile-time performance counters -- 32 named ones
+plus one slot per `FeType` -- and `fe_perf.c` holds their storage, their names
+and their JSON report. They exist
+because Phase 21 of kg's data-model plan has to *measure* fe's engine -- what
+allocates, what is looked up linearly, what the collector walks -- before a
+later phase changes any representation, and because a counter is a
+deterministic number a unit test can assert, while a wall-clock reading is not.
+
+### The compile-to-nothing contract
+
+Everything is behind `FE_PERF_COUNTERS`, which defaults to 0. In that build:
+
+* every `FE_PERF_*` macro expands to `((void)0)`;
+* `fe_perf.c` compiles to a single typedef and defines no symbol at all, so a
+  host that links the core without it (kg does) still links;
+* no declaration in `fe.h` changes, so `FE_API_VERSION` does not move; and
+* the generated code is identical at every instrumented site. The proof is
+  mechanical rather than asserted: build `fe.o fe_eval.o fe_run.o fe_unwind.o`
+  from the instrumented sources with counters off, build them again from a
+  control copy in which every instrumentation line has been replaced by a bare
+  `//` comment -- same line count, so `__LINE__` and therefore `assert`'s
+  arguments are unchanged -- and the object files compare byte for byte
+  identical at `-O0` and at `-O2`. Comparing against the pre-instrumentation
+  revision instead leaves exactly one class of difference, the `__LINE__`
+  immediates that `assert` passes, which is what the comment control removes.
+
+Counter storage is one process-wide static array and deliberately *not* a
+field of `FeContext`: the context lives inside the caller's arena, so widening
+it in a counting build would move the object/frame partition and measure a
+different arena from the one being described. Measured both ways, a 1 MiB
+arena partitions into 56 147 object slots in the counting build and in the
+ordinary one. The price of a process-wide array is that the counters are
+totals across every context a process opens, while `FeArenaStats` is per
+context; a measurement that reads both uses one context.
+
+### What is counted, and where
+
+| Group | Counters | Site |
+| --- | --- | --- |
+| allocation | `alloc_object`, `alloc_pair` … `alloc_fex2` | `MakeObject`, `FeCons`, `SetType` |
+| collector | `gc_collection`, `gc_mark_visit`, `gc_mark_new`, `gc_sweep_examined`, `gc_reclaimed` | `CollectGarbage`, `FeMark` |
+| strings | `string_object`, `string_byte`, `string_copy`, `string_byte_copied` | `MakeStringObject`, `FeMakeStringBytes`, `AppendStringByte`, `CopyStringBytes` |
+| interning | `intern_lookup`, `intern_miss`, `intern_candidate`, `intern_probe` | `FindInternedSymbol` |
+| symbol names | `name_compare`, `name_byte` | `IsStringEqual` |
+| environments | `env_lookup`, `env_cell`, `env_bind` | `GetBound`, `HasLexicalBinding`, `Bind` |
+| function cells | `function_resolve`, `function_hop` | `ResolveFunctionCallable` |
+| evaluator | `eval_step`, `eval_dispatch`, `frame_push`, `dispatch_primitive`, `dispatch_callable`, `dispatch_native`, `dispatch_lambda`, `dispatch_macro`, `macro_expansion` | `EvaluationStep`, `RunEvaluationLoop`, `AllocateFrame`, `DispatchResolvedCall`, `ResumeArguments`, `EnterMacroBody` |
+
+`intern_candidate` kept its meaning across Phase 26 -- it was the interned
+symbols a linear scan examined and it is now the OCCUPIED slots an
+open-addressed probe examines -- so a measurement taken before the index and
+one taken after compare the same quantity, which is what the phase's gate
+rests on. `intern_probe` is the number a probe has that a scan did not: slots
+looked at, including the free one a miss stops on. Probes are candidates plus
+exactly one free slot per miss, since a hit stops ON its candidate, and the
+workload battery asserts that identity rather than assuming it.
+
+`string_object` counts strings and `alloc_string` counts the cells they cost,
+which since Phase 25 are the same number: a string is one cell whatever its
+length. What the length costs is the region, and `payload_alloc`/`payload_byte`
+count that beside a vector's. Three counters retired with the cell chain --
+`string_cell`, `string_walk_cell` and `string_walk_byte` -- because the first
+two named cells no string has any more and the third named bytes a length pass
+no longer reads. `string_copy` and `string_byte_copied` are what is left of the
+copy-out surface: calls to fe's one byte-copy helper, and the bytes it actually
+`memcpy`'d. The gap between them is now a measurement rather than an overhead
+-- a caller that asks for a length makes a `string_copy` call that touches no
+byte at all, where the chain made it walk the whole string to count.
+
+The by-final-type block is one slot per `FeType`, indexed by the type itself
+(`FE_PERF_ALLOC_SLOT`), so a new type gets a slot by existing rather than by
+being added to a switch. A cell is charged where its type is settled: a pair in
+`FeCons`, which is the only place a cell becomes one, and everything else in
+`SetType`, which is the only place a type is spelled. Every cell reaches one of
+those exactly once -- until Phase 25 a string cell reached both, because
+`BuildString` took it through `FeCons` and retyped it, and a fourth counter
+(`alloc_retyped`) existed to move the charge and count the move. The invariant
+this buys, and the first thing `test_api.c`'s `TestPerfCounters` asserts, is
+that `alloc_object` equals the sum of the by-type block.
+
+Peak live cells, peak GC-root depth and peak frame depth are *not* counters:
+`FeArenaStats` already tracks them in the shipped build, and `FePerfWriteJson`
+reports them in an `"arena"` object beside the counter totals rather than
+tracking the same thing twice.
+
+Nothing here reads a clock, allocates, or touches the GC root stack. Every
+instrumented site is a bare macro call with no branch of its own, which is also
+why the counters cost the complexity ratchets nothing outside `fe_perf.c` and
+`main.c` -- `scc` and `pmccabe` both read source text and do not evaluate
+`#if`, so code that never compiles is still measured by them.
+
+### Building and reading a counting fe
+
+`make perf` builds the counting interpreter, the counting `test_api` and the
+counting example host into `perfobj/`. The objects live in their own directory
+so a counting object can never be linked into an ordinary binary and an
+ordinary object can never be linked into a counting one; `tiny-regex-c/re.o` is
+shared, since `FE_PERF_COUNTERS` does not appear in `RE_CFLAGS`.
+
+`make perf-check` is the counting build's own `check`: it runs the C API suite
+-- where the counter relationships are asserted -- the workload battery below,
+the example host, and the whole `scripts/` corpus against the counting
+interpreter, so every instrumented line is executed and not merely compiled.
+`.ci/ci-10-perf-counters.sh` is that target as a CI stage, which is what keeps
+a facility nobody compiles by default from rotting.
+
+There are two ways to read the counters:
+
+* in process, with `FePerfRead(counter)` (and `FePerfReset()` to scope a
+  measurement to one workload). This is what a test and Phase 21.2's workload
+  runner use.
+* as JSON, with `FePerfWriteJson(out, &stats)`. The counting `fe` writes it to
+  `$FE_PERF_OUT` when a run completes:
+
+```
+$ make perf
+$ FE_PERF_OUT=/tmp/fe.json ./perfobj/fe -e '(print (+ 1 2))'
+```
+
+A run that ends through an escaping error exits before that report by design:
+the counters describe a completed run.
+
+### The workload battery
+
+`perf_workloads.c` is Phase 21.2's in-process runner: one binary, built from
+the counting objects into `perfobj/perf_workloads`, that runs each named
+workload in its own `FeContext` with the counters reset around it, checks the
+workload's own answer, and emits a record per workload. `make perf-workloads`
+runs it and writes `perfobj/workloads.json`; `make perf-check` runs it too, so
+`.ci/ci-10-perf-counters.sh` is its CI home. It lives on the test side --
+`perf_workloads.c` is in `TEST_SRCS`, not `SRCS` -- so it costs the `scc` and
+`pmccabe` ratchets nothing while `format-check` still covers it.
+
+Twenty-two workloads in seven families: `context` (a bare open, and a bare
+open together with its close), `eval` (the four shapes kg's `utils/bench.py`
+benchmarks, respelled for a Lisp-2 without kg's prelude), `intern` (128, 1024
+and 8192 distinct symbols, then a miss and two hits), `env` (lexical lookup by
+environment width and by depth, separately), `string` (0, 7, 8, 256 and 8192
+bytes -- 7 and 8 straddled the seven-byte cell boundary of the representation
+Phase 25 replaced, and are kept at those lengths so the before/after is one
+measurement), `vector` (8 and 8192 elements, each filled and then randomly
+swapped 4096 times) and `gc` (sparse-garbage and dense-live collections).
+`./perfobj/perf_workloads --list` prints them with the arena each one uses and
+why.
+
+Every workload opens through `FeOpenContext`, which is Fe's own split since
+Phase 25, and every record therefore carries real payload numbers: the core
+names' blocks are in the region before a workload's body starts, so
+`baseline_payload_bytes` is what a check subtracts to see the body's own. The
+`vector` family runs at two sizes rather than one because the pair is what
+states the access cost: the 4096 swaps charge the same reads at 8 elements and
+at 8192, so the whole difference between the two records' read counts is the
+answer walk, while payload bytes differ by exactly eight per element.
+
+Three properties are what make the numbers usable.
+
+* **Every workload checks its own answer.** A workload whose result is not
+  asserted can silently stop doing its work while its counters still look
+  plausible.
+* **The counter assertions are the gate; wall time is a report.** `seconds`
+  travels with every record and nothing reads it, because a sanitizer lane or
+  a loaded box must not be able to fail this. The assertions prefer
+  relationships to golden constants, and are chosen so that the phases after
+  this one make them fail *loudly*: the `string` checks pin ONE cell per
+  string at every length (which is what Phase 25 made true, and what made
+  every earlier version of those checks fail), the `intern` checks pin the
+  symbol index's BOUNDED PROBE -- candidates per lookup under a literal at
+  every tier, and the 8192 tier within a factor of two of the 1024 one, where
+  the linear `symbol_list` scan they replaced was 629.85 and 4213.98 -- the
+  `env` checks pin the single flat alist, and the `gc` checks pin the
+  arena-proportional sweep.
+* **A counter read from a differently sized arena is a different
+  measurement.** Each workload names its own arena (96 KiB, 320 KiB, kg's
+  1 MiB, or 4 MiB for the intern tiers), and its cell capacity travels with
+  its counters. The fixed arena is exercised where it collects often as well
+  as where it does not.
+
+The record schema is `fe-perf-workloads/4`: a top-level object carrying the
+schema name, an `artifact` header, `payload_block_bytes`, then one object per
+workload with its name, family, note, `param`, `arena_bytes`,
+`cell_capacity`, `context_open_cells`, `includes_context_open`, `answer`,
+`seconds`, an `extra` object of workload-specific probes, and
+`counters`/`arena` objects whose keys are exactly the ones `FePerfWriteJson`
+writes. `/2` differed in one way: its `arena` object stopped at
+`allocation_failures` and omitted the five payload gauges `FePerfWriteJson`
+gained in Phase 23, which nothing in the battery had anything to describe
+until the `vector` family arrived. The counters are a delta over the workload's own measured region --
+the context open is excluded from every workload except `context-open`, whose
+measured region *is* the open, which is what `includes_context_open` reports
+-- so a consumer never has to subtract a baseline itself.
+
+The `artifact` header names what produced the numbers, because a number whose
+artifact line is not the tree under discussion is not evidence about it. It
+carries `fe_version` (`FeVersion`), `fe_api_version` (`FE_API_VERSION`) and
+`fe_language_version` (`FE_LANGUAGE_VERSION`), which the binary knows about
+itself and which schema `/1` wrote at the top level, plus `fe_git_describe`
+and `binary_sha256`, which it cannot: a describe compiled into an object file
+names the tree that last triggered a rebuild, not the tree that ran. Those
+two arrive as `--git-describe` and `--binary-sha256`, which `make
+perf-workloads` fills in from `git describe --always --dirty` and
+`sha256sum` at measurement time. A value the driver did not supply -- a run
+of the binary by hand, a box with no `git` -- is `null`, never a guess.
+
+The `context` pair is two workloads because `FeCloseContext` is not a small
+destructor: it clears every root and runs a full `CollectGarbage` over the
+whole arena. The harness closes an ordinary workload's context *after* the
+counters are snapshotted, so `context-open` cannot measure the close even by
+accident; `context-open-close` therefore opens and closes a context of its own,
+in a second arena, inside its measured region -- one collection, every cell the
+open took reclaimed, and a sweep that examined every slot in the arena. Its
+`arena` object and the arena table's `capacity`/`end-live` columns describe the
+harness context it ran under, which is the one still open when the snapshot is
+taken; its `counters` describe the scratch pair.
+
+The GC-root stack decides how a workload is written. `MakeObject` pushes every
+new object onto a fixed root stack (`GcStackSize` less `GcStackReserve`, so
+4032 in practice), so a C loop that allocates a caller-controlled number of
+times overflows it. The `intern`, `string` and `vector` workloads are C loops that
+take one `FeSaveGC` checkpoint and restore it every pass -- safe for interning
+because `symbol_list` is a permanent root, and for a vector fill because each
+element is rooted by the vector the moment it is stored -- and they measure
+the cost of an *operation*. Everything whose size is the point of the workload is a Lisp loop
+instead, whose accumulator lives in a value cell the collector marks directly
+and which therefore has no such ceiling; those measure the cost of a *shape*.
 
 ## Known Issues
 

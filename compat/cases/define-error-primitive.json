@@ -1,0 +1,6 @@
+{
+ "id": "define-error-primitive",
+ "setup": [],
+ "expr": "(get 'define-error 'error-message)",
+ "note": "The primitive is present in the Fe core symbol surface; kg owns the semantic oracle cases."
+}

@@ -1,0 +1,6 @@
+{
+ "id": "vector-predicate-values",
+ "setup": [],
+ "expr": "(list (vectorp [1]) (vectorp []) (vectorp '(1 2)) (vectorp \"ab\") (vectorp 1) (vectorp nil))",
+ "note": "`vectorp' on a populated vector, an empty one, and the four things most likely to be confused with one. The empty case matters because nil is not a vector and [] is."
+}
