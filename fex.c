@@ -5,10 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <assert.h>
 #include "fex.h"
 #include "fex_io.h"
 #include "fex_re.h"
-#include <assert.h>
 
 // The extension surface reports the Fe LANGUAGE version it rides on, not just
 // its own number: Fex 0.1 stayed put across observable regex and string

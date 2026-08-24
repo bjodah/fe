@@ -4,10 +4,10 @@
 #include <limits.h>
 #include <stdlib.h>
 
+#include <assert.h>
 #include "fex.h"
 #include "fex_re.h"
 #include "re.h"
-#include <assert.h>
 
 struct FexRegex {
   unsigned char* storage;

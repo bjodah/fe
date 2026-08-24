@@ -3239,7 +3239,7 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
       return false;
     default:
       assert(false && "unhandled switch case for frame->kind");
-      abort();        
+      abort();
   }
 }
 
@@ -3496,7 +3496,7 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         break;
       default:
         assert(false && "unhandled switch case for frame->kind");
-        abort();      
+        abort();
     }
 
     ctx->frame_stack_index--;
