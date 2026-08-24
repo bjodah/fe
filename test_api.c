@@ -3049,6 +3049,9 @@ static FeObject* MakeOperand(FeContext* context, const Operand* operand) {
       return FeMakeString(context, operand->value.text);
     case OperandValue:
       return operand->value.object;
+    default:
+      assert(false && "Unhandled operand->kind");
+      abort();
   }
   return nullptr;
 }
@@ -9579,9 +9582,11 @@ static FeObject* BindingSeamTarget(
     case BindingSeamDrop:
       return nullptr;
     case BindingSeamPassThrough:
-      break;
+      return symbol;
+    default:
+      assert(false && "unhandled binding_seam_mode");
+      abort();
   }
-  return symbol;
 }
 
 // The target callback alone, with no save callback installed: every binding's

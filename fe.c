@@ -307,7 +307,6 @@ static const char* TypePredicate(FeType type) {
     case FeTFex1:
     case FeTFex2:
     case FeTSentinel:
-      return "objectp";
     default:
       return "objectp";
   }
