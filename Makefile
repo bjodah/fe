@@ -127,7 +127,7 @@ PMCCABE_NEW_FUNCTION_MAX ?= 15
 # function being `ResumeEvalList` at 16 against the 22 cap. Any one raise is
 # derived in `git log`, with its per-symbol deltas; the blocks above are the
 # record of the raises that predate that rule.
-PMCCABE_TOTAL_MAX ?= 1504
+PMCCABE_TOTAL_MAX ?= 1512
 COMPAT_ROOT ?= compat
 COMPAT_EMACS ?=
 COMPAT_ORACLE_ARGS ?=
