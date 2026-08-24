@@ -308,8 +308,9 @@ static const char* TypePredicate(FeType type) {
     case FeTFex2:
     case FeTSentinel:
       return "objectp";
+    default:
+      return "objectp";
   }
-  return "objectp";
 }
 
 FeObject* CheckType(FeContext* ctx, FeObject* obj, FeType type) {
@@ -844,6 +845,9 @@ descend:
         break;
 
       case FeTSentinel:
+        abort();
+      default:
+        assert(false && "should not be possible");
         abort();
     }
   }
@@ -2551,6 +2555,9 @@ static void WriteObject(Writer* w, FeObject* obj, int qt, size_t depth) {
     case FeTFree:
     case FeTSentinel:
       abort();
+    default:
+      assert(false && "unhandled case, fix switch");
+      abort();
   }
 }
 
@@ -3106,6 +3113,9 @@ static FeObject* ReadAtom(FeContext* ctx, FeReadFn fn, void* udata, char chr) {
       return FeMakeDouble(ctx, NanWithSign(buf[0] == '-'));
     case NumberSymbol:
       break;
+    default:
+      assert(false && "unhandled switch case on ClassifyNumber, fix");
+      abort();
   }
   // Try to read it as nil:
   if (!strcmp(buf, "nil")) {

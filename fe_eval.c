@@ -650,7 +650,6 @@ static void PreflightPrimitive(FeContext* ctx,
                                Primitive primitive,
                                FeObject* function,
                                FeObject* arguments);
-static size_t CountRawArguments(FeContext* ctx, FeObject* arguments);
 
 // Binds a macro call's raw, unevaluated arguments into the transformer's
 // closure environment and switches `frame` to the body-evaluating
@@ -3158,6 +3157,9 @@ static bool ResumeContinuation(FeContext* ctx,
     case FeFrameMacroExpansion:
     case FeFrameNative:
       break;
+    default:
+      assert(false && "unhandled switch case for frame->kind");
+      abort();
   }
   abort();
 }
@@ -3196,6 +3198,8 @@ void FeMarkEvaluatorRoots(FeContext* ctx) {
         FeMark(ctx, frame->accumulator);
         FeMark(ctx, frame->callee);
         break;
+      default:
+        continue;
     }
   }
 }
@@ -3232,9 +3236,11 @@ static bool IsAwaitingDelivery(const FeEvalFrame* frame) {
     case FeFrameExpression:
     case FeFrameLambda:
     case FeFrameNative:
-      break;
+      return false;
+    default:
+      assert(false && "unhandled switch case for frame->kind");
+      abort();        
   }
-  return false;
 }
 
 // The ordinary-return tail of a pair form: drain the cleanups pushed while
@@ -3488,6 +3494,9 @@ FeObject* RunEvaluationLoop(FeContext* ctx, size_t base) {
         }
         CompletePairFrame(ctx, frame);
         break;
+      default:
+        assert(false && "unhandled switch case for frame->kind");
+        abort();      
     }
 
     ctx->frame_stack_index--;

@@ -8,6 +8,7 @@
 #include "fex.h"
 #include "fex_io.h"
 #include "fex_re.h"
+#include <assert.h>
 
 // The extension surface reports the Fe LANGUAGE version it rides on, not just
 // its own number: Fex 0.1 stayed put across observable regex and string
@@ -38,8 +39,10 @@ FeObject* FexGC(FeContext* ctx, FeObject* o) {
       return FexGCRE(ctx, o);
     case FeTSentinel:
       abort();
+    default:
+      assert(false && "unhandled switch case for frame->kind");
+      abort();
   }
-  abort();
 }
 
 void FexInit(FeContext* ctx) {

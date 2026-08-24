@@ -2,24 +2,19 @@ ifeq ($(wildcard tiny-regex-c/re.c),)
 $(error tiny-regex-c/re.c is missing; run 'git submodule update --init --recursive')
 endif
 
-ifeq ($(origin CC),default)
-CC = clang
-endif
-CFLAGS ?= -Weverything -Werror -std=c2x \
-	-Wno-poison-system-directories \
-	-Wno-declaration-after-statement \
-	-Wno-padded \
-	-Wno-switch-default \
-	-Wno-pre-c23-compat \
-	-Wno-pre-c11-compat \
-	-Wno-c++-compat \
-	-Wno-unsafe-buffer-usage \
-	-Wno-implicit-fallthrough \
-	-Wno-unused-command-line-argument \
-	-Wno-unknown-warning-option \
-	-Wno-reserved-macro-identifier \
-	-Wno-reserved-identifier \
-	-Wno-extra-semi-stmt
+CFLAGS ?= -Wall -Wextra -pedantic -std=c2x \
+        -Wredundant-decls \
+        -Wcast-align \
+        -Wmissing-include-dirs \
+        -Wswitch-enum \
+        -Wswitch-default \
+        -Winvalid-pch \
+        -Wredundant-decls \
+        -Wformat=2 \
+        -Wmissing-format-attribute \
+        -Wformat-nonliteral \
+        -Wodr \
+	$(CFLAGS_EXTRA)
 CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -Itiny-regex-c
 # Phase 23.0's payload poison knob (see the publish protocol in
 # fe_internal.h).  0 in every configuration but the lane that arms it, where

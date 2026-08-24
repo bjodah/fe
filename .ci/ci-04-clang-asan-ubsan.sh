@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 source .ci/ci-env.sh
 
 export CC="ccache clang"
-export CFLAGS="-Werror -Wall -Wextra -pedantic -std=c2x -fsanitize=address,undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -O1 -g"
+export CFLAGS_EXTRA="-Werror -Wall -Wextra -pedantic -std=c2x -fsanitize=address,undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -O1 -g"
 # Phase 23.0's payload poison mode, the publish protocol's enforcement arm
 # (fe_internal.h).  This lane arms it rather than a lane of its own: the
 # protocol's failure is a read through storage that moved, which is what a

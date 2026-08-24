@@ -7,6 +7,7 @@
 #include "fex.h"
 #include "fex_re.h"
 #include "re.h"
+#include <assert.h>
 
 struct FexRegex {
   unsigned char* storage;
@@ -190,8 +191,10 @@ FeObject* FexMatchRE(FeContext* ctx, FeObject* arg) {
     case RE_STATUS_TOO_COMPLEX:
     case RE_STATUS_BUFFER_TOO_SMALL:
       return BuildStatusError(ctx, status);
+    default:
+      assert(false && "unhandled switch case for status");
+      abort();
   }
-  abort();
 }
 
 FeObject* FexGCRE(FeContext* ctx, FeObject* o) {
